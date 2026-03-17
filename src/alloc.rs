@@ -2,7 +2,8 @@ use std::ffi::c_void;
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
-use nix::sys::mman::{MapFlags, ProtFlags, mlock, mmap_anonymous, munmap};
+use nix::sys::mman::{MapFlags, MmapAdvise, ProtFlags, madvise, mlock, mmap_anonymous, munmap};
+use rayon::prelude::*;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -28,7 +29,7 @@ unsafe impl Send for LockedRegion {}
 
 impl LockedRegion {
     /// Allocate and lock `size` bytes of anonymous memory.
-    /// Pages are faulted in via volatile writes before returning.
+    /// Pages are faulted in via parallel volatile writes before returning.
     pub fn new(size: usize) -> Result<Self, AllocError> {
         let size = NonZeroUsize::new(size).ok_or(AllocError::ZeroSize)?;
 
@@ -43,20 +44,30 @@ impl LockedRegion {
             .map_err(AllocError::Mmap)?
         };
 
-        let raw = ptr.as_ptr() as *mut u8;
         let len = size.get();
+
+        // Hint the kernel to back this region with 2 MiB transparent huge pages.
+        // Must be called before pages are faulted in so the kernel uses huge pages
+        // at fault time rather than collapsing 4 KiB pages later via khugepaged.
+        // Silently ignored if THP is disabled system-wide.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let _ = madvise(ptr, len, MmapAdvise::MADV_HUGEPAGE);
+        }
+
+        // Fault every page in parallel to both (a) ensure physical RAM is backed
+        // before mlock and (b) allow the kernel to assign pages to NUMA-local nodes
+        // for each faulting thread simultaneously.
+        let raw = ptr.as_ptr() as usize;
+        let page_count = len / 4096;
+        (0..page_count).into_par_iter().for_each(|i| {
+            // SAFETY: offset is within [0, len), each page is touched exactly once.
+            unsafe { ((raw + i * 4096) as *mut u8).write_volatile(0u8) };
+        });
 
         // SAFETY: ptr is valid for len bytes. mlock pins pages in physical RAM.
         unsafe {
             mlock(ptr, len).map_err(AllocError::Mlock)?;
-        }
-
-        // Force the kernel to back every page with physical RAM by touching each one.
-        let mut offset = 0;
-        while offset < len {
-            // SAFETY: offset < len, so raw.add(offset) is within the allocation.
-            unsafe { raw.add(offset).write_volatile(0u8) };
-            offset += 4096;
         }
 
         Ok(Self { ptr, len })
