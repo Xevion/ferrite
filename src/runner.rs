@@ -6,12 +6,15 @@ use owo_colors::OwoColorize;
 use crate::Failure;
 use crate::alloc::LockedRegion;
 use crate::pattern::{Pattern, run_pattern};
+use crate::units::{Rate, Size, UnitSystem};
 
 /// Result of running a single pattern.
 pub struct PatternResult {
     pub pattern: Pattern,
     pub failures: Vec<Failure>,
     pub elapsed: std::time::Duration,
+    /// Total bytes touched (writes + reads across all sub-passes).
+    pub bytes_processed: u64,
 }
 
 /// Result of a full pass (all patterns).
@@ -37,6 +40,7 @@ pub fn run(
     patterns: &[Pattern],
     passes: usize,
     parallel: bool,
+    unit_system: UnitSystem,
 ) -> Vec<PassResult> {
     let mp = MultiProgress::new();
     let pass_style =
@@ -48,11 +52,10 @@ pub fn run(
             .unwrap()
             .progress_chars("=> ");
 
-    let size_mb = region.len() as f64 / (1024.0 * 1024.0);
+    let size = Size::new(region.len() as f64, unit_system);
     println!(
-        "{} Testing {:.1} MiB across {} pass(es) with {} pattern(s){}\n",
+        "{} Testing {size:.1} across {} pass(es) with {} pattern(s){}\n",
         "ferrite".bold(),
-        size_mb,
         passes,
         patterns.len(),
         if parallel { "" } else { "  (sequential)" },
@@ -82,6 +85,7 @@ pub fn run(
             pass_pb.set_message(format!("{pattern}"));
 
             let buf = region.as_u64_slice_mut();
+            let buf_bytes = (buf.len() as u64) * 8;
             let start = Instant::now();
             let failures = run_pattern(pattern, buf, parallel, &mut || {
                 if let Some(pb) = &inner_pb {
@@ -89,21 +93,25 @@ pub fn run(
                 }
             });
             let elapsed = start.elapsed();
+            // Each sub-pass writes the entire buffer then reads it back.
+            let bytes_processed = buf_bytes * 2 * pattern.sub_passes();
 
             if let Some(pb) = inner_pb {
                 pb.finish_and_clear();
             }
 
+            let throughput = Rate::new(bytes_processed as f64 / elapsed.as_secs_f64(), unit_system);
+
             if failures.is_empty() {
                 pass_pb.println(format!(
-                    "  {} {:<20} {:>8.1}ms",
+                    "  {} {:<20} {:>8.1}ms  {throughput:>}",
                     "PASS".green(),
                     pattern.to_string(),
                     elapsed.as_secs_f64() * 1000.0,
                 ));
             } else {
                 pass_pb.println(format!(
-                    "  {} {:<20} {:>8.1}ms  ({} errors)",
+                    "  {} {:<20} {:>8.1}ms  {throughput:>}  ({} errors)",
                     "FAIL".red().bold(),
                     pattern.to_string(),
                     elapsed.as_secs_f64() * 1000.0,
@@ -118,6 +126,7 @@ pub fn run(
                 pattern,
                 failures,
                 elapsed,
+                bytes_processed,
             });
             pass_pb.inc(1);
         }

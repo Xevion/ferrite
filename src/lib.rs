@@ -4,6 +4,7 @@ pub mod alloc;
 pub mod pattern;
 pub mod runner;
 pub mod simd;
+pub mod units;
 
 /// A single test failure record.
 #[derive(Debug, Clone)]

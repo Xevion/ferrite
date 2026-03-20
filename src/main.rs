@@ -9,6 +9,7 @@ use owo_colors::OwoColorize;
 use ferrite::alloc::LockedRegion;
 use ferrite::pattern::Pattern;
 use ferrite::runner;
+use ferrite::units::UnitSystem;
 
 /// ferrite -- userspace RAM testing tool for Linux
 #[derive(Parser)]
@@ -30,6 +31,10 @@ struct Cli {
     /// Run patterns sequentially on a single core instead of using all CPU cores.
     #[arg(long)]
     sequential: bool,
+
+    /// Unit system for sizes and throughput: binary (KiB, MiB, GiB) or decimal (KB, MB, GB).
+    #[arg(long, value_enum, default_value_t = UnitSystem::Binary)]
+    units: UnitSystem,
 }
 
 fn parse_size(s: &str) -> Result<usize, String> {
@@ -118,7 +123,13 @@ fn main() -> Result<()> {
 
     let mut region = LockedRegion::new(cli.size).context("failed to allocate and lock memory")?;
 
-    let results = runner::run(&mut region, &patterns, cli.passes, !cli.sequential);
+    let results = runner::run(
+        &mut region,
+        &patterns,
+        cli.passes,
+        !cli.sequential,
+        cli.units,
+    );
 
     let total_failures: usize = results.iter().map(|r| r.total_failures()).sum();
     if total_failures == 0 {
