@@ -11,33 +11,68 @@ Named after ferrite core memory — the dominant RAM technology of the 1960s and
 
 ## What it does
 
-Allocates as much physical RAM as possible, locks it against swapping, then hammers it with a suite of test patterns to detect stuck bits, address line faults, coupling errors, and other common failure modes. Designed to be run while the OS is live — not a replacement for memtest86+, but a fast, ergonomic sanity check you can run without a reboot.
+Allocates a region of physical RAM, locks it against swapping via `mlock`, then runs a suite of test patterns to detect stuck bits, address line faults, coupling errors, and other common failure modes. Designed to run while the OS is live — not a replacement for memtest86+, but a fast sanity check you can run without a reboot.
 
-## Quick Start
+### Current test patterns
+
+- **Solid Bits** — fills with all-ones then all-zeros
+- **Walking Ones / Walking Zeros** — walks a single set/cleared bit across each 64-bit word
+- **Checkerboard** — alternating `0x55...55` / `0xAA...AA` patterns
+- **Stuck Address** — writes each word's index, verifies the address mapping is intact
+
+All writes use non-temporal stores (AVX-512 when available) and all reads/writes use volatile operations to prevent the compiler from optimizing away memory accesses.
+
+## Quick start
 
 ```bash
-# Test as much RAM as possible (requires root for mlock)
-sudo ferrite
+# Test 64M of RAM (default)
+ferrite
 
 # Test a specific amount
-sudo ferrite --size 8G
+ferrite --size 4G
 
-# Run a specific number of loops
-sudo ferrite --loops 3
+# Run 3 passes over the allocation
+ferrite --passes 3
 
-# JSON output for scripting
-sudo ferrite --json
+# Run only specific tests
+ferrite --test solid-bits --test checkerboard
+
+# NDJSON event stream to stdout
+ferrite --json
+
+# NDJSON to a file, human output to stdout
+ferrite --json results.ndjson
 ```
+
+Large allocations require sufficient `RLIMIT_MEMLOCK` — either run as root, raise the limit with `ulimit -l unlimited`, or grant `CAP_IPC_LOCK` to the binary.
 
 ## Why not memtester?
 
 memtester works. ferrite aims to be:
-- More informative output (which bits flipped, error density, suspected region)
-- Physical address resolution (when run as root on a cooperative kernel)
-- NUMA-aware (test per-node, or test all nodes)
-- ECC-aware (read correctable error counts before/after)
-- Faster iteration via parallelism
+
+- **More informative** — reports which bits flipped, at what offset, in what pattern
+- **Parallel** — uses all available cores via Rayon for write and verify phases
+- **Scriptable** — NDJSON output mode for machine consumption
+- **Faster** — AVX-512 non-temporal stores where available, avoiding cache pollution
+
+### Planned
+
+- Physical address resolution (via `/proc/self/pagemap`)
+- NUMA-aware allocation and per-node testing
+- ECC monitoring (EDAC counters before/after)
 
 ## Limitations
 
-Userspace testing cannot reach 100% of RAM — the kernel, running processes, and ferrite itself occupy memory that can't be touched. Expect to test roughly 70-85% of installed RAM. For comprehensive coverage, use memtest86+.
+Userspace testing cannot reach 100% of RAM — the kernel, running processes, and ferrite itself occupy memory that can't be touched. For comprehensive coverage, use memtest86+.
+
+## Building
+
+```bash
+cargo build --release
+```
+
+Requires Rust 1.85+ (2024 edition).
+
+## License
+
+[GPL-3.0](LICENSE)

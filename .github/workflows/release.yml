@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build (${{ matrix.target.os }} / ${{ matrix.target.arch }})
+    name: Build (${{ matrix.target.arch }})
     runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 20
     permissions:
@@ -29,23 +29,13 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          - os: linux
-            arch: x86_64
+          - arch: x86_64
             runner: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
-          - os: linux
-            arch: aarch64
+          - arch: aarch64
             runner: ubuntu-22.04
             rust_target: aarch64-unknown-linux-gnu
             cross: true
-          - os: macos
-            arch: x86_64
-            runner: macos-15-intel
-            rust_target: x86_64-apple-darwin
-          - os: macos
-            arch: aarch64
-            runner: macos-latest
-            rust_target: aarch64-apple-darwin
 
     steps:
       - uses: actions/checkout@v6
@@ -75,18 +65,14 @@ jobs:
         shell: bash
         run: |
           SRC="target/${{ matrix.target.rust_target }}/release/ferrite"
-          DEST="ferrite-${{ matrix.target.os }}-${{ matrix.target.arch }}"
-          if [ -f "$SRC.exe" ]; then
-            cp "$SRC.exe" "$DEST.exe"
-          else
-            cp "$SRC" "$DEST"
-          fi
+          DEST="ferrite-linux-${{ matrix.target.arch }}"
+          cp "$SRC" "$DEST"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ferrite-${{ matrix.target.os }}-${{ matrix.target.arch }}
-          path: ferrite-${{ matrix.target.os }}-${{ matrix.target.arch }}*
+          name: ferrite-linux-${{ matrix.target.arch }}
+          path: ferrite-linux-${{ matrix.target.arch }}
           if-no-files-found: error
           retention-days: 7
 
@@ -94,7 +80,7 @@ jobs:
         if: github.event_name == 'push' && github.ref_type == 'tag'
         shell: bash
         run: |
-          for f in ferrite-${{ matrix.target.os }}-${{ matrix.target.arch }}*; do
+          for f in ferrite-linux-${{ matrix.target.arch }}*; do
             gh release upload "${{ github.ref_name }}" "$f" --clobber
           done
         env:
