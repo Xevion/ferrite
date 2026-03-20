@@ -1,12 +1,11 @@
 use std::time::Instant;
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use owo_colors::OwoColorize;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::Failure;
 use crate::alloc::LockedRegion;
+use crate::output::OutputSink;
 use crate::pattern::{Pattern, run_pattern};
-use crate::units::{Rate, Size, UnitSystem};
 
 /// Result of running a single pattern.
 pub struct PatternResult {
@@ -40,9 +39,12 @@ pub fn run(
     patterns: &[Pattern],
     passes: usize,
     parallel: bool,
-    unit_system: UnitSystem,
+    sink: &mut OutputSink,
 ) -> Vec<PassResult> {
-    let mp = MultiProgress::new();
+    // Clone the MultiProgress handle upfront so we don't hold an immutable
+    // borrow on `sink` across mutable calls. indicatif's MultiProgress is
+    // internally Arc-backed, so cloning is cheap.
+    let mp = sink.multi_progress().clone();
     let pass_style =
         ProgressStyle::with_template("{prefix} [{bar:30.cyan/dim}] {pos}/{len} patterns  {msg}")
             .unwrap()
@@ -52,18 +54,14 @@ pub fn run(
             .unwrap()
             .progress_chars("=> ");
 
-    let size = Size::new(region.len() as f64, unit_system);
-    println!(
-        "{} Testing {size:.1} across {} pass(es) with {} pattern(s){}\n",
-        "ferrite".bold(),
-        passes,
-        patterns.len(),
-        if parallel { "" } else { "  (sequential)" },
-    );
+    sink.print_banner(region.len(), passes, patterns.len(), parallel);
 
     let mut results = Vec::with_capacity(passes);
 
     for pass in 0..passes {
+        let pass_start = Instant::now();
+        sink.emit_pass_start(pass + 1, passes);
+
         let pass_pb = mp.add(ProgressBar::new(patterns.len() as u64));
         pass_pb.set_style(pass_style.clone());
         pass_pb.set_prefix(format!("Pass {}/{}", pass + 1, passes));
@@ -72,7 +70,8 @@ pub fn run(
         for &pattern in patterns {
             let sub_passes = pattern.sub_passes();
 
-            // Show a sub-pass bar for patterns with more than one internal iteration.
+            sink.emit_test_start(pattern, pass + 1);
+
             let inner_pb = if sub_passes > 1 {
                 let pb = mp.insert_after(&pass_pb, ProgressBar::new(sub_passes));
                 pb.set_style(sub_style.clone());
@@ -87,40 +86,24 @@ pub fn run(
             let buf = region.as_u64_slice_mut();
             let buf_bytes = (buf.len() as u64) * 8;
             let start = Instant::now();
+
+            let mut sub_pass_count: u64 = 0;
             let failures = run_pattern(pattern, buf, parallel, &mut || {
+                sub_pass_count += 1;
                 if let Some(pb) = &inner_pb {
                     pb.inc(1);
                 }
+                sink.emit_progress(pattern, pass + 1, sub_pass_count, sub_passes);
             });
             let elapsed = start.elapsed();
-            // Each sub-pass writes the entire buffer then reads it back.
             let bytes_processed = buf_bytes * 2 * pattern.sub_passes();
 
             if let Some(pb) = inner_pb {
                 pb.finish_and_clear();
             }
 
-            let throughput = Rate::new(bytes_processed as f64 / elapsed.as_secs_f64(), unit_system);
-
-            if failures.is_empty() {
-                pass_pb.println(format!(
-                    "  {} {:<20} {:>8.1}ms  {throughput:>}",
-                    "PASS".green(),
-                    pattern.to_string(),
-                    elapsed.as_secs_f64() * 1000.0,
-                ));
-            } else {
-                pass_pb.println(format!(
-                    "  {} {:<20} {:>8.1}ms  {throughput:>}  ({} errors)",
-                    "FAIL".red().bold(),
-                    pattern.to_string(),
-                    elapsed.as_secs_f64() * 1000.0,
-                    failures.len(),
-                ));
-                for f in &failures {
-                    pass_pb.println(format!("       {f}"));
-                }
-            }
+            sink.emit_test_complete(pattern, pass + 1, elapsed, bytes_processed, &failures);
+            sink.print_test_result(pattern, elapsed, bytes_processed, &failures, &pass_pb);
 
             pattern_results.push(PatternResult {
                 pattern,
@@ -137,22 +120,11 @@ pub fn run(
             pattern_results,
         };
         let total = pass_result.total_failures();
-        if total == 0 {
-            println!(
-                "  Pass {}/{}: {}",
-                pass + 1,
-                passes,
-                "all patterns passed".green(),
-            );
-        } else {
-            println!(
-                "  Pass {}/{}: {}",
-                pass + 1,
-                passes,
-                format!("{total} total failure(s)").red().bold(),
-            );
-        }
-        println!();
+        let pass_elapsed = pass_start.elapsed();
+
+        sink.emit_pass_complete(pass + 1, total, pass_elapsed);
+        sink.print_pass_summary(pass + 1, passes, total);
+
         results.push(pass_result);
     }
 

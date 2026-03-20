@@ -1,6 +1,7 @@
 use std::fmt;
 
 pub mod alloc;
+pub mod output;
 pub mod pattern;
 pub mod runner;
 pub mod simd;

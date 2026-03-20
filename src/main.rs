@@ -1,4 +1,5 @@
 use std::fs;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -7,6 +8,7 @@ use nix::unistd::geteuid;
 use owo_colors::OwoColorize;
 
 use ferrite::alloc::LockedRegion;
+use ferrite::output::OutputSink;
 use ferrite::pattern::Pattern;
 use ferrite::runner;
 use ferrite::units::UnitSystem;
@@ -35,6 +37,12 @@ struct Cli {
     /// Unit system for sizes and throughput: binary (KiB, MiB, GiB) or decimal (KB, MB, GB).
     #[arg(long, value_enum, default_value_t = UnitSystem::Binary)]
     units: UnitSystem,
+
+    /// Emit NDJSON events instead of human-readable output.
+    /// Without a path (or with '-'), writes JSON to stdout and human output to stderr.
+    /// With a file path, writes JSON to that file and human output to stdout.
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "-")]
+    json: Option<String>,
 }
 
 fn parse_size(s: &str) -> Result<usize, String> {
@@ -121,26 +129,29 @@ fn main() -> Result<()> {
         cli.patterns
     };
 
+    let mut sink = match &cli.json {
+        None => OutputSink::human(cli.units),
+        Some(path) => OutputSink::json(path, cli.units).context("failed to open JSON output")?,
+    };
+
     let mut region = LockedRegion::new(cli.size).context("failed to allocate and lock memory")?;
 
+    let run_start = Instant::now();
     let results = runner::run(
         &mut region,
         &patterns,
         cli.passes,
         !cli.sequential,
-        cli.units,
+        &mut sink,
     );
+    let run_elapsed = run_start.elapsed();
 
     let total_failures: usize = results.iter().map(|r| r.total_failures()).sum();
-    if total_failures == 0 {
-        println!("{}", "All tests passed.".green().bold());
-    } else {
-        println!(
-            "{}",
-            format!("{total_failures} failure(s) detected.")
-                .red()
-                .bold(),
-        );
+
+    sink.emit_summary(cli.passes, total_failures, run_elapsed);
+    sink.print_final_result(total_failures);
+
+    if total_failures > 0 {
         std::process::exit(1);
     }
 
