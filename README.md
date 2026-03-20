@@ -1,5 +1,10 @@
 # ferrite
 
+[![CI](https://github.com/Xevion/ferrite/actions/workflows/check.yml/badge.svg)](https://github.com/Xevion/ferrite/actions/workflows/check.yml)
+[![Coverage](https://codecov.io/gh/Xevion/ferrite/branch/master/graph/badge.svg)](https://codecov.io/gh/Xevion/ferrite)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-orange?logo=rust&logoColor=white)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+
 A userspace memory tester for Linux, written in Rust.
 
 Named after ferrite core memory — the dominant RAM technology of the 1960s and 70s, where tiny iron rings were magnetized to store individual bits. Testing RAM with iron.

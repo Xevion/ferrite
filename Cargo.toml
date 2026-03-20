@@ -2,6 +2,7 @@
 name = "ferrite"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 
 [profile.release]
 codegen-units = 1
