@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Xevion/ferrite/actions/workflows/check.yml/badge.svg)](https://github.com/Xevion/ferrite/actions/workflows/check.yml)
 [![Coverage](https://codecov.io/gh/Xevion/ferrite/branch/master/graph/badge.svg)](https://codecov.io/gh/Xevion/ferrite)
-[![MSRV](https://img.shields.io/badge/MSRV-1.85-orange?logo=rust&logoColor=white)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
+[![MSRV](https://img.shields.io/badge/MSRV-1.89-orange?logo=rust&logoColor=white)](https://blog.rust-lang.org/2025/06/26/Rust-1.89.0.html)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
 A userspace memory tester for Linux, written in Rust.
@@ -71,7 +71,7 @@ Userspace testing cannot reach 100% of RAM — the kernel, running processes, an
 cargo build --release
 ```
 
-Requires Rust 1.85+ (2024 edition).
+Requires Rust 1.89+ (2024 edition).
 
 ## License
 
