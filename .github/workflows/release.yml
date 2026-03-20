@@ -1,21 +1,20 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Build without creating a release"
-        required: false
-        type: boolean
-        default: true
+      tag:
+        description: "Tag to build and upload (e.g. v0.1.0)"
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: true
 
 jobs:
@@ -39,6 +38,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -62,11 +63,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target.cross && 'aarch64-linux-gnu-gcc' || '' }}
 
       - name: Rename binary
-        shell: bash
-        run: |
-          SRC="target/${{ matrix.target.rust_target }}/release/ferrite"
-          DEST="ferrite-linux-${{ matrix.target.arch }}"
-          cp "$SRC" "$DEST"
+        run: cp "target/${{ matrix.target.rust_target }}/release/ferrite" "ferrite-linux-${{ matrix.target.arch }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -77,11 +74,7 @@ jobs:
           retention-days: 7
 
       - name: Upload to GitHub release
-        if: github.event_name == 'push' && github.ref_type == 'tag'
-        shell: bash
-        run: |
-          for f in ferrite-linux-${{ matrix.target.arch }}*; do
-            gh release upload "${{ github.ref_name }}" "$f" --clobber
-          done
+        if: github.event_name == 'release'
+        run: gh release upload "${{ github.event.release.tag_name }}" "ferrite-linux-${{ matrix.target.arch }}" --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
