@@ -95,11 +95,6 @@ impl LockedRegion {
     pub fn len(&self) -> usize {
         self.len
     }
-
-    /// Raw pointer to the start of the region.
-    pub fn as_ptr(&self) -> *const u8 {
-        self.ptr.as_ptr() as *const u8
-    }
 }
 
 impl Drop for LockedRegion {

@@ -3,8 +3,9 @@ use std::time::Instant;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 
+use crate::Failure;
 use crate::alloc::LockedRegion;
-use crate::pattern::{Failure, Pattern, run_pattern};
+use crate::pattern::{Pattern, run_pattern};
 
 /// Result of running a single pattern.
 pub struct PatternResult {
@@ -57,7 +58,6 @@ pub fn run(
         if parallel { "" } else { "  (sequential)" },
     );
 
-    let buf_ptr = region.as_ptr();
     let mut results = Vec::with_capacity(passes);
 
     for pass in 0..passes {
@@ -83,7 +83,7 @@ pub fn run(
 
             let buf = region.as_u64_slice_mut();
             let start = Instant::now();
-            let failures = run_pattern(pattern, buf_ptr, buf, parallel, &mut || {
+            let failures = run_pattern(pattern, buf, parallel, &mut || {
                 if let Some(pb) = &inner_pb {
                     pb.inc(1);
                 }
