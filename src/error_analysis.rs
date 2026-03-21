@@ -8,14 +8,14 @@ pub struct BitErrorStats {
     pub lowest_phys: Option<u64>,
     /// Highest physical address with an error.
     pub highest_phys: Option<u64>,
-    /// OR of all XOR masks — which bit positions have ever flipped.
+    /// OR of all XOR masks -- which bit positions have ever flipped.
     pub union_xor_mask: u64,
     /// Count of flips per bit position (index 0 = bit 0).
     pub bit_positions: [u32; 64],
-    /// Bits that always flipped from 0→1 across all errors.
+    /// Bits that always flipped from 0->1 across all errors.
     /// Computed as: AND of (actual & ~expected) across all errors.
     stuck_high_accum: Option<u64>,
-    /// Bits that always flipped from 1→0 across all errors.
+    /// Bits that always flipped from 1->0 across all errors.
     /// Computed as: AND of (expected & ~actual) across all errors.
     stuck_low_accum: Option<u64>,
 }
@@ -58,9 +58,9 @@ impl BitErrorStats {
             }
         }
 
-        // Stuck-high: bits that went 0→1 (set in actual, clear in expected)
+        // Stuck-high: bits that went 0->1 (set in actual, clear in expected)
         let high = failure.actual & !failure.expected;
-        // Stuck-low: bits that went 1→0 (set in expected, clear in actual)
+        // Stuck-low: bits that went 1->0 (set in expected, clear in actual)
         let low = failure.expected & !failure.actual;
 
         self.stuck_high_accum = Some(match self.stuck_high_accum {
@@ -73,12 +73,12 @@ impl BitErrorStats {
         });
     }
 
-    /// Bits that flipped 0→1 in every single error (consistent stuck-high).
+    /// Bits that flipped 0->1 in every single error (consistent stuck-high).
     pub fn stuck_high_mask(&self) -> u64 {
         self.stuck_high_accum.unwrap_or(0)
     }
 
-    /// Bits that flipped 1→0 in every single error (consistent stuck-low).
+    /// Bits that flipped 1->0 in every single error (consistent stuck-low).
     pub fn stuck_low_mask(&self) -> u64 {
         self.stuck_low_accum.unwrap_or(0)
     }
@@ -112,9 +112,9 @@ impl BitErrorStats {
 pub enum ErrorClassification {
     /// No errors recorded.
     NoErrors,
-    /// Same bit position(s) flip in every error — likely a hard stuck bit.
+    /// Same bit position(s) flip in every error -- likely a hard stuck bit.
     StuckBit { positions: Vec<u8> },
-    /// Different bits flip across errors — coupling or disturbance faults.
+    /// Different bits flip across errors -- coupling or disturbance faults.
     Coupling,
     /// Some bits are consistently stuck, but other bits also flip inconsistently.
     Mixed,
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn mixed_errors() {
         let mut stats = BitErrorStats::new();
-        // Bit 20 always flips 0→1, but bit 5 only sometimes
+        // Bit 20 always flips 0->1, but bit 5 only sometimes
         stats.record(&make_failure(0x1000, 0x0, (1 << 20) | (1 << 5), None));
         stats.record(&make_failure(0x2000, 0x0, 1 << 20, None));
 
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn bit_position_counts() {
         let mut stats = BitErrorStats::new();
-        // Bits 0, 1, and 2 flip — bit 0 flips twice
+        // Bits 0, 1, and 2 flip -- bit 0 flips twice
         stats.record(&make_failure(0x1000, 0x7, 0x4, None)); // bits 0,1 flipped
         stats.record(&make_failure(0x2000, 0x5, 0x0, None)); // bits 0,2 flipped
 

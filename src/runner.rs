@@ -37,6 +37,10 @@ impl PassResult {
 /// all available CPU cores via Rayon. Pass `false` to force single-threaded
 /// execution (useful for benchmarking or on systems where parallelism causes
 /// cache interference).
+///
+/// `on_activity` is called from worker threads with a position (0.0..1.0)
+/// within the buffer, suitable for driving activity heatmaps. Pass `&|_| {}`
+/// if no activity tracking is needed.
 pub fn run(
     region: &mut LockedRegion,
     patterns: &[Pattern],
@@ -44,6 +48,7 @@ pub fn run(
     parallel: bool,
     sink: &mut OutputSink,
     resolver: Option<&dyn PhysResolver>,
+    on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<PassResult> {
     // Clone the MultiProgress handle upfront so we don't hold an immutable
     // borrow on `sink` across mutable calls. indicatif's MultiProgress is
@@ -95,13 +100,19 @@ pub fn run(
             let start = Instant::now();
 
             let mut sub_pass_count: u64 = 0;
-            let mut failures = run_pattern(pattern, buf, parallel, &mut || {
-                sub_pass_count += 1;
-                if let Some(pb) = &inner_pb {
-                    pb.inc(1);
-                }
-                sink.emit_progress(pattern, pass + 1, sub_pass_count, sub_passes);
-            });
+            let mut failures = run_pattern(
+                pattern,
+                buf,
+                parallel,
+                &mut || {
+                    sub_pass_count += 1;
+                    if let Some(pb) = &inner_pb {
+                        pb.inc(1);
+                    }
+                    sink.emit_progress(pattern, pass + 1, sub_pass_count, sub_passes);
+                },
+                on_activity,
+            );
             let elapsed = start.elapsed();
             let bytes_processed = buf_bytes * 2 * pattern.sub_passes();
 

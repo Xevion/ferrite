@@ -11,6 +11,8 @@ pub mod runner;
 pub mod simd;
 pub mod smbios;
 pub mod stability;
+#[cfg(feature = "tui")]
+pub mod tui;
 pub mod units;
 
 /// A single test failure record.

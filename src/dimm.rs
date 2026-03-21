@@ -207,7 +207,7 @@ mod tests {
         ];
         let used = vec![false, false];
         // "channel 0 slot 0" doesn't substring-match "P0_Node0_Channel0_Dimm0"
-        // This is a known limitation — exact substring matching is imperfect
+        // This is a known limitation -- exact substring matching is imperfect
         assert_eq!(find_smbios_match(&edac, &smbios, &used), None);
     }
 

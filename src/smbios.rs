@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn parse_size_ffff_skipped() {
-        // 0xFFFF means size is unknown/not reported — should be treated as 0
+        // 0xFFFF means size is unknown/not reported -- should be treated as 0
         let table = build_type17(0xFF, 0xFF, None);
         let dimms = parse_type17_entries(&table);
         assert!(dimms.is_empty());
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn parse_minimal_struct_length() {
-        // Struct length exactly 0x17 — manufacturer/serial/part fields are absent
+        // Struct length exactly 0x17 -- manufacturer/serial/part fields are absent
         let mut s = vec![0u8; 0x17];
         s[0] = 17;
         s[1] = 0x17;

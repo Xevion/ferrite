@@ -641,7 +641,7 @@ mod tests {
         let mut sink = OutputSink::human(UnitSystem::Decimal);
         sink.emit_pass_start(1, 1);
         sink.emit_summary(1, 0, Duration::from_secs(1));
-        // No panic means success — human sink just skips JSON writes
+        // No panic means success -- human sink just skips JSON writes
     }
 
     #[test]
@@ -662,7 +662,7 @@ mod tests {
             hwpoison_pages: 1,
             unevictable_pages: 50,
         };
-        // Exercise all print paths — they write to stdout/stderr, which is fine
+        // Exercise all print paths -- they write to stdout/stderr, which is fine
         sink.print_banner(1024 * 1024, 2, 5, true);
         sink.print_banner(1024 * 1024, 1, 3, false);
         sink.print_map_info(&stats);

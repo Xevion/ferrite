@@ -224,7 +224,7 @@ mod tests {
         if !avx512_available() {
             return;
         }
-        // Heap-allocated buffer — tests the unaligned fallback path
+        // Heap-allocated buffer -- tests the unaligned fallback path
         let mut buf = vec![0u64; 256];
         let pattern = 0xDEAD_BEEF_CAFE_BABEu64;
         unsafe { fill_nt(&mut buf, pattern) };
@@ -291,7 +291,7 @@ mod tests {
         if !avx512_available() {
             return;
         }
-        // Buffer size not a multiple of 8 — tests the scalar tail path
+        // Buffer size not a multiple of 8 -- tests the scalar tail path
         let mut buf = vec![0u64; 13];
         let pattern = 0x1234_5678_9ABC_DEF0u64;
         unsafe { fill_nt(&mut buf, pattern) };
