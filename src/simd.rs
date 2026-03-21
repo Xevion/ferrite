@@ -213,3 +213,90 @@ pub(crate) unsafe fn verify_indexed_avx512(
     }
     failures
 }
+
+#[cfg(test)]
+#[cfg(target_arch = "x86_64")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fill_nt_and_verify_round_trip() {
+        if !avx512_available() {
+            return;
+        }
+        // Heap-allocated buffer — tests the unaligned fallback path
+        let mut buf = vec![0u64; 256];
+        let pattern = 0xDEAD_BEEF_CAFE_BABEu64;
+        unsafe { fill_nt(&mut buf, pattern) };
+        let failures = unsafe { verify_avx512(&buf, pattern, buf.as_ptr() as usize, 0) };
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn fill_nt_indexed_and_verify_round_trip() {
+        if !avx512_available() {
+            return;
+        }
+        let mut buf = vec![0u64; 256];
+        unsafe { fill_nt_indexed(&mut buf, 0) };
+        let failures = unsafe { verify_indexed_avx512(&buf, buf.as_ptr() as usize, 0) };
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn verify_detects_corruption() {
+        if !avx512_available() {
+            return;
+        }
+        let mut buf = vec![0u64; 256];
+        let pattern = 0xAAAA_AAAA_AAAA_AAAAu64;
+        unsafe { fill_nt(&mut buf, pattern) };
+        buf[42] = 0xBBBB_BBBB_BBBB_BBBBu64;
+        let failures = unsafe { verify_avx512(&buf, pattern, buf.as_ptr() as usize, 0) };
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].word_index, 42);
+        assert_eq!(failures[0].actual, 0xBBBB_BBBB_BBBB_BBBBu64);
+        assert_eq!(failures[0].expected, pattern);
+    }
+
+    #[test]
+    fn verify_indexed_detects_corruption() {
+        if !avx512_available() {
+            return;
+        }
+        let mut buf = vec![0u64; 256];
+        unsafe { fill_nt_indexed(&mut buf, 0) };
+        buf[10] = 0xFFFF;
+        let failures = unsafe { verify_indexed_avx512(&buf, buf.as_ptr() as usize, 0) };
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].word_index, 10);
+        assert_eq!(failures[0].expected, 10);
+    }
+
+    #[test]
+    fn fill_nt_indexed_with_offset() {
+        if !avx512_available() {
+            return;
+        }
+        let mut buf = vec![0u64; 64];
+        let start = 100;
+        unsafe { fill_nt_indexed(&mut buf, start) };
+        for (i, &val) in buf.iter().enumerate() {
+            assert_eq!(val, (start + i) as u64, "mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn fill_nt_scalar_tail() {
+        if !avx512_available() {
+            return;
+        }
+        // Buffer size not a multiple of 8 — tests the scalar tail path
+        let mut buf = vec![0u64; 13];
+        let pattern = 0x1234_5678_9ABC_DEF0u64;
+        unsafe { fill_nt(&mut buf, pattern) };
+        for (i, &val) in buf.iter().enumerate() {
+            assert_eq!(val, pattern, "mismatch at index {i}");
+        }
+    }
+}

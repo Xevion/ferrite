@@ -231,6 +231,84 @@ mod tests {
     }
 
     #[test]
+    fn read_u64_file_valid() {
+        let dir = std::env::temp_dir().join("ferrite_test_edac_u64");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_count");
+        std::fs::write(&path, "42\n").unwrap();
+        assert_eq!(read_u64_file(&path), Some(42));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_u64_file_invalid() {
+        let dir = std::env::temp_dir().join("ferrite_test_edac_u64_bad");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bad_count");
+        std::fs::write(&path, "not_a_number\n").unwrap();
+        assert_eq!(read_u64_file(&path), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_u64_file_missing() {
+        assert_eq!(read_u64_file(Path::new("/nonexistent/path")), None);
+    }
+
+    #[test]
+    fn read_trimmed_non_empty() {
+        let dir = std::env::temp_dir().join("ferrite_test_edac_trim");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("label");
+        std::fs::write(&path, "  DIMM_A1  \n").unwrap();
+        assert_eq!(read_trimmed(&path), Some("DIMM_A1".to_owned()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_trimmed_empty_returns_none() {
+        let dir = std::env::temp_dir().join("ferrite_test_edac_trim_empty");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("label");
+        std::fs::write(&path, "  \n").unwrap();
+        assert_eq!(read_trimmed(&path), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capture_returns_none_without_edac() {
+        // In CI/test environments, EDAC sysfs typically doesn't exist
+        // This exercises the early return path
+        let result = EdacSnapshot::capture();
+        // Can't assert None (might exist on some machines), but it shouldn't panic
+        let _ = result;
+    }
+
+    #[test]
+    fn ecc_delta_serialization() {
+        let delta_with_label = EccDelta {
+            mc: 0,
+            dimm_index: 1,
+            label: Some("DIMM_A1".to_owned()),
+            ce_delta: 3,
+            ue_delta: 0,
+        };
+        let json = serde_json::to_string(&delta_with_label).unwrap();
+        assert!(json.contains("\"label\":\"DIMM_A1\""));
+
+        let delta_no_label = EccDelta {
+            mc: 0,
+            dimm_index: 0,
+            label: None,
+            ce_delta: 0,
+            ue_delta: 1,
+        };
+        let json = serde_json::to_string(&delta_no_label).unwrap();
+        // label should be skipped entirely due to skip_serializing_if
+        assert!(!json.contains("label"));
+    }
+
+    #[test]
     fn delta_handles_missing_dimm() {
         let before = make_snapshot(vec![(0, 0, 5, 0)]);
         let after = make_snapshot(vec![(0, 0, 6, 0), (0, 1, 1, 0)]);

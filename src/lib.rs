@@ -54,3 +54,22 @@ impl fmt::Display for Failure {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_display_with_phys_addr() {
+        let f = Failure {
+            addr: 0x1000,
+            expected: 0xFF,
+            actual: 0xFE,
+            word_index: 0,
+            phys_addr: Some(phys::PhysAddr(0xdead_beef)),
+        };
+        let s = f.to_string();
+        assert!(s.contains("phys=0xdeadbeef"));
+        assert!(s.contains("1 bit(s)"));
+    }
+}

@@ -247,6 +247,140 @@ mod tests {
         assert_eq!(d.speed_mhz, 4800);
     }
 
+    /// Build a Type 17 structure with the given size field and optional extended size,
+    /// plus an end-of-table marker.
+    fn build_type17(size_lo: u8, size_hi: u8, ext_size: Option<u32>) -> Vec<u8> {
+        let struct_len = if ext_size.is_some() { 0x20 } else { 0x1B };
+        let mut s = vec![0u8; struct_len];
+        s[0] = 17;
+        s[1] = struct_len as u8;
+        s[0x0C] = size_lo;
+        s[0x0D] = size_hi;
+        s[0x10] = 1; // device_locator = string 1
+        s[0x12] = 0x1A; // DDR4
+        s[0x15] = 0x20; // 3200 MHz low
+        s[0x16] = 0x0C; // 3200 MHz high
+        if let Some(ext) = ext_size {
+            let bytes = ext.to_le_bytes();
+            s[0x1C] = bytes[0];
+            s[0x1D] = bytes[1];
+            s[0x1E] = bytes[2];
+            s[0x1F] = bytes[3];
+        }
+        // String table: "DIMM0\0\0"
+        s.extend_from_slice(b"DIMM0\0\0");
+        // End marker
+        s.extend_from_slice(&[127, 4, 0, 0, 0, 0]);
+        s
+    }
+
+    #[test]
+    fn parse_kb_granularity_size() {
+        // Bit 15 set = KB granularity, value 8192 KB = 8 MB
+        // 0x8000 | 8192 = 0xA000
+        let table = build_type17(0x00, 0xA0, None);
+        let dimms = parse_type17_entries(&table);
+        assert_eq!(dimms.len(), 1);
+        assert_eq!(dimms[0].size_mb, 8); // 8192 KB / 1024 = 8 MB
+    }
+
+    #[test]
+    fn parse_extended_size() {
+        // size = 0x7FFF triggers extended size read at 0x1C
+        let table = build_type17(0xFF, 0x7F, Some(32768));
+        let dimms = parse_type17_entries(&table);
+        assert_eq!(dimms.len(), 1);
+        assert_eq!(dimms[0].size_mb, 32768);
+    }
+
+    #[test]
+    fn parse_multiple_entries() {
+        let struct_len = 0x1Bu8;
+        let mut table = Vec::new();
+
+        // First DIMM: 4096 MB
+        let mut s1 = vec![0u8; 0x1B];
+        s1[0] = 17;
+        s1[1] = struct_len;
+        s1[0x0C] = 0x00;
+        s1[0x0D] = 0x10; // 4096 MB
+        s1[0x10] = 1; // device_locator
+        s1[0x12] = 0x1A; // DDR4
+        table.extend_from_slice(&s1);
+        table.extend_from_slice(b"SLOT1\0\0");
+
+        // Second DIMM: 8192 MB
+        let mut s2 = vec![0u8; 0x1B];
+        s2[0] = 17;
+        s2[1] = struct_len;
+        s2[0x0C] = 0x00;
+        s2[0x0D] = 0x20; // 8192 MB
+        s2[0x10] = 1;
+        s2[0x12] = 0x22; // DDR5
+        table.extend_from_slice(&s2);
+        table.extend_from_slice(b"SLOT2\0\0");
+
+        // End marker
+        table.extend_from_slice(&[127, 4, 0, 0, 0, 0]);
+
+        let dimms = parse_type17_entries(&table);
+        assert_eq!(dimms.len(), 2);
+        assert_eq!(dimms[0].size_mb, 4096);
+        assert_eq!(dimms[0].device_locator, "SLOT1");
+        assert_eq!(dimms[0].memory_type, "DDR4");
+        assert_eq!(dimms[1].size_mb, 8192);
+        assert_eq!(dimms[1].memory_type, "DDR5");
+    }
+
+    #[test]
+    fn parse_memory_type_variants() {
+        assert_eq!(memory_type_name(0x01), "Other");
+        assert_eq!(memory_type_name(0x12), "DDR");
+        assert_eq!(memory_type_name(0x13), "DDR2");
+        assert_eq!(memory_type_name(0x18), "DDR3");
+        assert_eq!(memory_type_name(0x1A), "DDR4");
+        assert_eq!(memory_type_name(0x22), "DDR5");
+        assert_eq!(memory_type_name(0x23), "LPDDR5");
+        assert_eq!(memory_type_name(0xFF), "Unknown");
+    }
+
+    #[test]
+    fn parse_size_ffff_skipped() {
+        // 0xFFFF means size is unknown/not reported — should be treated as 0
+        let table = build_type17(0xFF, 0xFF, None);
+        let dimms = parse_type17_entries(&table);
+        assert!(dimms.is_empty());
+    }
+
+    #[test]
+    fn parse_minimal_struct_length() {
+        // Struct length exactly 0x17 — manufacturer/serial/part fields are absent
+        let mut s = vec![0u8; 0x17];
+        s[0] = 17;
+        s[1] = 0x17;
+        s[0x0C] = 0x00;
+        s[0x0D] = 0x10; // 4096 MB
+        s[0x10] = 1; // device_locator
+        s[0x12] = 0x1A; // DDR4
+        s[0x15] = 0xC0;
+        s[0x16] = 0x12; // 4800 MHz
+        s.extend_from_slice(b"DIMM0\0\0");
+        s.extend_from_slice(&[127, 4, 0, 0, 0, 0]);
+
+        let dimms = parse_type17_entries(&s);
+        assert_eq!(dimms.len(), 1);
+        assert!(dimms[0].manufacturer.is_none());
+        assert!(dimms[0].serial_number.is_none());
+        assert!(dimms[0].part_number.is_none());
+    }
+
+    #[test]
+    fn get_string_out_of_range() {
+        let strings = b"Hello\0World\0\0";
+        // Index beyond available strings returns empty
+        assert_eq!(get_string(strings, 10), "");
+    }
+
     #[test]
     fn parse_empty_slot_skipped() {
         let mut structure = vec![0u8; 0x1B];

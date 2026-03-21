@@ -432,3 +432,272 @@ impl OutputSink {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::phys::PhysAddr;
+    use std::time::Duration;
+
+    /// Create a JSON sink that writes to a temp file, returning (sink, path).
+    fn json_sink() -> (OutputSink, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("ferrite_test_output_{}.ndjson", std::process::id()));
+        let sink = OutputSink::json(path.to_str().unwrap(), UnitSystem::Binary).unwrap();
+        (sink, path)
+    }
+
+    /// Read the temp file and parse each line as JSON.
+    fn read_events(path: &std::path::Path) -> Vec<serde_json::Value> {
+        let content = std::fs::read_to_string(path).unwrap();
+        content
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn human_sink_is_not_json() {
+        let sink = OutputSink::human(UnitSystem::Binary);
+        assert!(!sink.is_json());
+    }
+
+    #[test]
+    fn json_sink_is_json() {
+        let (sink, path) = json_sink();
+        assert!(sink.is_json());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn emit_pass_start_writes_event() {
+        let (mut sink, path) = json_sink();
+        sink.emit_pass_start(1, 3);
+        drop(sink);
+
+        let events = read_events(&path);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event"], "pass_start");
+        assert_eq!(events[0]["pass"], 1);
+        assert_eq!(events[0]["total_passes"], 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn emit_test_start_writes_event() {
+        let (mut sink, path) = json_sink();
+        sink.emit_test_start(Pattern::SolidBits, 1);
+        drop(sink);
+
+        let events = read_events(&path);
+        assert_eq!(events[0]["event"], "test_start");
+        assert_eq!(events[0]["pattern"], "Solid Bits");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn emit_test_complete_pass() {
+        let (mut sink, path) = json_sink();
+        sink.emit_test_complete(
+            Pattern::Checkerboard,
+            1,
+            Duration::from_millis(100),
+            1024,
+            &[],
+        );
+        drop(sink);
+
+        let events = read_events(&path);
+        assert_eq!(events[0]["event"], "test_pass");
+        assert_eq!(events[0]["pattern"], "Checkerboard");
+        assert!(events[0]["duration_ms"].as_f64().unwrap() > 0.0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn emit_test_complete_fail() {
+        let (mut sink, path) = json_sink();
+        let failures = vec![Failure {
+            addr: 0x1000,
+            expected: 0xFF,
+            actual: 0xFE,
+            word_index: 0,
+            phys_addr: Some(PhysAddr(0xABCD)),
+        }];
+        sink.emit_test_complete(
+            Pattern::WalkingOnes,
+            2,
+            Duration::from_millis(50),
+            512,
+            &failures,
+        );
+        drop(sink);
+
+        let events = read_events(&path);
+        assert_eq!(events[0]["event"], "test_fail");
+        let f = &events[0]["failures"][0];
+        assert_eq!(f["flipped_bits"], 1);
+        assert!(f["phys_addr"].as_str().is_some());
+        assert_eq!(f["word_index"], 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn emit_pass_complete_writes_event() {
+        let (mut sink, path) = json_sink();
+        sink.emit_pass_complete(1, 5, Duration::from_secs(2));
+        drop(sink);
+
+        let events = read_events(&path);
+        assert_eq!(events[0]["event"], "pass_complete");
+        assert_eq!(events[0]["failures"], 5);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn emit_summary_writes_event() {
+        let (mut sink, path) = json_sink();
+        sink.emit_summary(3, 0, Duration::from_secs(10));
+        drop(sink);
+
+        let events = read_events(&path);
+        assert_eq!(events[0]["event"], "run_summary");
+        assert_eq!(events[0]["passes"], 3);
+        assert_eq!(events[0]["total_failures"], 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn emit_map_info_writes_event() {
+        let (mut sink, path) = json_sink();
+        let stats = MapStats {
+            total_pages: 100,
+            huge_pages: 5,
+            thp_pages: 10,
+            hwpoison_pages: 0,
+            unevictable_pages: 90,
+        };
+        sink.emit_map_info(&stats);
+        drop(sink);
+
+        let events = read_events(&path);
+        assert_eq!(events[0]["event"], "map_info");
+        assert_eq!(events[0]["total_pages"], 100);
+        assert_eq!(events[0]["huge_pages"], 5);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn emit_ecc_deltas_writes_event() {
+        let (mut sink, path) = json_sink();
+        let deltas = vec![crate::edac::EccDelta {
+            mc: 0,
+            dimm_index: 1,
+            label: Some("DIMM_A1".to_owned()),
+            ce_delta: 2,
+            ue_delta: 0,
+        }];
+        sink.emit_ecc_deltas(1, &deltas);
+        drop(sink);
+
+        let events = read_events(&path);
+        assert_eq!(events[0]["event"], "ecc_deltas");
+        assert_eq!(events[0]["deltas"][0]["ce_delta"], 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn emit_progress_writes_event() {
+        let (mut sink, path) = json_sink();
+        sink.emit_progress(Pattern::StuckAddress, 1, 3, 5);
+        drop(sink);
+
+        let events = read_events(&path);
+        assert_eq!(events[0]["event"], "progress");
+        assert_eq!(events[0]["sub_pass"], 3);
+        assert_eq!(events[0]["total_sub_passes"], 5);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn failure_record_from_without_phys() {
+        let f = Failure {
+            addr: 0x2000,
+            expected: 0xAAAA,
+            actual: 0xBBBB,
+            word_index: 5,
+            phys_addr: None,
+        };
+        let r = FailureRecord::from(&f);
+        assert!(r.phys_addr.is_none());
+        assert_eq!(r.word_index, 5);
+        assert_eq!(r.flipped_bits, f.flipped_bits());
+    }
+
+    #[test]
+    fn human_sink_emit_does_not_write_json() {
+        // Human sink should silently ignore write_event calls (no crash, no output)
+        let mut sink = OutputSink::human(UnitSystem::Decimal);
+        sink.emit_pass_start(1, 1);
+        sink.emit_summary(1, 0, Duration::from_secs(1));
+        // No panic means success — human sink just skips JSON writes
+    }
+
+    #[test]
+    fn json_to_file_does_not_redirect_stderr() {
+        let (sink, path) = json_sink();
+        // When writing JSON to a file (not stdout), human_to_stderr should be false
+        assert!(!sink.human_to_stderr());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn print_methods_do_not_panic() {
+        let sink = OutputSink::human(UnitSystem::Binary);
+        let stats = MapStats {
+            total_pages: 50,
+            huge_pages: 0,
+            thp_pages: 10,
+            hwpoison_pages: 1,
+            unevictable_pages: 50,
+        };
+        // Exercise all print paths — they write to stdout/stderr, which is fine
+        sink.print_banner(1024 * 1024, 2, 5, true);
+        sink.print_banner(1024 * 1024, 1, 3, false);
+        sink.print_map_info(&stats);
+        sink.print_pass_summary(1, 2, 0);
+        sink.print_pass_summary(1, 2, 3);
+        sink.print_final_result(0);
+        sink.print_final_result(5);
+    }
+
+    #[test]
+    fn print_ecc_deltas_exercises_all_branches() {
+        let sink = OutputSink::human(UnitSystem::Binary);
+        let deltas = vec![
+            crate::edac::EccDelta {
+                mc: 0,
+                dimm_index: 0,
+                label: Some("DIMM_A1".to_owned()),
+                ce_delta: 3,
+                ue_delta: 0,
+            },
+            crate::edac::EccDelta {
+                mc: 0,
+                dimm_index: 1,
+                label: None,
+                ce_delta: 0,
+                ue_delta: 1,
+            },
+            crate::edac::EccDelta {
+                mc: 1,
+                dimm_index: 0,
+                label: None,
+                ce_delta: 2,
+                ue_delta: 3,
+            },
+        ];
+        sink.print_ecc_deltas(1, &deltas);
+    }
+}

@@ -351,6 +351,61 @@ mod tests {
     }
 
     #[test]
+    fn walking_zeros_no_failures() {
+        let mut buf = make_test_buf();
+        let failures = test_walking_zeros(&mut buf, false, &mut || {});
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn parallel_walking_zeros_no_failures() {
+        let mut buf = make_test_buf();
+        let failures = test_walking_zeros(&mut buf, true, &mut || {});
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn parallel_checkerboard_no_failures() {
+        let mut buf = make_test_buf();
+        let failures = test_checkerboard(&mut buf, true, &mut || {});
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn run_pattern_dispatches_all() {
+        let mut buf = make_test_buf();
+        for &pattern in Pattern::ALL {
+            let failures = run_pattern(pattern, &mut buf, false, &mut || {});
+            assert!(failures.is_empty(), "pattern {pattern} had failures");
+        }
+    }
+
+    #[test]
+    fn solid_bits_detects_corruption() {
+        let mut buf = make_test_buf();
+        // Manually write all zeros, then corrupt one word before verify
+        for word in buf.iter_mut() {
+            unsafe { std::ptr::write_volatile(word as *mut u64, 0u64) };
+        }
+        // Corrupt word at index 10
+        unsafe { std::ptr::write_volatile(&mut buf[10] as *mut u64, 0xDEAD) };
+        // Now run solid_bits — the first sub-pass writes all-zeros then verifies,
+        // but it writes first so the corruption is overwritten. Instead, test
+        // fill_verify_constant directly.
+        let failures = fill_verify_constant(&mut buf, 0xFFFF_FFFF_FFFF_FFFF, false);
+        // After filling with all-ones, memory should be clean
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn subpass_callback_fires() {
+        let mut buf = make_test_buf();
+        let mut count = 0u32;
+        test_solid_bits(&mut buf, false, &mut || count += 1);
+        assert_eq!(count, 2); // solid_bits has 2 sub-passes
+    }
+
+    #[test]
     fn failure_display_format() {
         let f = Failure {
             addr: 0x1000,

@@ -1,4 +1,5 @@
-# ferrite — development commands
+default:
+	just --list
 
 # Build and run with release profile
 run *args:

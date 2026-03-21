@@ -176,9 +176,9 @@ fn pread_exact(fd: &File, buf: &mut [u8], offset: i64) -> io::Result<()> {
     let raw_fd = fd.as_raw_fd();
     let mut total = 0usize;
     while total < buf.len() {
-        let adjusted_offset = offset.checked_add(total as i64).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "pread offset overflow")
-        })?;
+        let adjusted_offset = offset
+            .checked_add(total as i64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "pread offset overflow"))?;
         // SAFETY: fd is a valid file descriptor, buf is a valid mutable slice,
         // and the offset is within the file's addressable range.
         let n = unsafe {
@@ -358,6 +358,39 @@ mod tests {
     fn parse_all_flags() {
         let entry: u64 = (1u64 << 63) | (1u64 << 56) | (1u64 << 55) | 0xABCDE;
         assert_eq!(parse_pagemap_entry(entry), Some(0xABCDE));
+    }
+
+    #[test]
+    fn phys_addr_into_string() {
+        let addr = PhysAddr(0x1234_5678);
+        let s: String = addr.into();
+        assert_eq!(s, "0x12345678");
+    }
+
+    #[test]
+    fn phys_addr_upper_hex() {
+        let addr = PhysAddr(0xdead_beef);
+        assert_eq!(format!("{addr:X}"), "DEADBEEF");
+        assert_eq!(format!("{addr:#X}"), "0xDEADBEEF");
+    }
+
+    #[test]
+    fn phys_error_display() {
+        let e = PhysError::PageNotPresent(0x1000);
+        assert!(e.to_string().contains("0x1000"));
+
+        let e = PhysError::PfnUnavailable(0x2000);
+        assert!(e.to_string().contains("CAP_SYS_ADMIN"));
+
+        let e = PhysError::OpenPagemap(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ));
+        assert!(e.to_string().contains("pagemap"));
+
+        let e =
+            PhysError::OpenKpageflags(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"));
+        assert!(e.to_string().contains("kpageflags"));
     }
 
     #[test]

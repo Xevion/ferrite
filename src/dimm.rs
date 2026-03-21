@@ -230,4 +230,96 @@ mod tests {
         assert!(s.contains("TestMfr"));
         assert!(s.contains("channel 0 slot 0"));
     }
+
+    #[test]
+    fn display_smbios_only_with_manufacturer() {
+        let entry = DimmEntry {
+            edac: None,
+            smbios: Some(smbios_dimm("DIMM_B1", "BANK 1")),
+        };
+        let s = entry.to_string();
+        assert!(s.contains("DIMM_B1"));
+        assert!(s.contains("TestMfr"));
+        assert!(s.contains("8192MB"));
+    }
+
+    #[test]
+    fn display_smbios_only_without_manufacturer() {
+        let mut info = smbios_dimm("DIMM_C1", "BANK 2");
+        info.manufacturer = None;
+        let entry = DimmEntry {
+            edac: None,
+            smbios: Some(info),
+        };
+        let s = entry.to_string();
+        assert_eq!(s, "DIMM_C1");
+    }
+
+    #[test]
+    fn display_edac_only_with_location_and_label() {
+        let entry = DimmEntry {
+            edac: Some(edac_dimm(1, 2, Some("DIMM_X"), Some("channel 1 slot 0"))),
+            smbios: None,
+        };
+        let s = entry.to_string();
+        assert!(s.contains("mc1/dimm2"));
+        assert!(s.contains("channel 1 slot 0"));
+        assert!(s.contains("DIMM_X"));
+    }
+
+    #[test]
+    fn display_edac_only_no_label_no_location() {
+        let entry = DimmEntry {
+            edac: Some(edac_dimm(0, 3, None, None)),
+            smbios: None,
+        };
+        assert_eq!(entry.to_string(), "mc0/dimm3");
+    }
+
+    #[test]
+    fn display_neither() {
+        let entry = DimmEntry {
+            edac: None,
+            smbios: None,
+        };
+        assert_eq!(entry.to_string(), "(unknown)");
+    }
+
+    #[test]
+    fn match_skips_used_slots() {
+        let edac = edac_dimm(0, 0, Some("DIMM_A1"), None);
+        let smbios = vec![
+            smbios_dimm("DIMM_A1", "BANK 0"),
+            smbios_dimm("DIMM_A1", "BANK 1"), // duplicate label
+        ];
+        // First slot is already used
+        let used = vec![true, false];
+        assert_eq!(find_smbios_match(&edac, &smbios, &used), Some(1));
+    }
+
+    #[test]
+    fn match_by_bank_locator_substring() {
+        let edac = edac_dimm(0, 0, None, Some("BANK 0"));
+        let smbios = vec![
+            smbios_dimm("DIMM_B1", "BANK 1"),
+            smbios_dimm("DIMM_A1", "BANK 0"),
+        ];
+        let used = vec![false, false];
+        assert_eq!(find_smbios_match(&edac, &smbios, &used), Some(1));
+    }
+
+    #[test]
+    fn display_full_entry_without_manufacturer() {
+        let mut info = smbios_dimm("DIMM_A1", "BANK 0");
+        info.manufacturer = None;
+        let entry = DimmEntry {
+            edac: Some(edac_dimm(0, 0, None, Some("channel 0 slot 0"))),
+            smbios: Some(info),
+        };
+        let s = entry.to_string();
+        // Should show device_locator and location but no manufacturer block
+        assert!(s.contains("DIMM_A1"));
+        assert!(s.contains("channel 0 slot 0"));
+        assert!(!s.contains("TestMfr"));
+    }
 }
