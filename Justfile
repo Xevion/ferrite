@@ -14,17 +14,21 @@ sudo-run *args:
     cargo build --release -q
     sudo ./target/release/ferrite {{args}}
 
-# Run clippy + fmt check + unused deps
+# Run clippy + fmt check + unused deps (runs all checks, reports failures at end)
 check *args:
-    @if echo "{{args}}" | grep -q -- '--fix'; then \
-        cargo fmt; \
-        cargo clippy -- -D warnings; \
-    else \
-        cargo clippy -- -D warnings; \
-        cargo fmt --check; \
+    #!/usr/bin/env bash
+    set +e
+    exit_code=0
+    if echo "{{args}}" | grep -q -- '--fix'; then
+        cargo fmt
+        cargo clippy --all-targets --all-features -- -D warnings || exit_code=1
+    else
+        cargo clippy --all-targets --all-features -- -D warnings || exit_code=1
+        cargo fmt --check || exit_code=1
     fi
-    cargo machete
+    cargo machete || exit_code=1
     cargo deny check advisories sources 2>&1 || echo "warning: cargo deny found issues (non-blocking)"
+    exit $exit_code
 
 # Run tests
 test:
@@ -32,7 +36,7 @@ test:
 
 # Clippy only
 lint:
-    cargo clippy -- -D warnings
+    cargo clippy --all-targets --all-features -- -D warnings
 
 # Format code
 format:

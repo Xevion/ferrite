@@ -13,12 +13,12 @@ use thiserror::Error;
 pub struct PhysAddr(pub u64);
 
 impl PhysAddr {
-    /// The page frame number (PFN) — physical address >> 12.
+    /// The page frame number (PFN) -- physical address >> 12.
     pub fn pfn(self) -> u64 {
         self.0 >> 12
     }
 
-    /// The page offset — lower 12 bits.
+    /// The page offset -- lower 12 bits.
     pub fn page_offset(self) -> u64 {
         self.0 & 0xFFF
     }
@@ -127,7 +127,7 @@ pub trait PhysResolver {
     fn verify_stability(&self, base: usize, len: usize) -> Result<usize, PhysError>;
 }
 
-/// Resolves virtual → physical addresses via /proc/self/pagemap.
+/// Resolves virtual -> physical addresses via /proc/self/pagemap.
 pub struct PagemapResolver {
     pagemap_fd: File,
     kpageflags_fd: Option<File>,
@@ -171,7 +171,7 @@ fn parse_pagemap_entry(entry: u64) -> Option<u64> {
 ///
 /// The caller must ensure `offset + buf.len()` fits in `i64`. In practice
 /// this holds: the largest pagemap offset is ~2^50 (128 TiB virtual address
-/// space × 8 bytes per entry), well within i64 range.
+/// space x 8 bytes per entry), well within i64 range.
 fn pread_exact(fd: &File, buf: &mut [u8], offset: i64) -> io::Result<()> {
     let raw_fd = fd.as_raw_fd();
     let mut total = 0usize;
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn phys_addr_pfn_and_offset() {
         let addr = PhysAddr(0x1234_5678);
-        assert_eq!(addr.pfn(), 0x1234_5);
+        assert_eq!(addr.pfn(), 0x0001_2345);
         assert_eq!(addr.page_offset(), 0x678);
     }
 
