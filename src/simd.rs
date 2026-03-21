@@ -1,25 +1,22 @@
+#[cfg(target_arch = "x86_64")]
 use std::ptr;
 
+#[cfg(target_arch = "x86_64")]
 use crate::Failure;
 
 /// Number of u64 words processed per Rayon task.
 /// Must be a multiple of 8 (one AVX-512 register = 8 * u64 = 64 bytes) so that
 /// every chunk boundary is 64-byte aligned and NT store / aligned load intrinsics
 /// never straddle a chunk boundary.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const CHUNK: usize = 64 * 1024; // 64 K u64s = 512 KiB
 
 /// Returns true if AVX-512F is available. With `target-cpu=native` this is a
 /// compile-time constant and the dead branches are eliminated by LLVM.
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub(crate) fn avx512_available() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        is_x86_feature_detected!("avx512f")
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    is_x86_feature_detected!("avx512f")
 }
 
 /// Fill `buf` with `pattern` using AVX-512 non-temporal (streaming) stores.
@@ -133,6 +130,7 @@ pub(crate) unsafe fn verify_avx512(
                         expected: pattern,
                         actual,
                         word_index: wi,
+                        phys_addr: None,
                     });
                 }
             }
@@ -148,6 +146,7 @@ pub(crate) unsafe fn verify_avx512(
                 expected: pattern,
                 actual,
                 word_index: wi,
+                phys_addr: None,
             });
         }
     }
@@ -190,6 +189,7 @@ pub(crate) unsafe fn verify_indexed_avx512(
                         expected: wi as u64,
                         actual,
                         word_index: wi,
+                        phys_addr: None,
                     });
                 }
             }
@@ -207,6 +207,7 @@ pub(crate) unsafe fn verify_indexed_avx512(
                 expected,
                 actual,
                 word_index: wi,
+                phys_addr: None,
             });
         }
     }

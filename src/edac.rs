@@ -1,0 +1,242 @@
+use std::fs;
+use std::path::Path;
+use std::time::Instant;
+
+use serde::Serialize;
+
+/// Per-DIMM EDAC information from sysfs.
+#[derive(Debug, Clone, Serialize)]
+pub struct DimmEdac {
+    /// Memory controller index (e.g., 0 for mc0).
+    pub mc: usize,
+    /// DIMM index within the controller.
+    pub dimm_index: usize,
+    /// User-assigned or driver-populated label (often empty).
+    pub label: Option<String>,
+    /// Location string, e.g., "channel 0 slot 0".
+    pub location: Option<String>,
+    /// Correctable error count.
+    pub ce_count: u64,
+    /// Uncorrectable error count.
+    pub ue_count: u64,
+}
+
+/// Snapshot of all EDAC error counters at a point in time.
+#[derive(Debug, Clone)]
+pub struct EdacSnapshot {
+    pub dimms: Vec<DimmEdac>,
+    pub timestamp: Instant,
+}
+
+/// Change in error counts between two snapshots.
+#[derive(Debug, Clone, Serialize)]
+pub struct EccDelta {
+    pub mc: usize,
+    pub dimm_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub ce_delta: u64,
+    pub ue_delta: u64,
+}
+
+const EDAC_MC_PATH: &str = "/sys/devices/system/edac/mc";
+
+impl EdacSnapshot {
+    /// Read current EDAC counters. Returns `None` if EDAC is not available.
+    pub fn capture() -> Option<Self> {
+        let mc_root = Path::new(EDAC_MC_PATH);
+        if !mc_root.is_dir() {
+            return None;
+        }
+
+        let mut dimms = Vec::new();
+
+        for mc_entry in sorted_dir_entries(mc_root)? {
+            let mc_name = mc_entry.file_name();
+            let mc_name = mc_name.to_str()?;
+            let mc_index = mc_name.strip_prefix("mc")?.parse::<usize>().ok()?;
+            let mc_path = mc_entry.path();
+
+            // Try modern dimm-based API first, then legacy csrow-based
+            if !try_read_dimm_api(&mc_path, mc_index, &mut dimms) {
+                try_read_csrow_api(&mc_path, mc_index, &mut dimms);
+            }
+        }
+
+        if dimms.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            dimms,
+            timestamp: Instant::now(),
+        })
+    }
+
+    /// Compute deltas between this (before) and `after` snapshot.
+    /// Only returns entries where at least one counter increased.
+    pub fn delta(&self, after: &EdacSnapshot) -> Vec<EccDelta> {
+        let mut deltas = Vec::new();
+        for after_dimm in &after.dimms {
+            if let Some(before_dimm) = self
+                .dimms
+                .iter()
+                .find(|d| d.mc == after_dimm.mc && d.dimm_index == after_dimm.dimm_index)
+            {
+                let ce_delta = after_dimm.ce_count.saturating_sub(before_dimm.ce_count);
+                let ue_delta = after_dimm.ue_count.saturating_sub(before_dimm.ue_count);
+                if ce_delta > 0 || ue_delta > 0 {
+                    deltas.push(EccDelta {
+                        mc: after_dimm.mc,
+                        dimm_index: after_dimm.dimm_index,
+                        label: after_dimm.label.clone(),
+                        ce_delta,
+                        ue_delta,
+                    });
+                }
+            }
+        }
+        deltas
+    }
+}
+
+/// Modern EDAC API: mc0/dimm0/, mc0/dimm1/, etc.
+fn try_read_dimm_api(mc_path: &Path, mc_index: usize, dimms: &mut Vec<DimmEdac>) -> bool {
+    let mut found = false;
+    let Some(entries) = sorted_dir_entries(mc_path) else {
+        return false;
+    };
+
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_str().unwrap_or("");
+        let Some(idx_str) = name.strip_prefix("dimm") else {
+            continue;
+        };
+        let Ok(dimm_index) = idx_str.parse::<usize>() else {
+            continue;
+        };
+
+        let dimm_path = entry.path();
+        let ce = read_u64_file(&dimm_path.join("dimm_ce_count")).unwrap_or(0);
+        let ue = read_u64_file(&dimm_path.join("dimm_ue_count")).unwrap_or(0);
+        let label = read_trimmed(&dimm_path.join("dimm_label"));
+        let location = read_trimmed(&dimm_path.join("dimm_location"));
+
+        dimms.push(DimmEdac {
+            mc: mc_index,
+            dimm_index,
+            label,
+            location,
+            ce_count: ce,
+            ue_count: ue,
+        });
+        found = true;
+    }
+    found
+}
+
+/// Legacy EDAC API: mc0/csrow0/ch0_ce_count, mc0/csrow0/ch0_dimm_label, etc.
+fn try_read_csrow_api(mc_path: &Path, mc_index: usize, dimms: &mut Vec<DimmEdac>) {
+    let Some(entries) = sorted_dir_entries(mc_path) else {
+        return;
+    };
+
+    let mut dimm_counter = 0usize;
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_str().unwrap_or("");
+        if !name.starts_with("csrow") {
+            continue;
+        }
+
+        let csrow_path = entry.path();
+        // Each csrow can have multiple channels (ch0, ch1, ...)
+        for ch in 0..8 {
+            let ce_path = csrow_path.join(format!("ch{ch}_ce_count"));
+            if !ce_path.exists() {
+                break;
+            }
+            let ce = read_u64_file(&ce_path).unwrap_or(0);
+            let ue = read_u64_file(&csrow_path.join("ue_count")).unwrap_or(0);
+            let label = read_trimmed(&csrow_path.join(format!("ch{ch}_dimm_label")));
+
+            dimms.push(DimmEdac {
+                mc: mc_index,
+                dimm_index: dimm_counter,
+                label,
+                location: Some(format!("{name} channel {ch}")),
+                ce_count: ce,
+                ue_count: ue,
+            });
+            dimm_counter += 1;
+        }
+    }
+}
+
+fn read_u64_file(path: &Path) -> Option<u64> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    let s = fs::read_to_string(path).ok()?.trim().to_owned();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn sorted_dir_entries(path: &Path) -> Option<Vec<fs::DirEntry>> {
+    let mut entries: Vec<_> = fs::read_dir(path).ok()?.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+    Some(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_snapshot(dimms: Vec<(usize, usize, u64, u64)>) -> EdacSnapshot {
+        EdacSnapshot {
+            dimms: dimms
+                .into_iter()
+                .map(|(mc, idx, ce, ue)| DimmEdac {
+                    mc,
+                    dimm_index: idx,
+                    label: None,
+                    location: None,
+                    ce_count: ce,
+                    ue_count: ue,
+                })
+                .collect(),
+            timestamp: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn delta_detects_increase() {
+        let before = make_snapshot(vec![(0, 0, 5, 0), (0, 1, 0, 0)]);
+        let after = make_snapshot(vec![(0, 0, 8, 0), (0, 1, 0, 1)]);
+        let deltas = before.delta(&after);
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].ce_delta, 3);
+        assert_eq!(deltas[0].ue_delta, 0);
+        assert_eq!(deltas[1].ce_delta, 0);
+        assert_eq!(deltas[1].ue_delta, 1);
+    }
+
+    #[test]
+    fn delta_ignores_unchanged() {
+        let before = make_snapshot(vec![(0, 0, 5, 0)]);
+        let after = make_snapshot(vec![(0, 0, 5, 0)]);
+        let deltas = before.delta(&after);
+        assert!(deltas.is_empty());
+    }
+
+    #[test]
+    fn delta_handles_missing_dimm() {
+        let before = make_snapshot(vec![(0, 0, 5, 0)]);
+        let after = make_snapshot(vec![(0, 0, 6, 0), (0, 1, 1, 0)]);
+        let deltas = before.delta(&after);
+        // Only mc0/dimm0 has a match; dimm1 is new and has no before counterpart
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].dimm_index, 0);
+    }
+}

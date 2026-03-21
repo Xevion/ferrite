@@ -89,6 +89,11 @@ impl LockedRegion {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr() as *const u64, word_count) }
     }
 
+    /// The base virtual address of the locked region.
+    pub fn as_ptr(&self) -> usize {
+        self.ptr.as_ptr() as usize
+    }
+
     /// The size in bytes of the locked region.
     /// A `LockedRegion` is never empty (the constructor rejects zero size).
     #[allow(clippy::len_without_is_empty)]

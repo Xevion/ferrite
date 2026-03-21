@@ -4,6 +4,7 @@ use std::ptr;
 use rayon::prelude::*;
 
 use crate::Failure;
+#[cfg(target_arch = "x86_64")]
 use crate::simd::{
     CHUNK, avx512_available, fill_nt, fill_nt_indexed, verify_avx512, verify_indexed_avx512,
 };
@@ -79,8 +80,9 @@ pub fn run_pattern(
 fn fill_verify_constant(buf: &mut [u64], pattern: u64, parallel: bool) -> Vec<Failure> {
     let base_addr = buf.as_ptr() as usize;
 
-    match (parallel, avx512_available()) {
-        (true, true) => {
+    #[cfg(target_arch = "x86_64")]
+    if avx512_available() {
+        return if parallel {
             buf.par_chunks_mut(CHUNK).for_each(|chunk| {
                 // SAFETY: chunk starts at a 64-byte aligned address (mmap base is
                 // page-aligned; every CHUNK * 8 byte boundary is 64-byte aligned).
@@ -94,45 +96,48 @@ fn fill_verify_constant(buf: &mut [u64], pattern: u64, parallel: bool) -> Vec<Fa
                     unsafe { verify_avx512(chunk, pattern, base_addr, ci * CHUNK) }
                 })
                 .collect()
-        }
-        (false, true) => unsafe {
-            fill_nt(buf, pattern);
-            verify_avx512(buf, pattern, base_addr, 0)
-        },
-        (true, false) => {
-            buf.par_iter_mut().for_each(|word| {
-                unsafe { ptr::write_volatile(word as *mut u64, pattern) };
-            });
-            buf.par_iter()
-                .enumerate()
-                .filter_map(|(i, word)| {
-                    let actual = unsafe { ptr::read_volatile(word as *const u64) };
-                    (actual != pattern).then(|| Failure {
-                        addr: base_addr + i * 8,
-                        expected: pattern,
-                        actual,
-                        word_index: i,
-                    })
-                })
-                .collect()
-        }
-        (false, false) => {
-            for word in buf.iter_mut() {
-                unsafe { ptr::write_volatile(word as *mut u64, pattern) };
+        } else {
+            unsafe {
+                fill_nt(buf, pattern);
+                verify_avx512(buf, pattern, base_addr, 0)
             }
-            buf.iter()
-                .enumerate()
-                .filter_map(|(i, word)| {
-                    let actual = unsafe { ptr::read_volatile(word as *const u64) };
-                    (actual != pattern).then(|| Failure {
-                        addr: base_addr + i * 8,
-                        expected: pattern,
-                        actual,
-                        word_index: i,
-                    })
+        };
+    }
+
+    if parallel {
+        buf.par_iter_mut().for_each(|word| {
+            unsafe { ptr::write_volatile(word as *mut u64, pattern) };
+        });
+        buf.par_iter()
+            .enumerate()
+            .filter_map(|(i, word)| {
+                let actual = unsafe { ptr::read_volatile(word as *const u64) };
+                (actual != pattern).then(|| Failure {
+                    addr: base_addr + i * 8,
+                    expected: pattern,
+                    actual,
+                    word_index: i,
+                    phys_addr: None,
                 })
-                .collect()
+            })
+            .collect()
+    } else {
+        for word in buf.iter_mut() {
+            unsafe { ptr::write_volatile(word as *mut u64, pattern) };
         }
+        buf.iter()
+            .enumerate()
+            .filter_map(|(i, word)| {
+                let actual = unsafe { ptr::read_volatile(word as *const u64) };
+                (actual != pattern).then(|| Failure {
+                    addr: base_addr + i * 8,
+                    expected: pattern,
+                    actual,
+                    word_index: i,
+                    phys_addr: None,
+                })
+            })
+            .collect()
     }
 }
 
@@ -140,8 +145,9 @@ fn fill_verify_constant(buf: &mut [u64], pattern: u64, parallel: bool) -> Vec<Fa
 fn fill_verify_indexed(buf: &mut [u64], parallel: bool) -> Vec<Failure> {
     let base_addr = buf.as_ptr() as usize;
 
-    match (parallel, avx512_available()) {
-        (true, true) => {
+    #[cfg(target_arch = "x86_64")]
+    if avx512_available() {
+        return if parallel {
             buf.par_chunks_mut(CHUNK)
                 .enumerate()
                 .for_each(|(ci, chunk)| {
@@ -153,47 +159,50 @@ fn fill_verify_indexed(buf: &mut [u64], parallel: bool) -> Vec<Failure> {
                     verify_indexed_avx512(chunk, base_addr, ci * CHUNK)
                 })
                 .collect()
-        }
-        (false, true) => unsafe {
-            fill_nt_indexed(buf, 0);
-            verify_indexed_avx512(buf, base_addr, 0)
-        },
-        (true, false) => {
-            buf.par_iter_mut().enumerate().for_each(|(i, word)| {
-                unsafe { ptr::write_volatile(word as *mut u64, i as u64) };
-            });
-            buf.par_iter()
-                .enumerate()
-                .filter_map(|(i, word)| {
-                    let expected = i as u64;
-                    let actual = unsafe { ptr::read_volatile(word as *const u64) };
-                    (actual != expected).then(|| Failure {
-                        addr: base_addr + i * 8,
-                        expected,
-                        actual,
-                        word_index: i,
-                    })
-                })
-                .collect()
-        }
-        (false, false) => {
-            for (i, word) in buf.iter_mut().enumerate() {
-                unsafe { ptr::write_volatile(word as *mut u64, i as u64) };
+        } else {
+            unsafe {
+                fill_nt_indexed(buf, 0);
+                verify_indexed_avx512(buf, base_addr, 0)
             }
-            buf.iter()
-                .enumerate()
-                .filter_map(|(i, word)| {
-                    let expected = i as u64;
-                    let actual = unsafe { ptr::read_volatile(word as *const u64) };
-                    (actual != expected).then(|| Failure {
-                        addr: base_addr + i * 8,
-                        expected,
-                        actual,
-                        word_index: i,
-                    })
+        };
+    }
+
+    if parallel {
+        buf.par_iter_mut().enumerate().for_each(|(i, word)| {
+            unsafe { ptr::write_volatile(word as *mut u64, i as u64) };
+        });
+        buf.par_iter()
+            .enumerate()
+            .filter_map(|(i, word)| {
+                let expected = i as u64;
+                let actual = unsafe { ptr::read_volatile(word as *const u64) };
+                (actual != expected).then(|| Failure {
+                    addr: base_addr + i * 8,
+                    expected,
+                    actual,
+                    word_index: i,
+                    phys_addr: None,
                 })
-                .collect()
+            })
+            .collect()
+    } else {
+        for (i, word) in buf.iter_mut().enumerate() {
+            unsafe { ptr::write_volatile(word as *mut u64, i as u64) };
         }
+        buf.iter()
+            .enumerate()
+            .filter_map(|(i, word)| {
+                let expected = i as u64;
+                let actual = unsafe { ptr::read_volatile(word as *const u64) };
+                (actual != expected).then(|| Failure {
+                    addr: base_addr + i * 8,
+                    expected,
+                    actual,
+                    word_index: i,
+                    phys_addr: None,
+                })
+            })
+            .collect()
     }
 }
 
@@ -348,6 +357,7 @@ mod tests {
             expected: 0xAAAA_AAAA_AAAA_AAAA,
             actual: 0xAAAA_AAAA_AABA_AAAA,
             word_index: 0,
+            phys_addr: None,
         };
         assert_eq!(f.flipped_bits(), 1);
         let s = f.to_string();

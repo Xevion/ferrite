@@ -4,8 +4,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::Failure;
 use crate::alloc::LockedRegion;
+use crate::edac::{EccDelta, EdacSnapshot};
 use crate::output::OutputSink;
 use crate::pattern::{Pattern, run_pattern};
+use crate::phys::PhysResolver;
 
 /// Result of running a single pattern.
 pub struct PatternResult {
@@ -20,6 +22,7 @@ pub struct PatternResult {
 pub struct PassResult {
     pub pass_number: usize,
     pub pattern_results: Vec<PatternResult>,
+    pub ecc_deltas: Vec<EccDelta>,
 }
 
 impl PassResult {
@@ -40,6 +43,7 @@ pub fn run(
     passes: usize,
     parallel: bool,
     sink: &mut OutputSink,
+    resolver: Option<&dyn PhysResolver>,
 ) -> Vec<PassResult> {
     // Clone the MultiProgress handle upfront so we don't hold an immutable
     // borrow on `sink` across mutable calls. indicatif's MultiProgress is
@@ -61,6 +65,9 @@ pub fn run(
     for pass in 0..passes {
         let pass_start = Instant::now();
         sink.emit_pass_start(pass + 1, passes);
+
+        // Snapshot EDAC counters before this pass
+        let edac_before = EdacSnapshot::capture();
 
         let pass_pb = mp.add(ProgressBar::new(patterns.len() as u64));
         pass_pb.set_style(pass_style.clone());
@@ -88,7 +95,7 @@ pub fn run(
             let start = Instant::now();
 
             let mut sub_pass_count: u64 = 0;
-            let failures = run_pattern(pattern, buf, parallel, &mut || {
+            let mut failures = run_pattern(pattern, buf, parallel, &mut || {
                 sub_pass_count += 1;
                 if let Some(pb) = &inner_pb {
                     pb.inc(1);
@@ -97,6 +104,13 @@ pub fn run(
             });
             let elapsed = start.elapsed();
             let bytes_processed = buf_bytes * 2 * pattern.sub_passes();
+
+            // Post-process: resolve physical addresses for any failures
+            if let Some(resolver) = resolver {
+                for f in &mut failures {
+                    f.phys_addr = resolver.resolve(f.addr).ok();
+                }
+            }
 
             if let Some(pb) = inner_pb {
                 pb.finish_and_clear();
@@ -115,9 +129,23 @@ pub fn run(
         }
         pass_pb.finish_and_clear();
 
+        // Compute EDAC deltas for this pass
+        let ecc_deltas = match (&edac_before, EdacSnapshot::capture()) {
+            (Some(before), Some(after)) => {
+                let deltas = before.delta(&after);
+                if !deltas.is_empty() {
+                    sink.emit_ecc_deltas(pass + 1, &deltas);
+                    sink.print_ecc_deltas(pass + 1, &deltas);
+                }
+                deltas
+            }
+            _ => Vec::new(),
+        };
+
         let pass_result = PassResult {
             pass_number: pass + 1,
             pattern_results,
+            ecc_deltas,
         };
         let total = pass_result.total_failures();
         let pass_elapsed = pass_start.elapsed();

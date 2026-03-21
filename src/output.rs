@@ -7,7 +7,9 @@ use owo_colors::OwoColorize;
 use serde::Serialize;
 
 use crate::Failure;
+use crate::edac::EccDelta;
 use crate::pattern::Pattern;
+use crate::phys::MapStats;
 use crate::units::{Rate, Size, UnitSystem};
 
 #[derive(Serialize)]
@@ -45,6 +47,17 @@ enum Event {
         failures: usize,
         duration_ms: f64,
     },
+    EccDeltas {
+        pass: usize,
+        deltas: Vec<EccDelta>,
+    },
+    MapInfo {
+        total_pages: usize,
+        huge_pages: usize,
+        thp_pages: usize,
+        hwpoison_pages: usize,
+        unevictable_pages: usize,
+    },
     RunSummary {
         passes: usize,
         total_failures: usize,
@@ -55,6 +68,8 @@ enum Event {
 #[derive(Serialize)]
 struct FailureRecord {
     addr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phys_addr: Option<String>,
     expected: String,
     actual: String,
     xor: String,
@@ -66,6 +81,7 @@ impl From<&Failure> for FailureRecord {
     fn from(f: &Failure) -> Self {
         Self {
             addr: format!("0x{:016x}", f.addr),
+            phys_addr: f.phys_addr.map(|p| format!("{p}")),
             expected: format!("0x{:016x}", f.expected),
             actual: format!("0x{:016x}", f.actual),
             xor: format!("0x{:016x}", f.xor()),
@@ -106,8 +122,8 @@ impl OutputSink {
 
     /// Create a JSON output sink.
     ///
-    /// - `"-"` or empty -> NDJSON to stdout, progress bars to stderr
-    /// - any other path -> NDJSON to file, progress bars to stdout
+    /// - `"-"` or `""` -> NDJSON to stdout, human output to stderr
+    /// - any other path -> NDJSON to file, human output to stdout
     pub fn json(path: &str, unit_system: UnitSystem) -> io::Result<Self> {
         let to_stdout = path.is_empty() || path == "-";
         let writer: Box<dyn Write> = if to_stdout {
@@ -219,6 +235,23 @@ impl OutputSink {
         });
     }
 
+    pub fn emit_ecc_deltas(&mut self, pass: usize, deltas: &[EccDelta]) {
+        self.write_event(&Event::EccDeltas {
+            pass,
+            deltas: deltas.to_vec(),
+        });
+    }
+
+    pub fn emit_map_info(&mut self, stats: &MapStats) {
+        self.write_event(&Event::MapInfo {
+            total_pages: stats.total_pages,
+            huge_pages: stats.huge_pages,
+            thp_pages: stats.thp_pages,
+            hwpoison_pages: stats.hwpoison_pages,
+            unevictable_pages: stats.unevictable_pages,
+        });
+    }
+
     pub fn emit_summary(&mut self, passes: usize, total_failures: usize, elapsed: Duration) {
         self.write_event(&Event::RunSummary {
             passes,
@@ -251,9 +284,27 @@ impl OutputSink {
         }
     }
 
+    /// Print page map stats after building the physical address map.
+    pub fn print_map_info(&self, stats: &MapStats) {
+        let mut parts = vec![format!("{} pages mapped", stats.total_pages)];
+        if stats.thp_pages > 0 {
+            parts.push(format!("{} THP", stats.thp_pages));
+        }
+        if stats.huge_pages > 0 {
+            parts.push(format!("{} huge", stats.huge_pages));
+        }
+        if stats.hwpoison_pages > 0 {
+            parts.push(format!("{} {}", stats.hwpoison_pages, "hw-poisoned".red()));
+        }
+        let line = format!("  Physical address map: {}", parts.join(", "));
+        if self.human_to_stderr() {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    }
+
     /// Print a test result line (PASS/FAIL) in human-readable format.
-    /// Uses the progress bar's println to avoid clobbering the bar on stdout.
-    /// When JSON owns stdout, prints to stderr instead.
     pub fn print_test_result(
         &self,
         pattern: Pattern,
@@ -297,6 +348,33 @@ impl OutputSink {
                 for f in failures {
                     pb.println(format!("       {f}"));
                 }
+            }
+        }
+    }
+
+    /// Print ECC delta summary for a pass.
+    pub fn print_ecc_deltas(&self, pass: usize, deltas: &[EccDelta]) {
+        for d in deltas {
+            let fallback = format!("mc{}/dimm{}", d.mc, d.dimm_index);
+            let label = d.label.as_deref().unwrap_or(&fallback);
+            let mut parts = Vec::new();
+            if d.ce_delta > 0 {
+                parts.push(format!("{} correctable", d.ce_delta));
+            }
+            if d.ue_delta > 0 {
+                parts.push(format!("{} {}", d.ue_delta, "uncorrectable".red().bold()));
+            }
+            let line = format!(
+                "  {} ECC pass {}: {} on {}",
+                "ECC".yellow().bold(),
+                pass,
+                parts.join(", "),
+                label,
+            );
+            if self.human_to_stderr() {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
             }
         }
     }

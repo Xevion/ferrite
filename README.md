@@ -55,11 +55,17 @@ memtester works. ferrite aims to be:
 - **Scriptable** — NDJSON output mode for machine consumption
 - **Faster** — AVX-512 non-temporal stores where available, avoiding cache pollution
 
+### Also included
+
+- **Physical address resolution** — resolves virtual-to-physical mappings via `/proc/self/pagemap` with batch pread, including kpageflags support
+- **ECC monitoring** — reads EDAC sysfs counters before/after test runs, reports correctable/uncorrectable error deltas
+- **DIMM identification** — parses SMBIOS Type 17 entries and merges with EDAC topology to identify failing modules
+- **Error analysis** — classifies bit-flip errors as stuck-bit or coupling faults
+- **Page mapping stability** — verifies physical page mappings haven't migrated between test passes
+
 ### Planned
 
-- Physical address resolution (via `/proc/self/pagemap`)
 - NUMA-aware allocation and per-node testing
-- ECC monitoring (EDAC counters before/after)
 
 ## Limitations
 

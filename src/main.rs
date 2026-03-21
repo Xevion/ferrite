@@ -1,5 +1,5 @@
 use std::fs;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -8,9 +8,13 @@ use nix::unistd::geteuid;
 use owo_colors::OwoColorize;
 
 use ferrite::alloc::LockedRegion;
+use ferrite::dimm::DimmTopology;
+use ferrite::error_analysis::BitErrorStats;
 use ferrite::output::OutputSink;
 use ferrite::pattern::Pattern;
+use ferrite::phys::{PagemapResolver, PhysResolver};
 use ferrite::runner;
+use ferrite::stability::CompactionGuard;
 use ferrite::units::UnitSystem;
 
 /// ferrite -- userspace RAM testing tool for Linux
@@ -43,6 +47,10 @@ struct Cli {
     /// With a file path, writes JSON to that file and human output to stdout.
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "-")]
     json: Option<String>,
+
+    /// Disable physical address resolution (skip pagemap/EDAC/SMBIOS).
+    #[arg(long)]
+    no_phys: bool,
 }
 
 fn parse_size(s: &str) -> Result<usize, String> {
@@ -62,12 +70,24 @@ fn parse_size(s: &str) -> Result<usize, String> {
 
 /// Check whether the process has sufficient privileges to mlock memory.
 /// Prints warnings if issues are detected but does not exit.
-fn check_privileges(requested_bytes: usize) {
+fn check_privileges(requested_bytes: usize, need_phys: bool) {
     let is_root = geteuid().is_root();
-    let has_cap = has_cap_ipc_lock();
+    let has_ipc_lock = has_capability(14); // CAP_IPC_LOCK
+    let has_sys_admin = has_capability(21); // CAP_SYS_ADMIN
+
+    if need_phys && !is_root && !has_sys_admin {
+        eprintln!(
+            "{} CAP_SYS_ADMIN not detected -- physical addresses will be unavailable",
+            "warning:".yellow().bold(),
+        );
+        eprintln!(
+            "         run as root for physical address resolution: {}",
+            "sudo ferrite".bold()
+        );
+    }
 
     // Root and CAP_IPC_LOCK both bypass RLIMIT_MEMLOCK entirely.
-    if is_root || has_cap {
+    if is_root || has_ipc_lock {
         return;
     }
 
@@ -103,9 +123,8 @@ fn check_privileges(requested_bytes: usize) {
     }
 }
 
-/// Check if the current process has CAP_IPC_LOCK (bit 14) in its effective set.
-fn has_cap_ipc_lock() -> bool {
-    const CAP_IPC_LOCK: u32 = 14;
+/// Check if the current process has a given capability in its effective set.
+fn has_capability(cap_bit: u32) -> bool {
     let Ok(status) = fs::read_to_string("/proc/self/status") else {
         return false;
     };
@@ -114,14 +133,15 @@ fn has_cap_ipc_lock() -> bool {
         .find_map(|line| {
             let hex = line.strip_prefix("CapEff:\t")?;
             let bits = u64::from_str_radix(hex.trim(), 16).ok()?;
-            Some(bits & (1 << CAP_IPC_LOCK) != 0)
+            Some(bits & (1 << cap_bit) != 0)
         })
         .unwrap_or(false)
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    check_privileges(cli.size);
+    let need_phys = !cli.no_phys;
+    check_privileges(cli.size, need_phys);
 
     let patterns = if cli.patterns.is_empty() {
         Pattern::ALL.to_vec()
@@ -136,6 +156,80 @@ fn main() -> Result<()> {
 
     let mut region = LockedRegion::new(cli.size).context("failed to allocate and lock memory")?;
 
+    // Physical address resolution setup
+    let _compaction_guard = if need_phys {
+        CompactionGuard::new()
+    } else {
+        None
+    };
+
+    let resolver = if need_phys {
+        match PagemapResolver::new() {
+            Ok(mut r) => {
+                match r.build_map(region.as_ptr(), region.len()) {
+                    Ok(stats) => {
+                        sink.emit_map_info(&stats);
+                        sink.print_map_info(&stats);
+
+                        // Brief pause then verify PFN stability
+                        std::thread::sleep(Duration::from_millis(100));
+                        match r.verify_stability(region.as_ptr(), region.len()) {
+                            Ok(0) => {}
+                            Ok(n) => {
+                                eprintln!(
+                                    "{} {n} pages changed physical address after locking -- physical addresses may be inaccurate",
+                                    "warning:".yellow().bold(),
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "{} PFN stability check failed: {e}",
+                                    "warning:".yellow().bold(),
+                                );
+                            }
+                        }
+                        Some(r)
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} failed to build page map: {e}",
+                            "warning:".yellow().bold(),
+                        );
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("{} pagemap unavailable: {e}", "warning:".yellow().bold(),);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // DIMM topology (best-effort)
+    let _dimm_topo = if need_phys {
+        let topo = DimmTopology::build();
+        if let Some(ref topo) = topo {
+            let line = format!(
+                "  Installed DIMMs: {}",
+                topo.dimms
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+            if sink.is_json() {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
+        }
+        topo
+    } else {
+        None
+    };
     let run_start = Instant::now();
     let results = runner::run(
         &mut region,
@@ -143,10 +237,52 @@ fn main() -> Result<()> {
         cli.passes,
         !cli.sequential,
         &mut sink,
+        resolver.as_ref().map(|r| r as &dyn PhysResolver),
     );
     let run_elapsed = run_start.elapsed();
 
     let total_failures: usize = results.iter().map(|r| r.total_failures()).sum();
+
+    // Aggregate bit error statistics if there were failures
+    if total_failures > 0 {
+        let mut stats = BitErrorStats::new();
+        for pass_result in &results {
+            for pattern_result in &pass_result.pattern_results {
+                for f in &pattern_result.failures {
+                    stats.record(f);
+                }
+            }
+        }
+
+        let classification = stats.classification();
+        let class_str = match &classification {
+            ferrite::error_analysis::ErrorClassification::StuckBit { positions } => {
+                let pos_str: Vec<String> = positions.iter().map(|p| format!("bit {p}")).collect();
+                format!("stuck bit(s): {}", pos_str.join(", "))
+            }
+            ferrite::error_analysis::ErrorClassification::Coupling => {
+                "coupling/disturbance errors".to_owned()
+            }
+            ferrite::error_analysis::ErrorClassification::Mixed => {
+                "mixed (stuck + coupling)".to_owned()
+            }
+            ferrite::error_analysis::ErrorClassification::NoErrors => unreachable!(),
+        };
+
+        let mut summary_lines = vec![format!("  Error analysis: {class_str}")];
+        summary_lines.push(format!("  Affected bits: 0x{:016x}", stats.union_xor_mask));
+        if let (Some(lo), Some(hi)) = (stats.lowest_phys, stats.highest_phys) {
+            summary_lines.push(format!("  Physical address range: 0x{lo:x} — 0x{hi:x}"));
+        }
+
+        for line in &summary_lines {
+            if sink.is_json() {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
+        }
+    }
 
     sink.emit_summary(cli.passes, total_failures, run_elapsed);
     sink.print_final_result(total_failures);
