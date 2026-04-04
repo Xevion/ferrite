@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 
+use anyhow::Context;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::prelude::Widget;
@@ -208,7 +209,7 @@ pub fn run_tui(
     tx: mpsc::SyncSender<TuiEvent>,
     rx: mpsc::Receiver<TuiEvent>,
     quit: &Arc<AtomicBool>,
-) -> io::Result<()> {
+) -> anyhow::Result<()> {
     // Panic hook for terminal cleanup
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -216,7 +217,7 @@ pub fn run_tui(
         original_hook(info);
     }));
 
-    enable_raw_mode()?;
+    enable_raw_mode().context("failed to enable raw mode (is stdout a terminal?)")?;
 
     let viewport_height = (regions.len() + 8) as u16;
     let mut terminal = Terminal::with_options(
@@ -224,7 +225,8 @@ pub fn run_tui(
         TerminalOptions {
             viewport: Viewport::Inline(viewport_height),
         },
-    )?;
+    )
+    .context("failed to initialize terminal")?;
 
     // Input reader thread
     let input_tx = tx.clone();
@@ -369,8 +371,8 @@ pub fn run_tui(
 
     // Clear the inline viewport content while raw mode is still active,
     // then restore the terminal so the shell prompt appears cleanly below.
-    terminal.clear()?;
-    disable_raw_mode()?;
+    terminal.clear().context("failed to clear terminal")?;
+    disable_raw_mode().context("failed to disable raw mode")?;
     println!();
     Ok(())
 }

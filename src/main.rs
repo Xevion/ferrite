@@ -307,7 +307,7 @@ fn run_tui_mode(cli: Cli, patterns: Vec<Pattern>) -> Result<()> {
     });
 
     let config = TuiConfig::default();
-    ferrite::tui::run_tui(&config, &regions, tx, rx, &quit)?;
+    ferrite::tui::run_tui(&config, &regions, tx, rx, &quit).context("TUI failed")?;
 
     let _ = worker.join();
 
