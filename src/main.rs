@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use ferrite::dimm::DimmTopology;
 use ferrite::edac::EdacSnapshot;
 use ferrite::output::OutputSink;
 use ferrite::pattern::{Pattern, run_pattern};
-use ferrite::phys::{PagemapResolver, PhysResolver};
+use ferrite::phys::{MapStats, PagemapResolver, PhysResolver};
 use ferrite::runner;
 use ferrite::stability::CompactionGuard;
 use ferrite::tui::{RegionState, TuiConfig, TuiError, TuiEvent, TuiMakeWriter};
@@ -159,10 +159,13 @@ fn has_capability(cap_bit: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// Set up physical address resolution, returning the resolver if successful.
-fn setup_phys(region: &LockedRegion, need_phys: bool) -> Option<PagemapResolver> {
+/// Set up physical address resolution, returning the resolver and map stats if successful.
+fn setup_phys(
+    region: &LockedRegion,
+    need_phys: bool,
+) -> (Option<PagemapResolver>, Option<MapStats>) {
     if !need_phys {
-        return None;
+        return (None, None);
     }
     match PagemapResolver::new() {
         Ok(mut r) => match r.build_map(region.as_ptr(), region.len()) {
@@ -181,18 +184,99 @@ fn setup_phys(region: &LockedRegion, need_phys: bool) -> Option<PagemapResolver>
                     Ok(n) => warn!(changed = n, "pages changed physical address after locking"),
                     Err(e) => warn!("PFN stability check failed: {e}"),
                 }
-                Some(r)
+                (Some(r), Some(stats))
             }
             Err(e) => {
                 warn!("failed to build page map: {e}");
-                None
+                (None, None)
             }
         },
         Err(e) => {
             warn!("pagemap unavailable: {e}");
-            None
+            (None, None)
         }
     }
+}
+
+struct TestSetup {
+    region: LockedRegion,
+    _compaction_guard: Option<CompactionGuard>,
+    resolver: Option<PagemapResolver>,
+    map_stats: Option<MapStats>,
+}
+
+fn setup_test(cli: &Cli) -> Result<TestSetup> {
+    let need_phys = !cli.no_phys;
+    let region = LockedRegion::new(cli.size).context("failed to allocate and lock memory")?;
+    let compaction_guard = if need_phys {
+        CompactionGuard::new()
+    } else {
+        None
+    };
+    let (resolver, map_stats) = setup_phys(&region, need_phys);
+
+    if need_phys && let Some(topo) = DimmTopology::build() {
+        let dimm_str = topo
+            .dimms
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        info!("installed DIMMs: {dimm_str}");
+    }
+
+    Ok(TestSetup {
+        region,
+        _compaction_guard: compaction_guard,
+        resolver,
+        map_stats,
+    })
+}
+
+/// Set up the global tracing subscriber with a layered registry.
+///
+/// - `json_mode`: whether to emit JSON-formatted trace events on stderr
+/// - `tui_writer`: if present, adds a human-readable ANSI layer for the TUI channel
+///
+/// Layer matrix:
+/// | Mode              | TUI layer           | stderr layer          |
+/// |-------------------|---------------------|-----------------------|
+/// | TUI + JSON        | human ANSI → TUI    | json → stderr         |
+/// | TUI + no JSON     | human ANSI → TUI    | human no-ANSI → stderr|
+/// | no TUI + JSON     | None                | json → stderr         |
+/// | no TUI + no JSON  | None                | human → stderr        |
+fn setup_tracing(json_mode: bool, tui_writer: Option<TuiMakeWriter>) {
+    use tracing_subscriber::prelude::*;
+
+    let has_tui = tui_writer.is_some();
+
+    let tui_layer = tui_writer.map(|w| {
+        tracing_subscriber::fmt::layer()
+            .with_writer(w)
+            .with_ansi(true)
+    });
+
+    let stderr_json = json_mode.then(|| {
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(std::io::stderr)
+    });
+
+    let stderr_human_headless = (!json_mode && !has_tui)
+        .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
+
+    let stderr_human_tui = (!json_mode && has_tui).then(|| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::io::stderr)
+    });
+
+    tracing_subscriber::registry()
+        .with(tui_layer)
+        .with(stderr_json)
+        .with(stderr_human_headless)
+        .with(stderr_human_tui)
+        .init();
 }
 
 fn main() -> Result<()> {
@@ -218,6 +302,17 @@ fn main() -> Result<()> {
         TuiMode::Auto => std::io::stdout().is_terminal(),
     };
 
+    // JSON-to-stdout + TUI = both claim stdout
+    if use_tui
+        && let Some(ref path) = cli.json
+        && (path == "-" || path.is_empty())
+    {
+        anyhow::bail!(
+            "--json to stdout conflicts with --tui (both use stdout). \
+             Use --json <file> or --tui never."
+        );
+    }
+
     if use_tui {
         run_tui_mode(cli, patterns, sink)
     } else {
@@ -226,44 +321,25 @@ fn main() -> Result<()> {
 }
 
 /// TUI mode: the default interactive experience.
-fn run_tui_mode(cli: Cli, patterns: Vec<Pattern>, _sink: OutputSink) -> Result<()> {
-    let need_phys = !cli.no_phys;
-
+fn run_tui_mode(cli: Cli, patterns: Vec<Pattern>, sink: OutputSink) -> Result<()> {
     let (tx, rx) = mpsc::sync_channel::<TuiEvent>(256);
     let quit = Arc::new(AtomicBool::new(false));
 
-    // Set up tracing with fmt formatting routed through the TUI channel.
-    // When the TUI exits (rx dropped), the writer falls back to stderr.
+    let json_mode = sink.is_json();
+    let sink = Arc::new(Mutex::new(sink));
+
+    // Set up tracing: human ANSI layer → TUI channel, stderr layer based on mode
     let writer = TuiMakeWriter::new(tx.clone());
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(writer)
-        .with_ansi(true)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
+    setup_tracing(json_mode, Some(writer));
 
-    let mut region = LockedRegion::new(cli.size).context("failed to allocate and lock memory")?;
+    let mut setup = setup_test(&cli)?;
 
-    let _compaction_guard = if need_phys {
-        CompactionGuard::new()
-    } else {
-        None
-    };
-
-    let resolver = setup_phys(&region, need_phys);
-
-    // DIMM topology (best-effort)
-    if need_phys && let Some(topo) = DimmTopology::build() {
-        let dimm_str = topo
-            .dimms
-            .iter()
-            .map(|d| d.to_string())
-            .collect::<Vec<_>>()
-            .join("; ");
-        info!("installed DIMMs: {dimm_str}");
+    if let Some(ref stats) = setup.map_stats {
+        sink.lock().unwrap().emit_map_info(stats);
     }
 
     // Compute region count
-    let total_words = region.as_u64_slice().len();
+    let total_words = setup.region.as_u64_slice().len();
     let min_words_per_region = 1024 * 1024; // 8 MiB minimum per region
     let n_regions = if cli.regions > 0 {
         cli.regions
@@ -306,8 +382,9 @@ fn run_tui_mode(cli: Cli, patterns: Vec<Pattern>, _sink: OutputSink) -> Result<(
     let parallel = !cli.sequential;
     let passes = cli.passes;
 
+    let worker_sink = Arc::clone(&sink);
     let worker = thread::spawn(move || {
-        let buf = region.as_u64_slice_mut();
+        let buf = setup.region.as_u64_slice_mut();
 
         thread::scope(|s| {
             let chunks: Vec<&mut [u64]> = buf.chunks_mut(chunk_words).collect();
@@ -315,8 +392,12 @@ fn run_tui_mode(cli: Cli, patterns: Vec<Pattern>, _sink: OutputSink) -> Result<(
                 let tui_region = Arc::clone(&worker_regions[i]);
                 let tx = worker_tx.clone();
                 let quit = Arc::clone(&worker_quit);
-                let resolver_ref = resolver.as_ref().map(|r| r as &(dyn PhysResolver + Sync));
+                let resolver_ref = setup
+                    .resolver
+                    .as_ref()
+                    .map(|r| r as &(dyn PhysResolver + Sync));
                 let patterns = &patterns;
+                let sink = &worker_sink;
                 s.spawn(move || {
                     run_region_worker(
                         chunk,
@@ -328,6 +409,7 @@ fn run_tui_mode(cli: Cli, patterns: Vec<Pattern>, _sink: OutputSink) -> Result<(
                         &tx,
                         resolver_ref,
                         &quit,
+                        sink,
                     );
                 });
             }
@@ -335,6 +417,7 @@ fn run_tui_mode(cli: Cli, patterns: Vec<Pattern>, _sink: OutputSink) -> Result<(
     });
 
     let config = TuiConfig::default();
+    let run_start = Instant::now();
     ferrite::tui::run_tui(&config, &regions, tx, rx, &quit).context("TUI failed")?;
 
     let _ = worker.join();
@@ -343,6 +426,14 @@ fn run_tui_mode(cli: Cli, patterns: Vec<Pattern>, _sink: OutputSink) -> Result<(
         .iter()
         .map(|r| r.error_count.load(Ordering::Relaxed))
         .sum();
+
+    {
+        let elapsed = run_start.elapsed();
+        let mut sink = sink.lock().unwrap();
+        sink.emit_summary(cli.passes, total_errors, elapsed);
+        sink.print_final_result(total_errors);
+    }
+
     if total_errors > 0 {
         std::process::exit(1);
     }
@@ -362,6 +453,7 @@ fn run_region_worker(
     tx: &mpsc::SyncSender<TuiEvent>,
     resolver: Option<&(dyn PhysResolver + Sync)>,
     quit: &Arc<AtomicBool>,
+    sink: &Mutex<OutputSink>,
 ) {
     let region_bytes = buf.len() * 8;
     info!(
@@ -385,6 +477,7 @@ fn run_region_worker(
             }
 
             tui_state.set_pattern(pat_idx);
+            sink.lock().unwrap().emit_test_start(pattern, pass);
             info!(region = tui_state.name.as_str(), pattern = %pattern, pass = pass + 1, "starting pattern");
 
             while tui_state.paused.load(Ordering::Relaxed) && !quit.load(Ordering::Relaxed) {
@@ -432,6 +525,14 @@ fn run_region_worker(
             }
 
             tui_state.progress_bp.store(10000, Ordering::Relaxed);
+            let bytes_processed = buf.len() as u64 * 8;
+            sink.lock().unwrap().emit_test_complete(
+                pattern,
+                pass,
+                elapsed,
+                bytes_processed,
+                &failures,
+            );
             info!(
                 region = tui_state.name.as_str(),
                 pattern = %pattern,
@@ -445,6 +546,7 @@ fn run_region_worker(
         // EDAC check
         if let (Some(before), Some(after)) = (&edac_before, EdacSnapshot::capture()) {
             let deltas = before.delta(&after);
+            sink.lock().unwrap().emit_ecc_deltas(pass, &deltas);
             for d in &deltas {
                 warn!(
                     mc = d.mc,
@@ -462,41 +564,24 @@ fn run_region_worker(
 
 /// Non-TUI mode: headless output with tracing to stderr.
 fn run_non_tui(cli: Cli, patterns: Vec<Pattern>, mut sink: OutputSink) -> Result<()> {
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
+    let json_mode = sink.is_json();
+    setup_tracing(json_mode, None);
 
-    let need_phys = !cli.no_phys;
+    let mut setup = setup_test(&cli)?;
 
-    let mut region = LockedRegion::new(cli.size).context("failed to allocate and lock memory")?;
-
-    let _compaction_guard = if need_phys {
-        CompactionGuard::new()
-    } else {
-        None
-    };
-
-    let resolver = setup_phys(&region, need_phys);
-
-    if need_phys && let Some(topo) = DimmTopology::build() {
-        let dimm_str = topo
-            .dimms
-            .iter()
-            .map(|d| d.to_string())
-            .collect::<Vec<_>>()
-            .join("; ");
-        info!("installed DIMMs: {dimm_str}");
+    if let Some(ref stats) = setup.map_stats {
+        sink.emit_map_info(stats);
+        sink.print_map_info(stats);
     }
 
     let run_start = Instant::now();
     let results = runner::run(
-        &mut region,
+        &mut setup.region,
         &patterns,
         cli.passes,
         !cli.sequential,
         &mut sink,
-        resolver.as_ref().map(|r| r as &dyn PhysResolver),
+        setup.resolver.as_ref().map(|r| r as &dyn PhysResolver),
         &|_| {},
     );
     let run_elapsed = run_start.elapsed();

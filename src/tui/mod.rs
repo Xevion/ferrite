@@ -184,10 +184,8 @@ impl Drop for TuiWriter {
         if trimmed.is_empty() {
             return;
         }
-        // Always tee to stderr so logs are capturable via `2>log.txt`
-        let _ = io::stderr().write_all(&self.buf);
-
-        // Also send to TUI for inline display (best-effort)
+        // Send to TUI for inline display (best-effort).
+        // A separate tracing layer handles stderr output independently.
         let _ = self.tx.try_send(TuiEvent::Log(trimmed));
     }
 }

@@ -102,7 +102,7 @@ pub enum OutputSink {
     /// contained `MultiProgress` (which targets stderr when JSON goes to
     /// stdout, or stdout when JSON goes to a file).
     Json {
-        writer: BufWriter<Box<dyn Write>>,
+        writer: BufWriter<Box<dyn Write + Send>>,
         mp: MultiProgress,
         unit_system: UnitSystem,
         /// True when JSON is written to stdout (human output goes to stderr).
@@ -126,8 +126,8 @@ impl OutputSink {
     /// - any other path -> NDJSON to file, human output to stdout
     pub fn json(path: &str, unit_system: UnitSystem) -> io::Result<Self> {
         let to_stdout = path.is_empty() || path == "-";
-        let writer: Box<dyn Write> = if to_stdout {
-            Box::new(io::stdout().lock())
+        let writer: Box<dyn Write + Send> = if to_stdout {
+            Box::new(io::stdout())
         } else {
             Box::new(File::create(path)?)
         };
