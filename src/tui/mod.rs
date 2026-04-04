@@ -184,13 +184,11 @@ impl Drop for TuiWriter {
         if trimmed.is_empty() {
             return;
         }
-        match self.tx.try_send(TuiEvent::Log(trimmed)) {
-            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                // TUI has exited; write the already-formatted ANSI line to stderr
-                let _ = io::stderr().write_all(&self.buf);
-            }
-        }
+        // Always tee to stderr so logs are capturable via `2>log.txt`
+        let _ = io::stderr().write_all(&self.buf);
+
+        // Also send to TUI for inline display (best-effort)
+        let _ = self.tx.try_send(TuiEvent::Log(trimmed));
     }
 }
 

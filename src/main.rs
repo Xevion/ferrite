@@ -1,11 +1,12 @@
 use std::fs;
+use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use nix::sys::resource::{Resource, getrlimit};
 use nix::unistd::geteuid;
 use owo_colors::OwoColorize;
@@ -21,6 +22,16 @@ use ferrite::runner;
 use ferrite::stability::CompactionGuard;
 use ferrite::tui::{RegionState, TuiConfig, TuiError, TuiEvent, TuiMakeWriter};
 use ferrite::units::UnitSystem;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TuiMode {
+    /// Use TUI when stdout is a terminal, plain output otherwise.
+    Auto,
+    /// Always use the interactive TUI.
+    Always,
+    /// Never use the TUI; use plain non-interactive output.
+    Never,
+}
 
 /// ferrite -- userspace RAM testing tool for Linux
 #[derive(Parser)]
@@ -47,11 +58,16 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = UnitSystem::Binary)]
     units: UnitSystem,
 
-    /// Emit NDJSON events instead of human-readable output (disables TUI).
+    /// Emit NDJSON events for structured output.
     /// Without a path (or with '-'), writes JSON to stdout and human output to stderr.
     /// With a file path, writes JSON to that file and human output to stdout.
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "-")]
     json: Option<String>,
+
+    /// TUI mode: "auto" (default) uses the TUI when stdout is a terminal,
+    /// "always" forces the TUI, "never" uses plain non-interactive output.
+    #[arg(long, value_enum, default_value_t = TuiMode::Auto)]
+    tui: TuiMode,
 
     /// Disable physical address resolution (skip pagemap/EDAC/SMBIOS).
     #[arg(long)]
@@ -190,15 +206,27 @@ fn main() -> Result<()> {
         std::mem::take(&mut cli.patterns)
     };
 
-    if cli.json.is_some() {
-        return run_json_mode(cli, patterns);
-    }
+    let sink = if let Some(ref json_path) = cli.json {
+        OutputSink::json(json_path, cli.units).context("failed to open JSON output")?
+    } else {
+        OutputSink::human(cli.units)
+    };
 
-    run_tui_mode(cli, patterns)
+    let use_tui = match cli.tui {
+        TuiMode::Always => true,
+        TuiMode::Never => false,
+        TuiMode::Auto => std::io::stdout().is_terminal(),
+    };
+
+    if use_tui {
+        run_tui_mode(cli, patterns, sink)
+    } else {
+        run_non_tui(cli, patterns, sink)
+    }
 }
 
 /// TUI mode: the default interactive experience.
-fn run_tui_mode(cli: Cli, patterns: Vec<Pattern>) -> Result<()> {
+fn run_tui_mode(cli: Cli, patterns: Vec<Pattern>, _sink: OutputSink) -> Result<()> {
     let need_phys = !cli.no_phys;
 
     let (tx, rx) = mpsc::sync_channel::<TuiEvent>(256);
@@ -432,12 +460,14 @@ fn run_region_worker(
     let _ = tx.try_send(TuiEvent::RegionDone(region_idx));
 }
 
-/// JSON mode: NDJSON output with indicatif progress bars.
-fn run_json_mode(cli: Cli, patterns: Vec<Pattern>) -> Result<()> {
-    let need_phys = !cli.no_phys;
+/// Non-TUI mode: headless output with tracing to stderr.
+fn run_non_tui(cli: Cli, patterns: Vec<Pattern>, mut sink: OutputSink) -> Result<()> {
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
 
-    let mut sink = OutputSink::json(cli.json.as_deref().unwrap_or("-"), cli.units)
-        .context("failed to open JSON output")?;
+    let need_phys = !cli.no_phys;
 
     let mut region = LockedRegion::new(cli.size).context("failed to allocate and lock memory")?;
 
@@ -447,57 +477,16 @@ fn run_json_mode(cli: Cli, patterns: Vec<Pattern>) -> Result<()> {
         None
     };
 
-    let resolver = if need_phys {
-        match PagemapResolver::new() {
-            Ok(mut r) => match r.build_map(region.as_ptr(), region.len()) {
-                Ok(stats) => {
-                    sink.emit_map_info(&stats);
-                    sink.print_map_info(&stats);
-                    std::thread::sleep(Duration::from_millis(100));
-                    match r.verify_stability(region.as_ptr(), region.len()) {
-                        Ok(0) => {}
-                        Ok(n) => {
-                            eprintln!(
-                                "{} {n} pages changed physical address after locking",
-                                "warning:".yellow().bold(),
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "{} PFN stability check failed: {e}",
-                                "warning:".yellow().bold(),
-                            );
-                        }
-                    }
-                    Some(r)
-                }
-                Err(e) => {
-                    eprintln!(
-                        "{} failed to build page map: {e}",
-                        "warning:".yellow().bold(),
-                    );
-                    None
-                }
-            },
-            Err(e) => {
-                eprintln!("{} pagemap unavailable: {e}", "warning:".yellow().bold());
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let resolver = setup_phys(&region, need_phys);
 
     if need_phys && let Some(topo) = DimmTopology::build() {
-        let line = format!(
-            "  Installed DIMMs: {}",
-            topo.dimms
-                .iter()
-                .map(|d| d.to_string())
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-        eprintln!("{line}");
+        let dimm_str = topo
+            .dimms
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        info!("installed DIMMs: {dimm_str}");
     }
 
     let run_start = Instant::now();
