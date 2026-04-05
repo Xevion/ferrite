@@ -90,35 +90,97 @@ pub fn parse_size(s: &str) -> Result<usize, String> {
         .ok_or_else(|| format!("size overflow: {s}"))
 }
 
+/// A privilege-related warning that the caller should display.
+#[derive(Debug, PartialEq)]
+pub(crate) enum PrivilegeWarning {
+    /// Physical address resolution requires `CAP_SYS_ADMIN` (or root).
+    NoSysAdmin,
+    /// `RLIMIT_MEMLOCK` is too low for the requested allocation.
+    MlockLimitExceeded { soft: u64, requested: u64 },
+    /// Could not query `RLIMIT_MEMLOCK`.
+    MlockQueryFailed(String),
+}
+
+/// Resolved privilege state used to decide whether to emit warnings.
+#[allow(clippy::struct_excessive_bools)]
+pub(crate) struct PrivilegeContext {
+    pub is_root: bool,
+    pub has_ipc_lock: bool,
+    pub has_sys_admin: bool,
+    pub need_phys: bool,
+    /// `Ok(soft_limit)` or `Err(message)` from querying `RLIMIT_MEMLOCK`.
+    pub memlock_result: Result<u64, String>,
+    pub requested_bytes: usize,
+}
+
+impl PrivilegeContext {
+    /// Query the current process's privilege state from the OS.
+    pub fn from_system(requested_bytes: usize, need_phys: bool) -> Self {
+        let is_root = geteuid().is_root();
+        let has_ipc_lock = has_capability(14); // CAP_IPC_LOCK
+        let has_sys_admin = has_capability(21); // CAP_SYS_ADMIN
+        let memlock_result = getrlimit(Resource::RLIMIT_MEMLOCK)
+            .map(|(soft, _)| soft)
+            .map_err(|e| e.to_string());
+        Self {
+            is_root,
+            has_ipc_lock,
+            has_sys_admin,
+            need_phys,
+            memlock_result,
+            requested_bytes,
+        }
+    }
+
+    /// Compute which privilege warnings apply to the current state.
+    pub fn warnings(&self) -> Vec<PrivilegeWarning> {
+        let mut out = Vec::new();
+
+        if self.need_phys && !self.is_root && !self.has_sys_admin {
+            out.push(PrivilegeWarning::NoSysAdmin);
+        }
+
+        if self.is_root || self.has_ipc_lock {
+            return out;
+        }
+
+        match &self.memlock_result {
+            Ok(soft) => {
+                if *soft != u64::MAX && (self.requested_bytes as u64) > *soft {
+                    out.push(PrivilegeWarning::MlockLimitExceeded {
+                        soft: *soft,
+                        requested: self.requested_bytes as u64,
+                    });
+                }
+            }
+            Err(e) => {
+                out.push(PrivilegeWarning::MlockQueryFailed(e.clone()));
+            }
+        }
+
+        out
+    }
+}
+
 /// Check whether the process has sufficient privileges to mlock memory.
 pub fn check_privileges(requested_bytes: usize, need_phys: bool) {
-    let is_root = geteuid().is_root();
-    let has_ipc_lock = has_capability(14); // CAP_IPC_LOCK
-    let has_sys_admin = has_capability(21); // CAP_SYS_ADMIN
-
-    if need_phys && !is_root && !has_sys_admin {
-        eprintln!(
-            "{} CAP_SYS_ADMIN not detected -- physical addresses will be unavailable",
-            "warning:".yellow().bold(),
-        );
-        eprintln!(
-            "         run as root for physical address resolution: {}",
-            "sudo ferrite".bold()
-        );
-    }
-
-    if is_root || has_ipc_lock {
-        return;
-    }
-
-    match getrlimit(Resource::RLIMIT_MEMLOCK) {
-        Ok((soft, _hard)) => {
-            if soft != u64::MAX && (requested_bytes as u64) > soft {
+    let warnings = PrivilegeContext::from_system(requested_bytes, need_phys).warnings();
+    for w in &warnings {
+        match w {
+            PrivilegeWarning::NoSysAdmin => {
                 eprintln!(
-                    "{} RLIMIT_MEMLOCK is {} bytes, but {} bytes requested",
+                    "{} CAP_SYS_ADMIN not detected -- physical addresses will be unavailable",
                     "warning:".yellow().bold(),
-                    soft,
-                    requested_bytes,
+                );
+                eprintln!(
+                    "         run as root for physical address resolution: {}",
+                    "sudo ferrite".bold()
+                );
+            }
+            PrivilegeWarning::MlockLimitExceeded { soft, requested } => {
+                eprintln!(
+                    "{} RLIMIT_MEMLOCK is {soft} bytes, but {requested} bytes requested",
+                    "warning:".yellow().bold(),
                 );
                 eprintln!("         mlock will likely fail. Options:");
                 eprintln!("           - run as root: {}", "sudo ferrite".bold());
@@ -131,12 +193,12 @@ pub fn check_privileges(requested_bytes: usize, need_phys: bool) {
                     "sudo setcap cap_ipc_lock+ep $(which ferrite)".bold()
                 );
             }
-        }
-        Err(e) => {
-            eprintln!(
-                "{} could not query RLIMIT_MEMLOCK: {e}",
-                "warning:".yellow().bold(),
-            );
+            PrivilegeWarning::MlockQueryFailed(e) => {
+                eprintln!(
+                    "{} could not query RLIMIT_MEMLOCK: {e}",
+                    "warning:".yellow().bold(),
+                );
+            }
         }
     }
 }
@@ -320,6 +382,138 @@ CapEff:\t0000000000000000";
             check!(!parse_capability_from_status(status, 13));
             check!(!parse_capability_from_status(status, 15));
             check!(!parse_capability_from_status(status, 21));
+        }
+    }
+
+    mod privilege_context {
+        use assert2::{assert, check};
+
+        use crate::cli::{PrivilegeContext, PrivilegeWarning};
+
+        #[allow(clippy::fn_params_excessive_bools)]
+        fn ctx(
+            is_root: bool,
+            has_ipc_lock: bool,
+            has_sys_admin: bool,
+            need_phys: bool,
+            memlock_result: Result<u64, String>,
+            requested_bytes: usize,
+        ) -> PrivilegeContext {
+            PrivilegeContext {
+                is_root,
+                has_ipc_lock,
+                has_sys_admin,
+                need_phys,
+                memlock_result,
+                requested_bytes,
+            }
+        }
+
+        #[test]
+        fn no_warnings_when_root() {
+            let c = ctx(true, false, false, false, Ok(1024), 1024 * 1024);
+            assert!(c.warnings().is_empty());
+        }
+
+        #[test]
+        fn no_warnings_with_ipc_lock() {
+            let c = ctx(false, true, false, false, Ok(u64::MAX), 64 * 1024 * 1024);
+            assert!(c.warnings().is_empty());
+        }
+
+        #[test]
+        fn warns_when_need_phys_and_no_sys_admin() {
+            let c = ctx(false, false, false, true, Ok(u64::MAX), 64 * 1024 * 1024);
+            let w = c.warnings();
+            assert!(w.len() == 1);
+            check!(w[0] == PrivilegeWarning::NoSysAdmin);
+        }
+
+        #[test]
+        fn no_phys_warning_when_has_sys_admin() {
+            let c = ctx(false, false, true, true, Ok(u64::MAX), 64 * 1024 * 1024);
+            assert!(c.warnings().is_empty());
+        }
+
+        #[test]
+        fn rlimit_query_failed() {
+            let c = ctx(
+                false,
+                false,
+                false,
+                false,
+                Err("EPERM".into()),
+                64 * 1024 * 1024,
+            );
+            let w = c.warnings();
+            assert!(w.len() == 1);
+            check!(w[0] == PrivilegeWarning::MlockQueryFailed("EPERM".into()));
+        }
+
+        #[test]
+        fn rlimit_unlimited_no_warning() {
+            let c = ctx(false, false, false, false, Ok(u64::MAX), usize::MAX);
+            assert!(c.warnings().is_empty());
+        }
+
+        #[test]
+        fn rlimit_too_small() {
+            let c = ctx(
+                false,
+                false,
+                false,
+                false,
+                Ok(1024 * 1024),
+                10 * 1024 * 1024,
+            );
+            let w = c.warnings();
+            assert!(w.len() == 1);
+            check!(
+                w[0] == PrivilegeWarning::MlockLimitExceeded {
+                    soft: 1024 * 1024,
+                    requested: 10 * 1024 * 1024,
+                }
+            );
+        }
+
+        #[test]
+        fn rlimit_exactly_at_limit_no_warning() {
+            let c = ctx(false, false, false, false, Ok(1024), 1024);
+            assert!(c.warnings().is_empty());
+        }
+
+        #[test]
+        fn rlimit_within_limit_no_warning() {
+            let c = ctx(
+                false,
+                false,
+                false,
+                false,
+                Ok(64 * 1024 * 1024),
+                1024 * 1024,
+            );
+            assert!(c.warnings().is_empty());
+        }
+
+        #[test]
+        fn root_skips_rlimit_check() {
+            // root + memlock error: rlimit block should be skipped entirely
+            let c = ctx(true, false, false, false, Err("fail".into()), 1024);
+            assert!(c.warnings().is_empty());
+        }
+
+        #[test]
+        fn need_phys_and_rlimit_exceeded_both_fire() {
+            let c = ctx(false, false, false, true, Ok(1024), 1024 * 1024);
+            let w = c.warnings();
+            assert!(w.len() == 2);
+            check!(w[0] == PrivilegeWarning::NoSysAdmin);
+            check!(
+                w[1] == PrivilegeWarning::MlockLimitExceeded {
+                    soft: 1024,
+                    requested: 1024 * 1024,
+                }
+            );
         }
     }
 }

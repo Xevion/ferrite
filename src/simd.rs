@@ -421,6 +421,51 @@ mod tests {
         // Should not panic
     }
 
+    /// Return a slice of `size` words that is guaranteed NOT to be 64-byte aligned,
+    /// forcing `fill_nt` / `fill_nt_indexed` onto the scalar fallback path.
+    fn make_unaligned(backing: &mut Vec<u64>, size: usize) -> &mut [u64] {
+        backing.resize(size + 1, 0u64);
+        // shift by one word (8 bytes) if already aligned, to break 64-byte alignment
+        let offset = usize::from((backing.as_ptr() as usize).is_multiple_of(64));
+        &mut backing[offset..offset + size]
+    }
+
+    #[test]
+    fn fill_nt_unaligned_fallback() {
+        if !avx512_available() {
+            return;
+        }
+        let mut backing = Vec::new();
+        let buf = make_unaligned(&mut backing, 256);
+        assert!(
+            !(buf.as_ptr() as usize).is_multiple_of(64),
+            "buffer must be unaligned"
+        );
+        let pattern = 0xCAFE_BABE_DEAD_BEEFu64;
+        unsafe { fill_nt(buf, pattern) };
+        for (i, &val) in buf.iter().enumerate() {
+            check!(val == pattern, "mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn fill_nt_indexed_unaligned_fallback() {
+        if !avx512_available() {
+            return;
+        }
+        let mut backing = Vec::new();
+        let buf = make_unaligned(&mut backing, 64);
+        assert!(
+            !(buf.as_ptr() as usize).is_multiple_of(64),
+            "buffer must be unaligned"
+        );
+        let start = 42;
+        unsafe { fill_nt_indexed(buf, start) };
+        for (i, &val) in buf.iter().enumerate() {
+            check!(val == (start + i) as u64, "mismatch at index {i}");
+        }
+    }
+
     #[test]
     fn verify_with_word_offset() {
         if !avx512_available() {

@@ -88,6 +88,63 @@ pub fn run_pattern(
     }
 }
 
+/// Scalar fill: write `pattern` to every word using volatile stores.
+pub(crate) fn scalar_fill_constant(buf: &mut [u64], pattern: u64) {
+    for word in buf.iter_mut() {
+        unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), pattern) };
+    }
+}
+
+/// Scalar verify: read every word and report mismatches against `pattern`.
+///
+/// `word_start` is added to each failure's `word_index` so callers can pass a
+/// chunk-global offset and get back globally-correct indices without post-fixup.
+pub(crate) fn scalar_verify_constant(
+    buf: &[u64],
+    pattern: u64,
+    base_addr: usize,
+    word_start: usize,
+) -> Vec<Failure> {
+    buf.iter()
+        .enumerate()
+        .filter_map(|(i, word)| {
+            let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
+            (actual != pattern).then(|| Failure {
+                addr: base_addr + i * 8,
+                expected: pattern,
+                actual,
+                word_index: word_start + i,
+                phys_addr: None,
+            })
+        })
+        .collect()
+}
+
+/// Scalar fill: write each word's index as its value using volatile stores.
+pub(crate) fn scalar_fill_indexed(buf: &mut [u64], start: usize) {
+    for (i, word) in buf.iter_mut().enumerate() {
+        unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), (start + i) as u64) };
+    }
+}
+
+/// Scalar verify: read every word and report mismatches against its expected index.
+pub(crate) fn scalar_verify_indexed(buf: &[u64], base_addr: usize, start: usize) -> Vec<Failure> {
+    buf.iter()
+        .enumerate()
+        .filter_map(|(i, word)| {
+            let expected = (start + i) as u64;
+            let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
+            (actual != expected).then(|| Failure {
+                addr: base_addr + i * 8,
+                expected,
+                actual,
+                word_index: start + i,
+                phys_addr: None,
+            })
+        })
+        .collect()
+}
+
 /// Fill every word with `pattern`, then verify. Returns any mismatches.
 pub(super) fn fill_verify_constant(
     buf: &mut [u64],
@@ -131,12 +188,11 @@ pub(super) fn fill_verify_constant(
     }
 
     if parallel {
+        let total = buf.len();
         buf.par_chunks_mut(REPORT_CHUNK)
             .enumerate()
             .for_each(|(ci, chunk)| {
-                for word in chunk.iter_mut() {
-                    unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), pattern) };
-                }
+                scalar_fill_constant(chunk, pattern);
                 on_activity((ci * REPORT_CHUNK) as f64 / total as f64);
             });
         buf.par_chunks(REPORT_CHUNK)
@@ -144,43 +200,15 @@ pub(super) fn fill_verify_constant(
             .flat_map_iter(|(ci, chunk)| {
                 let chunk_start = ci * REPORT_CHUNK;
                 on_activity(chunk_start as f64 / total as f64);
-                chunk
-                    .iter()
-                    .enumerate()
-                    .filter_map(move |(j, word)| {
-                        let i = chunk_start + j;
-                        let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
-                        (actual != pattern).then(|| Failure {
-                            addr: base_addr + i * 8,
-                            expected: pattern,
-                            actual,
-                            word_index: i,
-                            phys_addr: None,
-                        })
-                    })
-                    .collect::<Vec<_>>()
+                scalar_verify_constant(chunk, pattern, base_addr + chunk_start * 8, chunk_start)
             })
             .collect()
     } else {
         for (ci, chunk) in buf.chunks_mut(REPORT_CHUNK).enumerate() {
-            for word in chunk.iter_mut() {
-                unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), pattern) };
-            }
+            scalar_fill_constant(chunk, pattern);
             on_activity((ci * REPORT_CHUNK) as f64 / total as f64);
         }
-        buf.iter()
-            .enumerate()
-            .filter_map(|(i, word)| {
-                let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
-                (actual != pattern).then(|| Failure {
-                    addr: base_addr + i * 8,
-                    expected: pattern,
-                    actual,
-                    word_index: i,
-                    phys_addr: None,
-                })
-            })
-            .collect()
+        scalar_verify_constant(buf, pattern, base_addr, 0)
     }
 }
 
@@ -222,18 +250,12 @@ pub(super) fn fill_verify_indexed(
     }
 
     if parallel {
+        let total = buf.len();
         buf.par_chunks_mut(REPORT_CHUNK)
             .enumerate()
             .for_each(|(ci, chunk)| {
                 let chunk_start = ci * REPORT_CHUNK;
-                for (j, word) in chunk.iter_mut().enumerate() {
-                    unsafe {
-                        ptr::write_volatile(
-                            std::ptr::from_mut::<u64>(word),
-                            (chunk_start + j) as u64,
-                        );
-                    }
-                }
+                scalar_fill_indexed(chunk, chunk_start);
                 on_activity(chunk_start as f64 / total as f64);
             });
         buf.par_chunks(REPORT_CHUNK)
@@ -241,48 +263,16 @@ pub(super) fn fill_verify_indexed(
             .flat_map_iter(|(ci, chunk)| {
                 let chunk_start = ci * REPORT_CHUNK;
                 on_activity(chunk_start as f64 / total as f64);
-                chunk
-                    .iter()
-                    .enumerate()
-                    .filter_map(move |(j, word)| {
-                        let i = chunk_start + j;
-                        let expected = i as u64;
-                        let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
-                        (actual != expected).then(|| Failure {
-                            addr: base_addr + i * 8,
-                            expected,
-                            actual,
-                            word_index: i,
-                            phys_addr: None,
-                        })
-                    })
-                    .collect::<Vec<_>>()
+                scalar_verify_indexed(chunk, base_addr + chunk_start * 8, chunk_start)
             })
             .collect()
     } else {
         for (ci, chunk) in buf.chunks_mut(REPORT_CHUNK).enumerate() {
             let chunk_start = ci * REPORT_CHUNK;
-            for (j, word) in chunk.iter_mut().enumerate() {
-                unsafe {
-                    ptr::write_volatile(std::ptr::from_mut::<u64>(word), (chunk_start + j) as u64);
-                }
-            }
+            scalar_fill_indexed(chunk, chunk_start);
             on_activity(chunk_start as f64 / total as f64);
         }
-        buf.iter()
-            .enumerate()
-            .filter_map(|(i, word)| {
-                let expected = i as u64;
-                let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
-                (actual != expected).then(|| Failure {
-                    addr: base_addr + i * 8,
-                    expected,
-                    actual,
-                    word_index: i,
-                    phys_addr: None,
-                })
-            })
-            .collect()
+        scalar_verify_indexed(buf, base_addr, 0)
     }
 }
 
@@ -546,6 +536,117 @@ mod tests {
             assert!(failures.is_empty());
 
             let failures = fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+    }
+
+    mod scalar_helpers {
+        use assert2::{assert, check};
+
+        use super::*;
+
+        #[test]
+        fn constant_round_trip() {
+            let mut buf = vec![0u64; 256];
+            scalar_fill_constant(&mut buf, 0xAAAA_AAAA_AAAA_AAAAu64);
+            let base = buf.as_ptr() as usize;
+            let failures = scalar_verify_constant(&buf, 0xAAAA_AAAA_AAAA_AAAAu64, base, 0);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn constant_detects_single_corruption() {
+            let mut buf = vec![0u64; 256];
+            let pattern = 0xFFFF_FFFF_FFFF_FFFFu64;
+            scalar_fill_constant(&mut buf, pattern);
+            buf[10] = 0;
+            let base = buf.as_ptr() as usize;
+            let failures = scalar_verify_constant(&buf, pattern, base, 0);
+            assert!(failures.len() == 1);
+            check!(failures[0].word_index == 10);
+            check!(failures[0].addr == base + 10 * 8);
+            check!(failures[0].expected == pattern);
+            check!(failures[0].actual == 0);
+        }
+
+        #[test]
+        fn constant_detects_multiple_corruptions() {
+            let mut buf = vec![0u64; 256];
+            let pattern = 0x5555_5555_5555_5555u64;
+            scalar_fill_constant(&mut buf, pattern);
+            buf[0] = 1;
+            buf[127] = 2;
+            buf[255] = 3;
+            let base = buf.as_ptr() as usize;
+            let failures = scalar_verify_constant(&buf, pattern, base, 0);
+            assert!(failures.len() == 3);
+            check!(failures[0].word_index == 0);
+            check!(failures[1].word_index == 127);
+            check!(failures[2].word_index == 255);
+        }
+
+        #[test]
+        fn constant_empty_buffer() {
+            let mut buf: Vec<u64> = vec![];
+            scalar_fill_constant(&mut buf, 0xFF);
+            let failures = scalar_verify_constant(&buf, 0xFF, 0, 0);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn indexed_round_trip() {
+            let mut buf = vec![0u64; 256];
+            scalar_fill_indexed(&mut buf, 0);
+            let base = buf.as_ptr() as usize;
+            let failures = scalar_verify_indexed(&buf, base, 0);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn indexed_round_trip_with_offset() {
+            // start=100: buf[i] should equal 100+i
+            let mut buf = vec![0u64; 64];
+            scalar_fill_indexed(&mut buf, 100);
+            for (i, &val) in buf.iter().enumerate() {
+                check!(val == (100 + i) as u64, "mismatch at i={i}");
+            }
+            let base = buf.as_ptr() as usize;
+            let failures = scalar_verify_indexed(&buf, base, 100);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn indexed_detects_single_corruption() {
+            let mut buf = vec![0u64; 256];
+            scalar_fill_indexed(&mut buf, 0);
+            buf[50] = 0xDEAD;
+            let base = buf.as_ptr() as usize;
+            let failures = scalar_verify_indexed(&buf, base, 0);
+            assert!(failures.len() == 1);
+            check!(failures[0].word_index == 50);
+            check!(failures[0].expected == 50);
+            check!(failures[0].actual == 0xDEAD);
+            check!(failures[0].addr == base + 50 * 8);
+        }
+
+        #[test]
+        fn indexed_detects_multiple_corruptions() {
+            let mut buf = vec![0u64; 64];
+            scalar_fill_indexed(&mut buf, 0);
+            buf[0] = 999;
+            buf[63] = 999;
+            let base = buf.as_ptr() as usize;
+            let failures = scalar_verify_indexed(&buf, base, 0);
+            assert!(failures.len() == 2);
+            check!(failures[0].word_index == 0);
+            check!(failures[1].word_index == 63);
+        }
+
+        #[test]
+        fn indexed_empty_buffer() {
+            let mut buf: Vec<u64> = vec![];
+            scalar_fill_indexed(&mut buf, 0);
+            let failures = scalar_verify_indexed(&buf, 0, 0);
             assert!(failures.is_empty());
         }
     }
