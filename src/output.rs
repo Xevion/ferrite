@@ -3,7 +3,6 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::time::Duration;
 
-use indicatif::{MultiProgress, ProgressDrawTarget};
 use owo_colors::OwoColorize;
 use serde::Serialize;
 
@@ -111,17 +110,12 @@ impl fmt::Display for Truncated<'_> {
 
 /// Controls where output goes -- human-readable to terminal or NDJSON events.
 pub enum OutputSink {
-    /// Standard human-readable output. Progress bars and text go to stdout.
-    Human {
-        mp: MultiProgress,
-        unit_system: UnitSystem,
-    },
-    /// NDJSON events to a writer. Progress bars go to the terminal via the
-    /// contained `MultiProgress` (which targets stderr when JSON goes to
-    /// stdout, or stdout when JSON goes to a file).
+    /// Standard human-readable output. Text goes to stdout.
+    Human { unit_system: UnitSystem },
+    /// NDJSON events to a writer. Human-readable text goes to stderr when JSON
+    /// is written to stdout, or stdout when JSON goes to a file.
     Json {
         writer: BufWriter<Box<dyn Write + Send>>,
-        mp: MultiProgress,
         unit_system: UnitSystem,
         /// True when JSON is written to stdout (human output goes to stderr).
         /// False when JSON is written to a file (human output goes to stdout).
@@ -135,10 +129,7 @@ impl OutputSink {
     /// Create a human-readable output sink.
     #[must_use]
     pub fn human(unit_system: UnitSystem) -> Self {
-        Self::Human {
-            mp: MultiProgress::new(),
-            unit_system,
-        }
+        Self::Human { unit_system }
     }
 
     /// Create a JSON output sink.
@@ -156,31 +147,17 @@ impl OutputSink {
         } else {
             Box::new(File::create(path)?)
         };
-        let mp = if to_stdout {
-            MultiProgress::with_draw_target(ProgressDrawTarget::stderr())
-        } else {
-            MultiProgress::new()
-        };
         Ok(Self::Json {
             writer: BufWriter::new(writer),
-            mp,
             unit_system,
             json_to_stdout: to_stdout,
             broken_pipe: false,
         })
     }
 
-    /// Get a reference to the `MultiProgress` for creating progress bars.
-    #[must_use]
-    pub fn multi_progress(&self) -> &MultiProgress {
-        match self {
-            Self::Human { mp, .. } | Self::Json { mp, .. } => mp,
-        }
-    }
-
     fn unit_system(&self) -> UnitSystem {
         match self {
-            Self::Human { unit_system, .. } | Self::Json { unit_system, .. } => *unit_system,
+            Self::Human { unit_system } | Self::Json { unit_system, .. } => *unit_system,
         }
     }
 
@@ -339,7 +316,6 @@ impl OutputSink {
         elapsed: Duration,
         bytes_processed: u64,
         failures: &[Failure],
-        pb: &indicatif::ProgressBar,
     ) {
         let ms = elapsed.as_secs_f64() * 1000.0;
         let throughput = Rate::new(
@@ -356,7 +332,7 @@ impl OutputSink {
             if self.human_to_stderr() {
                 eprintln!("{line}");
             } else {
-                pb.println(line);
+                println!("{line}");
             }
         } else {
             let line = format!(
@@ -370,8 +346,8 @@ impl OutputSink {
                 eprintln!("{line}");
                 eprint!("{}", Truncated(failures, 5));
             } else {
-                pb.println(line);
-                pb.println(format!("{}", Truncated(failures, 5)));
+                println!("{line}");
+                println!("{}", Truncated(failures, 5));
             }
         }
     }
@@ -781,7 +757,6 @@ mod tests {
     #[test]
     fn print_test_result_pass_and_fail() {
         let sink = OutputSink::human(UnitSystem::Decimal);
-        let pb = indicatif::ProgressBar::hidden();
 
         // Pass case
         sink.print_test_result(
@@ -789,7 +764,6 @@ mod tests {
             Duration::from_millis(100),
             1024 * 1024,
             &[],
-            &pb,
         );
 
         // Fail case
@@ -805,7 +779,6 @@ mod tests {
             Duration::from_millis(50),
             512 * 1024,
             &failures,
-            &pb,
         );
     }
 
@@ -926,14 +899,12 @@ mod tests {
     #[test]
     fn json_stdout_print_test_result() {
         let sink = OutputSink::json("-", UnitSystem::Binary).unwrap();
-        let pb = indicatif::ProgressBar::hidden();
 
         sink.print_test_result(
             Pattern::SolidBits,
             Duration::from_millis(100),
             1024 * 1024,
             &[],
-            &pb,
         );
 
         let failures = vec![
@@ -948,7 +919,6 @@ mod tests {
             Duration::from_millis(50),
             512 * 1024,
             &failures,
-            &pb,
         );
     }
 
@@ -988,7 +958,6 @@ mod tests {
         });
         let mut sink = OutputSink::Json {
             writer: std::io::BufWriter::with_capacity(0, writer),
-            mp: indicatif::MultiProgress::new(),
             unit_system: UnitSystem::Binary,
             json_to_stdout: false,
             broken_pipe: false,

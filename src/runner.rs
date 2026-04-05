@@ -3,7 +3,6 @@ use std::panic::{self, AssertUnwindSafe};
 use std::time::Instant;
 
 use anyhow::anyhow;
-use indicatif::{ProgressBar, ProgressStyle};
 use thiserror::Error;
 
 use crate::Failure;
@@ -72,10 +71,6 @@ impl PassResult {
 /// Returns [`PatternError::Unrecoverable`] if a pattern worker panics. The
 /// test buffer should be considered corrupted after this error.
 ///
-/// # Panics
-///
-/// Panics if progress bar template formatting fails (indicates a bug in the
-/// hardcoded template string).
 pub fn run(
     buf: &mut [u64],
     patterns: &[Pattern],
@@ -85,19 +80,6 @@ pub fn run(
     resolver: Option<&dyn PhysResolver>,
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Result<Vec<PassResult>, PatternError> {
-    // Clone the MultiProgress handle upfront so we don't hold an immutable
-    // borrow on `sink` across mutable calls. indicatif's MultiProgress is
-    // internally Arc-backed, so cloning is cheap.
-    let mp = sink.multi_progress().clone();
-    let pass_style =
-        ProgressStyle::with_template("{prefix} [{bar:30.cyan/dim}] {pos}/{len} patterns  {msg}")
-            .unwrap()
-            .progress_chars("=> ");
-    let sub_style =
-        ProgressStyle::with_template("  {prefix:<20} [{bar:30.yellow/dim}] {pos}/{len}")
-            .unwrap()
-            .progress_chars("=> ");
-
     let buf_bytes = buf.len() as u64 * 8;
     sink.print_banner(buf_bytes as usize, passes, patterns.len(), parallel);
 
@@ -110,32 +92,17 @@ pub fn run(
         // Snapshot EDAC counters before this pass
         let edac_before = EdacSnapshot::capture();
 
-        let pass_pb = mp.add(ProgressBar::new(patterns.len() as u64));
-        pass_pb.set_style(pass_style.clone());
-        pass_pb.set_prefix(format!("Pass {}/{}", pass + 1, passes));
-
         let mut pattern_results = Vec::with_capacity(patterns.len());
         for &pattern in patterns {
             let sub_passes = pattern.sub_passes();
 
             sink.emit_test_start(pattern, pass + 1);
 
-            let inner_pb = if sub_passes > 1 {
-                let pb = mp.insert_after(&pass_pb, ProgressBar::new(sub_passes));
-                pb.set_style(sub_style.clone());
-                pb.set_prefix(pattern.to_string());
-                Some(pb)
-            } else {
-                None
-            };
-
-            pass_pb.set_message(format!("{pattern}"));
-
             let start = Instant::now();
 
             let mut sub_pass_count: u64 = 0;
-            // SAFETY: captured state (sub_pass_count, inner_pb, sink) is not
-            // used after an unwind — we return Err immediately on panic.
+            // SAFETY: captured state (sub_pass_count, sink) is not used after
+            // an unwind — we return Err immediately on panic.
             let pattern_result = panic::catch_unwind(AssertUnwindSafe(|| {
                 run_pattern(
                     pattern,
@@ -143,9 +110,6 @@ pub fn run(
                     parallel,
                     &mut || {
                         sub_pass_count += 1;
-                        if let Some(pb) = &inner_pb {
-                            pb.inc(1);
-                        }
                         sink.emit_progress(pattern, pass + 1, sub_pass_count, sub_passes);
                     },
                     on_activity,
@@ -154,10 +118,6 @@ pub fn run(
             let mut failures = match pattern_result {
                 Ok(f) => f,
                 Err(panic_val) => {
-                    if let Some(pb) = inner_pb {
-                        pb.finish_and_clear();
-                    }
-                    pass_pb.finish_and_clear();
                     return Err(PatternError::Unrecoverable(anyhow!(
                         "{}",
                         extract_panic_msg(&panic_val)
@@ -174,12 +134,8 @@ pub fn run(
                 }
             }
 
-            if let Some(pb) = inner_pb {
-                pb.finish_and_clear();
-            }
-
             sink.emit_test_complete(pattern, pass + 1, elapsed, bytes_processed, &failures);
-            sink.print_test_result(pattern, elapsed, bytes_processed, &failures, &pass_pb);
+            sink.print_test_result(pattern, elapsed, bytes_processed, &failures);
 
             pattern_results.push(PatternResult {
                 pattern,
@@ -187,9 +143,7 @@ pub fn run(
                 elapsed,
                 bytes_processed,
             });
-            pass_pb.inc(1);
         }
-        pass_pb.finish_and_clear();
 
         // Compute EDAC deltas for this pass
         let ecc_deltas = match (&edac_before, EdacSnapshot::capture()) {
