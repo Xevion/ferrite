@@ -29,7 +29,7 @@ export default defineConfig({
       aliases: ["sec", "audit"],
       commands: {
         audit: {
-          cmd: "cargo deny check advisories sources",
+          cmd: "cargo deny check advisories bans sources",
           requires: ["cargo-deny"],
           hint: "Install cargo-deny: cargo install cargo-deny",
         },

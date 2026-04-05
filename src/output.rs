@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::time::Duration;
@@ -91,6 +92,23 @@ impl From<&Failure> for FailureRecord {
     }
 }
 
+/// Display wrapper that shows the first `N` failures then a count of the remainder.
+struct Truncated<'a>(&'a [Failure], usize);
+
+impl fmt::Display for Truncated<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let shown = self.0.len().min(self.1);
+        for failure in &self.0[..shown] {
+            writeln!(f, "       {failure}")?;
+        }
+        let remaining = self.0.len() - shown;
+        if remaining > 0 {
+            write!(f, "       ...+{remaining} more")?;
+        }
+        Ok(())
+    }
+}
+
 /// Controls where output goes -- human-readable to terminal or NDJSON events.
 pub enum OutputSink {
     /// Standard human-readable output. Progress bars and text go to stdout.
@@ -108,6 +126,8 @@ pub enum OutputSink {
         /// True when JSON is written to stdout (human output goes to stderr).
         /// False when JSON is written to a file (human output goes to stdout).
         json_to_stdout: bool,
+        /// Set after the first broken-pipe error to suppress per-event warnings.
+        broken_pipe: bool,
     },
 }
 
@@ -146,6 +166,7 @@ impl OutputSink {
             mp,
             unit_system,
             json_to_stdout: to_stdout,
+            broken_pipe: false,
         })
     }
 
@@ -347,14 +368,10 @@ impl OutputSink {
             );
             if self.human_to_stderr() {
                 eprintln!("{line}");
-                for f in failures {
-                    eprintln!("       {f}");
-                }
+                eprint!("{}", Truncated(failures, 5));
             } else {
                 pb.println(line);
-                for f in failures {
-                    pb.println(format!("       {f}"));
-                }
+                pb.println(format!("{}", Truncated(failures, 5)));
             }
         }
     }
@@ -432,10 +449,46 @@ impl OutputSink {
     }
 
     fn write_event(&mut self, event: &Event) {
-        if let Self::Json { writer, .. } = self {
-            let _ = serde_json::to_writer(&mut *writer, event);
-            let _ = writer.write_all(b"\n");
-            let _ = writer.flush();
+        let Self::Json {
+            writer,
+            broken_pipe,
+            ..
+        } = self
+        else {
+            return;
+        };
+
+        if *broken_pipe {
+            return;
+        }
+
+        if let Err(e) = serde_json::to_writer(&mut *writer, event) {
+            if e.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe) {
+                eprintln!("warning: JSON output pipe closed; no further events will be written");
+                *broken_pipe = true;
+            } else {
+                eprintln!("warning: failed to write JSON event: {e}");
+            }
+            return;
+        }
+
+        if let Err(e) = writer.write_all(b"\n") {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                eprintln!("warning: JSON output pipe closed; no further events will be written");
+                *broken_pipe = true;
+            } else {
+                eprintln!("warning: failed to write JSON newline: {e}");
+            }
+            return;
+        }
+
+        if let Err(e) = writer.flush() {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                eprintln!("warning: JSON output pipe closed; no further events will be written");
+                *broken_pipe = true;
+            } else {
+                eprintln!("warning: failed to flush JSON output: {e}");
+            }
         }
     }
 }

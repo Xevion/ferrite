@@ -30,7 +30,9 @@ use super::{RegionState, TuiConfig, TuiError, TuiEvent, TuiMakeWriter};
 /// | no TUI + no JSON  | None                | human → stderr        |
 pub fn setup_tracing(json_mode: bool, tui_writer: Option<TuiMakeWriter>) {
     use tracing_subscriber::prelude::*;
+    use tracing_subscriber::util::SubscriberInitExt;
 
+    let in_nextest = std::env::var("NEXTEST").is_ok();
     let has_tui = tui_writer.is_some();
 
     let tui_layer = tui_writer.map(|w| {
@@ -38,6 +40,17 @@ pub fn setup_tracing(json_mode: bool, tui_writer: Option<TuiMakeWriter>) {
             .with_writer(w)
             .with_ansi(true)
     });
+
+    // Under nextest, route all tracing through the test writer so output is
+    // captured per-test and only shown on failure. Use try_init to tolerate
+    // multiple calls within a single test binary.
+    if in_nextest {
+        let _ = tracing_subscriber::registry()
+            .with(tui_layer)
+            .with(tracing_subscriber::fmt::layer().with_test_writer())
+            .try_init();
+        return;
+    }
 
     let stderr_json = json_mode.then(|| {
         tracing_subscriber::fmt::layer()

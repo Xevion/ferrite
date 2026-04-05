@@ -3,6 +3,12 @@ yanked = "warn"
 unmaintained = "all"
 unsound = "workspace"
 
+[bans]
+# Warn on duplicate versions of the same crate across the dependency tree.
+multiple-versions = "warn"
+# Deny wildcard version requirements in workspace member Cargo.toml files.
+wildcards = "deny"
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
