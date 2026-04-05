@@ -13,6 +13,10 @@ export default defineConfig({
         lint: "cargo clippy --all-targets --all-features -- -D warnings",
         // Match CI: --no-fail-fast --hide-progress-bar --failure-output final
         test: "cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final",
+        // Feature-combination checks: catch compilation failures behind feature gates
+        "lint-no-default": "cargo clippy --all-targets --no-default-features -- -D warnings",
+        "test-no-default":
+          "cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final --no-default-features",
         "dep-check": {
           cmd: "cargo machete",
           hint: "Remove the unused dependency from Cargo.toml",

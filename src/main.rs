@@ -1,3 +1,4 @@
+#[cfg(feature = "tui")]
 use std::io::IsTerminal;
 
 use anyhow::{Context, Result};
@@ -7,10 +8,13 @@ use ferrite::output::OutputSink;
 use ferrite::pattern::Pattern;
 use ferrite::phys::PhysResolver;
 use ferrite::runner;
+#[cfg(feature = "tui")]
 use ferrite::tui::run::{TuiTestSetup, run_tui_mode, setup_tracing};
 
 mod cli;
-use cli::{Cli, TuiMode, check_privileges, setup_test};
+#[cfg(feature = "tui")]
+use cli::TuiMode;
+use cli::{Cli, check_privileges, setup_test};
 
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
@@ -29,49 +33,52 @@ fn main() -> Result<()> {
         OutputSink::human(cli.units)
     };
 
-    let use_tui = match cli.tui {
-        TuiMode::Always => true,
-        TuiMode::Never => false,
-        TuiMode::Auto => std::io::stdout().is_terminal(),
-    };
-
-    // JSON-to-stdout + TUI = both claim stdout
-    if use_tui
-        && let Some(ref path) = cli.json
-        && (path == "-" || path.is_empty())
+    #[cfg(feature = "tui")]
     {
-        anyhow::bail!(
-            "--json to stdout conflicts with --tui (both use stdout). \
-             Use --json <file> or --tui never."
-        );
+        let use_tui = match cli.tui {
+            TuiMode::Always => true,
+            TuiMode::Never => false,
+            TuiMode::Auto => std::io::stdout().is_terminal(),
+        };
+
+        // JSON-to-stdout + TUI = both claim stdout
+        if use_tui
+            && let Some(ref path) = cli.json
+            && (path == "-" || path.is_empty())
+        {
+            anyhow::bail!(
+                "--json to stdout conflicts with --tui (both use stdout). \
+                 Use --json <file> or --tui never."
+            );
+        }
+
+        if use_tui {
+            let s = setup_test(&cli)?;
+            let tui_setup = TuiTestSetup {
+                region: s.region,
+                resolver: s.resolver,
+                map_stats: s.map_stats,
+                _compaction_guard: s._compaction_guard,
+            };
+            return run_tui_mode(
+                cli.size,
+                cli.passes,
+                cli.regions,
+                cli.sequential,
+                tui_setup,
+                patterns,
+                sink,
+            );
+        }
     }
 
-    if use_tui {
-        let s = setup_test(&cli)?;
-        let tui_setup = TuiTestSetup {
-            region: s.region,
-            resolver: s.resolver,
-            map_stats: s.map_stats,
-            _compaction_guard: s._compaction_guard,
-        };
-        run_tui_mode(
-            cli.size,
-            cli.passes,
-            cli.regions,
-            cli.sequential,
-            tui_setup,
-            patterns,
-            sink,
-        )
-    } else {
-        run_non_tui(cli, patterns, sink)
-    }
+    run_non_tui(cli, patterns, sink)
 }
 
 /// Non-TUI mode: headless output with tracing to stderr.
 fn run_non_tui(cli: Cli, patterns: Vec<Pattern>, mut sink: OutputSink) -> Result<()> {
-    let json_mode = sink.is_json();
-    setup_tracing(json_mode, None);
+    #[cfg(feature = "tui")]
+    setup_tracing(sink.is_json(), None);
 
     let mut setup = setup_test(&cli)?;
 

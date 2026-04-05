@@ -2,7 +2,9 @@ use std::fs;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
+#[cfg(feature = "tui")]
+use clap::ValueEnum;
 use nix::sys::resource::{Resource, getrlimit};
 use nix::unistd::geteuid;
 use owo_colors::OwoColorize;
@@ -14,6 +16,7 @@ use ferrite::dimm::DimmTopology;
 use ferrite::phys::{MapStats, PagemapResolver, PhysResolver};
 use ferrite::units::UnitSystem;
 
+#[cfg(feature = "tui")]
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum TuiMode {
     /// Use TUI when stdout is a terminal, plain output otherwise.
@@ -57,6 +60,7 @@ pub struct Cli {
 
     /// TUI mode: "auto" (default) uses the TUI when stdout is a terminal,
     /// "always" forces the TUI, "never" uses plain non-interactive output.
+    #[cfg(feature = "tui")]
     #[arg(long, value_enum, default_value_t = TuiMode::Auto)]
     pub tui: TuiMode,
 

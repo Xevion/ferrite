@@ -36,8 +36,11 @@ jobs:
             cargo fmt -- --check || echo "::warning::Formatting issues found (not failing on push)"
           fi
 
-      - name: Clippy
+      - name: Clippy (all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Clippy (no default features)
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
 
       - name: Install cargo-machete
         uses: taiki-e/install-action@cargo-machete
@@ -46,9 +49,12 @@ jobs:
         run: cargo machete
 
   test:
-    name: Test
+    name: Test (${{ matrix.features }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      matrix:
+        features: ["--all-features", "--no-default-features"]
     steps:
       - uses: actions/checkout@v6
 
@@ -60,4 +66,4 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Run tests
-        run: cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final
+        run: cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final ${{ matrix.features }}
