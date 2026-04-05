@@ -1,10 +1,12 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
-
 // SIMD intrinsics require casting *mut u64 → *mut __m512i with stricter alignment.
 // Alignment is guaranteed by the mmap allocation (page-aligned = 4096-byte aligned).
 #![allow(clippy::cast_ptr_alignment)]
 #[cfg(target_arch = "x86_64")]
 use std::ptr;
+
+#[cfg(target_arch = "x86_64")]
+use rayon::prelude::*;
 
 #[cfg(target_arch = "x86_64")]
 use crate::Failure;
@@ -225,6 +227,81 @@ pub(crate) unsafe fn verify_indexed_avx512(
         }
     }
     failures
+}
+
+/// AVX-512 orchestration for constant fill-and-verify.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn fill_verify_constant(
+    buf: &mut [u64],
+    pattern: u64,
+    parallel: bool,
+    on_activity: &(dyn Fn(f64) + Sync),
+) -> Vec<Failure> {
+    let base_addr = buf.as_ptr() as usize;
+    let total = buf.len();
+    if parallel {
+        buf.par_chunks_mut(CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                // SAFETY: chunk starts at a 64-byte aligned address (mmap base is
+                // page-aligned; every CHUNK * 8 byte boundary is 64-byte aligned).
+                unsafe { fill_nt(chunk, pattern) };
+                on_activity((ci * CHUNK) as f64 / total as f64);
+            });
+        // Rayon's join barrier ensures all NT stores and sfences have completed.
+        buf.par_chunks(CHUNK)
+            .enumerate()
+            .flat_map_iter(|(ci, chunk)| {
+                on_activity((ci * CHUNK) as f64 / total as f64);
+                // SAFETY: same alignment argument as write side.
+                unsafe { verify_avx512(chunk, pattern, base_addr, ci * CHUNK) }
+            })
+            .collect()
+    } else {
+        on_activity(0.0);
+        unsafe {
+            fill_nt(buf, pattern);
+        }
+        on_activity(0.5);
+        let result = unsafe { verify_avx512(buf, pattern, base_addr, 0) };
+        on_activity(1.0);
+        result
+    }
+}
+
+/// AVX-512 orchestration for indexed fill-and-verify.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn fill_verify_indexed(
+    buf: &mut [u64],
+    parallel: bool,
+    on_activity: &(dyn Fn(f64) + Sync),
+) -> Vec<Failure> {
+    let base_addr = buf.as_ptr() as usize;
+    let total = buf.len();
+    if parallel {
+        buf.par_chunks_mut(CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                unsafe { fill_nt_indexed(chunk, ci * CHUNK) };
+                on_activity((ci * CHUNK) as f64 / total as f64);
+            });
+        buf.par_chunks(CHUNK)
+            .enumerate()
+            .flat_map_iter(|(ci, chunk)| {
+                on_activity((ci * CHUNK) as f64 / total as f64);
+                unsafe { verify_indexed_avx512(chunk, base_addr, ci * CHUNK) }
+            })
+            .collect()
+    } else {
+        on_activity(0.0);
+        unsafe {
+            fill_nt_indexed(buf, 0);
+        }
+        on_activity(0.5);
+        let result = unsafe { verify_indexed_avx512(buf, base_addr, 0) };
+        on_activity(1.0);
+        result
+    }
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ coverage:
         threshold: 0%
   ignore:
     - "src/main.rs"
-    - "src/simd.rs"
+    - "src/ops/avx512.rs"
     - "src/tui/mod.rs"
     - "src/tui/run.rs"
 
@@ -26,10 +26,10 @@ component_management:
       name: Test Patterns
       paths:
         - src/pattern/**
-    - component_id: simd
-      name: SIMD
+    - component_id: ops
+      name: Memory Operations
       paths:
-        - src/simd.rs
+        - src/ops/**
     - component_id: alloc
       name: Allocator
       paths:

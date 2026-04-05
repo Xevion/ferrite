@@ -1,6 +1,5 @@
 use crate::Failure;
-
-use super::fill_verify_indexed;
+use crate::ops;
 
 pub(super) fn run(
     buf: &mut [u64],
@@ -8,7 +7,7 @@ pub(super) fn run(
     on_subpass: &mut impl FnMut(),
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
-    let failures = fill_verify_indexed(buf, parallel, on_activity);
+    let failures = ops::fill_verify_indexed(buf, parallel, on_activity);
     on_subpass();
     failures
 }
