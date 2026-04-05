@@ -99,7 +99,8 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
         &mut sink,
         setup.resolver.as_ref().map(|r| r as &dyn PhysResolver),
         &|_| {},
-    );
+    )
+    .context("pattern execution failed")?;
     let run_elapsed = run_start.elapsed();
 
     let total_failures: usize = results

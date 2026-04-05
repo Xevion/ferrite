@@ -1,12 +1,37 @@
+use std::any::Any;
+use std::panic::{self, AssertUnwindSafe};
 use std::time::Instant;
 
+use anyhow::anyhow;
 use indicatif::{ProgressBar, ProgressStyle};
+use thiserror::Error;
 
 use crate::Failure;
 use crate::edac::{EccDelta, EdacSnapshot};
 use crate::output::OutputSink;
 use crate::pattern::{Pattern, run_pattern};
 use crate::phys::PhysResolver;
+
+/// Extract a human-readable message from a panic payload.
+///
+/// Handles the two common payload types (`&str` literal and `String`) and
+/// falls back to `"unknown panic"` for any other type.
+fn extract_panic_msg(val: &Box<dyn Any + Send>) -> &str {
+    val.downcast_ref::<&str>()
+        .copied()
+        .or_else(|| val.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
+}
+
+/// Unrecoverable error from the test runner — indicates a panic in a pattern
+/// worker that could not be handled gracefully.
+#[derive(Debug, Error)]
+pub enum PatternError {
+    /// A pattern worker panicked. The test buffer may be in a partially-modified
+    /// state and should not be trusted. The inner error carries the panic message.
+    #[error("unrecoverable error in pattern execution: {0}")]
+    Unrecoverable(#[source] anyhow::Error),
+}
 
 /// Result of running a single pattern.
 pub struct PatternResult {
@@ -42,6 +67,11 @@ impl PassResult {
 /// within the buffer, suitable for driving activity heatmaps. Pass `&|_| {}`
 /// if no activity tracking is needed.
 ///
+/// # Errors
+///
+/// Returns [`PatternError::Unrecoverable`] if a pattern worker panics. The
+/// test buffer should be considered corrupted after this error.
+///
 /// # Panics
 ///
 /// Panics if progress bar template formatting fails (indicates a bug in the
@@ -54,7 +84,7 @@ pub fn run(
     sink: &mut OutputSink,
     resolver: Option<&dyn PhysResolver>,
     on_activity: &(dyn Fn(f64) + Sync),
-) -> Vec<PassResult> {
+) -> Result<Vec<PassResult>, PatternError> {
     // Clone the MultiProgress handle upfront so we don't hold an immutable
     // borrow on `sink` across mutable calls. indicatif's MultiProgress is
     // internally Arc-backed, so cloning is cheap.
@@ -104,19 +134,36 @@ pub fn run(
             let start = Instant::now();
 
             let mut sub_pass_count: u64 = 0;
-            let mut failures = run_pattern(
-                pattern,
-                buf,
-                parallel,
-                &mut || {
-                    sub_pass_count += 1;
-                    if let Some(pb) = &inner_pb {
-                        pb.inc(1);
+            // SAFETY: captured state (sub_pass_count, inner_pb, sink) is not
+            // used after an unwind — we return Err immediately on panic.
+            let pattern_result = panic::catch_unwind(AssertUnwindSafe(|| {
+                run_pattern(
+                    pattern,
+                    buf,
+                    parallel,
+                    &mut || {
+                        sub_pass_count += 1;
+                        if let Some(pb) = &inner_pb {
+                            pb.inc(1);
+                        }
+                        sink.emit_progress(pattern, pass + 1, sub_pass_count, sub_passes);
+                    },
+                    on_activity,
+                )
+            }));
+            let mut failures = match pattern_result {
+                Ok(f) => f,
+                Err(panic_val) => {
+                    if let Some(pb) = inner_pb {
+                        pb.finish_and_clear();
                     }
-                    sink.emit_progress(pattern, pass + 1, sub_pass_count, sub_passes);
-                },
-                on_activity,
-            );
+                    pass_pb.finish_and_clear();
+                    return Err(PatternError::Unrecoverable(anyhow!(
+                        "{}",
+                        extract_panic_msg(&panic_val)
+                    )));
+                }
+            };
             let elapsed = start.elapsed();
             let bytes_processed = buf_bytes * 2 * pattern.sub_passes();
 
@@ -171,7 +218,7 @@ pub fn run(
         results.push(pass_result);
     }
 
-    results
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -254,7 +301,8 @@ mod tests {
             &mut sink,
             None,
             &|_| {},
-        );
+        )
+        .unwrap();
         check!(results.len() == 1);
         check!(results[0].pass_number == 1);
         check!(results[0].total_failures() == 0);
@@ -274,7 +322,8 @@ mod tests {
             &mut sink,
             None,
             &|_| {},
-        );
+        )
+        .unwrap();
         check!(results.len() == 3);
         for (i, r) in results.iter().enumerate() {
             check!(r.pass_number == i + 1);
@@ -286,7 +335,7 @@ mod tests {
     fn run_all_patterns_clean() {
         let mut buf = vec![0u64; 1024];
         let mut sink = make_sink();
-        let results = run(&mut buf, Pattern::ALL, 1, false, &mut sink, None, &|_| {});
+        let results = run(&mut buf, Pattern::ALL, 1, false, &mut sink, None, &|_| {}).unwrap();
         assert!(results.len() == 1);
         check!(results[0].pattern_results.len() == Pattern::ALL.len());
         check!(results[0].total_failures() == 0);
@@ -296,7 +345,7 @@ mod tests {
     fn run_empty_patterns() {
         let mut buf = vec![0u64; 1024];
         let mut sink = make_sink();
-        let results = run(&mut buf, &[], 1, false, &mut sink, None, &|_| {});
+        let results = run(&mut buf, &[], 1, false, &mut sink, None, &|_| {}).unwrap();
         check!(results.len() == 1);
         check!(results[0].pattern_results.is_empty());
         check!(results[0].total_failures() == 0);
@@ -306,7 +355,7 @@ mod tests {
     fn run_parallel_clean() {
         let mut buf = vec![0u64; 4096];
         let mut sink = make_sink();
-        let results = run(&mut buf, Pattern::ALL, 1, true, &mut sink, None, &|_| {});
+        let results = run(&mut buf, Pattern::ALL, 1, true, &mut sink, None, &|_| {}).unwrap();
         assert!(results.len() == 1);
         check!(results[0].total_failures() == 0);
     }
@@ -351,8 +400,48 @@ mod tests {
             &mut sink,
             Some(&resolver),
             &|_| {},
-        );
+        )
+        .unwrap();
         check!(results.len() == 1);
         check!(results[0].total_failures() == 0);
+    }
+
+    mod pattern_error {
+        use assert2::assert;
+
+        use super::*;
+
+        #[test]
+        fn pattern_error_display() {
+            let e = PatternError::Unrecoverable(anyhow::anyhow!("worker panicked"));
+            assert!(e.to_string().contains("unrecoverable"));
+            assert!(e.to_string().contains("worker panicked"));
+        }
+    }
+
+    mod extract_panic_msg_tests {
+        use assert2::assert;
+
+        use super::*;
+
+        #[test]
+        fn str_payload() {
+            let val = std::panic::catch_unwind(|| panic!("str payload")).unwrap_err();
+            assert!(extract_panic_msg(&val) == "str payload");
+        }
+
+        #[test]
+        fn string_payload() {
+            let val =
+                std::panic::catch_unwind(|| std::panic::panic_any(String::from("owned string")))
+                    .unwrap_err();
+            assert!(extract_panic_msg(&val) == "owned string");
+        }
+
+        #[test]
+        fn unknown_payload() {
+            let val = std::panic::catch_unwind(|| std::panic::panic_any(42u32)).unwrap_err();
+            assert!(extract_panic_msg(&val) == "unknown panic");
+        }
     }
 }

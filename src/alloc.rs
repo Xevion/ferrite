@@ -16,6 +16,21 @@ pub enum AllocError {
     Mlock(#[source] nix::Error),
 }
 
+impl AllocError {
+    /// Human-readable remediation hint for this error variant, if one exists.
+    /// Callers may display this alongside the error message to guide the user.
+    #[must_use]
+    pub fn help(&self) -> Option<&'static str> {
+        match self {
+            AllocError::Mlock(_) => Some(
+                "run as root, raise the mlock limit (ulimit -l unlimited), \
+                or grant the capability: sudo setcap cap_ipc_lock+ep $(which ferrite)",
+            ),
+            AllocError::Mmap(_) | AllocError::ZeroSize => None,
+        }
+    }
+}
+
 /// A region of anonymous memory that is mmap'd and mlock'd.
 /// Automatically unmaps on drop.
 pub struct LockedRegion {
@@ -187,6 +202,33 @@ impl Drop for CompactionGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod alloc_error_help {
+        use assert2::check;
+
+        use super::*;
+
+        #[test]
+        fn mlock_has_help() {
+            let e = AllocError::Mlock(nix::Error::EPERM);
+            check!(e.help().is_some());
+            let msg = e.help().unwrap();
+            check!(msg.contains("cap_ipc_lock"));
+            check!(msg.contains("setcap"));
+        }
+
+        #[test]
+        fn mmap_no_help() {
+            let e = AllocError::Mmap(nix::Error::ENOMEM);
+            check!(e.help().is_none());
+        }
+
+        #[test]
+        fn zero_size_no_help() {
+            let e = AllocError::ZeroSize;
+            check!(e.help().is_none());
+        }
+    }
 
     mod compaction_guard {
         use std::os::unix::fs::PermissionsExt;

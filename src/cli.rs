@@ -10,10 +10,9 @@ use nix::unistd::geteuid;
 use owo_colors::OwoColorize;
 use tracing::{info, warn};
 
-use ferrite::alloc::CompactionGuard;
-use ferrite::alloc::LockedRegion;
+use ferrite::alloc::{CompactionGuard, LockedRegion};
 use ferrite::dimm::DimmTopology;
-use ferrite::phys::{MapStats, PagemapResolver, PhysResolver};
+use ferrite::phys::{MapStats, PagemapResolver, PhysResolver, PhysResolverError};
 use ferrite::units::UnitSystem;
 
 #[cfg(feature = "tui")]
@@ -172,9 +171,10 @@ pub fn check_privileges(requested_bytes: usize, need_phys: bool) {
                     "{} CAP_SYS_ADMIN not detected -- physical addresses will be unavailable",
                     "warning:".yellow().bold(),
                 );
+                eprintln!("         run as root: {}", "sudo ferrite".bold());
                 eprintln!(
-                    "         run as root for physical address resolution: {}",
-                    "sudo ferrite".bold()
+                    "         or grant the capability: {}",
+                    "sudo setcap cap_sys_admin+ep $(which ferrite)".bold()
                 );
             }
             PrivilegeWarning::MlockLimitExceeded { soft, requested } => {
@@ -231,32 +231,45 @@ pub fn setup_phys(
     if !need_phys {
         return (None, None);
     }
-    match PagemapResolver::new() {
+    let resolver_result = match PagemapResolver::new() {
         Ok(mut r) => match r.build_map(region.as_ptr(), region.len()) {
-            Ok(stats) => {
-                info!(
-                    pages = stats.total_pages,
-                    thp = stats.thp_pages,
-                    huge = stats.huge_pages,
-                    hwpoison = stats.hwpoison_pages,
-                    "physical address map built"
-                );
-
-                std::thread::sleep(Duration::from_millis(100));
-                match r.verify_stability(region.as_ptr(), region.len()) {
-                    Ok(0) => {}
-                    Ok(n) => warn!(changed = n, "pages changed physical address after locking"),
-                    Err(e) => warn!("PFN stability check failed: {e}"),
-                }
-                (Some(r), Some(stats))
-            }
-            Err(e) => {
-                warn!("failed to build page map: {e}");
-                (None, None)
-            }
+            Ok(stats) => Ok((r, stats)),
+            Err(e) => Err(PhysResolverError::from_build(e)),
         },
-        Err(e) => {
-            warn!("pagemap unavailable: {e}");
+        Err(e) => Err(PhysResolverError::from_open(e)),
+    };
+
+    match resolver_result {
+        Ok((r, stats)) => {
+            info!(
+                pages = stats.total_pages,
+                thp = stats.thp_pages,
+                huge = stats.huge_pages,
+                hwpoison = stats.hwpoison_pages,
+                "physical address map built"
+            );
+
+            std::thread::sleep(Duration::from_millis(100));
+            match r.verify_stability(region.as_ptr(), region.len()) {
+                Ok(0) => {}
+                Ok(n) => warn!(changed = n, "pages changed physical address after locking"),
+                Err(e) => warn!("PFN stability check failed: {e}"),
+            }
+            (Some(r), Some(stats))
+        }
+        Err(PhysResolverError::PermissionDenied(e)) => {
+            warn!("{e}");
+            warn!(
+                "run as root or grant the capability: sudo setcap cap_sys_admin+ep $(which ferrite)"
+            );
+            (None, None)
+        }
+        Err(PhysResolverError::Unavailable(e)) => {
+            info!("{e}");
+            (None, None)
+        }
+        Err(PhysResolverError::ReadError(e)) => {
+            warn!("{e}");
             (None, None)
         }
     }
@@ -273,7 +286,15 @@ pub struct TestSetup {
 
 pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
     let need_phys = !cli.no_phys;
-    let region = LockedRegion::new(cli.size).context("failed to allocate and lock memory")?;
+    let region = match LockedRegion::new(cli.size) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(hint) = e.help() {
+                eprintln!("hint: {hint}");
+            }
+            return Err(e).context("failed to allocate and lock memory");
+        }
+    };
     let compaction_guard = if need_phys {
         CompactionGuard::new()
     } else {

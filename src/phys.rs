@@ -66,6 +66,51 @@ pub enum PhysError {
     ReadKpageflags(#[source] io::Error),
 }
 
+/// Higher-level error type for physical address resolution setup.
+///
+/// Callers can match on variants to choose appropriate warning strategies:
+/// `PermissionDenied` is actionable (suggest root or `setcap`),
+/// `Unavailable` is informational (continue without physical addresses),
+/// and `ReadError` is unexpected and worth logging at a higher severity.
+#[derive(Debug, Error)]
+pub enum PhysResolverError {
+    /// `/proc/self/pagemap` could not be opened because the process lacks
+    /// `CAP_SYS_ADMIN` or is not root. Physical address resolution is not
+    /// possible without elevated privileges.
+    #[error("pagemap access denied (requires CAP_SYS_ADMIN or root): {0}")]
+    PermissionDenied(#[source] PhysError),
+    /// `/proc/self/pagemap` is not available — the kernel may not support it,
+    /// or the file is missing on this system. Safe to continue without
+    /// physical addresses.
+    #[error("pagemap unavailable: {0}")]
+    Unavailable(#[source] PhysError),
+    /// An unexpected I/O error occurred while building the page map.
+    /// The region is allocated and locked but physical addresses are unavailable.
+    #[error("failed to build page map: {0}")]
+    ReadError(#[source] PhysError),
+}
+
+impl PhysResolverError {
+    /// Classify a [`PhysError`] from opening `/proc/self/pagemap`.
+    /// Permission-denied errors map to [`Self::PermissionDenied`]; all others
+    /// to [`Self::Unavailable`].
+    #[must_use]
+    pub fn from_open(e: PhysError) -> Self {
+        if let PhysError::OpenPagemap(ref io_err) = e
+            && io_err.kind() == io::ErrorKind::PermissionDenied
+        {
+            return Self::PermissionDenied(e);
+        }
+        Self::Unavailable(e)
+    }
+
+    /// Classify a [`PhysError`] from building the page map (reading pagemap entries).
+    #[must_use]
+    pub fn from_build(e: PhysError) -> Self {
+        Self::ReadError(e)
+    }
+}
+
 // Pagemap entry bit layout (kernel 4.2+, x86_64)
 const PM_PFN_MASK: u64 = (1 << 55) - 1; // bits 0-54
 const PM_PRESENT: u64 = 1 << 63; // bit 63
@@ -349,6 +394,47 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
+
+    mod phys_resolver_error {
+        use assert2::{assert, check};
+
+        use super::*;
+
+        #[test]
+        fn permission_denied_from_open() {
+            let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "EPERM");
+            let phys_err = PhysError::OpenPagemap(io_err);
+            let resolver_err = PhysResolverError::from_open(phys_err);
+            check!(resolver_err.to_string().contains("CAP_SYS_ADMIN"));
+            assert!(let PhysResolverError::PermissionDenied(_) = resolver_err);
+        }
+
+        #[test]
+        fn other_open_error_maps_to_unavailable() {
+            let io_err = io::Error::new(io::ErrorKind::NotFound, "no file");
+            let phys_err = PhysError::OpenPagemap(io_err);
+            let resolver_err = PhysResolverError::from_open(phys_err);
+            check!(resolver_err.to_string().contains("unavailable"));
+            assert!(let PhysResolverError::Unavailable(_) = resolver_err);
+        }
+
+        #[test]
+        fn non_open_error_maps_to_unavailable() {
+            let io_err = io::Error::new(io::ErrorKind::BrokenPipe, "pipe");
+            let phys_err = PhysError::ReadPagemap(io_err);
+            let resolver_err = PhysResolverError::from_open(phys_err);
+            assert!(let PhysResolverError::Unavailable(_) = resolver_err);
+        }
+
+        #[test]
+        fn build_error_maps_to_read_error() {
+            let io_err = io::Error::new(io::ErrorKind::UnexpectedEof, "short read");
+            let phys_err = PhysError::ReadPagemap(io_err);
+            let resolver_err = PhysResolverError::from_build(phys_err);
+            check!(resolver_err.to_string().contains("failed to build"));
+            assert!(let PhysResolverError::ReadError(_) = resolver_err);
+        }
+    }
 
     #[test]
     fn phys_addr_pfn_and_offset() {
