@@ -139,38 +139,44 @@ pub fn run_tui_mode(
     let parallel = !sequential;
 
     let worker_sink = Arc::clone(&sink);
-    let worker = thread::spawn(move || {
-        let buf = setup.region.as_u64_slice_mut();
+    let worker = thread::Builder::new()
+        .name("test-driver".into())
+        .spawn(move || {
+            let buf = setup.region.as_u64_slice_mut();
 
-        thread::scope(|s| {
-            let chunks: Vec<&mut [u64]> = buf.chunks_mut(chunk_words).collect();
-            for (i, chunk) in chunks.into_iter().enumerate() {
-                let tui_region = Arc::clone(&worker_regions[i]);
-                let tx = worker_tx.clone();
-                let quit = Arc::clone(&worker_quit);
-                let resolver_ref = setup
-                    .resolver
-                    .as_ref()
-                    .map(|r| r as &(dyn PhysResolver + Sync));
-                let patterns = &patterns;
-                let sink = &worker_sink;
-                s.spawn(move || {
-                    run_region_worker(
-                        chunk,
-                        patterns,
-                        passes,
-                        parallel,
-                        i,
-                        &tui_region,
-                        &tx,
-                        resolver_ref,
-                        &quit,
-                        sink,
-                    );
-                });
-            }
-        });
-    });
+            thread::scope(|s| {
+                let chunks: Vec<&mut [u64]> = buf.chunks_mut(chunk_words).collect();
+                for (i, chunk) in chunks.into_iter().enumerate() {
+                    let tui_region = Arc::clone(&worker_regions[i]);
+                    let tx = worker_tx.clone();
+                    let quit = Arc::clone(&worker_quit);
+                    let resolver_ref = setup
+                        .resolver
+                        .as_ref()
+                        .map(|r| r as &(dyn PhysResolver + Sync));
+                    let patterns = &patterns;
+                    let sink = &worker_sink;
+                    thread::Builder::new()
+                        .name(format!("region-{i}"))
+                        .spawn_scoped(s, move || {
+                            run_region_worker(
+                                chunk,
+                                patterns,
+                                passes,
+                                parallel,
+                                i,
+                                &tui_region,
+                                &tx,
+                                resolver_ref,
+                                &quit,
+                                sink,
+                            );
+                        })
+                        .expect("failed to spawn region worker thread");
+                }
+            });
+        })
+        .expect("failed to spawn test-driver thread");
 
     let config = TuiConfig::default();
     let run_start = Instant::now();

@@ -1,3 +1,4 @@
 /target
 /coverage
 Justfile.local
+.cargo/config.toml

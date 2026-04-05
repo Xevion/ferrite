@@ -228,25 +228,31 @@ pub fn run_tui(
     // Input reader thread
     let input_tx = tx.clone();
     let input_quit = Arc::clone(quit);
-    thread::spawn(move || {
-        while !input_quit.load(Ordering::Relaxed) {
-            if event::poll(Duration::from_millis(50)).unwrap_or(false)
-                && let Ok(Event::Key(key)) = event::read()
-            {
-                let _ = input_tx.try_send(TuiEvent::Key(key));
+    thread::Builder::new()
+        .name("tui-input".into())
+        .spawn(move || {
+            while !input_quit.load(Ordering::Relaxed) {
+                if event::poll(Duration::from_millis(50)).unwrap_or(false)
+                    && let Ok(Event::Key(key)) = event::read()
+                {
+                    let _ = input_tx.try_send(TuiEvent::Key(key));
+                }
             }
-        }
-    });
+        })
+        .expect("failed to spawn tui-input thread");
 
     // Tick thread
     let tick_tx = tx.clone();
     let tick_quit = Arc::clone(quit);
-    thread::spawn(move || {
-        while !tick_quit.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(100));
-            let _ = tick_tx.try_send(TuiEvent::Tick);
-        }
-    });
+    thread::Builder::new()
+        .name("tui-tick".into())
+        .spawn(move || {
+            while !tick_quit.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(100));
+                let _ = tick_tx.try_send(TuiEvent::Tick);
+            }
+        })
+        .expect("failed to spawn tui-tick thread");
 
     let start_time = Instant::now();
     let mut errors: Vec<TuiError> = Vec::new();
