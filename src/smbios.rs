@@ -29,7 +29,7 @@ pub fn read_dimm_info() -> Option<Vec<DimmInfo>> {
 }
 
 /// Parse all Type 17 structures from a raw SMBIOS table blob.
-fn parse_type17_entries(table: &[u8]) -> Vec<DimmInfo> {
+pub(crate) fn parse_type17_entries(table: &[u8]) -> Vec<DimmInfo> {
     let mut dimms = Vec::new();
     let mut offset = 0;
 
@@ -124,7 +124,7 @@ fn parse_type17_entries(table: &[u8]) -> Vec<DimmInfo> {
 }
 
 /// Find the end of the string table (double NUL terminator).
-fn find_string_table_end(table: &[u8], start: usize) -> usize {
+pub(crate) fn find_string_table_end(table: &[u8], start: usize) -> usize {
     let mut i = start;
     // The string area is a sequence of NUL-terminated strings, terminated by an additional NUL.
     // So we look for \0\0.
@@ -138,7 +138,7 @@ fn find_string_table_end(table: &[u8], start: usize) -> usize {
 }
 
 /// Get the Nth string (1-indexed) from the NUL-terminated string table.
-fn get_string(strings: &[u8], index: u8) -> String {
+pub(crate) fn get_string(strings: &[u8], index: u8) -> String {
     if index == 0 {
         return String::new();
     }
@@ -181,6 +181,8 @@ fn memory_type_name(byte: u8) -> String {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -396,5 +398,33 @@ mod tests {
 
         let dimms = parse_type17_entries(&structure);
         assert!(dimms.is_empty());
+    }
+
+    proptest! {
+        #[test]
+        fn parse_type17_entries_never_panics(
+            bytes in prop::collection::vec(any::<u8>(), 0..=512)
+        ) {
+            let _ = parse_type17_entries(&bytes);
+        }
+
+        #[test]
+        fn find_string_table_end_never_panics(
+            (bytes, start) in prop::collection::vec(any::<u8>(), 0..=256)
+                .prop_flat_map(|v| {
+                    let len = v.len();
+                    (Just(v), 0..=len)
+                })
+        ) {
+            let _ = find_string_table_end(&bytes, start);
+        }
+
+        #[test]
+        fn get_string_never_panics(
+            bytes in prop::collection::vec(any::<u8>(), 0..=128),
+            index: u8,
+        ) {
+            let _ = get_string(&bytes, index);
+        }
     }
 }

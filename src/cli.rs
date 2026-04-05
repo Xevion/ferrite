@@ -235,12 +235,19 @@ pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
 mod tests {
     use proptest::prelude::*;
 
+    use ferrite::units::format_size;
+
     use super::parse_size;
 
     proptest! {
         #[test]
         fn parse_size_never_panics(s in any::<String>()) {
             let _ = parse_size(&s);
+        }
+
+        #[test]
+        fn parse_size_roundtrip(bytes: usize) {
+            prop_assert_eq!(parse_size(&format_size(bytes)), Ok(bytes));
         }
     }
 }

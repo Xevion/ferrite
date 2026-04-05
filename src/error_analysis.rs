@@ -241,6 +241,23 @@ mod tests {
         }
     }
 
+    fn arb_stuck_high_failures() -> impl Strategy<Value = (u64, Vec<crate::Failure>)> {
+        (1u64..=u64::MAX, any::<u64>(), 1usize..=12).prop_map(|(stuck_mask, base, count)| {
+            let expected = base & !stuck_mask;
+            let actual = expected | stuck_mask;
+            let failures = (0..count)
+                .map(|i| {
+                    FailureBuilder::default()
+                        .addr(i * 8)
+                        .expected(expected)
+                        .actual(actual)
+                        .build()
+                })
+                .collect();
+            (stuck_mask, failures)
+        })
+    }
+
     proptest! {
         #[test]
         fn classification_not_no_errors_after_record(
@@ -263,6 +280,58 @@ mod tests {
             }
             let stuck = stats.stuck_high_mask() | stats.stuck_low_mask();
             prop_assert_eq!(stuck & !stats.union_xor_mask, 0u64);
+        }
+
+        #[test]
+        fn record_order_independence(
+            keyed in prop::collection::vec((arb_failure(), any::<u8>()), 1..=12)
+        ) {
+            let mut permuted = keyed.clone();
+            permuted.sort_by_key(|(_, k)| *k);
+
+            let mut fwd = BitErrorStats::new();
+            let mut perm = BitErrorStats::new();
+            for (f, _) in &keyed { fwd.record(f); }
+            for (f, _) in &permuted { perm.record(f); }
+
+            prop_assert_eq!(fwd.total_errors, perm.total_errors);
+            prop_assert_eq!(fwd.union_xor_mask, perm.union_xor_mask);
+            prop_assert_eq!(fwd.bit_positions, perm.bit_positions);
+            prop_assert_eq!(fwd.stuck_high_mask(), perm.stuck_high_mask());
+            prop_assert_eq!(fwd.stuck_low_mask(), perm.stuck_low_mask());
+        }
+
+        #[test]
+        fn stuckbit_positions_in_union_xor(
+            failures in prop::collection::vec(arb_failure(), 1..=20)
+        ) {
+            let mut stats = BitErrorStats::new();
+            for f in &failures {
+                stats.record(f);
+            }
+            if let ErrorClassification::StuckBit { positions } = stats.classification() {
+                for &pos in &positions {
+                    prop_assert!(stats.union_xor_mask & (1u64 << pos) != 0);
+                }
+            }
+        }
+
+        #[test]
+        fn stuckbit_positions_exhaustive(
+            (stuck_mask, failures) in arb_stuck_high_failures()
+        ) {
+            let mut stats = BitErrorStats::new();
+            for f in &failures {
+                stats.record(f);
+            }
+            let expected_positions: Vec<u8> =
+                (0u8..64).filter(|&b| stuck_mask & (1u64 << b) != 0).collect();
+            match stats.classification() {
+                ErrorClassification::StuckBit { positions } => {
+                    prop_assert_eq!(positions, expected_positions);
+                }
+                other => prop_assert!(false, "expected StuckBit, got {other:?}"),
+            }
         }
     }
 }

@@ -1,5 +1,25 @@
 use std::fmt;
 
+/// Format a byte count as a size string reversible by `parse_size`.
+///
+/// Picks the largest exact unit: `G` if divisible by 1 GiB, `M` if divisible
+/// by 1 MiB, `K` if divisible by 1 KiB, plain decimal otherwise.
+#[must_use]
+pub fn format_size(bytes: usize) -> String {
+    const GIB: usize = 1024 * 1024 * 1024;
+    const MIB: usize = 1024 * 1024;
+    const KIB: usize = 1024;
+    if bytes.is_multiple_of(GIB) {
+        format!("{}G", bytes / GIB)
+    } else if bytes.is_multiple_of(MIB) {
+        format!("{}M", bytes / MIB)
+    } else if bytes.is_multiple_of(KIB) {
+        format!("{}K", bytes / KIB)
+    } else {
+        format!("{bytes}")
+    }
+}
+
 /// Whether to display sizes in binary (KiB, MiB, GiB) or decimal (KB, MB, GB) units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum UnitSystem {
@@ -99,6 +119,8 @@ impl fmt::Display for Rate {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -156,5 +178,19 @@ mod tests {
         let size = Size::new(1536.0 * 1024.0, UnitSystem::Binary);
         assert_eq!(format!("{size:.1}"), "1.5 MiB");
         assert_eq!(format!("{size:.3}"), "1.500 MiB");
+    }
+
+    proptest! {
+        #[test]
+        fn size_display_never_panics(bytes: f64) {
+            let _ = Size::new(bytes, UnitSystem::Binary).to_string();
+            let _ = Size::new(bytes, UnitSystem::Decimal).to_string();
+        }
+
+        #[test]
+        fn rate_display_never_panics(bytes_per_sec: f64) {
+            let _ = Rate::new(bytes_per_sec, UnitSystem::Binary).to_string();
+            let _ = Rate::new(bytes_per_sec, UnitSystem::Decimal).to_string();
+        }
     }
 }
