@@ -28,7 +28,7 @@ use super::{RegionState, TuiConfig, TuiError, TuiEvent, TuiMakeWriter};
 /// | Mode              | TUI layer           | stderr layer          |
 /// |-------------------|---------------------|-----------------------|
 /// | TUI + JSON        | human ANSI -> TUI    | json -> stderr         |
-/// | TUI + no JSON     | human ANSI -> TUI    | human no-ANSI -> stderr|
+/// | TUI + no JSON     | human ANSI -> TUI    | (none)                 |
 /// | no TUI + JSON     | None                | json -> stderr         |
 /// | no TUI + no JSON  | None                | human -> stderr        |
 pub fn setup_tracing(json_mode: bool, tui_writer: Option<TuiMakeWriter>) {
@@ -64,17 +64,10 @@ pub fn setup_tracing(json_mode: bool, tui_writer: Option<TuiMakeWriter>) {
     let stderr_human_headless = (!json_mode && !has_tui)
         .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
 
-    let stderr_human_tui = (!json_mode && has_tui).then(|| {
-        tracing_subscriber::fmt::layer()
-            .with_ansi(false)
-            .with_writer(std::io::stderr)
-    });
-
     tracing_subscriber::registry()
         .with(tui_layer)
         .with(stderr_json)
         .with(stderr_human_headless)
-        .with(stderr_human_tui)
         .init();
 }
 

@@ -8,6 +8,7 @@ pub mod run;
 pub use activity::ActivityBuffer;
 pub use render::SymbolSet;
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -24,6 +25,24 @@ use tracing::info;
 use tracing_subscriber::fmt::MakeWriter;
 
 use render::render_heatmap;
+
+/// Outcome of the TUI event loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiOutcome {
+    /// User pressed 'q', Esc, or Ctrl+C.
+    Quit,
+    /// All regions finished testing.
+    AllComplete,
+    /// Event channel disconnected (all senders dropped).
+    Disconnected,
+}
+
+/// Result returned by [`run_event_loop`], capturing loop state for the caller.
+pub struct TuiLoopResult {
+    pub outcome: TuiOutcome,
+    pub errors: Vec<TuiError>,
+    pub verbose: bool,
+}
 
 /// A test error record for TUI display. String-based so it's decoupled from
 /// the main crate's `Failure` type.
@@ -205,15 +224,149 @@ impl Drop for TuiWriter {
     }
 }
 
-/// Run the TUI event loop. Blocks until the user quits or all regions complete.
+/// Core event loop: processes events from `rx`, renders to `terminal`.
 ///
-/// The caller should:
-/// 1. Create a channel: `mpsc::sync_channel::<TuiEvent>(256)`
-/// 2. Spawn worker threads that send `TuiEvent::Error` and `TuiEvent::RegionDone`
-/// 3. Optionally set up tracing with `TuiLogLayer` using the sender
-/// 4. Call this function with both ends of the channel and a shared quit flag
+/// Generic over the backend so tests can use `TestBackend`. Returns a
+/// [`TuiLoopResult`] with the exit reason, collected errors, and verbose state.
 ///
-/// `run_tui` spawns internal threads for keyboard input and tick events.
+/// # Errors
+///
+/// Returns an error if drawing to the terminal fails.
+#[allow(clippy::too_many_lines)]
+pub fn run_event_loop<B>(
+    terminal: &mut Terminal<B>,
+    config: &TuiConfig,
+    regions: &[Arc<RegionState>],
+    rx: &mpsc::Receiver<TuiEvent>,
+) -> anyhow::Result<TuiLoopResult>
+where
+    B: ratatui::backend::Backend,
+    B::Error: Send + Sync + 'static,
+{
+    let start_time = Instant::now();
+    let mut errors: Vec<TuiError> = Vec::new();
+    // Pending log lines, drained once per tick to bound insert_before calls.
+    let mut log_buf: VecDeque<ratatui::text::Text<'static>> = VecDeque::with_capacity(32);
+    let mut regions_done = 0;
+    let mut verbose = false;
+    let total_regions = regions.len();
+
+    // Establish the viewport before processing any events -- insert_before
+    // misbehaves if called before the first draw.
+    terminal.draw(|frame| {
+        render_heatmap(
+            frame,
+            regions,
+            &errors,
+            start_time.elapsed(),
+            verbose,
+            config.symbols,
+        );
+    })?;
+
+    let outcome = loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(TuiEvent::Key(key)) => {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    info!("interrupted");
+                    crate::shutdown::escalate();
+                    break TuiOutcome::Quit;
+                }
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        info!("user requested quit");
+                        crate::shutdown::request_quit(crate::shutdown::QuitReason::UserQuit);
+                        break TuiOutcome::Quit;
+                    }
+                    KeyCode::Char('p') => {
+                        let any_paused = regions.iter().any(|r| r.paused.load(Ordering::Relaxed));
+                        for r in regions {
+                            r.paused.store(!any_paused, Ordering::Relaxed);
+                        }
+                        if any_paused {
+                            info!("resumed all regions");
+                        } else {
+                            info!("paused all regions");
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        info!("skip requested (would skip current pattern)");
+                    }
+                    KeyCode::Char('v') => {
+                        verbose = !verbose;
+                        info!(verbose, "toggled verbosity");
+                    }
+                    _ => {}
+                }
+            }
+            Ok(TuiEvent::Log(msg)) => {
+                if let Ok(text) = ansi_to_tui::IntoText::into_text(&msg) {
+                    if log_buf.len() >= 32 {
+                        log_buf.pop_front();
+                    }
+                    log_buf.push_back(text);
+                }
+            }
+            Ok(TuiEvent::Error(err)) => {
+                errors.push(err);
+            }
+            Ok(TuiEvent::RegionDone(idx)) => {
+                regions_done += 1;
+                let region = regions.get(idx).with_context(|| {
+                    format!("RegionDone({idx}) out of bounds (len={})", regions.len())
+                })?;
+                info!(region = region.name.as_str(), "region complete");
+                if regions_done >= total_regions {
+                    info!("all regions complete");
+                    crate::shutdown::request_quit(crate::shutdown::QuitReason::UserQuit);
+                    break TuiOutcome::AllComplete;
+                }
+            }
+            Ok(TuiEvent::Tick) | Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !log_buf.is_empty() {
+                    let lines: Vec<_> = log_buf.drain(..).collect();
+                    terminal.insert_before(lines.len() as u16, |buf| {
+                        for (i, text) in lines.into_iter().enumerate() {
+                            let area = ratatui::layout::Rect {
+                                y: buf.area.y + i as u16,
+                                height: 1,
+                                ..buf.area
+                            };
+                            Paragraph::new(text).render(area, buf);
+                        }
+                    })?;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break TuiOutcome::Disconnected,
+        }
+
+        let elapsed = start_time.elapsed();
+        terminal.draw(|frame| {
+            render_heatmap(frame, regions, &errors, elapsed, verbose, config.symbols);
+        })?;
+    };
+
+    // Final render to capture end state.
+    let elapsed = start_time.elapsed();
+    terminal.draw(|frame| {
+        render_heatmap(frame, regions, &errors, elapsed, verbose, config.symbols);
+    })?;
+
+    Ok(TuiLoopResult {
+        outcome,
+        errors,
+        verbose,
+    })
+}
+
+/// Run the TUI event loop with a real terminal. Blocks until the user quits
+/// or all regions complete.
+///
+/// This is the production entry point: it sets up raw mode, an inline viewport,
+/// and spawns input/tick threads, then delegates to [`run_event_loop`].
 ///
 /// # Errors
 ///
@@ -223,7 +376,6 @@ impl Drop for TuiWriter {
 /// # Panics
 ///
 /// Panics if the input or tick thread cannot be spawned.
-#[allow(clippy::too_many_lines)]
 pub fn run_tui(
     config: &TuiConfig,
     regions: &[Arc<RegionState>],
@@ -269,96 +421,10 @@ pub fn run_tui(
         .expect("failed to spawn tui-tick thread");
 
     let start_time = Instant::now();
-    let mut errors: Vec<TuiError> = Vec::new();
-    let mut regions_done = 0;
-    let mut verbose = false;
-    let total_regions = regions.len();
+    run_event_loop(&mut terminal, config, regions, rx)?;
 
-    // Establish the inline viewport before processing any events -- insert_before
-    // misbehaves if called before the first draw.
-    terminal.draw(|frame| {
-        render_heatmap(
-            frame,
-            regions,
-            &errors,
-            start_time.elapsed(),
-            verbose,
-            config.symbols,
-        );
-    })?;
-
-    loop {
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(TuiEvent::Key(key)) => {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    info!("interrupted");
-                    crate::shutdown::escalate();
-                    break;
-                }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        info!("user requested quit");
-                        crate::shutdown::request_quit(crate::shutdown::QuitReason::UserQuit);
-                        break;
-                    }
-                    KeyCode::Char('p') => {
-                        let any_paused = regions.iter().any(|r| r.paused.load(Ordering::Relaxed));
-                        for r in regions {
-                            r.paused.store(!any_paused, Ordering::Relaxed);
-                        }
-                        if any_paused {
-                            info!("resumed all regions");
-                        } else {
-                            info!("paused all regions");
-                        }
-                    }
-                    KeyCode::Char('s') => {
-                        info!("skip requested (would skip current pattern)");
-                    }
-                    KeyCode::Char('v') => {
-                        verbose = !verbose;
-                        info!(verbose, "toggled verbosity");
-                    }
-                    _ => {}
-                }
-            }
-            Ok(TuiEvent::Log(msg)) => {
-                if let Ok(text) = ansi_to_tui::IntoText::into_text(&msg) {
-                    terminal.insert_before(1, |buf| {
-                        Paragraph::new(text).render(buf.area, buf);
-                    })?;
-                }
-            }
-            Ok(TuiEvent::Error(err)) => {
-                errors.push(err);
-            }
-            Ok(TuiEvent::RegionDone(idx)) => {
-                regions_done += 1;
-                info!(region = regions[idx].name.as_str(), "region complete");
-                if regions_done >= total_regions {
-                    info!("all regions complete");
-                    crate::shutdown::request_quit(crate::shutdown::QuitReason::UserQuit);
-                    break;
-                }
-            }
-            Ok(TuiEvent::Tick) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-
-        let elapsed = start_time.elapsed();
-        terminal.draw(|frame| {
-            render_heatmap(frame, regions, &errors, elapsed, verbose, config.symbols);
-        })?;
-    }
-
+    // Render summary line above the viewport.
     let elapsed = start_time.elapsed();
-    terminal.draw(|frame| {
-        render_heatmap(frame, regions, &errors, elapsed, verbose, config.symbols);
-    })?;
-
     let total_errors: usize = regions
         .iter()
         .map(|r| r.error_count.load(Ordering::Relaxed))
@@ -514,5 +580,474 @@ mod tests {
             rx.try_recv().is_err(),
             "empty buffer should not send an event"
         );
+    }
+
+    mod event_loop {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::sync::mpsc;
+
+        use assert2::{assert, check};
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        use ratatui::backend::TestBackend;
+        use ratatui::{Terminal, TerminalOptions, Viewport};
+        use serial_test::serial;
+
+        use super::super::*;
+        use crate::shutdown;
+
+        fn make_terminal(w: u16, h: u16) -> Terminal<TestBackend> {
+            Terminal::with_options(
+                TestBackend::new(w, h),
+                TerminalOptions {
+                    viewport: Viewport::Inline(h),
+                },
+            )
+            .unwrap()
+        }
+
+        fn make_regions(n: usize, patterns: &[&str]) -> Vec<Arc<RegionState>> {
+            let names: Vec<String> = patterns.iter().map(|s| (*s).to_string()).collect();
+            (0..n)
+                .map(|i| {
+                    Arc::new(RegionState::new(
+                        format!("r{i}"),
+                        8 * 1024 * 1024,
+                        names.clone(),
+                    ))
+                })
+                .collect()
+        }
+
+        fn press(code: KeyCode) -> TuiEvent {
+            TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+        }
+
+        fn press_modified(code: KeyCode, modifiers: KeyModifiers) -> TuiEvent {
+            TuiEvent::Key(KeyEvent::new(code, modifiers))
+        }
+
+        fn release(code: KeyCode) -> TuiEvent {
+            TuiEvent::Key(KeyEvent {
+                code,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Release,
+                state: KeyEventState::NONE,
+            })
+        }
+
+        fn make_error(region_idx: usize) -> TuiEvent {
+            TuiEvent::Error(TuiError {
+                region_idx,
+                region_name: format!("r{region_idx}"),
+                address: 0xdead_0000 + region_idx as u64,
+                expected: 0xFF,
+                actual: 0xFE,
+                bit_position: 0,
+                pattern: "solid".into(),
+                progress_fraction: 0.5,
+            })
+        }
+
+        fn buf_text(term: &Terminal<TestBackend>) -> String {
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect()
+        }
+
+        fn config() -> TuiConfig {
+            TuiConfig::default()
+        }
+
+        #[test]
+        #[serial]
+        fn exits_on_channel_disconnect() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            drop(tx);
+            let regions = make_regions(2, &["solid"]);
+            let mut term = make_terminal(80, 15);
+
+            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            check!(result.outcome == TuiOutcome::Disconnected);
+        }
+
+        #[test]
+        #[serial]
+        fn exits_on_quit_key() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(2, &["solid", "walk"]);
+            let mut term = make_terminal(80, 15);
+
+            tx.send(press(KeyCode::Char('q'))).unwrap();
+            drop(tx);
+
+            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            check!(result.outcome == TuiOutcome::Quit);
+        }
+
+        #[test]
+        #[serial]
+        fn exits_on_esc_key() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(1, &["solid"]);
+            let mut term = make_terminal(80, 15);
+
+            tx.send(press(KeyCode::Esc)).unwrap();
+            drop(tx);
+
+            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            check!(result.outcome == TuiOutcome::Quit);
+        }
+
+        #[test]
+        #[serial]
+        fn exits_on_ctrl_c() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(1, &["solid"]);
+            let mut term = make_terminal(80, 15);
+
+            tx.send(press_modified(KeyCode::Char('c'), KeyModifiers::CONTROL))
+                .unwrap();
+            drop(tx);
+
+            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            check!(result.outcome == TuiOutcome::Quit);
+        }
+
+        #[test]
+        #[serial]
+        fn exits_on_all_regions_done() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(3, &["solid"]);
+            let mut term = make_terminal(80, 18);
+
+            tx.send(TuiEvent::RegionDone(0)).unwrap();
+            tx.send(TuiEvent::RegionDone(1)).unwrap();
+            tx.send(TuiEvent::RegionDone(2)).unwrap();
+            drop(tx);
+
+            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            check!(result.outcome == TuiOutcome::AllComplete);
+        }
+
+        #[test]
+        #[serial]
+        fn region_done_partial_continues() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(2, &["solid"]);
+            let mut term = make_terminal(80, 15);
+
+            // Only 1 of 2 regions done — loop should continue until disconnect.
+            tx.send(TuiEvent::RegionDone(0)).unwrap();
+            drop(tx);
+
+            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            check!(result.outcome == TuiOutcome::Disconnected);
+        }
+
+        #[test]
+        #[serial]
+        fn key_release_ignored() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(1, &["solid"]);
+            let mut term = make_terminal(80, 15);
+
+            // Release 'q' should not cause a quit.
+            tx.send(release(KeyCode::Char('q'))).unwrap();
+            drop(tx);
+
+            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            check!(result.outcome == TuiOutcome::Disconnected);
+        }
+
+        #[test]
+        #[serial]
+        fn pause_toggles_region_state() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(2, &["solid"]);
+            let mut term = make_terminal(80, 15);
+
+            // Press 'p' to pause, then disconnect.
+            tx.send(press(KeyCode::Char('p'))).unwrap();
+            drop(tx);
+
+            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            for r in &regions {
+                assert!(r.paused.load(Ordering::Relaxed));
+            }
+        }
+
+        #[test]
+        #[serial]
+        fn unpause_toggles_back() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(2, &["solid"]);
+            let mut term = make_terminal(80, 15);
+
+            // Two presses: pause then unpause.
+            tx.send(press(KeyCode::Char('p'))).unwrap();
+            tx.send(press(KeyCode::Char('p'))).unwrap();
+            drop(tx);
+
+            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            for r in &regions {
+                assert!(!r.paused.load(Ordering::Relaxed));
+            }
+        }
+
+        #[test]
+        #[serial]
+        fn verbose_toggle() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(1, &["solid"]);
+            let mut term = make_terminal(80, 15);
+
+            tx.send(press(KeyCode::Char('v'))).unwrap();
+            drop(tx);
+
+            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            assert!(result.verbose);
+        }
+
+        #[test]
+        #[serial]
+        fn verbose_double_toggle_off() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(1, &["solid"]);
+            let mut term = make_terminal(80, 15);
+
+            tx.send(press(KeyCode::Char('v'))).unwrap();
+            tx.send(press(KeyCode::Char('v'))).unwrap();
+            drop(tx);
+
+            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            assert!(!result.verbose);
+        }
+
+        #[test]
+        #[serial]
+        fn error_events_collected() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(2, &["solid"]);
+            let mut term = make_terminal(80, 15);
+
+            tx.send(make_error(0)).unwrap();
+            tx.send(make_error(1)).unwrap();
+            tx.send(make_error(0)).unwrap();
+            drop(tx);
+
+            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            check!(result.errors.len() == 3);
+            check!(result.errors[0].region_idx == 0);
+            check!(result.errors[1].region_idx == 1);
+            check!(result.errors[2].region_idx == 0);
+        }
+
+        #[test]
+        #[serial]
+        fn progress_renders_correctly() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(1, &["solid", "walk"]);
+            regions[0].progress_bp.store(5000, Ordering::Relaxed);
+            let mut term = make_terminal(80, 15);
+
+            // Single tick to trigger a render, then quit.
+            tx.send(TuiEvent::Tick).unwrap();
+            tx.send(press(KeyCode::Char('q'))).unwrap();
+            drop(tx);
+
+            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let text = buf_text(&term);
+            assert!(text.contains("50.0%"), "expected '50.0%' in: {text}");
+        }
+
+        #[test]
+        #[serial]
+        fn pattern_name_renders() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(1, &["solid", "walk"]);
+            regions[0].set_pattern(1); // "walk"
+            let mut term = make_terminal(80, 15);
+
+            tx.send(TuiEvent::Tick).unwrap();
+            tx.send(press(KeyCode::Char('q'))).unwrap();
+            drop(tx);
+
+            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let text = buf_text(&term);
+            assert!(text.contains("walk"), "expected 'walk' in: {text}");
+        }
+
+        #[test]
+        #[serial]
+        fn error_table_renders() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(1, &["solid"]);
+            regions[0].record_error();
+            let mut term = make_terminal(120, 15);
+
+            tx.send(make_error(0)).unwrap();
+            tx.send(TuiEvent::Tick).unwrap();
+            tx.send(press(KeyCode::Char('q'))).unwrap();
+            drop(tx);
+
+            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let text = buf_text(&term);
+            assert!(text.contains("r0"), "expected region name in error table");
+            assert!(
+                text.contains("solid"),
+                "expected pattern name in error table"
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn header_shows_region_count() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(3, &["solid"]);
+            let mut term = make_terminal(80, 18);
+
+            tx.send(TuiEvent::Tick).unwrap();
+            tx.send(press(KeyCode::Char('q'))).unwrap();
+            drop(tx);
+
+            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let text = buf_text(&term);
+            assert!(
+                text.contains("3 regions"),
+                "expected '3 regions' in header: {text}"
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn header_shows_error_count() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(1, &["solid"]);
+            regions[0].error_count.store(7, Ordering::Relaxed);
+            let mut term = make_terminal(80, 15);
+
+            tx.send(TuiEvent::Tick).unwrap();
+            tx.send(press(KeyCode::Char('q'))).unwrap();
+            drop(tx);
+
+            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let text = buf_text(&term);
+            assert!(
+                text.contains("7 errors"),
+                "expected '7 errors' in header: {text}"
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn controls_bar_present() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            let regions = make_regions(1, &["solid"]);
+            let mut term = make_terminal(80, 15);
+
+            tx.send(press(KeyCode::Char('q'))).unwrap();
+            drop(tx);
+
+            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let text = buf_text(&term);
+            assert!(text.contains("ause"), "expected pause control");
+            assert!(text.contains("uit"), "expected quit control");
+        }
+
+        #[test]
+        #[serial]
+        fn log_events_dont_corrupt_viewport() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(64);
+            let regions = make_regions(2, &["solid", "walk"]);
+            regions[0].progress_bp.store(5000, Ordering::Relaxed);
+            regions[1].progress_bp.store(7500, Ordering::Relaxed);
+            let mut term = make_terminal(100, 18);
+
+            // Flood with log events interleaved with ticks.
+            for i in 0..20 {
+                tx.send(TuiEvent::Log(format!(
+                    "2026-01-01 INFO region-0: test log line {i}"
+                )))
+                .unwrap();
+                if i % 5 == 0 {
+                    tx.send(TuiEvent::Tick).unwrap();
+                }
+            }
+            tx.send(press(KeyCode::Char('q'))).unwrap();
+            drop(tx);
+
+            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let text = buf_text(&term);
+
+            // The viewport should contain the heatmap content, not log fragments.
+            assert!(text.contains("ferrite"), "header should be present");
+            assert!(
+                text.contains("50.0%"),
+                "region 0 progress should render cleanly"
+            );
+            assert!(
+                text.contains("75.0%"),
+                "region 1 progress should render cleanly"
+            );
+            // Log text should NOT appear in the rendered viewport buffer.
+            assert!(
+                !text.contains("test log line"),
+                "log text leaked into viewport: {text}"
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn rapid_mixed_events() {
+            shutdown::reset();
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(128);
+            let regions = make_regions(2, &["solid"]);
+            let mut term = make_terminal(100, 18);
+
+            // Burst of mixed events.
+            for i in 0..10 {
+                tx.send(TuiEvent::Log(format!("log line {i}"))).unwrap();
+                tx.send(make_error(i % 2)).unwrap();
+                tx.send(TuiEvent::Tick).unwrap();
+            }
+            tx.send(press(KeyCode::Char('q'))).unwrap();
+            drop(tx);
+
+            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            check!(result.errors.len() == 10);
+
+            let text = buf_text(&term);
+            assert!(
+                text.contains("ferrite"),
+                "header should survive event burst"
+            );
+            assert!(
+                !text.contains("log line"),
+                "log text leaked into viewport after burst"
+            );
+        }
     }
 }
