@@ -1,0 +1,5 @@
+coverage:
+  ignore:
+    - "src/main.rs"
+    - "src/tui/mod.rs"
+    - "src/tui/run.rs"

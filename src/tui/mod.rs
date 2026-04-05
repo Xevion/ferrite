@@ -1,3 +1,5 @@
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 pub mod activity;
 pub mod palette;
 pub mod render;

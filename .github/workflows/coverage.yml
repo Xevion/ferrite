@@ -36,12 +36,16 @@ jobs:
 
       - name: Run tests with coverage
         run: cargo llvm-cov nextest --no-fail-fast --hide-progress-bar --failure-output final
+        env:
+          RUSTFLAGS: --cfg coverage_nightly
 
       - name: Generate coverage reports
         run: |
           mkdir -p coverage
           cargo llvm-cov report --html --output-dir coverage/html
           cargo llvm-cov report --lcov --output-path coverage/lcov.info
+        env:
+          RUSTFLAGS: --cfg coverage_nightly
 
       - name: Upload HTML coverage report
         uses: actions/upload-artifact@v7

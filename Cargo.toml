@@ -29,6 +29,9 @@ default = ["tui"]
 bench = []
 tui = ["dep:ratatui", "dep:crossterm", "dep:tracing-subscriber", "dep:ansi-to-tui"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 
