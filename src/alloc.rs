@@ -124,6 +124,7 @@ impl Drop for LockedRegion {
 }
 
 use std::fs;
+use std::path::{Path, PathBuf};
 
 const SYSCTL_PATH: &str = "/proc/sys/vm/compact_unevictable_allowed";
 
@@ -133,6 +134,7 @@ const SYSCTL_PATH: &str = "/proc/sys/vm/compact_unevictable_allowed";
 /// and restores the original value on drop. This prevents the kernel from
 /// migrating mlocked pages during the test, keeping physical addresses stable.
 pub struct CompactionGuard {
+    path: PathBuf,
     original: String,
     changed: bool,
 }
@@ -142,15 +144,24 @@ impl CompactionGuard {
     /// cannot be read or written (not root, file missing, etc.).
     #[must_use]
     pub fn new() -> Option<Self> {
-        let original = fs::read_to_string(SYSCTL_PATH).ok()?.trim().to_owned();
+        Self::with_path(Path::new(SYSCTL_PATH))
+    }
+
+    /// Disable compaction via an arbitrary sysctl path.
+    /// Useful for testing with a temporary file.
+    #[must_use]
+    pub(crate) fn with_path(path: &Path) -> Option<Self> {
+        let original = fs::read_to_string(path).ok()?.trim().to_owned();
         if original == "0" {
             return Some(Self {
+                path: path.to_owned(),
                 original,
                 changed: false,
             });
         }
-        fs::write(SYSCTL_PATH, "0\n").ok()?;
+        fs::write(path, "0\n").ok()?;
         Some(Self {
+            path: path.to_owned(),
             original,
             changed: true,
         })
@@ -160,7 +171,75 @@ impl CompactionGuard {
 impl Drop for CompactionGuard {
     fn drop(&mut self) {
         if self.changed {
-            let _ = fs::write(SYSCTL_PATH, format!("{}\n", self.original));
+            let _ = fs::write(&self.path, format!("{}\n", self.original));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod compaction_guard {
+        use std::os::unix::fs::PermissionsExt;
+
+        use assert2::{assert, check};
+        use tempfile::NamedTempFile;
+
+        use super::*;
+
+        fn write_tempfile(content: &str) -> NamedTempFile {
+            let f = NamedTempFile::new().unwrap();
+            fs::write(f.path(), content).unwrap();
+            f
+        }
+
+        #[test]
+        fn already_zero_does_not_write() {
+            let f = write_tempfile("0\n");
+
+            assert!(let Some(guard) = CompactionGuard::with_path(f.path()));
+            check!(!guard.changed);
+            check!(guard.original == "0");
+            drop(guard);
+
+            let content = fs::read_to_string(f.path()).unwrap();
+            check!(content == "0\n");
+        }
+
+        #[test]
+        fn nonzero_writes_zero_and_restores() {
+            let f = write_tempfile("1\n");
+
+            {
+                assert!(let Some(guard) = CompactionGuard::with_path(f.path()));
+                check!(guard.changed);
+                check!(guard.original == "1");
+
+                let content = fs::read_to_string(f.path()).unwrap();
+                check!(content == "0\n");
+            }
+
+            let restored = fs::read_to_string(f.path()).unwrap();
+            check!(restored == "1\n");
+        }
+
+        #[test]
+        fn missing_path_returns_none() {
+            let guard = CompactionGuard::with_path(Path::new("/tmp/ferrite_nonexistent_sysctl"));
+            assert!(guard.is_none());
+        }
+
+        #[test]
+        fn read_only_path_returns_none() {
+            let f = write_tempfile("1\n");
+
+            // Make read-only (owner r--, no write)
+            let perms = std::fs::Permissions::from_mode(0o444);
+            fs::set_permissions(f.path(), perms).unwrap();
+
+            let guard = CompactionGuard::with_path(f.path());
+            assert!(guard.is_none());
         }
     }
 }

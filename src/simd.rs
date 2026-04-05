@@ -229,6 +229,8 @@ pub(crate) unsafe fn verify_indexed_avx512(
 #[cfg(test)]
 #[cfg(target_arch = "x86_64")]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
 
     #[test]
@@ -265,10 +267,10 @@ mod tests {
         unsafe { fill_nt(&mut buf, pattern) };
         buf[42] = 0xBBBB_BBBB_BBBB_BBBBu64;
         let failures = unsafe { verify_avx512(&buf, pattern, buf.as_ptr() as usize, 0) };
-        assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].word_index, 42);
-        assert_eq!(failures[0].actual, 0xBBBB_BBBB_BBBB_BBBBu64);
-        assert_eq!(failures[0].expected, pattern);
+        assert!(failures.len() == 1);
+        check!(failures[0].word_index == 42);
+        check!(failures[0].actual == 0xBBBB_BBBB_BBBB_BBBBu64);
+        check!(failures[0].expected == pattern);
     }
 
     #[test]
@@ -280,9 +282,9 @@ mod tests {
         unsafe { fill_nt_indexed(&mut buf, 0) };
         buf[10] = 0xFFFF;
         let failures = unsafe { verify_indexed_avx512(&buf, buf.as_ptr() as usize, 0) };
-        assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].word_index, 10);
-        assert_eq!(failures[0].expected, 10);
+        assert!(failures.len() == 1);
+        check!(failures[0].word_index == 10);
+        check!(failures[0].expected == 10);
     }
 
     #[test]
@@ -294,7 +296,7 @@ mod tests {
         let start = 100;
         unsafe { fill_nt_indexed(&mut buf, start) };
         for (i, &val) in buf.iter().enumerate() {
-            assert_eq!(val, (start + i) as u64, "mismatch at index {i}");
+            check!(val == (start + i) as u64, "mismatch at index {i}");
         }
     }
 
@@ -308,7 +310,129 @@ mod tests {
         let pattern = 0x1234_5678_9ABC_DEF0u64;
         unsafe { fill_nt(&mut buf, pattern) };
         for (i, &val) in buf.iter().enumerate() {
-            assert_eq!(val, pattern, "mismatch at index {i}");
+            check!(val == pattern, "mismatch at index {i}");
         }
+    }
+
+    #[test]
+    fn verify_multiple_corruptions_different_lanes() {
+        if !avx512_available() {
+            return;
+        }
+        let mut buf = vec![0u64; 256];
+        let pattern = 0xAAAA_AAAA_AAAA_AAAAu64;
+        unsafe { fill_nt(&mut buf, pattern) };
+        // Corrupt words in different 8-word SIMD lanes
+        buf[3] = 0; // lane 0, word 3
+        buf[12] = 0; // lane 1, word 4
+        buf[255] = 0; // last word
+        let failures = unsafe { verify_avx512(&buf, pattern, buf.as_ptr() as usize, 0) };
+        assert!(failures.len() == 3);
+        check!(failures[0].word_index == 3);
+        check!(failures[1].word_index == 12);
+        check!(failures[2].word_index == 255);
+    }
+
+    #[test]
+    fn verify_corruption_at_lane_boundaries() {
+        if !avx512_available() {
+            return;
+        }
+        let mut buf = vec![0u64; 32];
+        let pattern = 0xFFFF_FFFF_FFFF_FFFFu64;
+        unsafe { fill_nt(&mut buf, pattern) };
+        // First and last word of first SIMD lane
+        buf[0] = 0;
+        buf[7] = 0;
+        // First word of second lane
+        buf[8] = 0;
+        let failures = unsafe { verify_avx512(&buf, pattern, buf.as_ptr() as usize, 0) };
+        assert!(failures.len() == 3);
+        check!(failures[0].word_index == 0);
+        check!(failures[1].word_index == 7);
+        check!(failures[2].word_index == 8);
+    }
+
+    #[test]
+    fn verify_indexed_multiple_corruptions() {
+        if !avx512_available() {
+            return;
+        }
+        let mut buf = vec![0u64; 64];
+        unsafe { fill_nt_indexed(&mut buf, 0) };
+        buf[0] = 999;
+        buf[63] = 999;
+        let failures = unsafe { verify_indexed_avx512(&buf, buf.as_ptr() as usize, 0) };
+        assert!(failures.len() == 2);
+        check!(failures[0].word_index == 0);
+        check!(failures[0].expected == 0);
+        check!(failures[1].word_index == 63);
+        check!(failures[1].expected == 63);
+    }
+
+    #[test]
+    fn fill_nt_indexed_scalar_tail() {
+        if !avx512_available() {
+            return;
+        }
+        let mut buf = vec![0u64; 11];
+        unsafe { fill_nt_indexed(&mut buf, 50) };
+        for (i, &val) in buf.iter().enumerate() {
+            check!(val == (50 + i) as u64, "mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn verify_scalar_tail_corruption() {
+        if !avx512_available() {
+            return;
+        }
+        // 11 words: 8 in SIMD lane + 3 in scalar tail
+        let mut buf = vec![0u64; 11];
+        let pattern = 0x5555_5555_5555_5555u64;
+        unsafe { fill_nt(&mut buf, pattern) };
+        buf[9] = 0; // in scalar tail
+        let failures = unsafe { verify_avx512(&buf, pattern, buf.as_ptr() as usize, 0) };
+        assert!(failures.len() == 1);
+        check!(failures[0].word_index == 9);
+    }
+
+    #[test]
+    fn verify_indexed_scalar_tail_corruption() {
+        if !avx512_available() {
+            return;
+        }
+        let mut buf = vec![0u64; 11];
+        unsafe { fill_nt_indexed(&mut buf, 0) };
+        buf[10] = 999; // last word, in scalar tail
+        let failures = unsafe { verify_indexed_avx512(&buf, buf.as_ptr() as usize, 0) };
+        assert!(failures.len() == 1);
+        check!(failures[0].word_index == 10);
+        check!(failures[0].expected == 10);
+    }
+
+    #[test]
+    fn fill_nt_empty_buffer() {
+        if !avx512_available() {
+            return;
+        }
+        let mut buf: Vec<u64> = vec![];
+        unsafe { fill_nt(&mut buf, 0xFF) };
+        // Should not panic
+    }
+
+    #[test]
+    fn verify_with_word_offset() {
+        if !avx512_available() {
+            return;
+        }
+        let mut buf = vec![0u64; 16];
+        let pattern = 0xAAAAu64;
+        unsafe { fill_nt(&mut buf, pattern) };
+        buf[5] = 0;
+        // word_off=100 means buf[5] is word 105 globally
+        let failures = unsafe { verify_avx512(&buf, pattern, buf.as_ptr() as usize, 100) };
+        assert!(failures.len() == 1);
+        check!(failures[0].word_index == 105);
     }
 }

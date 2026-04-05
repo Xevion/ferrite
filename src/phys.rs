@@ -440,4 +440,150 @@ mod tests {
         assert!(flags2.is_hwpoison());
         assert!(!flags2.is_huge());
     }
+
+    mod pread_exact_tests {
+        use std::io::Write;
+
+        use assert2::{assert, check};
+        use tempfile::NamedTempFile;
+
+        use super::*;
+
+        #[test]
+        fn reads_exact_bytes_at_offset() {
+            let mut f = NamedTempFile::new().unwrap();
+            let data: Vec<u8> = (0..64).collect();
+            f.write_all(&data).unwrap();
+            f.flush().unwrap();
+
+            let file = f.reopen().unwrap();
+            let mut buf = [0u8; 8];
+            pread_exact(&file, &mut buf, 16).unwrap();
+            check!(buf == [16, 17, 18, 19, 20, 21, 22, 23]);
+        }
+
+        #[test]
+        fn reads_from_start() {
+            let mut f = NamedTempFile::new().unwrap();
+            f.write_all(b"hello world").unwrap();
+            f.flush().unwrap();
+
+            let file = f.reopen().unwrap();
+            let mut buf = [0u8; 5];
+            pread_exact(&file, &mut buf, 0).unwrap();
+            check!(buf == *b"hello");
+        }
+
+        #[test]
+        fn eof_returns_error() {
+            let mut f = NamedTempFile::new().unwrap();
+            f.write_all(b"short").unwrap();
+            f.flush().unwrap();
+
+            let file = f.reopen().unwrap();
+            let mut buf = [0u8; 32];
+            let result = pread_exact(&file, &mut buf, 0);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn offset_past_end_returns_error() {
+            let mut f = NamedTempFile::new().unwrap();
+            f.write_all(b"data").unwrap();
+            f.flush().unwrap();
+
+            let file = f.reopen().unwrap();
+            let mut buf = [0u8; 1];
+            let result = pread_exact(&file, &mut buf, 1000);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn empty_read_succeeds() {
+            let mut f = NamedTempFile::new().unwrap();
+            f.write_all(b"data").unwrap();
+            f.flush().unwrap();
+
+            let file = f.reopen().unwrap();
+            let mut buf = [0u8; 0];
+            pread_exact(&file, &mut buf, 0).unwrap();
+        }
+    }
+
+    /// A fake [`PhysResolver`] for testing code that consumes the trait
+    /// without needing `/proc/self/pagemap`.
+    ///
+    /// `resolve` returns `PhysAddr(vaddr as u64 + phys_offset)`.
+    pub(crate) struct FakeResolver {
+        pub base: usize,
+        pub len: usize,
+        pub phys_offset: u64,
+    }
+
+    impl FakeResolver {
+        pub fn new(base: usize, len: usize) -> Self {
+            Self {
+                base,
+                len,
+                phys_offset: 0x1_0000_0000,
+            }
+        }
+    }
+
+    impl PhysResolver for FakeResolver {
+        fn build_map(&mut self, base: usize, len: usize) -> Result<MapStats, PhysError> {
+            self.base = base;
+            self.len = len;
+            Ok(MapStats {
+                total_pages: len / PAGE_SIZE,
+                huge_pages: 0,
+                thp_pages: 0,
+                hwpoison_pages: 0,
+                unevictable_pages: 0,
+            })
+        }
+
+        fn resolve(&self, vaddr: usize) -> Result<PhysAddr, PhysError> {
+            if vaddr < self.base || vaddr >= self.base + self.len {
+                return Err(PhysError::PageNotPresent(vaddr));
+            }
+            Ok(PhysAddr(vaddr as u64 + self.phys_offset))
+        }
+
+        fn page_flags(&self, _pfn: u64) -> Result<PageFlags, PhysError> {
+            Ok(PageFlags::default())
+        }
+
+        fn verify_stability(&self, _base: usize, _len: usize) -> Result<usize, PhysError> {
+            Ok(0)
+        }
+    }
+
+    mod fake_resolver_tests {
+        use assert2::{assert, check};
+
+        use super::*;
+
+        #[test]
+        fn resolve_within_range() {
+            let resolver = FakeResolver::new(0x1000, 0x2000);
+            let addr = resolver.resolve(0x1500).unwrap();
+            check!(addr.0 == 0x1500u64 + 0x1_0000_0000);
+        }
+
+        #[test]
+        fn resolve_out_of_range() {
+            let resolver = FakeResolver::new(0x1000, 0x2000);
+            assert!(resolver.resolve(0x5000).is_err());
+        }
+
+        #[test]
+        fn build_map_returns_stats() {
+            let mut resolver = FakeResolver::new(0, 0);
+            let stats = resolver.build_map(0x1000, 8192).unwrap();
+            check!(stats.total_pages == 2);
+            check!(resolver.base == 0x1000);
+            check!(resolver.len == 8192);
+        }
+    }
 }

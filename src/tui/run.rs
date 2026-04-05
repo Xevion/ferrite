@@ -304,7 +304,7 @@ pub fn run_region_worker(
             }
 
             tui_state.progress_bp.store(10000, Ordering::Relaxed);
-            let bytes_processed = buf.len() as u64 * 8;
+            let bytes_processed = buf.len() as u64 * 8 * 2 * sub_passes;
             sink.lock().unwrap().emit_test_complete(
                 pattern,
                 pass,
@@ -339,4 +339,167 @@ pub fn run_region_worker(
     }
 
     let _ = tx.try_send(TuiEvent::RegionDone(region_idx));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
+
+    use assert2::{assert, check};
+
+    use crate::output::OutputSink;
+    use crate::pattern::Pattern;
+    use crate::units::UnitSystem;
+
+    use super::*;
+
+    fn make_test_state(patterns: &[Pattern]) -> Arc<RegionState> {
+        let names: Vec<String> = patterns.iter().map(ToString::to_string).collect();
+        Arc::new(RegionState::new("test-region".into(), 8192, names))
+    }
+
+    fn make_sink() -> Mutex<OutputSink> {
+        Mutex::new(OutputSink::human(UnitSystem::Binary))
+    }
+
+    #[test]
+    fn worker_sends_region_done() {
+        let mut buf = vec![0u64; 1024];
+        let (tx, rx) = mpsc::sync_channel::<TuiEvent>(256);
+        let quit = Arc::new(AtomicBool::new(false));
+        let state = make_test_state(&[Pattern::SolidBits]);
+        let sink = make_sink();
+
+        run_region_worker(
+            &mut buf,
+            &[Pattern::SolidBits],
+            1,
+            false,
+            0,
+            &state,
+            &tx,
+            None,
+            &quit,
+            &sink,
+        );
+
+        // Drain events and look for RegionDone
+        let mut found_done = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::RegionDone(idx) = event {
+                check!(idx == 0);
+                found_done = true;
+            }
+        }
+        assert!(found_done, "expected TuiEvent::RegionDone");
+    }
+
+    #[test]
+    fn worker_progress_reaches_completion() {
+        let mut buf = vec![0u64; 1024];
+        let (tx, _rx) = mpsc::sync_channel::<TuiEvent>(256);
+        let quit = Arc::new(AtomicBool::new(false));
+        let state = make_test_state(&[Pattern::SolidBits]);
+        let sink = make_sink();
+
+        run_region_worker(
+            &mut buf,
+            &[Pattern::SolidBits],
+            1,
+            false,
+            0,
+            &state,
+            &tx,
+            None,
+            &quit,
+            &sink,
+        );
+
+        check!(state.progress_bp.load(Ordering::Relaxed) == 10000);
+    }
+
+    #[test]
+    fn worker_zero_errors_on_clean_memory() {
+        let mut buf = vec![0u64; 1024];
+        let (tx, _rx) = mpsc::sync_channel::<TuiEvent>(256);
+        let quit = Arc::new(AtomicBool::new(false));
+        let state = make_test_state(Pattern::ALL);
+        let sink = make_sink();
+
+        run_region_worker(
+            &mut buf,
+            Pattern::ALL,
+            1,
+            false,
+            0,
+            &state,
+            &tx,
+            None,
+            &quit,
+            &sink,
+        );
+
+        check!(state.error_count.load(Ordering::Relaxed) == 0);
+    }
+
+    #[test]
+    fn worker_respects_quit_flag() {
+        let mut buf = vec![0u64; 1024];
+        let (tx, rx) = mpsc::sync_channel::<TuiEvent>(256);
+        let quit = Arc::new(AtomicBool::new(true));
+        let state = make_test_state(Pattern::ALL);
+        let sink = make_sink();
+
+        run_region_worker(
+            &mut buf,
+            Pattern::ALL,
+            100,
+            false,
+            0,
+            &state,
+            &tx,
+            None,
+            &quit,
+            &sink,
+        );
+
+        // Should have exited immediately — no RegionDone, minimal progress
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        // With quit=true from the start, the outer loop breaks before running any patterns
+        let done_count = events
+            .iter()
+            .filter(|e| matches!(e, TuiEvent::RegionDone(_)))
+            .count();
+        // RegionDone is sent unconditionally at end of function
+        check!(done_count == 1);
+    }
+
+    #[test]
+    fn worker_multi_pass() {
+        let mut buf = vec![0u64; 1024];
+        let (tx, _rx) = mpsc::sync_channel::<TuiEvent>(256);
+        let quit = Arc::new(AtomicBool::new(false));
+        let state = make_test_state(&[Pattern::SolidBits]);
+        let sink = make_sink();
+
+        run_region_worker(
+            &mut buf,
+            &[Pattern::SolidBits],
+            3,
+            false,
+            0,
+            &state,
+            &tx,
+            None,
+            &quit,
+            &sink,
+        );
+
+        check!(state.error_count.load(Ordering::Relaxed) == 0);
+        check!(state.progress_bp.load(Ordering::Relaxed) == 10000);
+    }
 }

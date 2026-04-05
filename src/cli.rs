@@ -145,6 +145,12 @@ pub fn has_capability(cap_bit: u32) -> bool {
     let Ok(status) = fs::read_to_string("/proc/self/status") else {
         return false;
     };
+    parse_capability_from_status(&status, cap_bit)
+}
+
+/// Parse the effective capability bitmask from `/proc/self/status` content.
+/// Returns true if the given capability bit is set in the `CapEff` field.
+pub(crate) fn parse_capability_from_status(status: &str, cap_bit: u32) -> bool {
     status
         .lines()
         .find_map(|line| {
@@ -237,7 +243,7 @@ mod tests {
 
     use ferrite::units::format_size;
 
-    use super::parse_size;
+    use super::{parse_capability_from_status, parse_size};
 
     proptest! {
         #[test]
@@ -248,6 +254,72 @@ mod tests {
         #[test]
         fn parse_size_roundtrip(bytes: usize) {
             prop_assert_eq!(parse_size(&format_size(bytes)), Ok(bytes));
+        }
+    }
+
+    mod capability_parsing {
+        use assert2::{assert, check};
+
+        use super::parse_capability_from_status;
+
+        const STATUS_WITH_CAPS: &str = "\
+Name:\tferrite
+Umask:\t0022
+State:\tR (running)
+Tgid:\t12345
+Pid:\t12345
+CapInh:\t0000000000000000
+CapPrm:\t000001ffffffffff
+CapEff:\t000001ffffffffff
+CapBnd:\t000001ffffffffff
+CapAmb:\t0000000000000000";
+
+        const STATUS_NO_CAPS: &str = "\
+Name:\tferrite
+CapEff:\t0000000000000000";
+
+        #[test]
+        fn cap_ipc_lock_present() {
+            assert!(parse_capability_from_status(STATUS_WITH_CAPS, 14));
+        }
+
+        #[test]
+        fn cap_sys_admin_present() {
+            // CAP_SYS_ADMIN = bit 21
+            assert!(parse_capability_from_status(STATUS_WITH_CAPS, 21));
+        }
+
+        #[test]
+        fn cap_absent_when_zero() {
+            check!(!parse_capability_from_status(STATUS_NO_CAPS, 14));
+            check!(!parse_capability_from_status(STATUS_NO_CAPS, 21));
+        }
+
+        #[test]
+        fn missing_capeff_line() {
+            let status = "Name:\tferrite\nPid:\t1234\n";
+            check!(!parse_capability_from_status(status, 14));
+        }
+
+        #[test]
+        fn malformed_hex() {
+            let status = "CapEff:\tnot_hex";
+            check!(!parse_capability_from_status(status, 14));
+        }
+
+        #[test]
+        fn empty_status() {
+            check!(!parse_capability_from_status("", 0));
+        }
+
+        #[test]
+        fn specific_bit_only() {
+            // Only bit 14 set (CAP_IPC_LOCK)
+            let status = "CapEff:\t0000000000004000";
+            assert!(parse_capability_from_status(status, 14));
+            check!(!parse_capability_from_status(status, 13));
+            check!(!parse_capability_from_status(status, 15));
+            check!(!parse_capability_from_status(status, 21));
         }
     }
 }

@@ -390,4 +390,163 @@ mod tests {
             "Pattern::ALL is missing variants — update it when adding new patterns"
         );
     }
+
+    mod corruption {
+        use assert2::{assert, check};
+
+        use super::*;
+
+        /// Fill every word with `pattern` using volatile writes.
+        fn fill_const(buf: &mut [u64], pattern: u64) {
+            for word in buf.iter_mut() {
+                unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), pattern) };
+            }
+        }
+
+        /// Fill every word with its index using volatile writes.
+        fn fill_indexed(buf: &mut [u64]) {
+            for (i, word) in buf.iter_mut().enumerate() {
+                unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), i as u64) };
+            }
+        }
+
+        /// Verify every word equals `pattern` using volatile reads.
+        fn verify_const(buf: &[u64], pattern: u64) -> Vec<Failure> {
+            let base_addr = buf.as_ptr() as usize;
+            buf.iter()
+                .enumerate()
+                .filter_map(|(i, word)| {
+                    let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
+                    (actual != pattern).then(|| Failure {
+                        addr: base_addr + i * 8,
+                        expected: pattern,
+                        actual,
+                        word_index: i,
+                        phys_addr: None,
+                    })
+                })
+                .collect()
+        }
+
+        /// Verify every word equals its index using volatile reads.
+        fn verify_indexed(buf: &[u64]) -> Vec<Failure> {
+            let base_addr = buf.as_ptr() as usize;
+            buf.iter()
+                .enumerate()
+                .filter_map(|(i, word)| {
+                    let expected = i as u64;
+                    let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
+                    (actual != expected).then(|| Failure {
+                        addr: base_addr + i * 8,
+                        expected,
+                        actual,
+                        word_index: i,
+                        phys_addr: None,
+                    })
+                })
+                .collect()
+        }
+
+        #[test]
+        fn constant_detects_single_corruption_serial() {
+            let mut buf = vec![0u64; 1024];
+            let pattern = 0xAAAA_AAAA_AAAA_AAAAu64;
+            fill_const(&mut buf, pattern);
+            buf[42] = 0xBBBB_BBBB_BBBB_BBBBu64;
+            let failures = verify_const(&buf, pattern);
+            assert!(failures.len() == 1);
+            check!(failures[0].word_index == 42);
+            check!(failures[0].actual == 0xBBBB_BBBB_BBBB_BBBBu64);
+        }
+
+        #[test]
+        fn constant_detects_multiple_corruptions() {
+            let mut buf = vec![0u64; 1024];
+            let pattern = 0xFFFF_FFFF_FFFF_FFFFu64;
+            fill_const(&mut buf, pattern);
+            buf[0] = 0;
+            buf[511] = 0;
+            buf[1023] = 0;
+            let failures = verify_const(&buf, pattern);
+            assert!(failures.len() == 3);
+            check!(failures[0].word_index == 0);
+            check!(failures[1].word_index == 511);
+            check!(failures[2].word_index == 1023);
+        }
+
+        #[test]
+        fn indexed_detects_corruption_serial() {
+            let mut buf = vec![0u64; 256];
+            fill_indexed(&mut buf);
+            buf[100] = 0xDEAD;
+            let failures = verify_indexed(&buf);
+            assert!(failures.len() == 1);
+            check!(failures[0].word_index == 100);
+            check!(failures[0].expected == 100);
+            check!(failures[0].actual == 0xDEAD);
+        }
+
+        #[test]
+        fn fill_verify_constant_single_word() {
+            let mut buf = vec![0u64; 1];
+            let failures = fill_verify_constant(&mut buf, 0xDEAD_BEEF, false, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn fill_verify_indexed_single_word() {
+            let mut buf = vec![0u64; 1];
+            let failures = fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn fill_verify_constant_parallel_clean() {
+            let mut buf = vec![0u64; 4096];
+            let failures =
+                fill_verify_constant(&mut buf, 0x5555_5555_5555_5555, true, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn fill_verify_indexed_parallel_clean() {
+            let mut buf = vec![0u64; 4096];
+            let failures = fill_verify_indexed(&mut buf, true, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn fill_verify_constant_empty_buffer() {
+            let mut buf: Vec<u64> = vec![];
+            let failures = fill_verify_constant(&mut buf, 0xFF, false, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn fill_verify_indexed_empty_buffer() {
+            let mut buf: Vec<u64> = vec![];
+            let failures = fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn fill_and_verify_calls_on_complete() {
+            let mut buf = vec![0u64; 64];
+            let mut called = false;
+            let _ = fill_and_verify(&mut buf, 0xAA, false, &mut || called = true, &NOOP_ACTIVITY);
+            assert!(called);
+        }
+
+        #[test]
+        fn non_chunk_multiple_buffer_size() {
+            // 1000 is not a multiple of REPORT_CHUNK (64*1024), testing partial chunk handling
+            let mut buf = vec![0u64; 1000];
+            let failures =
+                fill_verify_constant(&mut buf, 0x1234_5678_9ABC_DEF0, false, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+
+            let failures = fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+    }
 }

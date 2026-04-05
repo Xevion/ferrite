@@ -3,7 +3,6 @@ use std::time::Instant;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::Failure;
-use crate::alloc::LockedRegion;
 use crate::edac::{EccDelta, EdacSnapshot};
 use crate::output::OutputSink;
 use crate::pattern::{Pattern, run_pattern};
@@ -48,7 +47,7 @@ impl PassResult {
 /// Panics if progress bar template formatting fails (indicates a bug in the
 /// hardcoded template string).
 pub fn run(
-    region: &mut LockedRegion,
+    buf: &mut [u64],
     patterns: &[Pattern],
     passes: usize,
     parallel: bool,
@@ -69,7 +68,8 @@ pub fn run(
             .unwrap()
             .progress_chars("=> ");
 
-    sink.print_banner(region.len(), passes, patterns.len(), parallel);
+    let buf_bytes = buf.len() as u64 * 8;
+    sink.print_banner(buf_bytes as usize, passes, patterns.len(), parallel);
 
     let mut results = Vec::with_capacity(passes);
 
@@ -101,8 +101,6 @@ pub fn run(
 
             pass_pb.set_message(format!("{pattern}"));
 
-            let buf = region.as_u64_slice_mut();
-            let buf_bytes = (buf.len() as u64) * 8;
             let start = Instant::now();
 
             let mut sub_pass_count: u64 = 0;
@@ -174,4 +172,142 @@ pub fn run(
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::{assert, check};
+
+    use crate::output::OutputSink;
+    use crate::pattern::Pattern;
+    use crate::units::UnitSystem;
+
+    use super::*;
+
+    fn make_sink() -> OutputSink {
+        OutputSink::human(UnitSystem::Binary)
+    }
+
+    #[test]
+    fn total_failures_empty() {
+        let pr = PassResult {
+            pass_number: 1,
+            pattern_results: vec![],
+            ecc_deltas: vec![],
+        };
+        check!(pr.total_failures() == 0);
+    }
+
+    #[test]
+    fn total_failures_aggregates() {
+        let pr = PassResult {
+            pass_number: 1,
+            pattern_results: vec![
+                PatternResult {
+                    pattern: Pattern::SolidBits,
+                    failures: vec![
+                        crate::Failure {
+                            addr: 0,
+                            expected: 0,
+                            actual: 1,
+                            word_index: 0,
+                            phys_addr: None,
+                        },
+                        crate::Failure {
+                            addr: 8,
+                            expected: 0,
+                            actual: 1,
+                            word_index: 1,
+                            phys_addr: None,
+                        },
+                    ],
+                    elapsed: std::time::Duration::ZERO,
+                    bytes_processed: 0,
+                },
+                PatternResult {
+                    pattern: Pattern::Checkerboard,
+                    failures: vec![crate::Failure {
+                        addr: 16,
+                        expected: 0,
+                        actual: 1,
+                        word_index: 2,
+                        phys_addr: None,
+                    }],
+                    elapsed: std::time::Duration::ZERO,
+                    bytes_processed: 0,
+                },
+            ],
+            ecc_deltas: vec![],
+        };
+        check!(pr.total_failures() == 3);
+    }
+
+    #[test]
+    fn run_single_pass_clean_memory() {
+        let mut buf = vec![0u64; 1024];
+        let mut sink = make_sink();
+        let results = run(
+            &mut buf,
+            &[Pattern::SolidBits],
+            1,
+            false,
+            &mut sink,
+            None,
+            &|_| {},
+        );
+        check!(results.len() == 1);
+        check!(results[0].pass_number == 1);
+        check!(results[0].total_failures() == 0);
+        check!(results[0].pattern_results.len() == 1);
+        check!(results[0].pattern_results[0].pattern == Pattern::SolidBits);
+    }
+
+    #[test]
+    fn run_multi_pass() {
+        let mut buf = vec![0u64; 1024];
+        let mut sink = make_sink();
+        let results = run(
+            &mut buf,
+            &[Pattern::SolidBits],
+            3,
+            false,
+            &mut sink,
+            None,
+            &|_| {},
+        );
+        check!(results.len() == 3);
+        for (i, r) in results.iter().enumerate() {
+            check!(r.pass_number == i + 1);
+            check!(r.total_failures() == 0);
+        }
+    }
+
+    #[test]
+    fn run_all_patterns_clean() {
+        let mut buf = vec![0u64; 1024];
+        let mut sink = make_sink();
+        let results = run(&mut buf, Pattern::ALL, 1, false, &mut sink, None, &|_| {});
+        assert!(results.len() == 1);
+        check!(results[0].pattern_results.len() == Pattern::ALL.len());
+        check!(results[0].total_failures() == 0);
+    }
+
+    #[test]
+    fn run_empty_patterns() {
+        let mut buf = vec![0u64; 1024];
+        let mut sink = make_sink();
+        let results = run(&mut buf, &[], 1, false, &mut sink, None, &|_| {});
+        check!(results.len() == 1);
+        check!(results[0].pattern_results.is_empty());
+        check!(results[0].total_failures() == 0);
+    }
+
+    #[test]
+    fn run_parallel_clean() {
+        let mut buf = vec![0u64; 4096];
+        let mut sink = make_sink();
+        let results = run(&mut buf, Pattern::ALL, 1, true, &mut sink, None, &|_| {});
+        assert!(results.len() == 1);
+        check!(results[0].total_failures() == 0);
+    }
 }

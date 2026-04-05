@@ -89,7 +89,7 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
 
     let run_start = std::time::Instant::now();
     let results = runner::run(
-        &mut setup.region,
+        setup.region.as_u64_slice_mut(),
         patterns,
         cli.passes,
         !cli.sequential,
