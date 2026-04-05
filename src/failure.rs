@@ -27,6 +27,13 @@ impl Failure {
     pub fn flipped_bits(&self) -> u32 {
         self.xor().count_ones()
     }
+
+    /// Bit positions (0–63) that differ between expected and actual.
+    #[must_use]
+    pub fn bit_positions(&self) -> Vec<u8> {
+        let xor = self.xor();
+        (0u8..64).filter(|&bit| xor & (1u64 << bit) != 0).collect()
+    }
 }
 
 impl fmt::Display for Failure {

@@ -101,11 +101,15 @@ impl LockedRegion {
     }
 
     /// The size in bytes of the locked region.
-    /// A `LockedRegion` is never empty (the constructor rejects zero size).
-    #[allow(clippy::len_without_is_empty)]
     #[must_use]
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Always returns `false` — the constructor rejects zero-size allocations.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        false
     }
 }
 

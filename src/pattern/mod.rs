@@ -20,7 +20,7 @@ mod walking;
 const REPORT_CHUNK: usize = 64 * 1024; // 512 KiB
 
 /// All supported test patterns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, strum::EnumCount)]
 pub enum Pattern {
     SolidBits,
     WalkingOnes,
@@ -301,6 +301,8 @@ pub(super) fn fill_and_verify(
 
 #[cfg(test)]
 mod tests {
+    use strum::EnumCount as _;
+
     use super::*;
 
     /// Create a small test buffer on the heap (no mmap needed for unit tests).
@@ -427,5 +429,14 @@ mod tests {
         let s = f.to_string();
         assert!(s.contains("FAIL"));
         assert!(s.contains("1 bit(s)"));
+    }
+
+    #[test]
+    fn pattern_all_covers_every_variant() {
+        assert_eq!(
+            Pattern::ALL.len(),
+            Pattern::COUNT,
+            "Pattern::ALL is missing variants — update it when adding new patterns"
+        );
     }
 }
