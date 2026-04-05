@@ -26,6 +26,7 @@ codegen-units = 256
 
 [features]
 default = ["tui"]
+bench = []
 tui = ["dep:ratatui", "dep:crossterm", "dep:tracing-subscriber", "dep:ansi-to-tui"]
 
 [lints.clippy]
@@ -73,6 +74,26 @@ tracing-subscriber = { version = "0.3", features = ["json"], optional = true }
 
 [dev-dependencies]
 assert2 = "0.4.0"
+divan = "0.1.21"
+gungraun = "0.17.2"
 proptest = "1"
 rstest = "0.26.1"
 tempfile = "3.27.0"
+
+[[bench]]
+name = "patterns"
+harness = false
+
+[[bench]]
+name = "alloc"
+harness = false
+
+[[bench]]
+name = "simd"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "instructions"
+harness = false
+required-features = ["bench"]

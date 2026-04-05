@@ -74,3 +74,21 @@ coverage:
     cargo +nightly llvm-cov nextest --no-fail-fast --hide-progress-bar
     cargo +nightly llvm-cov report --html --output-dir coverage/html
     cargo +nightly llvm-cov report --lcov --output-path coverage/lcov.info
+
+# Run wall-clock benchmarks (patterns, alloc, SIMD) — alloc requires root for mlock
+bench:
+    cargo bench --features bench --bench patterns --bench alloc --bench simd
+
+# Save current bench results as a named baseline (default: "main")
+bench-baseline name="main":
+    mkdir -p benches/baselines
+    cargo bench --features bench --bench patterns --bench alloc --bench simd | tee benches/baselines/{{name}}.txt
+
+# Compare current bench results against a saved baseline
+bench-compare name="main":
+    cargo bench --features bench --bench patterns --bench alloc --bench simd | tee /tmp/ferrite-bench-current.txt
+    diff benches/baselines/{{name}}.txt /tmp/ferrite-bench-current.txt || true
+
+# Run instruction-count benchmarks via Gungraun (requires valgrind + cargo install gungraun-runner)
+bench-ci:
+    cargo bench --features bench --bench instructions
