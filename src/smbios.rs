@@ -174,10 +174,10 @@ pub(crate) fn find_string_table_end(table: &[u8], start: usize) -> usize {
 
 /// Decode the SMBIOS size field into megabytes.
 ///
-/// - `0x0000` / `0xFFFF` — slot not installed or size unknown, returns 0.
-/// - `0x7FFF` — use 32-bit extended size from `ext_bytes`; returns 0 if absent.
-/// - bit 15 set — KB granularity; value is the low 15 bits divided by 1024.
-/// - otherwise — MB granularity.
+/// - `0x0000` / `0xFFFF` -- slot not installed or size unknown, returns 0.
+/// - `0x7FFF` -- use 32-bit extended size from `ext_bytes`; returns 0 if absent.
+/// - bit 15 set -- KB granularity; value is the low 15 bits divided by 1024.
+/// - otherwise -- MB granularity.
 fn parse_size_mb(size_raw: u16, ext_bytes: Option<[u8; 4]>) -> u64 {
     match size_raw {
         0 | 0xFFFF => 0,
@@ -302,7 +302,7 @@ mod tests {
         #[test]
         fn single_byte_remaining_returns_len() {
             let data = b"abc\0x";
-            // Starting at index 4, only one byte left — can't form a window of 2
+            // Starting at index 4, only one byte left -- can't form a window of 2
             check!(find_string_table_end(data, 4) == data.len());
         }
 
@@ -348,15 +348,15 @@ mod tests {
 
         #[test]
         fn kb_granularity_sub_1mb_truncates_to_zero() {
-            // 0x8001 = bit15 set | 1 KB → 1/1024 = 0 (truncation bug)
+            // 0x8001 = bit15 set | 1 KB -> 1/1024 = 0 (truncation bug)
             check!(parse_size_mb(0x8001, None) == 0);
-            // 0x8200 = bit15 set | 512 KB → 512/1024 = 0
+            // 0x8200 = bit15 set | 512 KB -> 512/1024 = 0
             check!(parse_size_mb(0x8200, None) == 0);
         }
 
         #[test]
         fn kb_granularity_non_even_division() {
-            // 0x8300 = bit15 set | 768 KB → 768/1024 = 0 (truncation)
+            // 0x8300 = bit15 set | 768 KB -> 768/1024 = 0 (truncation)
             check!(parse_size_mb(0x8300, None) == 0);
         }
 
@@ -475,7 +475,7 @@ mod tests {
 
         #[test]
         fn kb_granularity_size() {
-            // 0x8000 | 8192 = 0xA000 → 8192 KB / 1024 = 8 MB
+            // 0x8000 | 8192 = 0xA000 -> 8192 KB / 1024 = 8 MB
             let table = build_type17(0x00, 0xA0, None);
             let dimms = parse_type17_entries(&table);
             check!(dimms.len() == 1);
@@ -545,7 +545,7 @@ mod tests {
 
         #[test]
         fn minimal_struct_length_no_optional_fields() {
-            // Struct length exactly 0x17 — manufacturer/serial/part offsets are absent
+            // Struct length exactly 0x17 -- manufacturer/serial/part offsets are absent
             let mut s = vec![0u8; 0x17];
             s[0] = 17;
             s[1] = 0x17;
@@ -569,14 +569,14 @@ mod tests {
         fn non_type17_structures_skipped() {
             let mut table = Vec::new();
 
-            // Type 1 (System Information) — should be skipped
+            // Type 1 (System Information) -- should be skipped
             let mut s1 = vec![0u8; 0x1B];
             s1[0] = 1; // Type 1
             s1[1] = 0x1B;
             table.extend_from_slice(&s1);
             table.extend_from_slice(b"SystemInfo\0\0");
 
-            // Type 17 — should be parsed
+            // Type 17 -- should be parsed
             let mut s2 = vec![0u8; 0x1B];
             s2[0] = 17;
             s2[1] = 0x1B;
@@ -587,7 +587,7 @@ mod tests {
             table.extend_from_slice(&s2);
             table.extend_from_slice(b"DIMM0\0\0");
 
-            // Type 4 (Processor) — should be skipped
+            // Type 4 (Processor) -- should be skipped
             let mut s3 = vec![0u8; 0x1B];
             s3[0] = 4; // Type 4
             s3[1] = 0x1B;
@@ -603,7 +603,7 @@ mod tests {
 
         #[test]
         fn type17_too_short_skipped() {
-            // Type 17 with struct_len < 0x17 — not enough data for required fields
+            // Type 17 with struct_len < 0x17 -- not enough data for required fields
             let mut table = Vec::new();
             let mut s = vec![0u8; 0x10]; // only 16 bytes, less than 0x17
             s[0] = 17;
@@ -620,7 +620,7 @@ mod tests {
         fn end_of_table_marker_stops_iteration() {
             let mut table = Vec::new();
 
-            // Type 17 — should be parsed
+            // Type 17 -- should be parsed
             let mut s1 = vec![0u8; 0x1B];
             s1[0] = 17;
             s1[1] = 0x1B;
@@ -634,7 +634,7 @@ mod tests {
             // End-of-table marker (type 127)
             table.extend_from_slice(&[127, 4, 0, 0, 0, 0]);
 
-            // Another Type 17 after the marker — should NOT be parsed
+            // Another Type 17 after the marker -- should NOT be parsed
             let mut s2 = vec![0u8; 0x1B];
             s2[0] = 17;
             s2[1] = 0x1B;
@@ -661,7 +661,7 @@ mod tests {
 
         #[test]
         fn empty_string_table_gives_defaults() {
-            // String table is just \0\0 — no strings at all
+            // String table is just \0\0 -- no strings at all
             let mut s = vec![0u8; 0x1B];
             s[0] = 17;
             s[1] = 0x1B;

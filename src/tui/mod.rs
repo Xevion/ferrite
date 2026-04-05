@@ -17,7 +17,6 @@ use std::{fmt, thread};
 
 use anyhow::Context;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::prelude::Widget;
 use ratatui::widgets::Paragraph;
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -230,16 +229,8 @@ pub fn run_tui(
     regions: &[Arc<RegionState>],
     tx: &mpsc::SyncSender<TuiEvent>,
     rx: &mpsc::Receiver<TuiEvent>,
-    quit: &Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
-    // Panic hook for terminal cleanup
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        original_hook(info);
-    }));
-
-    enable_raw_mode().context("failed to enable raw mode (is stdout a terminal?)")?;
+    let guard = crate::shutdown::TerminalGuard::new()?;
 
     let viewport_height = (regions.len() + 8) as u16;
     let mut terminal = Terminal::with_options(
@@ -252,11 +243,10 @@ pub fn run_tui(
 
     // Input reader thread
     let input_tx = tx.clone();
-    let input_quit = Arc::clone(quit);
     thread::Builder::new()
         .name("tui-input".into())
         .spawn(move || {
-            while !input_quit.load(Ordering::Relaxed) {
+            while !crate::shutdown::quit_requested() {
                 if event::poll(Duration::from_millis(50)).unwrap_or(false)
                     && let Ok(Event::Key(key)) = event::read()
                 {
@@ -268,11 +258,10 @@ pub fn run_tui(
 
     // Tick thread
     let tick_tx = tx.clone();
-    let tick_quit = Arc::clone(quit);
     thread::Builder::new()
         .name("tui-tick".into())
         .spawn(move || {
-            while !tick_quit.load(Ordering::Relaxed) {
+            while !crate::shutdown::quit_requested() {
                 thread::sleep(Duration::from_millis(100));
                 let _ = tick_tx.try_send(TuiEvent::Tick);
             }
@@ -285,7 +274,7 @@ pub fn run_tui(
     let mut verbose = false;
     let total_regions = regions.len();
 
-    // Establish the inline viewport before processing any events — insert_before
+    // Establish the inline viewport before processing any events -- insert_before
     // misbehaves if called before the first draw.
     terminal.draw(|frame| {
         render_heatmap(
@@ -306,13 +295,13 @@ pub fn run_tui(
                 }
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     info!("interrupted");
-                    quit.store(true, Ordering::Relaxed);
+                    crate::shutdown::escalate();
                     break;
                 }
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
                         info!("user requested quit");
-                        quit.store(true, Ordering::Relaxed);
+                        crate::shutdown::request_quit(crate::shutdown::QuitReason::UserQuit);
                         break;
                     }
                     KeyCode::Char('p') => {
@@ -351,7 +340,7 @@ pub fn run_tui(
                 info!(region = regions[idx].name.as_str(), "region complete");
                 if regions_done >= total_regions {
                     info!("all regions complete");
-                    quit.store(true, Ordering::Relaxed);
+                    crate::shutdown::request_quit(crate::shutdown::QuitReason::UserQuit);
                     break;
                 }
             }
@@ -397,10 +386,10 @@ pub fn run_tui(
         Paragraph::new(Line::from(Span::styled(summary_text, summary_style))).render(buf.area, buf);
     })?;
 
-    // Clear the inline viewport content while raw mode is still active,
-    // then restore the terminal so the shell prompt appears cleanly below.
+    // Clear the inline viewport while raw mode is still active (guard drops after return).
     terminal.clear().context("failed to clear terminal")?;
-    disable_raw_mode().context("failed to disable raw mode")?;
+    // Explicitly drop the guard before println so the terminal is restored first.
+    drop(guard);
     println!();
     Ok(())
 }

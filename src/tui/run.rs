@@ -1,7 +1,7 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ use crate::edac::EdacSnapshot;
 use crate::output::OutputSink;
 use crate::pattern::{Pattern, run_pattern};
 use crate::phys::{MapStats, PagemapResolver, PhysResolver};
+use crate::shutdown;
 use crate::units::{Size, UnitSystem};
 
 use super::{RegionState, TuiConfig, TuiError, TuiEvent, TuiMakeWriter};
@@ -26,10 +27,10 @@ use super::{RegionState, TuiConfig, TuiError, TuiEvent, TuiMakeWriter};
 /// Layer matrix:
 /// | Mode              | TUI layer           | stderr layer          |
 /// |-------------------|---------------------|-----------------------|
-/// | TUI + JSON        | human ANSI → TUI    | json → stderr         |
-/// | TUI + no JSON     | human ANSI → TUI    | human no-ANSI → stderr|
-/// | no TUI + JSON     | None                | json → stderr         |
-/// | no TUI + no JSON  | None                | human → stderr        |
+/// | TUI + JSON        | human ANSI -> TUI    | json -> stderr         |
+/// | TUI + no JSON     | human ANSI -> TUI    | human no-ANSI -> stderr|
+/// | no TUI + JSON     | None                | json -> stderr         |
+/// | no TUI + no JSON  | None                | human -> stderr        |
 pub fn setup_tracing(json_mode: bool, tui_writer: Option<TuiMakeWriter>) {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -107,12 +108,11 @@ pub fn run_tui_mode(
     sink: OutputSink,
 ) -> Result<()> {
     let (tx, rx) = mpsc::sync_channel::<TuiEvent>(256);
-    let quit = Arc::new(AtomicBool::new(false));
 
     let json_mode = sink.is_json();
     let sink = Arc::new(Mutex::new(sink));
 
-    // Set up tracing: human ANSI layer → TUI channel, stderr layer based on mode
+    // Set up tracing: human ANSI layer -> TUI channel, stderr layer based on mode
     let writer = TuiMakeWriter::new(tx.clone());
     setup_tracing(json_mode, Some(writer));
 
@@ -163,9 +163,10 @@ pub fn run_tui_mode(
 
     let worker_regions: Vec<Arc<RegionState>> = regions.iter().map(Arc::clone).collect();
     let worker_tx = tx.clone();
-    let worker_quit = Arc::clone(&quit);
     let parallel = !sequential;
 
+    let worker_done = Arc::new((Mutex::new(false), Condvar::new()));
+    let worker_done2 = Arc::clone(&worker_done);
     let worker_sink = Arc::clone(&sink);
     let worker = thread::Builder::new()
         .name("test-driver".into())
@@ -177,7 +178,6 @@ pub fn run_tui_mode(
                 for (i, chunk) in chunks.into_iter().enumerate() {
                     let tui_region = Arc::clone(&worker_regions[i]);
                     let tx = worker_tx.clone();
-                    let quit = Arc::clone(&worker_quit);
                     let resolver_ref = setup
                         .resolver
                         .as_ref()
@@ -196,20 +196,33 @@ pub fn run_tui_mode(
                                 &tui_region,
                                 &tx,
                                 resolver_ref,
-                                &quit,
                                 sink,
                             );
                         })
                         .expect("failed to spawn region worker thread");
                 }
             });
+
+            let (lock, cvar) = &*worker_done2;
+            *lock.lock().unwrap() = true;
+            cvar.notify_one();
         })
         .expect("failed to spawn test-driver thread");
 
     let config = TuiConfig::default();
     let run_start = Instant::now();
-    crate::tui::run_tui(&config, &regions, &tx, &rx, &quit).context("TUI failed")?;
+    crate::tui::run_tui(&config, &regions, &tx, &rx).context("TUI failed")?;
 
+    // Wait for the worker with a bounded timeout.
+    {
+        let (lock, cvar) = &*worker_done;
+        let guard = lock.lock().unwrap();
+        let (done, _) = cvar.wait_timeout(guard, Duration::from_secs(5)).unwrap();
+        if !*done {
+            eprintln!("Worker did not exit within 5s, forcing exit");
+            shutdown::force_exit(2);
+        }
+    }
     let _ = worker.join();
 
     let total_errors: usize = regions
@@ -224,11 +237,7 @@ pub fn run_tui_mode(
         sink.print_final_result(total_errors);
     }
 
-    if total_errors > 0 {
-        std::process::exit(1);
-    }
-
-    Ok(())
+    std::process::exit(shutdown::exit_code(total_errors))
 }
 
 /// Worker for a single memory region: runs test patterns and feeds results to the TUI.
@@ -246,7 +255,6 @@ pub fn run_region_worker(
     tui_state: &Arc<RegionState>,
     tx: &mpsc::SyncSender<TuiEvent>,
     resolver: Option<&(dyn PhysResolver + Sync)>,
-    quit: &Arc<AtomicBool>,
     sink: &Mutex<OutputSink>,
 ) {
     let region_bytes = buf.len() * 8;
@@ -259,14 +267,14 @@ pub fn run_region_worker(
     );
 
     for pass in 0..passes {
-        if quit.load(Ordering::Relaxed) {
+        if shutdown::quit_requested() {
             break;
         }
 
         let edac_before = EdacSnapshot::capture();
 
         for (pat_idx, &pattern) in patterns.iter().enumerate() {
-            if quit.load(Ordering::Relaxed) {
+            if shutdown::quit_requested() {
                 break;
             }
 
@@ -274,7 +282,7 @@ pub fn run_region_worker(
             sink.lock().unwrap().emit_test_start(pattern, pass);
             info!(region = tui_state.name.as_str(), pattern = %pattern, pass = pass + 1, "starting pattern");
 
-            while tui_state.paused.load(Ordering::Relaxed) && !quit.load(Ordering::Relaxed) {
+            while tui_state.paused.load(Ordering::Relaxed) && !shutdown::quit_requested() {
                 thread::sleep(Duration::from_millis(50));
             }
 
@@ -358,13 +366,15 @@ pub fn run_region_worker(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex, mpsc};
 
     use assert2::{assert, check};
+    use serial_test::serial;
 
     use crate::output::OutputSink;
     use crate::pattern::Pattern;
+    use crate::shutdown;
     use crate::units::UnitSystem;
 
     use super::*;
@@ -379,10 +389,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn worker_sends_region_done() {
+        shutdown::reset();
         let mut buf = vec![0u64; 1024];
         let (tx, rx) = mpsc::sync_channel::<TuiEvent>(256);
-        let quit = Arc::new(AtomicBool::new(false));
         let state = make_test_state(&[Pattern::SolidBits]);
         let sink = make_sink();
 
@@ -395,11 +406,9 @@ mod tests {
             &state,
             &tx,
             None,
-            &quit,
             &sink,
         );
 
-        // Drain events and look for RegionDone
         let mut found_done = false;
         while let Ok(event) = rx.try_recv() {
             if let TuiEvent::RegionDone(idx) = event {
@@ -411,10 +420,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn worker_progress_reaches_completion() {
+        shutdown::reset();
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = mpsc::sync_channel::<TuiEvent>(256);
-        let quit = Arc::new(AtomicBool::new(false));
         let state = make_test_state(&[Pattern::SolidBits]);
         let sink = make_sink();
 
@@ -427,7 +437,6 @@ mod tests {
             &state,
             &tx,
             None,
-            &quit,
             &sink,
         );
 
@@ -435,10 +444,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn worker_zero_errors_on_clean_memory() {
+        shutdown::reset();
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = mpsc::sync_channel::<TuiEvent>(256);
-        let quit = Arc::new(AtomicBool::new(false));
         let state = make_test_state(Pattern::ALL);
         let sink = make_sink();
 
@@ -451,7 +461,6 @@ mod tests {
             &state,
             &tx,
             None,
-            &quit,
             &sink,
         );
 
@@ -459,10 +468,12 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn worker_respects_quit_flag() {
+        shutdown::reset();
+        shutdown::request_quit(shutdown::QuitReason::UserQuit);
         let mut buf = vec![0u64; 1024];
         let (tx, rx) = mpsc::sync_channel::<TuiEvent>(256);
-        let quit = Arc::new(AtomicBool::new(true));
         let state = make_test_state(Pattern::ALL);
         let sink = make_sink();
 
@@ -475,29 +486,26 @@ mod tests {
             &state,
             &tx,
             None,
-            &quit,
             &sink,
         );
 
-        // Should have exited immediately — no RegionDone, minimal progress
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
             events.push(event);
         }
-        // With quit=true from the start, the outer loop breaks before running any patterns
         let done_count = events
             .iter()
             .filter(|e| matches!(e, TuiEvent::RegionDone(_)))
             .count();
-        // RegionDone is sent unconditionally at end of function
         check!(done_count == 1);
     }
 
     #[test]
+    #[serial]
     fn worker_multi_pass() {
+        shutdown::reset();
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = mpsc::sync_channel::<TuiEvent>(256);
-        let quit = Arc::new(AtomicBool::new(false));
         let state = make_test_state(&[Pattern::SolidBits]);
         let sink = make_sink();
 
@@ -510,7 +518,6 @@ mod tests {
             &state,
             &tx,
             None,
-            &quit,
             &sink,
         );
 

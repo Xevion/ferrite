@@ -1,5 +1,5 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
-// SIMD intrinsics require casting *mut u64 → *mut __m512i with stricter alignment.
+// SIMD intrinsics require casting *mut u64 -> *mut __m512i with stricter alignment.
 // Alignment is guaranteed by the mmap allocation (page-aligned = 4096-byte aligned).
 #![allow(clippy::cast_ptr_alignment)]
 #[cfg(target_arch = "x86_64")]

@@ -10,6 +10,7 @@ use crate::edac::{EccDelta, EdacSnapshot};
 use crate::output::OutputSink;
 use crate::pattern::{Pattern, run_pattern};
 use crate::phys::PhysResolver;
+use crate::shutdown;
 
 /// Extract a human-readable message from a panic payload.
 ///
@@ -22,7 +23,7 @@ fn extract_panic_msg(val: &Box<dyn Any + Send>) -> &str {
         .unwrap_or("unknown panic")
 }
 
-/// Unrecoverable error from the test runner — indicates a panic in a pattern
+/// Unrecoverable error from the test runner -- indicates a panic in a pattern
 /// worker that could not be handled gracefully.
 #[derive(Debug, Error)]
 pub enum PatternError {
@@ -86,6 +87,10 @@ pub fn run(
     let mut results = Vec::with_capacity(passes);
 
     for pass in 0..passes {
+        if shutdown::quit_requested() {
+            break;
+        }
+
         let pass_start = Instant::now();
         sink.emit_pass_start(pass + 1, passes);
 
@@ -94,6 +99,9 @@ pub fn run(
 
         let mut pattern_results = Vec::with_capacity(patterns.len());
         for &pattern in patterns {
+            if shutdown::quit_requested() {
+                break;
+            }
             let sub_passes = pattern.sub_passes();
 
             sink.emit_test_start(pattern, pass + 1);
@@ -102,7 +110,7 @@ pub fn run(
 
             let mut sub_pass_count: u64 = 0;
             // SAFETY: captured state (sub_pass_count, sink) is not used after
-            // an unwind — we return Err immediately on panic.
+            // an unwind -- we return Err immediately on panic.
             let pattern_result = panic::catch_unwind(AssertUnwindSafe(|| {
                 run_pattern(
                     pattern,
@@ -178,6 +186,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use serial_test::serial;
 
     use crate::output::OutputSink;
     use crate::pattern::Pattern;
@@ -314,7 +323,7 @@ mod tests {
         check!(results[0].total_failures() == 0);
     }
 
-    /// Minimal resolver that always succeeds — for testing the resolver branch.
+    /// Minimal resolver that always succeeds -- for testing the resolver branch.
     struct StubResolver;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -371,6 +380,18 @@ mod tests {
             assert!(e.to_string().contains("unrecoverable"));
             assert!(e.to_string().contains("worker panicked"));
         }
+    }
+
+    #[test]
+    #[serial]
+    fn run_respects_quit_flag() {
+        shutdown::reset();
+        shutdown::request_quit(shutdown::QuitReason::UserQuit);
+        let mut buf = vec![0u64; 1024];
+        let mut sink = make_sink();
+        let results = run(&mut buf, Pattern::ALL, 100, false, &mut sink, None, &|_| {}).unwrap();
+        // With quit set before running, no passes should execute
+        check!(results.is_empty());
     }
 
     mod extract_panic_msg_tests {

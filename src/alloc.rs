@@ -126,7 +126,7 @@ impl LockedRegion {
         self.len
     }
 
-    /// Always returns `false` — the constructor rejects zero-size allocations.
+    /// Always returns `false` -- the constructor rejects zero-size allocations.
     #[must_use]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn is_empty(&self) -> bool {

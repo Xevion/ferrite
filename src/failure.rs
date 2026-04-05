@@ -28,7 +28,7 @@ impl Failure {
         self.xor().count_ones()
     }
 
-    /// Bit positions (0–63) that differ between expected and actual.
+    /// Bit positions (0-63) that differ between expected and actual.
     #[must_use]
     pub fn bit_positions(&self) -> Vec<u8> {
         let xor = self.xor();

@@ -277,7 +277,7 @@ pub fn setup_phys(
 
 pub struct TestSetup {
     pub region: LockedRegion,
-    /// Held for its [`Drop`] side-effect — restores the compaction sysctl on teardown.
+    /// Held for its [`Drop`] side-effect -- restores the compaction sysctl on teardown.
     #[allow(dead_code)]
     pub compaction_guard: Option<CompactionGuard>,
     pub resolver: Option<PagemapResolver>,

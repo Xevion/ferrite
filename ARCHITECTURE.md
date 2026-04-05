@@ -21,10 +21,10 @@ Tracing uses a layered subscriber (`tracing_subscriber::registry`) with conditio
 
 | Mode              | TUI layer                | stderr layer                |
 |-------------------|--------------------------|-----------------------------|
-| TUI + `--json`    | human ANSI → TUI channel | JSON → stderr               |
-| TUI + no `--json` | human ANSI → TUI channel | human (no ANSI) → stderr    |
-| no TUI + `--json` | —                        | JSON → stderr               |
-| no TUI + no JSON  | —                        | human → stderr              |
+| TUI + `--json`    | human ANSI -> TUI channel | JSON -> stderr               |
+| TUI + no `--json` | human ANSI -> TUI channel | human (no ANSI) -> stderr    |
+| no TUI + `--json` | --                        | JSON -> stderr               |
+| no TUI + no JSON  | --                        | human -> stderr              |
 
 Each layer is an `Option<Layer>` (`None` = no-op). The TUI channel layer and the stderr layer run independently -- every tracing event is formatted and dispatched to both active layers.
 
@@ -69,12 +69,12 @@ Code: `src/output.rs` (`OutputSink` enum, event emission, human-readable printin
 main()
  ├─ parse CLI, check privileges
  ├─ create OutputSink (human or JSON)
- ├─ conflict guard: --json stdout + TUI → error
- ├─ setup_tracing() → layered registry (TUI layer + stderr layer)
- ├─ setup_test() → TestSetup:
+ ├─ conflict guard: --json stdout + TUI -> error
+ ├─ setup_tracing() -> layered registry (TUI layer + stderr layer)
+ ├─ setup_test() -> TestSetup:
  │   ├─ allocate LockedRegion (mmap + mlock + parallel page fault)
  │   ├─ CompactionGuard (optional)
- │   ├─ setup_phys() → (PagemapResolver, MapStats) (optional)
+ │   ├─ setup_phys() -> (PagemapResolver, MapStats) (optional)
  │   └─ DimmTopology::build() (optional)
  │
  ├─ TUI mode:
@@ -82,16 +82,16 @@ main()
  │   ├─ emit map_info to sink
  │   ├─ spawn region workers (thread::scope)
  │   │   └─ run_region_worker() per chunk
- │   │       ├─ run_pattern() for each pattern × pass
+ │   │       ├─ run_pattern() for each pattern x pass
  │   │       ├─ emit_test_start / emit_test_complete to sink
  │   │       ├─ send TuiEvent::Error / RegionDone
- │   │       └─ ECC snapshot delta → emit_ecc_deltas
+ │   │       └─ ECC snapshot delta -> emit_ecc_deltas
  │   ├─ run_tui() event loop (render, keyboard, tick)
  │   └─ emit_summary + print_final_result
  │
  └─ Headless mode:
      ├─ emit_map_info / print_map_info to sink
-     ├─ runner::run() (patterns × passes, progress via OutputSink)
+     ├─ runner::run() (patterns x passes, progress via OutputSink)
      ├─ error analysis (if failures)
      └─ emit_summary + print_final_result + exit code
 ```

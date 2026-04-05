@@ -79,7 +79,7 @@ pub enum PhysResolverError {
     /// possible without elevated privileges.
     #[error("pagemap access denied (requires CAP_SYS_ADMIN or root): {0}")]
     PermissionDenied(#[source] PhysError),
-    /// `/proc/self/pagemap` is not available — the kernel may not support it,
+    /// `/proc/self/pagemap` is not available -- the kernel may not support it,
     /// or the file is missing on this system. Safe to continue without
     /// physical addresses.
     #[error("pagemap unavailable: {0}")]

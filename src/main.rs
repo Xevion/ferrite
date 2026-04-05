@@ -11,6 +11,7 @@ use ferrite::output::OutputSink;
 use ferrite::pattern::Pattern;
 use ferrite::phys::PhysResolver;
 use ferrite::runner;
+use ferrite::shutdown;
 #[cfg(feature = "tui")]
 use ferrite::tui::run::{TuiTestSetup, run_tui_mode, setup_tracing};
 
@@ -21,6 +22,9 @@ use cli::{Cli, check_privileges, setup_test};
 
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
+    let shutdown_handle = shutdown::install_signal_handlers()?;
+    shutdown::install_panic_hook();
+
     let need_phys = !cli.no_phys;
     check_privileges(cli.size, need_phys);
 
@@ -63,6 +67,7 @@ fn main() -> Result<()> {
                 map_stats: s.map_stats,
                 compaction_guard: s.compaction_guard,
             };
+            // run_tui_mode calls process::exit internally
             return run_tui_mode(
                 cli.size,
                 cli.passes,
@@ -75,7 +80,9 @@ fn main() -> Result<()> {
         }
     }
 
-    run_non_tui(&cli, &patterns, sink)
+    let result = run_non_tui(&cli, &patterns, sink);
+    shutdown_handle.shutdown();
+    result
 }
 
 /// Non-TUI mode: headless output with tracing to stderr.
@@ -143,8 +150,9 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
     sink.emit_summary(cli.passes, total_failures, run_elapsed);
     sink.print_final_result(total_failures);
 
-    if total_failures > 0 {
-        std::process::exit(1);
+    let code = shutdown::exit_code(total_failures);
+    if code != 0 {
+        std::process::exit(code);
     }
 
     Ok(())

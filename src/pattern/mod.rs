@@ -104,7 +104,7 @@ mod tests {
 
     static NOOP_ACTIVITY: fn(f64) = |_| {};
 
-    /// Parametrized clean-memory tests — one case per pattern × serial/parallel.
+    /// Parametrized clean-memory tests -- one case per pattern x serial/parallel.
     /// New patterns added to `Pattern::ALL` are automatically covered here.
     mod clean_memory {
         use assert2::assert;
@@ -170,7 +170,7 @@ mod tests {
     fn pattern_all_covers_every_variant() {
         assert!(
             Pattern::ALL.len() == Pattern::COUNT,
-            "Pattern::ALL is missing variants — update it when adding new patterns"
+            "Pattern::ALL is missing variants -- update it when adding new patterns"
         );
     }
 

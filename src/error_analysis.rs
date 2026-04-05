@@ -229,7 +229,7 @@ mod tests {
         #[test]
         fn coupling_errors_vary() {
             let mut stats = BitErrorStats::new();
-            // Different bits flip each time — no consistently stuck bit
+            // Different bits flip each time -- no consistently stuck bit
             stats.record(&f(0x1000, 0xFF, 0xFE)); // bit 0 flipped
             stats.record(&f(0x2000, 0xFF, 0xFD)); // bit 1 flipped
 

@@ -10,6 +10,7 @@ pub mod output;
 pub mod pattern;
 pub mod phys;
 pub mod runner;
+pub mod shutdown;
 pub mod smbios;
 #[cfg(feature = "tui")]
 pub mod tui;
@@ -19,7 +20,7 @@ pub use alloc::CompactionGuard;
 pub use failure::Failure;
 
 /// Internal functions exposed for benchmark targets via thin wrappers.
-/// Not stable API — only available with `--features bench`.
+/// Not stable API -- only available with `--features bench`.
 #[cfg(feature = "bench")]
 pub mod bench_api {
     use crate::Failure;
