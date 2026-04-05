@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.1.2](https://github.com/Xevion/ferrite/compare/v0.1.1...v0.1.2) (2026-04-05)
+
+
+### Features
+
+* Add --tui auto|always|never flag and unify mode dispatch ([f000221](https://github.com/Xevion/ferrite/commit/f000221d745944abd319408d9f9ed8a9162d945f))
+* Add physical address resolution, ECC monitoring, and DIMM topology ([302a431](https://github.com/Xevion/ferrite/commit/302a43137c3db024df0f6eb0425025b51cf444ca))
+* Add ratatui TUI with activity heatmaps and multi-region parallel testing ([ee7741f](https://github.com/Xevion/ferrite/commit/ee7741f45effdf992f2a6aa06d0db63f1fcc293e))
+
+
+### Bug Fixes
+
+* Add anyhow context to TUI terminal errors for clearer diagnostics ([2a9646c](https://github.com/Xevion/ferrite/commit/2a9646c46726c770eea43cc512ed356a8e4efd9d))
+* Prevent parse_size overflow and add property-based test coverage ([6869865](https://github.com/Xevion/ferrite/commit/686986503c1acede5796f087a2cb6f8d69679d49))
+
+
+### Code Refactoring
+
+* Add format_size as parse_size inverse and broaden proptests ([809b947](https://github.com/Xevion/ferrite/commit/809b9470c1e6d95b5d869138a17cb04a276f0ceb))
+* Break up main.rs into cli, failure, pattern, and tui modules ([b7417ce](https://github.com/Xevion/ferrite/commit/b7417ce66326553a10163d137a26c7686816f8bb))
+* Cfg-gate TUI logic and expand CI to test all feature combos ([acf8372](https://github.com/Xevion/ferrite/commit/acf8372b2916c560ac3381cfb240fd3855a8c09a))
+* Enforce clippy pedantic lints and modernize pointer casts ([b90fccd](https://github.com/Xevion/ferrite/commit/b90fccd642554116def05232dd1ffd91ba1f54e6))
+* Fix len_without_is_empty lint and verify Pattern::ALL scope ([1fab629](https://github.com/Xevion/ferrite/commit/1fab629fcf4f7c72f04ad2ae3a90b89c16789fe3))
+* Migrate tests to assert2/rstest with FailureBuilder fixture ([a0997fd](https://github.com/Xevion/ferrite/commit/a0997fdaa2b5ff0981d8c59bc1e4ac705d3e6c97))
+* Name spawned threads, promote tracing dependency ([25069c3](https://github.com/Xevion/ferrite/commit/25069c3435aa20b098e0c711d95c82475df5197f))
+* Unify tracing and output plumbing across run modes ([fe394fa](https://github.com/Xevion/ferrite/commit/fe394fac391ba5d913a9833e968b3ccb7f987b74))
+
+
+### Documentation
+
+* Correct MSRV badge and requirement from 1.85 to 1.89 ([1117029](https://github.com/Xevion/ferrite/commit/11170292c9d89170493610b658a43a539cba60c4))
+
+
+### Miscellaneous
+
+* **deps:** Bump codecov/codecov-action from 5 to 6 ([9945794](https://github.com/Xevion/ferrite/commit/994579412b323069dc59f4b01321b73024c39096))
+* Integrate tempo as task runner for checks, lint, and format ([b18e28f](https://github.com/Xevion/ferrite/commit/b18e28fcea009fc7995f180d314b43b9ed855787))
+
 ## [0.1.1](https://github.com/Xevion/ferrite/compare/v0.1.0...v0.1.1) (2026-03-20)
 
 
