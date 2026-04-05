@@ -20,6 +20,7 @@ impl Default for ActivityBuffer {
 }
 
 impl ActivityBuffer {
+    #[must_use]
     pub fn new() -> Self {
         let cells = (0..ACTIVITY_CELLS).map(|_| AtomicU64::new(0)).collect();
         Self {
@@ -36,6 +37,7 @@ impl ActivityBuffer {
     }
 
     /// Get brightness (0.0..1.0) for a given cell index, fading over time.
+    #[must_use]
     pub fn brightness(&self, cell_idx: usize) -> f64 {
         let nanos = self.cells[cell_idx].load(Ordering::Relaxed);
         if nanos == 0 {
@@ -48,6 +50,7 @@ impl ActivityBuffer {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 

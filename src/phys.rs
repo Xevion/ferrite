@@ -14,11 +14,13 @@ pub struct PhysAddr(pub u64);
 
 impl PhysAddr {
     /// The page frame number (PFN) -- physical address >> 12.
+    #[must_use]
     pub fn pfn(self) -> u64 {
         self.0 >> 12
     }
 
     /// The page offset -- lower 12 bits.
+    #[must_use]
     pub fn page_offset(self) -> u64 {
         self.0 & 0xFFF
     }
@@ -83,18 +85,22 @@ impl PageFlags {
     const KPF_HWPOISON: u64 = 1 << 19;
     const KPF_THP: u64 = 1 << 22;
 
+    #[must_use]
     pub fn is_huge(self) -> bool {
         self.raw & Self::KPF_HUGE != 0
     }
 
+    #[must_use]
     pub fn is_thp(self) -> bool {
         self.raw & Self::KPF_THP != 0
     }
 
+    #[must_use]
     pub fn is_unevictable(self) -> bool {
         self.raw & Self::KPF_UNEVICTABLE != 0
     }
 
+    #[must_use]
     pub fn is_hwpoison(self) -> bool {
         self.raw & Self::KPF_HWPOISON != 0
     }
@@ -114,16 +120,33 @@ pub struct MapStats {
 pub trait PhysResolver {
     /// Build the internal mapping for a contiguous virtual region.
     /// Called once after mlock + initial write pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhysError`] if pagemap cannot be read or pages are not present.
     fn build_map(&mut self, base: usize, len: usize) -> Result<MapStats, PhysError>;
 
     /// Resolve a single virtual address to a physical address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhysError`] if the pagemap entry cannot be read or the page
+    /// is not present.
     fn resolve(&self, vaddr: usize) -> Result<PhysAddr, PhysError>;
 
     /// Query kpageflags for a given PFN.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhysError`] if `/proc/kpageflags` cannot be read.
     fn page_flags(&self, pfn: u64) -> Result<PageFlags, PhysError>;
 
-    /// Verify that PFN mappings haven't changed since build_map.
+    /// Verify that PFN mappings haven't changed since `build_map`.
     /// Returns the number of pages whose PFN changed (0 = stable).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhysError`] if the pagemap cannot be re-read for comparison.
     fn verify_stability(&self, base: usize, len: usize) -> Result<usize, PhysError>;
 }
 
@@ -138,6 +161,13 @@ pub struct PagemapResolver {
 }
 
 impl PagemapResolver {
+    /// Open `/proc/self/pagemap` (and optionally `/proc/kpageflags`) for
+    /// virtual-to-physical address resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhysError::OpenPagemap`] if `/proc/self/pagemap` cannot be opened
+    /// (typically requires root or `CAP_SYS_ADMIN`).
     pub fn new() -> Result<Self, PhysError> {
         let pagemap_fd = File::open("/proc/self/pagemap").map_err(PhysError::OpenPagemap)?;
         let kpageflags_fd = File::open("/proc/kpageflags").ok();

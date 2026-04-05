@@ -26,6 +26,7 @@ pub struct PassResult {
 }
 
 impl PassResult {
+    #[must_use]
     pub fn total_failures(&self) -> usize {
         self.pattern_results.iter().map(|r| r.failures.len()).sum()
     }
@@ -41,6 +42,11 @@ impl PassResult {
 /// `on_activity` is called from worker threads with a position (0.0..1.0)
 /// within the buffer, suitable for driving activity heatmaps. Pass `&|_| {}`
 /// if no activity tracking is needed.
+///
+/// # Panics
+///
+/// Panics if progress bar template formatting fails (indicates a bug in the
+/// hardcoded template string).
 pub fn run(
     region: &mut LockedRegion,
     patterns: &[Pattern],

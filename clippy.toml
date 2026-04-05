@@ -1,0 +1,7 @@
+# Math helpers (lerp, color interpolation) conventionally use single-char names
+# (a, b, t, r, g). Default threshold is 4; palette.rs::lerp uses 5.
+single-char-binding-names-threshold = 5
+
+# Runner and TUI event loops are tightly-coupled state machines.
+# Default is 100; run_tui is 153 lines.
+too-many-lines-threshold = 120

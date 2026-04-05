@@ -12,6 +12,32 @@ opt-level = 3
 default = ["tui"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:tracing-subscriber", "dep:ansi-to-tui"]
 
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+# Memory address arithmetic intentionally truncates usize → smaller types and
+# uses unsigned↔signed casts for page-math, physical-address resolution, etc.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+
+# Progress bars, throughput display, and histogram buckets cast u64/usize → f64.
+# Precision loss beyond 2^52 is irrelevant for display-only values.
+cast_precision_loss = "allow"
+
+# SIMD intrinsics require casting *mut u64 → *mut __m512i with stricter alignment.
+# Alignment is guaranteed by the mmap allocation (page-aligned). Scoped to simd.rs.
+# cast_ptr_alignment = "allow"
+
+# Pre-1.0 API surface — doc sections for every fallible fn are enforced but
+# may be relaxed again if the churn outweighs the benefit.
+# missing_errors_doc = "allow"
+
+# Prefer #[inline] over #[inline(always)] — let the compiler decide; benchmark before allowing/using inline(always).
+inline_always = "deny"
+used_underscore_binding = "deny"
+pub_underscore_fields = "deny"
+
 [dependencies]
 ansi-to-tui = { version = "8.0.1", optional = true }
 anyhow = "1.0.102"

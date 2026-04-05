@@ -19,6 +19,7 @@ pub struct DimmTopology {
 impl DimmTopology {
     /// Build topology by merging EDAC and SMBIOS data.
     /// Returns `None` if neither source provides data.
+    #[must_use]
     pub fn build() -> Option<Self> {
         let edac = EdacSnapshot::capture();
         let smbios_dimms = smbios::read_dimm_info();
@@ -166,8 +167,8 @@ mod tests {
         DimmEdac {
             mc,
             dimm_index: idx,
-            label: label.map(|s| s.to_owned()),
-            location: location.map(|s| s.to_owned()),
+            label: label.map(str::to_owned),
+            location: location.map(str::to_owned),
             ce_count: 0,
             ue_count: 0,
         }

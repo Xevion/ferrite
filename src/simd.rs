@@ -1,3 +1,7 @@
+// SIMD intrinsics require casting *mut u64 → *mut __m512i with stricter alignment.
+// Alignment is guaranteed by the mmap allocation (page-aligned = 4096-byte aligned).
+#![allow(clippy::cast_ptr_alignment)]
+
 #[cfg(target_arch = "x86_64")]
 use std::ptr;
 
@@ -14,7 +18,7 @@ pub(crate) const CHUNK: usize = 64 * 1024; // 64 K u64s = 512 KiB
 /// Returns true if AVX-512F is available. With `target-cpu=native` this is a
 /// compile-time constant and the dead branches are eliminated by LLVM.
 #[cfg(target_arch = "x86_64")]
-#[inline(always)]
+#[inline]
 pub(crate) fn avx512_available() -> bool {
     is_x86_feature_detected!("avx512f")
 }
@@ -32,16 +36,16 @@ pub(crate) fn avx512_available() -> bool {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 pub(crate) unsafe fn fill_nt(buf: &mut [u64], pattern: u64) {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{__m512i, _mm_sfence, _mm512_set1_epi64, _mm512_stream_si512};
     if !(buf.as_ptr() as usize).is_multiple_of(64) {
         // Unaligned fallback: NT stores require 64-byte alignment.
         for word in buf.iter_mut() {
-            unsafe { ptr::write_volatile(word as *mut u64, pattern) };
+            unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), pattern) };
         }
         return;
     }
     let vp = _mm512_set1_epi64(pattern as i64);
-    let base = buf.as_mut_ptr() as *mut __m512i;
+    let base = buf.as_mut_ptr().cast::<__m512i>();
     let n = buf.len() / 8;
     for i in 0..n {
         // SAFETY: base + i is within the buffer and 64-byte aligned.
@@ -63,10 +67,13 @@ pub(crate) unsafe fn fill_nt(buf: &mut [u64], pattern: u64) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 pub(crate) unsafe fn fill_nt_indexed(buf: &mut [u64], start: usize) {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{
+        __m512i, _mm_sfence, _mm512_add_epi64, _mm512_set_epi64, _mm512_set1_epi64,
+        _mm512_stream_si512,
+    };
     if !(buf.as_ptr() as usize).is_multiple_of(64) {
         for (i, word) in buf.iter_mut().enumerate() {
-            unsafe { ptr::write_volatile(word as *mut u64, (start + i) as u64) };
+            unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), (start + i) as u64) };
         }
         return;
     }
@@ -76,7 +83,7 @@ pub(crate) unsafe fn fill_nt_indexed(buf: &mut [u64], start: usize) {
         _mm512_set1_epi64(start as i64),
     );
     let vstep = _mm512_set1_epi64(8);
-    let base = buf.as_mut_ptr() as *mut __m512i;
+    let base = buf.as_mut_ptr().cast::<__m512i>();
     let n = buf.len() / 8;
     for i in 0..n {
         // SAFETY: base + i is within the buffer and 64-byte aligned.
@@ -108,9 +115,11 @@ pub(crate) unsafe fn verify_avx512(
     base_addr: usize,
     word_off: usize,
 ) -> Vec<Failure> {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{
+        __m512i, _mm512_cmpeq_epi64_mask, _mm512_loadu_si512, _mm512_set1_epi64,
+    };
     let vp = _mm512_set1_epi64(pattern as i64);
-    let base = buf.as_ptr() as *const __m512i;
+    let base = buf.as_ptr().cast::<__m512i>();
     let n = buf.len() / 8;
     let mut failures = Vec::new();
     for i in 0..n {
@@ -164,13 +173,16 @@ pub(crate) unsafe fn verify_indexed_avx512(
     base_addr: usize,
     word_off: usize,
 ) -> Vec<Failure> {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{
+        __m512i, _mm512_add_epi64, _mm512_cmpeq_epi64_mask, _mm512_loadu_si512, _mm512_set_epi64,
+        _mm512_set1_epi64,
+    };
     let mut vexp = _mm512_add_epi64(
         _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0),
         _mm512_set1_epi64(word_off as i64),
     );
     let vstep = _mm512_set1_epi64(8);
-    let base = buf.as_ptr() as *const __m512i;
+    let base = buf.as_ptr().cast::<__m512i>();
     let n = buf.len() / 8;
     let mut failures = Vec::new();
     for i in 0..n {

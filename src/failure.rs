@@ -18,10 +18,12 @@ pub struct Failure {
 }
 
 impl Failure {
+    #[must_use]
     pub fn xor(&self) -> u64 {
         self.expected ^ self.actual
     }
 
+    #[must_use]
     pub fn flipped_bits(&self) -> u32 {
         self.xor().count_ones()
     }

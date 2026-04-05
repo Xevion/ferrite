@@ -34,6 +34,7 @@ impl SymbolSet {
     }
 
     /// Pick the character for a brightness level 0.0..1.0.
+    #[must_use]
     pub fn char_for(self, brightness: f64) -> char {
         let chars = self.chars();
         let idx = (brightness.clamp(0.0, 1.0) * (chars.len() - 1) as f64).round() as usize;

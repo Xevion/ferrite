@@ -113,6 +113,7 @@ pub enum OutputSink {
 
 impl OutputSink {
     /// Create a human-readable output sink.
+    #[must_use]
     pub fn human(unit_system: UnitSystem) -> Self {
         Self::Human {
             mp: MultiProgress::new(),
@@ -124,6 +125,10 @@ impl OutputSink {
     ///
     /// - `"-"` or `""` -> NDJSON to stdout, human output to stderr
     /// - any other path -> NDJSON to file, human output to stdout
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::Error`] if the output file cannot be created.
     pub fn json(path: &str, unit_system: UnitSystem) -> io::Result<Self> {
         let to_stdout = path.is_empty() || path == "-";
         let writer: Box<dyn Write + Send> = if to_stdout {
@@ -145,6 +150,7 @@ impl OutputSink {
     }
 
     /// Get a reference to the `MultiProgress` for creating progress bars.
+    #[must_use]
     pub fn multi_progress(&self) -> &MultiProgress {
         match self {
             Self::Human { mp, .. } | Self::Json { mp, .. } => mp,
@@ -158,6 +164,7 @@ impl OutputSink {
     }
 
     /// Whether this sink emits JSON events.
+    #[must_use]
     pub fn is_json(&self) -> bool {
         matches!(self, Self::Json { .. })
     }

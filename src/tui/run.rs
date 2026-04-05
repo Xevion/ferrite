@@ -68,10 +68,20 @@ pub struct TuiTestSetup {
     pub resolver: Option<PagemapResolver>,
     pub map_stats: Option<MapStats>,
     /// Keeps the compaction guard alive for the duration of the test.
-    pub _compaction_guard: Option<CompactionGuard>,
+    pub compaction_guard: Option<CompactionGuard>,
 }
 
 /// TUI mode: the default interactive experience.
+///
+/// # Errors
+///
+/// Returns an error if terminal initialization, TUI event loop, or any
+/// worker thread reports a fatal failure.
+///
+/// # Panics
+///
+/// Panics if the output sink mutex is poisoned (indicates a prior panic
+/// in a worker thread).
 pub fn run_tui_mode(
     size: usize,
     passes: usize,
@@ -102,7 +112,7 @@ pub fn run_tui_mode(
         regions_arg
     } else {
         std::thread::available_parallelism()
-            .map(|n| n.get())
+            .map(std::num::NonZero::get)
             .unwrap_or(1)
     }
     .min(total_words / min_words_per_region)
@@ -117,7 +127,10 @@ pub fn run_tui_mode(
         patterns.len()
     );
 
-    let pattern_names: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
+    let pattern_names: Vec<String> = patterns
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     let regions: Vec<Arc<RegionState>> = (0..n_regions)
         .map(|i| {
             let region_words = if i == n_regions - 1 {
@@ -180,7 +193,7 @@ pub fn run_tui_mode(
 
     let config = TuiConfig::default();
     let run_start = Instant::now();
-    crate::tui::run_tui(&config, &regions, tx, rx, &quit).context("TUI failed")?;
+    crate::tui::run_tui(&config, &regions, &tx, &rx, &quit).context("TUI failed")?;
 
     let _ = worker.join();
 
@@ -204,6 +217,10 @@ pub fn run_tui_mode(
 }
 
 /// Worker for a single memory region: runs test patterns and feeds results to the TUI.
+///
+/// # Panics
+///
+/// Panics if the output sink mutex is poisoned.
 #[allow(clippy::too_many_arguments)]
 pub fn run_region_worker(
     buf: &mut [u64],

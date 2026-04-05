@@ -78,6 +78,7 @@ pub struct RegionState {
 }
 
 impl RegionState {
+    #[must_use]
     pub fn new(name: String, size_bytes: usize, patterns: Vec<String>) -> Self {
         Self {
             name,
@@ -95,7 +96,9 @@ impl RegionState {
     /// Current pattern name, or "done" if all patterns are complete.
     pub fn current_pattern(&self) -> &str {
         let idx = self.current_pattern_idx.load(Ordering::Relaxed);
-        self.patterns.get(idx).map(|s| s.as_str()).unwrap_or("done")
+        self.patterns
+            .get(idx)
+            .map_or("done", std::string::String::as_str)
     }
 
     /// Advance to the given pattern index and reset progress.
@@ -105,12 +108,20 @@ impl RegionState {
     }
 
     /// Record that an error was found (increments count, updates timestamp).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn record_error(&self) {
         self.error_count.fetch_add(1, Ordering::Relaxed);
         *self.last_error_time.lock().unwrap() = Some(Instant::now());
     }
 
     /// Seconds since the last error, or `f64::MAX` if none.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn last_error_age_secs(&self) -> f64 {
         self.last_error_time
             .lock()
@@ -120,6 +131,7 @@ impl RegionState {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)]
 impl fmt::Debug for RegionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RegionState")
@@ -141,6 +153,7 @@ pub struct TuiMakeWriter {
 }
 
 impl TuiMakeWriter {
+    #[must_use]
     pub fn new(tx: mpsc::SyncSender<TuiEvent>) -> Self {
         Self { tx }
     }
@@ -200,11 +213,21 @@ impl Drop for TuiWriter {
 /// 4. Call this function with both ends of the channel and a shared quit flag
 ///
 /// `run_tui` spawns internal threads for keyboard input and tick events.
+///
+/// # Errors
+///
+/// Returns an error if raw mode cannot be enabled, terminal initialization
+/// fails, or drawing to the terminal fails.
+///
+/// # Panics
+///
+/// Panics if the input or tick thread cannot be spawned.
+#[allow(clippy::too_many_lines)]
 pub fn run_tui(
     config: &TuiConfig,
     regions: &[Arc<RegionState>],
-    tx: mpsc::SyncSender<TuiEvent>,
-    rx: mpsc::Receiver<TuiEvent>,
+    tx: &mpsc::SyncSender<TuiEvent>,
+    rx: &mpsc::Receiver<TuiEvent>,
     quit: &Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     // Panic hook for terminal cleanup
@@ -381,6 +404,7 @@ pub fn run_tui(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -464,7 +488,7 @@ mod tests {
         assert!(debug.contains("8192"));
         assert!(debug.contains("solid"));
         assert!(debug.contains("5000"));
-        assert!(debug.contains("3"));
+        assert!(debug.contains('3'));
     }
 
     #[test]

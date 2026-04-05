@@ -58,7 +58,7 @@ fn main() -> Result<()> {
                 region: s.region,
                 resolver: s.resolver,
                 map_stats: s.map_stats,
-                _compaction_guard: s._compaction_guard,
+                compaction_guard: s.compaction_guard,
             };
             return run_tui_mode(
                 cli.size,
@@ -72,15 +72,15 @@ fn main() -> Result<()> {
         }
     }
 
-    run_non_tui(cli, patterns, sink)
+    run_non_tui(&cli, &patterns, sink)
 }
 
 /// Non-TUI mode: headless output with tracing to stderr.
-fn run_non_tui(cli: Cli, patterns: Vec<Pattern>, mut sink: OutputSink) -> Result<()> {
+fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<()> {
     #[cfg(feature = "tui")]
     setup_tracing(sink.is_json(), None);
 
-    let mut setup = setup_test(&cli)?;
+    let mut setup = setup_test(cli)?;
 
     if let Some(ref stats) = setup.map_stats {
         sink.emit_map_info(stats);
@@ -90,7 +90,7 @@ fn run_non_tui(cli: Cli, patterns: Vec<Pattern>, mut sink: OutputSink) -> Result
     let run_start = std::time::Instant::now();
     let results = runner::run(
         &mut setup.region,
-        &patterns,
+        patterns,
         cli.passes,
         !cli.sequential,
         &mut sink,
@@ -99,7 +99,10 @@ fn run_non_tui(cli: Cli, patterns: Vec<Pattern>, mut sink: OutputSink) -> Result
     );
     let run_elapsed = run_start.elapsed();
 
-    let total_failures: usize = results.iter().map(|r| r.total_failures()).sum();
+    let total_failures: usize = results
+        .iter()
+        .map(ferrite::runner::PassResult::total_failures)
+        .sum();
 
     if total_failures > 0 {
         let mut stats = ferrite::error_analysis::BitErrorStats::new();

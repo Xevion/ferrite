@@ -30,6 +30,10 @@ unsafe impl Send for LockedRegion {}
 impl LockedRegion {
     /// Allocate and lock `size` bytes of anonymous memory.
     /// Pages are faulted in via parallel volatile writes before returning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError`] if the size is zero, mmap fails, or mlock fails.
     pub fn new(size: usize) -> Result<Self, AllocError> {
         let size = NonZeroUsize::new(size).ok_or(AllocError::ZeroSize)?;
 
@@ -79,10 +83,11 @@ impl LockedRegion {
         let word_count = self.len / size_of::<u64>();
         // SAFETY: The allocation is aligned to page boundaries (4096), which satisfies
         // u64 alignment (8). word_count * 8 <= self.len, so all accesses are in bounds.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut u64, word_count) }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().cast::<u64>(), word_count) }
     }
 
     /// Returns the buffer as a slice of u64 words.
+    #[must_use]
     pub fn as_u64_slice(&self) -> &[u64] {
         let word_count = self.len / size_of::<u64>();
         // SAFETY: Same alignment and bounds reasoning as as_u64_slice_mut.
@@ -90,6 +95,7 @@ impl LockedRegion {
     }
 
     /// The base virtual address of the locked region.
+    #[must_use]
     pub fn as_ptr(&self) -> usize {
         self.ptr.as_ptr() as usize
     }
@@ -97,6 +103,7 @@ impl LockedRegion {
     /// The size in bytes of the locked region.
     /// A `LockedRegion` is never empty (the constructor rejects zero size).
     #[allow(clippy::len_without_is_empty)]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.len
     }
@@ -129,6 +136,7 @@ pub struct CompactionGuard {
 impl CompactionGuard {
     /// Disable compaction of unevictable pages. Returns `None` if the sysctl
     /// cannot be read or written (not root, file missing, etc.).
+    #[must_use]
     pub fn new() -> Option<Self> {
         let original = fs::read_to_string(SYSCTL_PATH).ok()?.trim().to_owned();
         if original == "0" {

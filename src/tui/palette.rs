@@ -34,13 +34,14 @@ pub const LOG_INFO: Color = Color::Rgb(80, 200, 140);
 pub const LOG_DEBUG: Color = Color::Rgb(100, 150, 255);
 pub const LOG_TRACE: Color = Color::Rgb(80, 80, 90);
 
+#[must_use]
 pub fn lerp(a: Color, b: Color, t: f64) -> Color {
     let t = t.clamp(0.0, 1.0);
     match (a, b) {
         (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
-            let r = (r1 as f64 + (r2 as f64 - r1 as f64) * t) as u8;
-            let g = (g1 as f64 + (g2 as f64 - g1 as f64) * t) as u8;
-            let b = (b1 as f64 + (b2 as f64 - b1 as f64) * t) as u8;
+            let r = (f64::from(r1) + (f64::from(r2) - f64::from(r1)) * t) as u8;
+            let g = (f64::from(g1) + (f64::from(g2) - f64::from(g1)) * t) as u8;
+            let b = (f64::from(b1) + (f64::from(b2) - f64::from(b1)) * t) as u8;
             Color::Rgb(r, g, b)
         }
         _ => {
@@ -53,6 +54,7 @@ pub fn lerp(a: Color, b: Color, t: f64) -> Color {
     }
 }
 
+#[must_use]
 pub fn error_severity(error_count: usize) -> Color {
     match error_count {
         0 => ERR_NONE,
@@ -68,6 +70,7 @@ pub fn error_severity(error_count: usize) -> Color {
 }
 
 /// Background color for error cells. Fades with age but has a warm-yellow floor.
+#[must_use]
 pub fn error_bg(error_count: usize, age_secs: f64) -> Option<Color> {
     if error_count == 0 {
         return None;
@@ -86,6 +89,7 @@ pub fn error_bg(error_count: usize, age_secs: f64) -> Option<Color> {
     Some(lerp(peak, ERR_BG_MIN, fade))
 }
 
+#[must_use]
 pub fn activity_color(brightness: f64) -> Color {
     if brightness > 0.7 {
         lerp(ACTIVE_MID, ACTIVE_BRIGHT, (brightness - 0.7) / 0.3)
@@ -217,8 +221,8 @@ mod tests {
         let (r_min, _, _) = rgb(ERR_BG_MIN);
         // Aged r should be closer to min than fresh r
         assert!(
-            (r_aged as i16 - r_min as i16).unsigned_abs()
-                <= (r_fresh as i16 - r_min as i16).unsigned_abs(),
+            (i16::from(r_aged) - i16::from(r_min)).unsigned_abs()
+                <= (i16::from(r_fresh) - i16::from(r_min)).unsigned_abs(),
             "aged bg should be closer to ERR_BG_MIN"
         );
     }

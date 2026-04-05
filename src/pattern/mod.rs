@@ -40,12 +40,11 @@ impl Pattern {
 
     /// Number of fill-and-verify sub-passes this pattern performs.
     /// Used to size the inner progress bar.
+    #[must_use]
     pub fn sub_passes(&self) -> u64 {
         match self {
-            Pattern::SolidBits => 2,
-            Pattern::WalkingOnes => 64,
-            Pattern::WalkingZeros => 64,
-            Pattern::Checkerboard => 2,
+            Pattern::SolidBits | Pattern::Checkerboard => 2,
+            Pattern::WalkingOnes | Pattern::WalkingZeros => 64,
             Pattern::StuckAddress => 1,
         }
     }
@@ -136,7 +135,7 @@ pub(super) fn fill_verify_constant(
             .enumerate()
             .for_each(|(ci, chunk)| {
                 for word in chunk.iter_mut() {
-                    unsafe { ptr::write_volatile(word as *mut u64, pattern) };
+                    unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), pattern) };
                 }
                 on_activity((ci * REPORT_CHUNK) as f64 / total as f64);
             });
@@ -150,7 +149,7 @@ pub(super) fn fill_verify_constant(
                     .enumerate()
                     .filter_map(move |(j, word)| {
                         let i = chunk_start + j;
-                        let actual = unsafe { ptr::read_volatile(word as *const u64) };
+                        let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
                         (actual != pattern).then(|| Failure {
                             addr: base_addr + i * 8,
                             expected: pattern,
@@ -165,14 +164,14 @@ pub(super) fn fill_verify_constant(
     } else {
         for (ci, chunk) in buf.chunks_mut(REPORT_CHUNK).enumerate() {
             for word in chunk.iter_mut() {
-                unsafe { ptr::write_volatile(word as *mut u64, pattern) };
+                unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), pattern) };
             }
             on_activity((ci * REPORT_CHUNK) as f64 / total as f64);
         }
         buf.iter()
             .enumerate()
             .filter_map(|(i, word)| {
-                let actual = unsafe { ptr::read_volatile(word as *const u64) };
+                let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
                 (actual != pattern).then(|| Failure {
                     addr: base_addr + i * 8,
                     expected: pattern,
@@ -228,7 +227,12 @@ pub(super) fn fill_verify_indexed(
             .for_each(|(ci, chunk)| {
                 let chunk_start = ci * REPORT_CHUNK;
                 for (j, word) in chunk.iter_mut().enumerate() {
-                    unsafe { ptr::write_volatile(word as *mut u64, (chunk_start + j) as u64) };
+                    unsafe {
+                        ptr::write_volatile(
+                            std::ptr::from_mut::<u64>(word),
+                            (chunk_start + j) as u64,
+                        );
+                    }
                 }
                 on_activity(chunk_start as f64 / total as f64);
             });
@@ -243,7 +247,7 @@ pub(super) fn fill_verify_indexed(
                     .filter_map(move |(j, word)| {
                         let i = chunk_start + j;
                         let expected = i as u64;
-                        let actual = unsafe { ptr::read_volatile(word as *const u64) };
+                        let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
                         (actual != expected).then(|| Failure {
                             addr: base_addr + i * 8,
                             expected,
@@ -259,7 +263,9 @@ pub(super) fn fill_verify_indexed(
         for (ci, chunk) in buf.chunks_mut(REPORT_CHUNK).enumerate() {
             let chunk_start = ci * REPORT_CHUNK;
             for (j, word) in chunk.iter_mut().enumerate() {
-                unsafe { ptr::write_volatile(word as *mut u64, (chunk_start + j) as u64) };
+                unsafe {
+                    ptr::write_volatile(std::ptr::from_mut::<u64>(word), (chunk_start + j) as u64);
+                }
             }
             on_activity(chunk_start as f64 / total as f64);
         }
@@ -267,7 +273,7 @@ pub(super) fn fill_verify_indexed(
             .enumerate()
             .filter_map(|(i, word)| {
                 let expected = i as u64;
-                let actual = unsafe { ptr::read_volatile(word as *const u64) };
+                let actual = unsafe { ptr::read_volatile(std::ptr::from_ref::<u64>(word)) };
                 (actual != expected).then(|| Failure {
                     addr: base_addr + i * 8,
                     expected,
@@ -387,11 +393,11 @@ mod tests {
     fn solid_bits_detects_corruption() {
         let mut buf = make_test_buf();
         // Manually write all zeros, then corrupt one word before verify
-        for word in buf.iter_mut() {
-            unsafe { std::ptr::write_volatile(word as *mut u64, 0u64) };
+        for word in &mut buf {
+            unsafe { std::ptr::write_volatile(std::ptr::from_mut::<u64>(word), 0u64) };
         }
         // Corrupt word at index 10
-        unsafe { std::ptr::write_volatile(&mut buf[10] as *mut u64, 0xDEAD) };
+        unsafe { std::ptr::write_volatile(&raw mut buf[10], 0xDEAD) };
         // Now run solid_bits -- the first sub-pass writes all-zeros then verifies,
         // but it writes first so the corruption is overwritten. Instead, test
         // fill_verify_constant directly.

@@ -27,6 +27,7 @@ impl Default for BitErrorStats {
 }
 
 impl BitErrorStats {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             total_errors: 0,
@@ -74,16 +75,19 @@ impl BitErrorStats {
     }
 
     /// Bits that flipped 0->1 in every single error (consistent stuck-high).
+    #[must_use]
     pub fn stuck_high_mask(&self) -> u64 {
         self.stuck_high_accum.unwrap_or(0)
     }
 
     /// Bits that flipped 1->0 in every single error (consistent stuck-low).
+    #[must_use]
     pub fn stuck_low_mask(&self) -> u64 {
         self.stuck_low_accum.unwrap_or(0)
     }
 
     /// Classify the overall error pattern.
+    #[must_use]
     pub fn classification(&self) -> ErrorClassification {
         if self.total_errors == 0 {
             return ErrorClassification::NoErrors;

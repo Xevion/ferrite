@@ -6,9 +6,9 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct DimmInfo {
     pub handle: u16,
-    /// Silk-screen label, e.g., "DIMM_A1".
+    /// Silk-screen label, e.g., "`DIMM_A1`".
     pub device_locator: String,
-    /// Bank grouping label, e.g., "BANK 0" or "P0_Node0_Channel0_Dimm0".
+    /// Bank grouping label, e.g., "BANK 0" or "`P0_Node0_Channel0_Dimm0`".
     pub bank_locator: String,
     pub manufacturer: Option<String>,
     pub serial_number: Option<String>,
@@ -21,6 +21,7 @@ pub struct DimmInfo {
 
 /// Parse SMBIOS Type 17 entries from the raw DMI table.
 /// Returns `None` if the DMI table cannot be read.
+#[must_use]
 pub fn read_dimm_info() -> Option<Vec<DimmInfo>> {
     let table = fs::read("/sys/firmware/dmi/tables/DMI").ok()?;
     let dimms = parse_type17_entries(&table);
@@ -80,14 +81,14 @@ fn parse_type17_entries(table: &[u8]) -> Vec<DimmInfo> {
                         table[offset + 0x1E],
                         table[offset + 0x1F],
                     ]);
-                    ext as u64
+                    u64::from(ext)
                 }
                 other => {
                     // Bit 15: 0 = MB granularity, 1 = KB granularity
                     if other & 0x8000 != 0 {
-                        (other & 0x7FFF) as u64 / 1024
+                        u64::from(other & 0x7FFF) / 1024
                     } else {
-                        other as u64
+                        u64::from(other)
                     }
                 }
             };
@@ -147,8 +148,7 @@ fn get_string(strings: &[u8], index: u8) -> String {
         let end = strings[start..]
             .iter()
             .position(|&b| b == 0)
-            .map(|p| start + p)
-            .unwrap_or(strings.len());
+            .map_or(strings.len(), |p| start + p);
 
         if current == index {
             return String::from_utf8_lossy(&strings[start..end])

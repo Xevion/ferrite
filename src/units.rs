@@ -62,6 +62,7 @@ pub struct Rate {
 }
 
 impl Rate {
+    #[must_use]
     pub fn new(bytes_per_sec: f64, system: UnitSystem) -> Self {
         Self {
             bytes_per_sec,

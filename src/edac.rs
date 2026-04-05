@@ -43,6 +43,7 @@ const EDAC_MC_PATH: &str = "/sys/devices/system/edac/mc";
 
 impl EdacSnapshot {
     /// Read current EDAC counters. Returns `None` if EDAC is not available.
+    #[must_use]
     pub fn capture() -> Option<Self> {
         let mc_root = Path::new(EDAC_MC_PATH);
         if !mc_root.is_dir() {
@@ -75,6 +76,7 @@ impl EdacSnapshot {
 
     /// Compute deltas between this (before) and `after` snapshot.
     /// Only returns entries where at least one counter increased.
+    #[must_use]
     pub fn delta(&self, after: &EdacSnapshot) -> Vec<EccDelta> {
         let mut deltas = Vec::new();
         for after_dimm in &after.dimms {
@@ -136,7 +138,7 @@ fn try_read_dimm_api(mc_path: &Path, mc_index: usize, dimms: &mut Vec<DimmEdac>)
     found
 }
 
-/// Legacy EDAC API: mc0/csrow0/ch0_ce_count, mc0/csrow0/ch0_dimm_label, etc.
+/// Legacy EDAC API: `mc0/csrow0/ch0_ce_count`, `mc0/csrow0/ch0_dimm_label`, etc.
 fn try_read_csrow_api(mc_path: &Path, mc_index: usize, dimms: &mut Vec<DimmEdac>) {
     let Some(entries) = sorted_dir_entries(mc_path) else {
         return;
@@ -184,8 +186,11 @@ fn read_trimmed(path: &Path) -> Option<String> {
 }
 
 fn sorted_dir_entries(path: &Path) -> Option<Vec<fs::DirEntry>> {
-    let mut entries: Vec<_> = fs::read_dir(path).ok()?.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
+    let mut entries: Vec<_> = fs::read_dir(path)
+        .ok()?
+        .filter_map(std::result::Result::ok)
+        .collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
     Some(entries)
 }
 

@@ -195,7 +195,9 @@ pub fn setup_phys(
 
 pub struct TestSetup {
     pub region: LockedRegion,
-    pub _compaction_guard: Option<CompactionGuard>,
+    /// Held for its [`Drop`] side-effect — restores the compaction sysctl on teardown.
+    #[allow(dead_code)]
+    pub compaction_guard: Option<CompactionGuard>,
     pub resolver: Option<PagemapResolver>,
     pub map_stats: Option<MapStats>,
 }
@@ -214,7 +216,7 @@ pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
         let dimm_str = topo
             .dimms
             .iter()
-            .map(|d| d.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join("; ");
         info!("installed DIMMs: {dimm_str}");
@@ -222,7 +224,7 @@ pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
 
     Ok(TestSetup {
         region,
-        _compaction_guard: compaction_guard,
+        compaction_guard,
         resolver,
         map_stats,
     })
