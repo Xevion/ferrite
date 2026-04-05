@@ -127,9 +127,20 @@ pub enum ErrorClassification {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use proptest::prelude::*;
 
     use super::*;
     use crate::failure::FailureBuilder;
+
+    fn arb_failure() -> impl Strategy<Value = crate::Failure> {
+        (any::<usize>(), any::<u64>(), any::<u64>()).prop_map(|(addr, expected, actual)| {
+            FailureBuilder::default()
+                .addr(addr)
+                .expected(expected)
+                .actual(actual)
+                .build()
+        })
+    }
 
     fn f(addr: usize, expected: u64, actual: u64) -> crate::Failure {
         FailureBuilder::default()
@@ -227,6 +238,31 @@ mod tests {
 
             check!(stats.stuck_high_mask() == 1 << 20);
             assert!(stats.classification() == ErrorClassification::Mixed);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn classification_not_no_errors_after_record(
+            failures in prop::collection::vec(arb_failure(), 1..=20)
+        ) {
+            let mut stats = BitErrorStats::new();
+            for f in &failures {
+                stats.record(f);
+            }
+            prop_assert!(!matches!(stats.classification(), ErrorClassification::NoErrors));
+        }
+
+        #[test]
+        fn stuck_mask_subset_of_union_xor(
+            failures in prop::collection::vec(arb_failure(), 1..=20)
+        ) {
+            let mut stats = BitErrorStats::new();
+            for f in &failures {
+                stats.record(f);
+            }
+            let stuck = stats.stuck_high_mask() | stats.stuck_low_mask();
+            prop_assert_eq!(stuck & !stats.union_xor_mask, 0u64);
         }
     }
 }

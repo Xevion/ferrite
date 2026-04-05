@@ -86,7 +86,8 @@ pub fn parse_size(s: &str) -> Result<usize, String> {
         (s, 1)
     };
     let num: usize = num_str.parse().map_err(|_| format!("invalid size: {s}"))?;
-    Ok(num * multiplier)
+    num.checked_mul(multiplier)
+        .ok_or_else(|| format!("size overflow: {s}"))
 }
 
 /// Check whether the process has sufficient privileges to mlock memory.
@@ -228,4 +229,18 @@ pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
         resolver,
         map_stats,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::parse_size;
+
+    proptest! {
+        #[test]
+        fn parse_size_never_panics(s in any::<String>()) {
+            let _ = parse_size(&s);
+        }
+    }
 }

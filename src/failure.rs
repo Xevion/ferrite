@@ -102,6 +102,7 @@ impl FailureBuilder {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use proptest::prelude::*;
 
     use super::*;
 
@@ -116,5 +117,16 @@ mod tests {
         let s = f.to_string();
         assert!(s.contains("phys=0xdeadbeef"));
         assert!(s.contains("1 bit(s)"));
+    }
+
+    proptest! {
+        #[test]
+        fn flipped_bits_at_most_64(expected: u64, actual: u64) {
+            let f = FailureBuilder::default()
+                .expected(expected)
+                .actual(actual)
+                .build();
+            prop_assert!(f.flipped_bits() <= 64);
+        }
     }
 }

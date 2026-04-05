@@ -57,4 +57,5 @@ tracing-subscriber = { version = "0.3", features = ["json"], optional = true }
 
 [dev-dependencies]
 assert2 = "0.4.0"
+proptest = "1"
 rstest = "0.26.1"
