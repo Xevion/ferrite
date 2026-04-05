@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod palette;
 pub mod render;
+pub mod run;
 
 pub use activity::ActivityBuffer;
 pub use render::SymbolSet;

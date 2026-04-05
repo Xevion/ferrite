@@ -9,6 +9,11 @@ use crate::simd::{
     CHUNK, avx512_available, fill_nt, fill_nt_indexed, verify_avx512, verify_indexed_avx512,
 };
 
+mod checkerboard;
+mod solid;
+mod stuck_address;
+mod walking;
+
 /// Chunk size (in u64 words) for activity reporting in non-SIMD paths.
 /// Matches `simd::CHUNK` so activity granularity is consistent regardless
 /// of whether AVX-512 is available.
@@ -76,16 +81,16 @@ pub fn run_pattern(
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
     match pattern {
-        Pattern::SolidBits => test_solid_bits(buf, parallel, on_subpass, on_activity),
-        Pattern::WalkingOnes => test_walking_ones(buf, parallel, on_subpass, on_activity),
-        Pattern::WalkingZeros => test_walking_zeros(buf, parallel, on_subpass, on_activity),
-        Pattern::Checkerboard => test_checkerboard(buf, parallel, on_subpass, on_activity),
-        Pattern::StuckAddress => test_stuck_address(buf, parallel, on_subpass, on_activity),
+        Pattern::SolidBits => solid::run(buf, parallel, on_subpass, on_activity),
+        Pattern::WalkingOnes => walking::run_ones(buf, parallel, on_subpass, on_activity),
+        Pattern::WalkingZeros => walking::run_zeros(buf, parallel, on_subpass, on_activity),
+        Pattern::Checkerboard => checkerboard::run(buf, parallel, on_subpass, on_activity),
+        Pattern::StuckAddress => stuck_address::run(buf, parallel, on_subpass, on_activity),
     }
 }
 
 /// Fill every word with `pattern`, then verify. Returns any mismatches.
-fn fill_verify_constant(
+pub(super) fn fill_verify_constant(
     buf: &mut [u64],
     pattern: u64,
     parallel: bool,
@@ -181,7 +186,7 @@ fn fill_verify_constant(
 }
 
 /// Fill every word with its index, then verify. Returns any mismatches.
-fn fill_verify_indexed(
+pub(super) fn fill_verify_indexed(
     buf: &mut [u64],
     parallel: bool,
     on_activity: &(dyn Fn(f64) + Sync),
@@ -276,7 +281,7 @@ fn fill_verify_indexed(
 }
 
 /// Fill with `pattern`, verify, then call `on_complete`.
-fn fill_and_verify(
+pub(super) fn fill_and_verify(
     buf: &mut [u64],
     pattern: u64,
     parallel: bool,
@@ -285,105 +290,6 @@ fn fill_and_verify(
 ) -> Vec<Failure> {
     let failures = fill_verify_constant(buf, pattern, parallel, on_activity);
     on_complete();
-    failures
-}
-
-fn test_solid_bits(
-    buf: &mut [u64],
-    parallel: bool,
-    on_subpass: &mut impl FnMut(),
-    on_activity: &(dyn Fn(f64) + Sync),
-) -> Vec<Failure> {
-    let mut failures = Vec::new();
-    failures.extend(fill_and_verify(
-        buf,
-        0x0000_0000_0000_0000,
-        parallel,
-        on_subpass,
-        on_activity,
-    ));
-    failures.extend(fill_and_verify(
-        buf,
-        0xFFFF_FFFF_FFFF_FFFF,
-        parallel,
-        on_subpass,
-        on_activity,
-    ));
-    failures
-}
-
-fn test_walking_ones(
-    buf: &mut [u64],
-    parallel: bool,
-    on_subpass: &mut impl FnMut(),
-    on_activity: &(dyn Fn(f64) + Sync),
-) -> Vec<Failure> {
-    let mut failures = Vec::new();
-    for bit in 0..64 {
-        let pattern = 1u64 << bit;
-        failures.extend(fill_and_verify(
-            buf,
-            pattern,
-            parallel,
-            on_subpass,
-            on_activity,
-        ));
-    }
-    failures
-}
-
-fn test_walking_zeros(
-    buf: &mut [u64],
-    parallel: bool,
-    on_subpass: &mut impl FnMut(),
-    on_activity: &(dyn Fn(f64) + Sync),
-) -> Vec<Failure> {
-    let mut failures = Vec::new();
-    for bit in 0..64 {
-        let pattern = !(1u64 << bit);
-        failures.extend(fill_and_verify(
-            buf,
-            pattern,
-            parallel,
-            on_subpass,
-            on_activity,
-        ));
-    }
-    failures
-}
-
-fn test_checkerboard(
-    buf: &mut [u64],
-    parallel: bool,
-    on_subpass: &mut impl FnMut(),
-    on_activity: &(dyn Fn(f64) + Sync),
-) -> Vec<Failure> {
-    let mut failures = Vec::new();
-    failures.extend(fill_and_verify(
-        buf,
-        0xAAAA_AAAA_AAAA_AAAA,
-        parallel,
-        on_subpass,
-        on_activity,
-    ));
-    failures.extend(fill_and_verify(
-        buf,
-        0x5555_5555_5555_5555,
-        parallel,
-        on_subpass,
-        on_activity,
-    ));
-    failures
-}
-
-fn test_stuck_address(
-    buf: &mut [u64],
-    parallel: bool,
-    on_subpass: &mut impl FnMut(),
-    on_activity: &(dyn Fn(f64) + Sync),
-) -> Vec<Failure> {
-    let failures = fill_verify_indexed(buf, parallel, on_activity);
-    on_subpass();
     failures
 }
 
@@ -401,70 +307,70 @@ mod tests {
     #[test]
     fn solid_bits_no_failures_on_good_memory() {
         let mut buf = make_test_buf();
-        let failures = test_solid_bits(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
+        let failures = solid::run(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
         assert!(failures.is_empty());
     }
 
     #[test]
     fn walking_ones_no_failures() {
         let mut buf = make_test_buf();
-        let failures = test_walking_ones(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
+        let failures = walking::run_ones(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
         assert!(failures.is_empty());
     }
 
     #[test]
     fn checkerboard_no_failures() {
         let mut buf = make_test_buf();
-        let failures = test_checkerboard(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
+        let failures = checkerboard::run(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
         assert!(failures.is_empty());
     }
 
     #[test]
     fn stuck_address_no_failures() {
         let mut buf = make_test_buf();
-        let failures = test_stuck_address(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
+        let failures = stuck_address::run(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
         assert!(failures.is_empty());
     }
 
     #[test]
     fn parallel_solid_bits_no_failures() {
         let mut buf = make_test_buf();
-        let failures = test_solid_bits(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
+        let failures = solid::run(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
         assert!(failures.is_empty());
     }
 
     #[test]
     fn parallel_walking_ones_no_failures() {
         let mut buf = make_test_buf();
-        let failures = test_walking_ones(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
+        let failures = walking::run_ones(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
         assert!(failures.is_empty());
     }
 
     #[test]
     fn parallel_stuck_address_no_failures() {
         let mut buf = make_test_buf();
-        let failures = test_stuck_address(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
+        let failures = stuck_address::run(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
         assert!(failures.is_empty());
     }
 
     #[test]
     fn walking_zeros_no_failures() {
         let mut buf = make_test_buf();
-        let failures = test_walking_zeros(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
+        let failures = walking::run_zeros(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
         assert!(failures.is_empty());
     }
 
     #[test]
     fn parallel_walking_zeros_no_failures() {
         let mut buf = make_test_buf();
-        let failures = test_walking_zeros(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
+        let failures = walking::run_zeros(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
         assert!(failures.is_empty());
     }
 
     #[test]
     fn parallel_checkerboard_no_failures() {
         let mut buf = make_test_buf();
-        let failures = test_checkerboard(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
+        let failures = checkerboard::run(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
         assert!(failures.is_empty());
     }
 
@@ -498,7 +404,7 @@ mod tests {
     fn subpass_callback_fires() {
         let mut buf = make_test_buf();
         let mut count = 0u32;
-        test_solid_bits(&mut buf, false, &mut || count += 1, &NOOP_ACTIVITY);
+        solid::run(&mut buf, false, &mut || count += 1, &NOOP_ACTIVITY);
         assert_eq!(count, 2); // solid_bits has 2 sub-passes
     }
 
