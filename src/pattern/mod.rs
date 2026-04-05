@@ -381,6 +381,28 @@ mod tests {
         );
     }
 
+    mod pattern_metadata {
+        use assert2::check;
+        use rstest::rstest;
+
+        use super::*;
+
+        #[rstest]
+        #[case(Pattern::SolidBits, "Solid Bits", 2)]
+        #[case(Pattern::WalkingOnes, "Walking Ones", 64)]
+        #[case(Pattern::WalkingZeros, "Walking Zeros", 64)]
+        #[case(Pattern::Checkerboard, "Checkerboard", 2)]
+        #[case(Pattern::StuckAddress, "Stuck Address", 1)]
+        fn display_and_sub_passes(
+            #[case] pattern: Pattern,
+            #[case] expected_name: &str,
+            #[case] expected_sub_passes: u64,
+        ) {
+            check!(pattern.to_string() == expected_name);
+            check!(pattern.sub_passes() == expected_sub_passes);
+        }
+    }
+
     mod corruption {
         use assert2::{assert, check};
 

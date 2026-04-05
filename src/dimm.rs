@@ -23,7 +23,16 @@ impl DimmTopology {
     pub fn build() -> Option<Self> {
         let edac = EdacSnapshot::capture();
         let smbios_dimms = smbios::read_dimm_info();
+        Self::merge(edac, smbios_dimms)
+    }
 
+    /// Merge EDAC and SMBIOS data into a unified topology.
+    /// Returns `None` if neither source provides data or the result is empty.
+    #[must_use]
+    pub(crate) fn merge(
+        edac: Option<EdacSnapshot>,
+        smbios_dimms: Option<Vec<DimmInfo>>,
+    ) -> Option<Self> {
         if edac.is_none() && smbios_dimms.is_none() {
             return None;
         }
@@ -284,6 +293,79 @@ mod tests {
             smbios: None,
         };
         assert_eq!(entry.to_string(), "(unknown)");
+    }
+
+    mod merge_tests {
+        use std::time::Instant;
+
+        use assert2::{assert, check};
+
+        use super::*;
+        use crate::edac::EdacSnapshot;
+
+        fn make_edac(dimms: Vec<DimmEdac>) -> EdacSnapshot {
+            EdacSnapshot {
+                dimms,
+                timestamp: Instant::now(),
+            }
+        }
+
+        #[test]
+        fn none_none_returns_none() {
+            check!(DimmTopology::merge(None, None).is_none());
+        }
+
+        #[test]
+        fn edac_only() {
+            let edac = make_edac(vec![edac_dimm(0, 0, Some("DIMM_A1"), None)]);
+            let topo = DimmTopology::merge(Some(edac), None).unwrap();
+            check!(topo.dimms.len() == 1);
+            assert!(topo.dimms[0].edac.is_some());
+            assert!(topo.dimms[0].smbios.is_none());
+        }
+
+        #[test]
+        fn smbios_only() {
+            let smbios = vec![smbios_dimm("DIMM_A1", "BANK 0")];
+            let topo = DimmTopology::merge(None, Some(smbios)).unwrap();
+            check!(topo.dimms.len() == 1);
+            assert!(topo.dimms[0].edac.is_none());
+            assert!(topo.dimms[0].smbios.is_some());
+        }
+
+        #[test]
+        fn matched_merge() {
+            let edac = make_edac(vec![edac_dimm(0, 0, Some("DIMM_A1"), None)]);
+            let smbios = vec![smbios_dimm("DIMM_A1", "BANK 0")];
+            let topo = DimmTopology::merge(Some(edac), Some(smbios)).unwrap();
+            check!(topo.dimms.len() == 1);
+            assert!(topo.dimms[0].edac.is_some());
+            assert!(topo.dimms[0].smbios.is_some());
+        }
+
+        #[test]
+        fn unmatched_entries_kept() {
+            let edac = make_edac(vec![edac_dimm(0, 0, None, None)]);
+            let smbios = vec![smbios_dimm("DIMM_A1", "BANK 0")];
+            let topo = DimmTopology::merge(Some(edac), Some(smbios)).unwrap();
+            // EDAC entry unmatched + SMBIOS entry unmatched = 2 entries
+            check!(topo.dimms.len() == 2);
+        }
+
+        #[test]
+        fn partial_match_preserves_all() {
+            let edac = make_edac(vec![
+                edac_dimm(0, 0, Some("DIMM_A1"), None),
+                edac_dimm(0, 1, None, None),
+            ]);
+            let smbios = vec![
+                smbios_dimm("DIMM_A1", "BANK 0"),
+                smbios_dimm("DIMM_B1", "BANK 1"),
+            ];
+            let topo = DimmTopology::merge(Some(edac), Some(smbios)).unwrap();
+            // DIMM_A1 matched, edac dimm1 unmatched, DIMM_B1 unmatched = 3
+            check!(topo.dimms.len() == 3);
+        }
     }
 
     #[test]

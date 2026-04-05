@@ -289,6 +289,191 @@ mod tests {
         let _ = result;
     }
 
+    mod try_read_dimm_api_tests {
+        use assert2::check;
+        use tempfile::TempDir;
+
+        use super::*;
+
+        fn setup_dimm_dir(
+            mc_path: &Path,
+            idx: usize,
+            ce: u64,
+            ue: u64,
+            label: Option<&str>,
+            location: Option<&str>,
+        ) {
+            let dimm = mc_path.join(format!("dimm{idx}"));
+            fs::create_dir_all(&dimm).unwrap();
+            fs::write(dimm.join("dimm_ce_count"), format!("{ce}\n")).unwrap();
+            fs::write(dimm.join("dimm_ue_count"), format!("{ue}\n")).unwrap();
+            if let Some(l) = label {
+                fs::write(dimm.join("dimm_label"), format!("{l}\n")).unwrap();
+            }
+            if let Some(loc) = location {
+                fs::write(dimm.join("dimm_location"), format!("{loc}\n")).unwrap();
+            }
+        }
+
+        #[test]
+        fn reads_single_dimm() {
+            let tmp = TempDir::new().unwrap();
+            let mc = tmp.path().join("mc0");
+            fs::create_dir_all(&mc).unwrap();
+            setup_dimm_dir(&mc, 0, 5, 1, Some("DIMM_A1"), Some("channel 0 slot 0"));
+
+            let mut dimms = Vec::new();
+            let found = try_read_dimm_api(&mc, 0, &mut dimms);
+            check!(found);
+            check!(dimms.len() == 1);
+            check!(dimms[0].mc == 0);
+            check!(dimms[0].dimm_index == 0);
+            check!(dimms[0].ce_count == 5);
+            check!(dimms[0].ue_count == 1);
+            check!(dimms[0].label == Some("DIMM_A1".to_owned()));
+            check!(dimms[0].location == Some("channel 0 slot 0".to_owned()));
+        }
+
+        #[test]
+        fn reads_multiple_dimms() {
+            let tmp = TempDir::new().unwrap();
+            let mc = tmp.path().join("mc0");
+            fs::create_dir_all(&mc).unwrap();
+            setup_dimm_dir(&mc, 0, 0, 0, None, None);
+            setup_dimm_dir(&mc, 1, 3, 0, Some("DIMM_B1"), None);
+
+            let mut dimms = Vec::new();
+            try_read_dimm_api(&mc, 0, &mut dimms);
+            check!(dimms.len() == 2);
+            check!(dimms[0].dimm_index == 0);
+            check!(dimms[1].dimm_index == 1);
+            check!(dimms[1].ce_count == 3);
+        }
+
+        #[test]
+        fn skips_non_dimm_entries() {
+            let tmp = TempDir::new().unwrap();
+            let mc = tmp.path().join("mc0");
+            fs::create_dir_all(&mc).unwrap();
+            setup_dimm_dir(&mc, 0, 0, 0, None, None);
+            // Create a non-dimm directory
+            fs::create_dir_all(mc.join("some_other_dir")).unwrap();
+
+            let mut dimms = Vec::new();
+            try_read_dimm_api(&mc, 0, &mut dimms);
+            check!(dimms.len() == 1);
+        }
+
+        #[test]
+        fn returns_false_for_empty_mc() {
+            let tmp = TempDir::new().unwrap();
+            let mc = tmp.path().join("mc0");
+            fs::create_dir_all(&mc).unwrap();
+
+            let mut dimms = Vec::new();
+            check!(!try_read_dimm_api(&mc, 0, &mut dimms));
+        }
+
+        #[test]
+        fn missing_count_files_default_to_zero() {
+            let tmp = TempDir::new().unwrap();
+            let mc = tmp.path().join("mc0");
+            let dimm = mc.join("dimm0");
+            fs::create_dir_all(&dimm).unwrap();
+            // Don't create ce/ue count files
+
+            let mut dimms = Vec::new();
+            try_read_dimm_api(&mc, 0, &mut dimms);
+            check!(dimms.len() == 1);
+            check!(dimms[0].ce_count == 0);
+            check!(dimms[0].ue_count == 0);
+        }
+    }
+
+    mod try_read_csrow_api_tests {
+        use assert2::check;
+        use tempfile::TempDir;
+
+        use super::*;
+
+        fn setup_csrow(mc_path: &Path, csrow: usize, channels: &[(u64, Option<&str>)], ue: u64) {
+            let csrow_path = mc_path.join(format!("csrow{csrow}"));
+            fs::create_dir_all(&csrow_path).unwrap();
+            fs::write(csrow_path.join("ue_count"), format!("{ue}\n")).unwrap();
+            for (ch, (ce, label)) in channels.iter().enumerate() {
+                fs::write(
+                    csrow_path.join(format!("ch{ch}_ce_count")),
+                    format!("{ce}\n"),
+                )
+                .unwrap();
+                if let Some(l) = label {
+                    fs::write(
+                        csrow_path.join(format!("ch{ch}_dimm_label")),
+                        format!("{l}\n"),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+
+        #[test]
+        fn reads_single_csrow_single_channel() {
+            let tmp = TempDir::new().unwrap();
+            let mc = tmp.path().join("mc0");
+            fs::create_dir_all(&mc).unwrap();
+            setup_csrow(&mc, 0, &[(3, Some("DIMM_A1"))], 1);
+
+            let mut dimms = Vec::new();
+            try_read_csrow_api(&mc, 0, &mut dimms);
+            check!(dimms.len() == 1);
+            check!(dimms[0].mc == 0);
+            check!(dimms[0].ce_count == 3);
+            check!(dimms[0].ue_count == 1);
+            check!(dimms[0].label == Some("DIMM_A1".to_owned()));
+            check!(dimms[0].location == Some("csrow0 channel 0".to_owned()));
+        }
+
+        #[test]
+        fn reads_multi_channel_csrow() {
+            let tmp = TempDir::new().unwrap();
+            let mc = tmp.path().join("mc0");
+            fs::create_dir_all(&mc).unwrap();
+            setup_csrow(&mc, 0, &[(1, None), (2, Some("CH_B"))], 0);
+
+            let mut dimms = Vec::new();
+            try_read_csrow_api(&mc, 0, &mut dimms);
+            check!(dimms.len() == 2);
+            check!(dimms[0].ce_count == 1);
+            check!(dimms[0].location == Some("csrow0 channel 0".to_owned()));
+            check!(dimms[1].ce_count == 2);
+            check!(dimms[1].label == Some("CH_B".to_owned()));
+        }
+
+        #[test]
+        fn skips_non_csrow_entries() {
+            let tmp = TempDir::new().unwrap();
+            let mc = tmp.path().join("mc0");
+            fs::create_dir_all(&mc).unwrap();
+            setup_csrow(&mc, 0, &[(0, None)], 0);
+            fs::create_dir_all(mc.join("not_a_csrow")).unwrap();
+
+            let mut dimms = Vec::new();
+            try_read_csrow_api(&mc, 0, &mut dimms);
+            check!(dimms.len() == 1);
+        }
+
+        #[test]
+        fn empty_mc_produces_no_dimms() {
+            let tmp = TempDir::new().unwrap();
+            let mc = tmp.path().join("mc0");
+            fs::create_dir_all(&mc).unwrap();
+
+            let mut dimms = Vec::new();
+            try_read_csrow_api(&mc, 0, &mut dimms);
+            check!(dimms.is_empty());
+        }
+    }
+
     #[test]
     fn ecc_delta_serialization() {
         let delta_with_label = EccDelta {

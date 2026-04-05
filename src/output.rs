@@ -496,6 +496,7 @@ impl OutputSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::failure::FailureBuilder;
     use crate::phys::PhysAddr;
     use std::time::Duration;
 
@@ -730,6 +731,130 @@ mod tests {
         sink.print_pass_summary(1, 2, 3);
         sink.print_final_result(0);
         sink.print_final_result(5);
+    }
+
+    #[test]
+    fn truncated_display_within_limit() {
+        let failures: Vec<Failure> = (0..3)
+            .map(|i| {
+                FailureBuilder::default()
+                    .addr(i * 8)
+                    .expected(0xFF)
+                    .actual(0xFE)
+                    .build()
+            })
+            .collect();
+        let t = Truncated(&failures, 5);
+        let s = format!("{t}");
+        // All 3 shown, no "...+N more"
+        assert!(!s.contains("more"));
+        // Each failure gets a line
+        assert_eq!(s.lines().count(), 3);
+    }
+
+    #[test]
+    fn truncated_display_exceeds_limit() {
+        let failures: Vec<Failure> = (0..10)
+            .map(|i| {
+                FailureBuilder::default()
+                    .addr(i * 8)
+                    .expected(0xFF)
+                    .actual(0xFE)
+                    .build()
+            })
+            .collect();
+        let t = Truncated(&failures, 3);
+        let s = format!("{t}");
+        assert!(s.contains("...+7 more"));
+    }
+
+    #[test]
+    fn truncated_display_empty() {
+        let failures: Vec<Failure> = vec![];
+        let t = Truncated(&failures, 5);
+        let s = format!("{t}");
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn print_test_result_pass_and_fail() {
+        let sink = OutputSink::human(UnitSystem::Decimal);
+        let pb = indicatif::ProgressBar::hidden();
+
+        // Pass case
+        sink.print_test_result(
+            Pattern::SolidBits,
+            Duration::from_millis(100),
+            1024 * 1024,
+            &[],
+            &pb,
+        );
+
+        // Fail case
+        let failures = vec![FailureBuilder::default()
+            .addr(0x1000)
+            .expected(0xFF)
+            .actual(0xFE)
+            .build()];
+        sink.print_test_result(
+            Pattern::WalkingOnes,
+            Duration::from_millis(50),
+            512 * 1024,
+            &failures,
+            &pb,
+        );
+    }
+
+    #[test]
+    fn print_map_info_various_configs() {
+        let sink = OutputSink::human(UnitSystem::Binary);
+
+        // Only THP
+        sink.print_map_info(&MapStats {
+            total_pages: 100,
+            huge_pages: 0,
+            thp_pages: 10,
+            hwpoison_pages: 0,
+            unevictable_pages: 100,
+        });
+
+        // Only huge
+        sink.print_map_info(&MapStats {
+            total_pages: 50,
+            huge_pages: 5,
+            thp_pages: 0,
+            hwpoison_pages: 0,
+            unevictable_pages: 50,
+        });
+
+        // No special pages
+        sink.print_map_info(&MapStats {
+            total_pages: 200,
+            huge_pages: 0,
+            thp_pages: 0,
+            hwpoison_pages: 0,
+            unevictable_pages: 200,
+        });
+    }
+
+    #[test]
+    fn json_sink_multiple_events() {
+        let (mut sink, path) = json_sink();
+        sink.emit_pass_start(1, 2);
+        sink.emit_test_start(Pattern::SolidBits, 1);
+        sink.emit_test_complete(Pattern::SolidBits, 1, Duration::from_millis(50), 1024, &[]);
+        sink.emit_pass_complete(1, 0, Duration::from_millis(100));
+        sink.emit_summary(1, 0, Duration::from_millis(100));
+        drop(sink);
+
+        let events = read_events(&path);
+        assert_eq!(events.len(), 5);
+        assert_eq!(events[0]["event"], "pass_start");
+        assert_eq!(events[1]["event"], "test_start");
+        assert_eq!(events[2]["event"], "test_pass");
+        assert_eq!(events[3]["event"], "pass_complete");
+        assert_eq!(events[4]["event"], "run_summary");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
