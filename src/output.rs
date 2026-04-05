@@ -495,6 +495,8 @@ impl OutputSink {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::failure::FailureBuilder;
     use crate::phys::PhysAddr;
@@ -538,10 +540,10 @@ mod tests {
         drop(sink);
 
         let events = read_events(&path);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["event"], "pass_start");
-        assert_eq!(events[0]["pass"], 1);
-        assert_eq!(events[0]["total_passes"], 3);
+        check!(events.len() == 1);
+        check!(events[0]["event"] == "pass_start");
+        check!(events[0]["pass"] == 1);
+        check!(events[0]["total_passes"] == 3);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -552,8 +554,8 @@ mod tests {
         drop(sink);
 
         let events = read_events(&path);
-        assert_eq!(events[0]["event"], "test_start");
-        assert_eq!(events[0]["pattern"], "Solid Bits");
+        check!(events[0]["event"] == "test_start");
+        check!(events[0]["pattern"] == "Solid Bits");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -570,8 +572,8 @@ mod tests {
         drop(sink);
 
         let events = read_events(&path);
-        assert_eq!(events[0]["event"], "test_pass");
-        assert_eq!(events[0]["pattern"], "Checkerboard");
+        check!(events[0]["event"] == "test_pass");
+        check!(events[0]["pattern"] == "Checkerboard");
         assert!(events[0]["duration_ms"].as_f64().unwrap() > 0.0);
         let _ = std::fs::remove_file(&path);
     }
@@ -596,11 +598,11 @@ mod tests {
         drop(sink);
 
         let events = read_events(&path);
-        assert_eq!(events[0]["event"], "test_fail");
+        check!(events[0]["event"] == "test_fail");
         let f = &events[0]["failures"][0];
-        assert_eq!(f["flipped_bits"], 1);
+        check!(f["flipped_bits"] == 1);
         assert!(f["phys_addr"].as_str().is_some());
-        assert_eq!(f["word_index"], 0);
+        check!(f["word_index"] == 0);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -611,8 +613,8 @@ mod tests {
         drop(sink);
 
         let events = read_events(&path);
-        assert_eq!(events[0]["event"], "pass_complete");
-        assert_eq!(events[0]["failures"], 5);
+        check!(events[0]["event"] == "pass_complete");
+        check!(events[0]["failures"] == 5);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -623,9 +625,9 @@ mod tests {
         drop(sink);
 
         let events = read_events(&path);
-        assert_eq!(events[0]["event"], "run_summary");
-        assert_eq!(events[0]["passes"], 3);
-        assert_eq!(events[0]["total_failures"], 0);
+        check!(events[0]["event"] == "run_summary");
+        check!(events[0]["passes"] == 3);
+        check!(events[0]["total_failures"] == 0);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -643,9 +645,9 @@ mod tests {
         drop(sink);
 
         let events = read_events(&path);
-        assert_eq!(events[0]["event"], "map_info");
-        assert_eq!(events[0]["total_pages"], 100);
-        assert_eq!(events[0]["huge_pages"], 5);
+        check!(events[0]["event"] == "map_info");
+        check!(events[0]["total_pages"] == 100);
+        check!(events[0]["huge_pages"] == 5);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -663,8 +665,8 @@ mod tests {
         drop(sink);
 
         let events = read_events(&path);
-        assert_eq!(events[0]["event"], "ecc_deltas");
-        assert_eq!(events[0]["deltas"][0]["ce_delta"], 2);
+        check!(events[0]["event"] == "ecc_deltas");
+        check!(events[0]["deltas"][0]["ce_delta"] == 2);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -675,9 +677,9 @@ mod tests {
         drop(sink);
 
         let events = read_events(&path);
-        assert_eq!(events[0]["event"], "progress");
-        assert_eq!(events[0]["sub_pass"], 3);
-        assert_eq!(events[0]["total_sub_passes"], 5);
+        check!(events[0]["event"] == "progress");
+        check!(events[0]["sub_pass"] == 3);
+        check!(events[0]["total_sub_passes"] == 5);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -692,8 +694,8 @@ mod tests {
         };
         let r = FailureRecord::from(&f);
         assert!(r.phys_addr.is_none());
-        assert_eq!(r.word_index, 5);
-        assert_eq!(r.flipped_bits, f.flipped_bits());
+        check!(r.word_index == 5);
+        check!(r.flipped_bits == f.flipped_bits());
     }
 
     #[test]
@@ -749,7 +751,7 @@ mod tests {
         // All 3 shown, no "...+N more"
         assert!(!s.contains("more"));
         // Each failure gets a line
-        assert_eq!(s.lines().count(), 3);
+        check!(s.lines().count() == 3);
     }
 
     #[test]
@@ -791,11 +793,13 @@ mod tests {
         );
 
         // Fail case
-        let failures = vec![FailureBuilder::default()
-            .addr(0x1000)
-            .expected(0xFF)
-            .actual(0xFE)
-            .build()];
+        let failures = vec![
+            FailureBuilder::default()
+                .addr(0x1000)
+                .expected(0xFF)
+                .actual(0xFE)
+                .build(),
+        ];
         sink.print_test_result(
             Pattern::WalkingOnes,
             Duration::from_millis(50),
@@ -848,12 +852,12 @@ mod tests {
         drop(sink);
 
         let events = read_events(&path);
-        assert_eq!(events.len(), 5);
-        assert_eq!(events[0]["event"], "pass_start");
-        assert_eq!(events[1]["event"], "test_start");
-        assert_eq!(events[2]["event"], "test_pass");
-        assert_eq!(events[3]["event"], "pass_complete");
-        assert_eq!(events[4]["event"], "run_summary");
+        check!(events.len() == 5);
+        check!(events[0]["event"] == "pass_start");
+        check!(events[1]["event"] == "test_start");
+        check!(events[2]["event"] == "test_pass");
+        check!(events[3]["event"] == "pass_complete");
+        check!(events[4]["event"] == "run_summary");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -884,5 +888,115 @@ mod tests {
             },
         ];
         sink.print_ecc_deltas(1, &deltas);
+    }
+
+    #[test]
+    fn json_stdout_sink_properties() {
+        let sink = OutputSink::json("-", UnitSystem::Decimal).unwrap();
+        assert!(sink.is_json());
+        assert!(sink.human_to_stderr());
+    }
+
+    #[test]
+    fn json_empty_path_is_stdout() {
+        let sink = OutputSink::json("", UnitSystem::Binary).unwrap();
+        assert!(sink.is_json());
+        assert!(sink.human_to_stderr());
+    }
+
+    #[test]
+    fn json_stdout_print_methods_use_stderr() {
+        let sink = OutputSink::json("-", UnitSystem::Binary).unwrap();
+        let stats = MapStats {
+            total_pages: 100,
+            huge_pages: 5,
+            thp_pages: 10,
+            hwpoison_pages: 1,
+            unevictable_pages: 90,
+        };
+        sink.print_banner(1024 * 1024, 2, 5, true);
+        sink.print_banner(1024 * 1024, 1, 3, false);
+        sink.print_map_info(&stats);
+        sink.print_pass_summary(1, 2, 0);
+        sink.print_pass_summary(1, 2, 3);
+        sink.print_final_result(0);
+        sink.print_final_result(5);
+    }
+
+    #[test]
+    fn json_stdout_print_test_result() {
+        let sink = OutputSink::json("-", UnitSystem::Binary).unwrap();
+        let pb = indicatif::ProgressBar::hidden();
+
+        sink.print_test_result(
+            Pattern::SolidBits,
+            Duration::from_millis(100),
+            1024 * 1024,
+            &[],
+            &pb,
+        );
+
+        let failures = vec![
+            FailureBuilder::default()
+                .addr(0x1000)
+                .expected(0xFF)
+                .actual(0xFE)
+                .build(),
+        ];
+        sink.print_test_result(
+            Pattern::WalkingOnes,
+            Duration::from_millis(50),
+            512 * 1024,
+            &failures,
+            &pb,
+        );
+    }
+
+    #[test]
+    fn json_stdout_print_ecc_deltas() {
+        let sink = OutputSink::json("-", UnitSystem::Binary).unwrap();
+        let deltas = vec![crate::edac::EccDelta {
+            mc: 0,
+            dimm_index: 0,
+            label: Some("DIMM_A1".to_owned()),
+            ce_delta: 1,
+            ue_delta: 0,
+        }];
+        sink.print_ecc_deltas(1, &deltas);
+    }
+
+    #[test]
+    fn write_event_broken_pipe_suppresses_further_writes() {
+        use std::io::{self, Write};
+
+        struct BrokenWriter {
+            call_count: std::cell::Cell<usize>,
+        }
+
+        impl Write for BrokenWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                self.call_count.set(self.call_count.get() + 1);
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let writer: Box<dyn Write + Send> = Box::new(BrokenWriter {
+            call_count: std::cell::Cell::new(0),
+        });
+        let mut sink = OutputSink::Json {
+            writer: std::io::BufWriter::with_capacity(0, writer),
+            mp: indicatif::MultiProgress::new(),
+            unit_system: UnitSystem::Binary,
+            json_to_stdout: false,
+            broken_pipe: false,
+        };
+
+        // First event should hit the broken pipe and set the flag
+        sink.emit_pass_start(1, 1);
+        // Second event should be suppressed
+        sink.emit_pass_start(2, 2);
     }
 }

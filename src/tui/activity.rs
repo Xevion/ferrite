@@ -52,25 +52,27 @@ impl ActivityBuffer {
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
+    use assert2::check;
+
     use super::*;
 
     #[test]
     fn new_creates_correct_cell_count() {
         let buf = ActivityBuffer::new();
-        assert_eq!(buf.cells.len(), ACTIVITY_CELLS);
+        check!(buf.cells.len() == ACTIVITY_CELLS);
     }
 
     #[test]
     fn default_matches_new() {
         let buf = ActivityBuffer::default();
-        assert_eq!(buf.cells.len(), ACTIVITY_CELLS);
+        check!(buf.cells.len() == ACTIVITY_CELLS);
     }
 
     #[test]
     fn untouched_cell_has_zero_brightness() {
         let buf = ActivityBuffer::new();
-        assert_eq!(buf.brightness(0), 0.0);
-        assert_eq!(buf.brightness(ACTIVITY_CELLS - 1), 0.0);
+        check!(buf.brightness(0) == 0.0);
+        check!(buf.brightness(ACTIVITY_CELLS - 1) == 0.0);
     }
 
     #[test]
@@ -110,8 +112,8 @@ mod tests {
         buf.touch(0.5);
         assert!(buf.brightness(64) > 0.0);
         // Adjacent cells should remain untouched
-        assert_eq!(buf.brightness(63), 0.0);
-        assert_eq!(buf.brightness(65), 0.0);
+        check!(buf.brightness(63) == 0.0);
+        check!(buf.brightness(65) == 0.0);
     }
 
     #[test]

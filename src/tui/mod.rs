@@ -408,40 +408,42 @@ pub fn run_tui(
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
 
     #[test]
     fn tui_config_default_uses_braille() {
         let config = TuiConfig::default();
-        assert_eq!(config.symbols, SymbolSet::Braille);
+        check!(config.symbols == SymbolSet::Braille);
     }
 
     #[test]
     fn region_state_new_defaults() {
         let rs = RegionState::new("test".into(), 4096, vec!["solid".into(), "walk".into()]);
-        assert_eq!(rs.name, "test");
-        assert_eq!(rs.size_bytes, 4096);
-        assert_eq!(rs.current_pattern(), "solid");
-        assert_eq!(rs.progress_bp.load(Ordering::Relaxed), 0);
-        assert_eq!(rs.error_count.load(Ordering::Relaxed), 0);
+        check!(rs.name == "test");
+        check!(rs.size_bytes == 4096);
+        check!(rs.current_pattern() == "solid");
+        check!(rs.progress_bp.load(Ordering::Relaxed) == 0);
+        check!(rs.error_count.load(Ordering::Relaxed) == 0);
         assert!(!rs.paused.load(Ordering::Relaxed));
     }
 
     #[test]
     fn current_pattern_returns_correct_pattern() {
         let rs = RegionState::new("r0".into(), 1024, vec!["a".into(), "b".into(), "c".into()]);
-        assert_eq!(rs.current_pattern(), "a");
+        check!(rs.current_pattern() == "a");
         rs.current_pattern_idx.store(1, Ordering::Relaxed);
-        assert_eq!(rs.current_pattern(), "b");
+        check!(rs.current_pattern() == "b");
         rs.current_pattern_idx.store(2, Ordering::Relaxed);
-        assert_eq!(rs.current_pattern(), "c");
+        check!(rs.current_pattern() == "c");
     }
 
     #[test]
     fn current_pattern_returns_done_past_end() {
         let rs = RegionState::new("r0".into(), 1024, vec!["a".into()]);
         rs.current_pattern_idx.store(5, Ordering::Relaxed);
-        assert_eq!(rs.current_pattern(), "done");
+        check!(rs.current_pattern() == "done");
     }
 
     #[test]
@@ -449,24 +451,24 @@ mod tests {
         let rs = RegionState::new("r0".into(), 1024, vec!["a".into(), "b".into()]);
         rs.progress_bp.store(5000, Ordering::Relaxed);
         rs.set_pattern(1);
-        assert_eq!(rs.current_pattern(), "b");
-        assert_eq!(rs.progress_bp.load(Ordering::Relaxed), 0);
+        check!(rs.current_pattern() == "b");
+        check!(rs.progress_bp.load(Ordering::Relaxed) == 0);
     }
 
     #[test]
     fn record_error_increments_count() {
         let rs = RegionState::new("r0".into(), 1024, vec!["a".into()]);
-        assert_eq!(rs.error_count.load(Ordering::Relaxed), 0);
+        check!(rs.error_count.load(Ordering::Relaxed) == 0);
         rs.record_error();
-        assert_eq!(rs.error_count.load(Ordering::Relaxed), 1);
+        check!(rs.error_count.load(Ordering::Relaxed) == 1);
         rs.record_error();
-        assert_eq!(rs.error_count.load(Ordering::Relaxed), 2);
+        check!(rs.error_count.load(Ordering::Relaxed) == 2);
     }
 
     #[test]
     fn last_error_age_max_when_no_errors() {
         let rs = RegionState::new("r0".into(), 1024, vec!["a".into()]);
-        assert_eq!(rs.last_error_age_secs(), f64::MAX);
+        check!(rs.last_error_age_secs() == f64::MAX);
     }
 
     #[test]

@@ -160,6 +160,14 @@ mod tests {
     }
 
     #[test]
+    fn default_is_new() {
+        let d = BitErrorStats::default();
+        let n = BitErrorStats::new();
+        check!(d.total_errors == n.total_errors);
+        check!(d.union_xor_mask == n.union_xor_mask);
+    }
+
+    #[test]
     fn empty_stats() {
         let stats = BitErrorStats::new();
         check!(stats.total_errors == 0);

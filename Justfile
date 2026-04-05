@@ -74,6 +74,7 @@ coverage:
     RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov nextest --no-fail-fast --hide-progress-bar
     RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov report --html --output-dir coverage/html
     RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov report --lcov --output-path coverage/lcov.info
+    RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov report --json --output-path coverage/coverage.json
 
 # Run wall-clock benchmarks (patterns, alloc, SIMD) — alloc requires root for mlock
 bench:

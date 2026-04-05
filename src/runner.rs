@@ -310,4 +310,49 @@ mod tests {
         assert!(results.len() == 1);
         check!(results[0].total_failures() == 0);
     }
+
+    /// Minimal resolver that always succeeds — for testing the resolver branch.
+    struct StubResolver;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl crate::phys::PhysResolver for StubResolver {
+        fn build_map(
+            &mut self,
+            _base: usize,
+            _len: usize,
+        ) -> Result<crate::phys::MapStats, crate::phys::PhysError> {
+            unreachable!()
+        }
+        fn resolve(&self, vaddr: usize) -> Result<crate::phys::PhysAddr, crate::phys::PhysError> {
+            Ok(crate::phys::PhysAddr(vaddr as u64 + 0x1_0000_0000))
+        }
+        fn page_flags(&self, _pfn: u64) -> Result<crate::phys::PageFlags, crate::phys::PhysError> {
+            Ok(crate::phys::PageFlags::default())
+        }
+        fn verify_stability(
+            &self,
+            _base: usize,
+            _len: usize,
+        ) -> Result<usize, crate::phys::PhysError> {
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn run_with_resolver() {
+        let mut buf = vec![0u64; 1024];
+        let resolver = StubResolver;
+        let mut sink = make_sink();
+        let results = run(
+            &mut buf,
+            &[Pattern::SolidBits],
+            1,
+            false,
+            &mut sink,
+            Some(&resolver),
+            &|_| {},
+        );
+        check!(results.len() == 1);
+        check!(results[0].total_failures() == 0);
+    }
 }

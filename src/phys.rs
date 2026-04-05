@@ -168,6 +168,7 @@ impl PagemapResolver {
     ///
     /// Returns [`PhysError::OpenPagemap`] if `/proc/self/pagemap` cannot be opened
     /// (typically requires root or `CAP_SYS_ADMIN`).
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn new() -> Result<Self, PhysError> {
         let pagemap_fd = File::open("/proc/self/pagemap").map_err(PhysError::OpenPagemap)?;
         let kpageflags_fd = File::open("/proc/kpageflags").ok();
@@ -233,6 +234,7 @@ fn pread_exact(fd: &File, buf: &mut [u8], offset: i64) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl PhysResolver for PagemapResolver {
     fn build_map(&mut self, base: usize, len: usize) -> Result<MapStats, PhysError> {
         let page_count = len / PAGE_SIZE;
@@ -344,64 +346,66 @@ impl PhysResolver for PagemapResolver {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
 
     #[test]
     fn phys_addr_pfn_and_offset() {
         let addr = PhysAddr(0x1234_5678);
-        assert_eq!(addr.pfn(), 0x0001_2345);
-        assert_eq!(addr.page_offset(), 0x678);
+        check!(addr.pfn() == 0x0001_2345);
+        check!(addr.page_offset() == 0x678);
     }
 
     #[test]
     fn phys_addr_display() {
         let addr = PhysAddr(0xdead_beef);
-        assert_eq!(format!("{addr}"), "0xdeadbeef");
-        assert_eq!(format!("{addr:#x}"), "0xdeadbeef");
+        check!(format!("{addr}") == "0xdeadbeef");
+        check!(format!("{addr:#x}") == "0xdeadbeef");
     }
 
     #[test]
     fn parse_present_page() {
         let entry: u64 = (1u64 << 63) | 0x12345;
-        assert_eq!(parse_pagemap_entry(entry), Some(0x12345));
+        check!(parse_pagemap_entry(entry) == Some(0x12345));
     }
 
     #[test]
     fn parse_not_present() {
         let entry: u64 = 0x12345;
-        assert_eq!(parse_pagemap_entry(entry), None);
+        check!(parse_pagemap_entry(entry) == None);
     }
 
     #[test]
     fn parse_swapped_page() {
         let entry: u64 = (1u64 << 63) | (1u64 << 62) | 0x12345;
-        assert_eq!(parse_pagemap_entry(entry), None);
+        check!(parse_pagemap_entry(entry) == None);
     }
 
     #[test]
     fn parse_zero_pfn_means_no_cap() {
         let entry: u64 = 1u64 << 63;
-        assert_eq!(parse_pagemap_entry(entry), None);
+        check!(parse_pagemap_entry(entry) == None);
     }
 
     #[test]
     fn parse_all_flags() {
         let entry: u64 = (1u64 << 63) | (1u64 << 56) | (1u64 << 55) | 0xABCDE;
-        assert_eq!(parse_pagemap_entry(entry), Some(0xABCDE));
+        check!(parse_pagemap_entry(entry) == Some(0xABCDE));
     }
 
     #[test]
     fn phys_addr_into_string() {
         let addr = PhysAddr(0x1234_5678);
         let s: String = addr.into();
-        assert_eq!(s, "0x12345678");
+        check!(s == "0x12345678");
     }
 
     #[test]
     fn phys_addr_upper_hex() {
         let addr = PhysAddr(0xdead_beef);
-        assert_eq!(format!("{addr:X}"), "DEADBEEF");
-        assert_eq!(format!("{addr:#X}"), "0xDEADBEEF");
+        check!(format!("{addr:X}") == "DEADBEEF");
+        check!(format!("{addr:#X}") == "0xDEADBEEF");
     }
 
     #[test]
@@ -584,6 +588,28 @@ mod tests {
             check!(stats.total_pages == 2);
             check!(resolver.base == 0x1000);
             check!(resolver.len == 8192);
+        }
+
+        #[test]
+        fn page_flags_returns_default() {
+            let resolver = FakeResolver::new(0x1000, 0x2000);
+            let flags = resolver.page_flags(42).unwrap();
+            check!(flags.raw == 0);
+            check!(!flags.is_huge());
+            check!(!flags.is_thp());
+        }
+
+        #[test]
+        fn verify_stability_always_zero() {
+            let resolver = FakeResolver::new(0x1000, 0x2000);
+            let changed = resolver.verify_stability(0x1000, 0x2000).unwrap();
+            check!(changed == 0);
+        }
+
+        #[test]
+        fn resolve_below_base_fails() {
+            let resolver = FakeResolver::new(0x2000, 0x1000);
+            assert!(resolver.resolve(0x1000).is_err());
         }
     }
 }

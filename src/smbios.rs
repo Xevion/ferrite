@@ -1,6 +1,57 @@
+use std::fmt;
 use std::fs;
 
 use serde::Serialize;
+
+/// SMBIOS memory type codes from the Type 17 structure (offset 0x12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryType {
+    Other,
+    Ddr,
+    Ddr2,
+    Ddr3,
+    Ddr4,
+    Ddr5,
+    Lpddr5,
+    /// Unrecognized SMBIOS type code; raw byte preserved.
+    Unknown(u8),
+}
+
+impl From<u8> for MemoryType {
+    fn from(byte: u8) -> Self {
+        match byte {
+            0x01 => Self::Other,
+            0x12 => Self::Ddr,
+            0x13 => Self::Ddr2,
+            0x18 => Self::Ddr3,
+            0x1A => Self::Ddr4,
+            0x22 => Self::Ddr5,
+            0x23 => Self::Lpddr5,
+            b => Self::Unknown(b),
+        }
+    }
+}
+
+impl fmt::Display for MemoryType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Other => f.write_str("Other"),
+            Self::Ddr => f.write_str("DDR"),
+            Self::Ddr2 => f.write_str("DDR2"),
+            Self::Ddr3 => f.write_str("DDR3"),
+            Self::Ddr4 => f.write_str("DDR4"),
+            Self::Ddr5 => f.write_str("DDR5"),
+            Self::Lpddr5 => f.write_str("LPDDR5"),
+            Self::Unknown(b) => write!(f, "Unknown(0x{b:02X})"),
+        }
+    }
+}
+
+impl Serialize for MemoryType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
 
 /// SMBIOS Type 17 (Memory Device) information for a single DIMM slot.
 #[derive(Debug, Clone, Serialize)]
@@ -14,8 +65,7 @@ pub struct DimmInfo {
     pub serial_number: Option<String>,
     pub part_number: Option<String>,
     pub size_mb: u64,
-    /// Memory type string, e.g., "DDR4" or "DDR5".
-    pub memory_type: String,
+    pub memory_type: MemoryType,
     pub speed_mhz: u16,
 }
 
@@ -107,7 +157,7 @@ pub(crate) fn parse_type17_entries(table: &[u8]) -> Vec<DimmInfo> {
                 serial_number: non_empty(get_string(strings, serial_idx)),
                 part_number: non_empty(get_string(strings, part_idx)),
                 size_mb,
-                memory_type: memory_type_name(memory_type_byte),
+                memory_type: MemoryType::from(memory_type_byte),
                 speed_mhz: speed,
             });
         }
@@ -165,22 +215,9 @@ fn non_empty(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-fn memory_type_name(byte: u8) -> String {
-    match byte {
-        0x01 => "Other",
-        0x12 => "DDR",
-        0x13 => "DDR2",
-        0x18 => "DDR3",
-        0x1A => "DDR4",
-        0x22 => "DDR5",
-        0x23 => "LPDDR5",
-        _ => "Unknown",
-    }
-    .to_owned()
-}
-
 #[cfg(test)]
 mod tests {
+    use assert2::check;
     use proptest::prelude::*;
 
     use super::*;
@@ -188,17 +225,17 @@ mod tests {
     #[test]
     fn get_string_1_indexed() {
         let strings = b"Hello\0World\0Test\0";
-        assert_eq!(get_string(strings, 1), "Hello");
-        assert_eq!(get_string(strings, 2), "World");
-        assert_eq!(get_string(strings, 3), "Test");
-        assert_eq!(get_string(strings, 4), "");
-        assert_eq!(get_string(strings, 0), "");
+        check!(get_string(strings, 1) == "Hello");
+        check!(get_string(strings, 2) == "World");
+        check!(get_string(strings, 3) == "Test");
+        check!(get_string(strings, 4) == "");
+        check!(get_string(strings, 0) == "");
     }
 
     #[test]
     fn find_double_nul() {
         let data = b"abc\0def\0\0rest";
-        assert_eq!(find_string_table_end(data, 0), 9);
+        check!(find_string_table_end(data, 0) == 9);
     }
 
     #[test]
@@ -236,17 +273,17 @@ mod tests {
         structure.extend_from_slice(&[127, 4, 0xFF, 0xFF, 0, 0]);
 
         let dimms = parse_type17_entries(&structure);
-        assert_eq!(dimms.len(), 1);
+        check!(dimms.len() == 1);
         let d = &dimms[0];
-        assert_eq!(d.handle, 0x20);
-        assert_eq!(d.device_locator, "DIMM_A1");
-        assert_eq!(d.bank_locator, "BANK 0");
-        assert_eq!(d.manufacturer.as_deref(), Some("Samsung"));
-        assert_eq!(d.serial_number.as_deref(), Some("SN12345"));
-        assert_eq!(d.part_number.as_deref(), Some("M471A2G43AB2"));
-        assert_eq!(d.size_mb, 8192);
-        assert_eq!(d.memory_type, "DDR5");
-        assert_eq!(d.speed_mhz, 4800);
+        check!(d.handle == 0x20);
+        check!(d.device_locator == "DIMM_A1");
+        check!(d.bank_locator == "BANK 0");
+        check!(d.manufacturer.as_deref() == Some("Samsung"));
+        check!(d.serial_number.as_deref() == Some("SN12345"));
+        check!(d.part_number.as_deref() == Some("M471A2G43AB2"));
+        check!(d.size_mb == 8192);
+        check!(d.memory_type == MemoryType::Ddr5);
+        check!(d.speed_mhz == 4800);
     }
 
     /// Build a Type 17 structure with the given size field and optional extended size,
@@ -282,8 +319,8 @@ mod tests {
         // 0x8000 | 8192 = 0xA000
         let table = build_type17(0x00, 0xA0, None);
         let dimms = parse_type17_entries(&table);
-        assert_eq!(dimms.len(), 1);
-        assert_eq!(dimms[0].size_mb, 8); // 8192 KB / 1024 = 8 MB
+        check!(dimms.len() == 1);
+        check!(dimms[0].size_mb == 8); // 8192 KB / 1024 = 8 MB
     }
 
     #[test]
@@ -291,8 +328,8 @@ mod tests {
         // size = 0x7FFF triggers extended size read at 0x1C
         let table = build_type17(0xFF, 0x7F, Some(32768));
         let dimms = parse_type17_entries(&table);
-        assert_eq!(dimms.len(), 1);
-        assert_eq!(dimms[0].size_mb, 32768);
+        check!(dimms.len() == 1);
+        check!(dimms[0].size_mb == 32768);
     }
 
     #[test]
@@ -326,24 +363,39 @@ mod tests {
         table.extend_from_slice(&[127, 4, 0, 0, 0, 0]);
 
         let dimms = parse_type17_entries(&table);
-        assert_eq!(dimms.len(), 2);
-        assert_eq!(dimms[0].size_mb, 4096);
-        assert_eq!(dimms[0].device_locator, "SLOT1");
-        assert_eq!(dimms[0].memory_type, "DDR4");
-        assert_eq!(dimms[1].size_mb, 8192);
-        assert_eq!(dimms[1].memory_type, "DDR5");
+        check!(dimms.len() == 2);
+        check!(dimms[0].size_mb == 4096);
+        check!(dimms[0].device_locator == "SLOT1");
+        check!(dimms[0].memory_type == MemoryType::Ddr4);
+        check!(dimms[1].size_mb == 8192);
+        check!(dimms[1].memory_type == MemoryType::Ddr5);
     }
 
-    #[test]
-    fn parse_memory_type_variants() {
-        assert_eq!(memory_type_name(0x01), "Other");
-        assert_eq!(memory_type_name(0x12), "DDR");
-        assert_eq!(memory_type_name(0x13), "DDR2");
-        assert_eq!(memory_type_name(0x18), "DDR3");
-        assert_eq!(memory_type_name(0x1A), "DDR4");
-        assert_eq!(memory_type_name(0x22), "DDR5");
-        assert_eq!(memory_type_name(0x23), "LPDDR5");
-        assert_eq!(memory_type_name(0xFF), "Unknown");
+    #[rstest::rstest]
+    #[case(0x01, MemoryType::Other)]
+    #[case(0x12, MemoryType::Ddr)]
+    #[case(0x13, MemoryType::Ddr2)]
+    #[case(0x18, MemoryType::Ddr3)]
+    #[case(0x1A, MemoryType::Ddr4)]
+    #[case(0x22, MemoryType::Ddr5)]
+    #[case(0x23, MemoryType::Lpddr5)]
+    #[case(0xFF, MemoryType::Unknown(0xFF))]
+    fn memory_type_from_byte(#[case] code: u8, #[case] expected: MemoryType) {
+        check!(MemoryType::from(code) == expected);
+    }
+
+    #[rstest::rstest]
+    #[case(MemoryType::Other, "Other")]
+    #[case(MemoryType::Ddr, "DDR")]
+    #[case(MemoryType::Ddr2, "DDR2")]
+    #[case(MemoryType::Ddr3, "DDR3")]
+    #[case(MemoryType::Ddr4, "DDR4")]
+    #[case(MemoryType::Ddr5, "DDR5")]
+    #[case(MemoryType::Lpddr5, "LPDDR5")]
+    #[case(MemoryType::Unknown(0xFF), "Unknown(0xFF)")]
+    #[case(MemoryType::Unknown(0x02), "Unknown(0x02)")]
+    fn memory_type_display(#[case] ty: MemoryType, #[case] expected: &str) {
+        check!(ty.to_string() == expected);
     }
 
     #[test]
@@ -370,17 +422,17 @@ mod tests {
         s.extend_from_slice(&[127, 4, 0, 0, 0, 0]);
 
         let dimms = parse_type17_entries(&s);
-        assert_eq!(dimms.len(), 1);
-        assert!(dimms[0].manufacturer.is_none());
-        assert!(dimms[0].serial_number.is_none());
-        assert!(dimms[0].part_number.is_none());
+        check!(dimms.len() == 1);
+        check!(dimms[0].manufacturer.is_none());
+        check!(dimms[0].serial_number.is_none());
+        check!(dimms[0].part_number.is_none());
     }
 
     #[test]
     fn get_string_out_of_range() {
         let strings = b"Hello\0World\0\0";
         // Index beyond available strings returns empty
-        assert_eq!(get_string(strings, 10), "");
+        check!(get_string(strings, 10) == "");
     }
 
     #[test]

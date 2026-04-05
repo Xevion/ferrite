@@ -34,6 +34,7 @@ impl LockedRegion {
     /// # Errors
     ///
     /// Returns [`AllocError`] if the size is zero, mmap fails, or mlock fails.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn new(size: usize) -> Result<Self, AllocError> {
         let size = NonZeroUsize::new(size).ok_or(AllocError::ZeroSize)?;
 
@@ -79,6 +80,7 @@ impl LockedRegion {
 
     /// Returns the buffer as a mutable slice of u64 words.
     /// The returned length is `self.len / 8` (trailing bytes are excluded).
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn as_u64_slice_mut(&mut self) -> &mut [u64] {
         let word_count = self.len / size_of::<u64>();
         // SAFETY: The allocation is aligned to page boundaries (4096), which satisfies
@@ -88,6 +90,7 @@ impl LockedRegion {
 
     /// Returns the buffer as a slice of u64 words.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn as_u64_slice(&self) -> &[u64] {
         let word_count = self.len / size_of::<u64>();
         // SAFETY: Same alignment and bounds reasoning as as_u64_slice_mut.
@@ -96,24 +99,28 @@ impl LockedRegion {
 
     /// The base virtual address of the locked region.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn as_ptr(&self) -> usize {
         self.ptr.as_ptr() as usize
     }
 
     /// The size in bytes of the locked region.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn len(&self) -> usize {
         self.len
     }
 
     /// Always returns `false` — the constructor rejects zero-size allocations.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn is_empty(&self) -> bool {
         false
     }
 }
 
 impl Drop for LockedRegion {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn drop(&mut self) {
         // SAFETY: ptr and len were produced by a successful mmap call.
         // We unmap the entire region.
@@ -143,6 +150,7 @@ impl CompactionGuard {
     /// Disable compaction of unevictable pages. Returns `None` if the sysctl
     /// cannot be read or written (not root, file missing, etc.).
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn new() -> Option<Self> {
         Self::with_path(Path::new(SYSCTL_PATH))
     }

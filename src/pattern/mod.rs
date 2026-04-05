@@ -187,8 +187,20 @@ pub(super) fn fill_verify_constant(
         };
     }
 
+    scalar_fill_verify_constant(buf, pattern, parallel, on_activity)
+}
+
+/// Scalar orchestration for `fill_verify_constant`.
+/// Separated so it can be tested directly on AVX-512 machines.
+pub(crate) fn scalar_fill_verify_constant(
+    buf: &mut [u64],
+    pattern: u64,
+    parallel: bool,
+    on_activity: &(dyn Fn(f64) + Sync),
+) -> Vec<Failure> {
+    let base_addr = buf.as_ptr() as usize;
+    let total = buf.len();
     if parallel {
-        let total = buf.len();
         buf.par_chunks_mut(REPORT_CHUNK)
             .enumerate()
             .for_each(|(ci, chunk)| {
@@ -249,8 +261,19 @@ pub(super) fn fill_verify_indexed(
         };
     }
 
+    scalar_fill_verify_indexed(buf, parallel, on_activity)
+}
+
+/// Scalar orchestration for `fill_verify_indexed`.
+/// Separated so it can be tested directly on AVX-512 machines.
+pub(crate) fn scalar_fill_verify_indexed(
+    buf: &mut [u64],
+    parallel: bool,
+    on_activity: &(dyn Fn(f64) + Sync),
+) -> Vec<Failure> {
+    let base_addr = buf.as_ptr() as usize;
+    let total = buf.len();
     if parallel {
-        let total = buf.len();
         buf.par_chunks_mut(REPORT_CHUNK)
             .enumerate()
             .for_each(|(ci, chunk)| {
@@ -558,6 +581,76 @@ mod tests {
             assert!(failures.is_empty());
 
             let failures = fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+    }
+
+    mod scalar_orchestration {
+        use assert2::assert;
+
+        use super::*;
+
+        #[test]
+        fn constant_serial_clean() {
+            let mut buf = vec![0u64; 1024];
+            let failures =
+                scalar_fill_verify_constant(&mut buf, 0xDEAD_BEEF_CAFE_BABE, false, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn constant_parallel_clean() {
+            let mut buf = vec![0u64; 4096];
+            let failures =
+                scalar_fill_verify_constant(&mut buf, 0x5555_5555_5555_5555, true, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn indexed_serial_clean() {
+            let mut buf = vec![0u64; 1024];
+            let failures = scalar_fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn indexed_parallel_clean() {
+            let mut buf = vec![0u64; 4096];
+            let failures = scalar_fill_verify_indexed(&mut buf, true, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn constant_serial_activity_fires() {
+            let mut buf = vec![0u64; 1024];
+            let count = std::sync::atomic::AtomicU32::new(0);
+            let _ = scalar_fill_verify_constant(&mut buf, 0xFF, false, &|_| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            });
+            assert!(count.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        }
+
+        #[test]
+        fn indexed_serial_activity_fires() {
+            let mut buf = vec![0u64; 1024];
+            let count = std::sync::atomic::AtomicU32::new(0);
+            let _ = scalar_fill_verify_indexed(&mut buf, false, &|_| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            });
+            assert!(count.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        }
+
+        #[test]
+        fn constant_empty() {
+            let mut buf: Vec<u64> = vec![];
+            let failures = scalar_fill_verify_constant(&mut buf, 0xFF, false, &NOOP_ACTIVITY);
+            assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn indexed_empty() {
+            let mut buf: Vec<u64> = vec![];
+            let failures = scalar_fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
             assert!(failures.is_empty());
         }
     }

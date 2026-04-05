@@ -170,7 +170,10 @@ fn find_smbios_match(edac: &DimmEdac, smbios: &[DimmInfo], used: &[bool]) -> Opt
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
+    use crate::smbios::MemoryType;
 
     fn edac_dimm(mc: usize, idx: usize, label: Option<&str>, location: Option<&str>) -> DimmEdac {
         DimmEdac {
@@ -192,7 +195,7 @@ mod tests {
             serial_number: None,
             part_number: None,
             size_mb: 8192,
-            memory_type: "DDR5".to_owned(),
+            memory_type: MemoryType::Ddr5,
             speed_mhz: 4800,
         }
     }
@@ -205,7 +208,7 @@ mod tests {
             smbios_dimm("DIMM_A1", "BANK 0"),
         ];
         let used = vec![false, false];
-        assert_eq!(find_smbios_match(&edac, &smbios, &used), Some(1));
+        check!(find_smbios_match(&edac, &smbios, &used) == Some(1));
     }
 
     #[test]
@@ -218,7 +221,7 @@ mod tests {
         let used = vec![false, false];
         // "channel 0 slot 0" doesn't substring-match "P0_Node0_Channel0_Dimm0"
         // This is a known limitation -- exact substring matching is imperfect
-        assert_eq!(find_smbios_match(&edac, &smbios, &used), None);
+        check!(find_smbios_match(&edac, &smbios, &used) == None);
     }
 
     #[test]
@@ -226,7 +229,7 @@ mod tests {
         let edac = edac_dimm(0, 0, None, None);
         let smbios = vec![smbios_dimm("DIMM_A1", "BANK 0")];
         let used = vec![false];
-        assert_eq!(find_smbios_match(&edac, &smbios, &used), None);
+        check!(find_smbios_match(&edac, &smbios, &used) == None);
     }
 
     #[test]
@@ -262,7 +265,7 @@ mod tests {
             smbios: Some(info),
         };
         let s = entry.to_string();
-        assert_eq!(s, "DIMM_C1");
+        check!(s == "DIMM_C1");
     }
 
     #[test]
@@ -283,7 +286,7 @@ mod tests {
             edac: Some(edac_dimm(0, 3, None, None)),
             smbios: None,
         };
-        assert_eq!(entry.to_string(), "mc0/dimm3");
+        check!(entry.to_string() == "mc0/dimm3");
     }
 
     #[test]
@@ -292,7 +295,7 @@ mod tests {
             edac: None,
             smbios: None,
         };
-        assert_eq!(entry.to_string(), "(unknown)");
+        check!(entry.to_string() == "(unknown)");
     }
 
     mod merge_tests {
@@ -377,7 +380,7 @@ mod tests {
         ];
         // First slot is already used
         let used = vec![true, false];
-        assert_eq!(find_smbios_match(&edac, &smbios, &used), Some(1));
+        check!(find_smbios_match(&edac, &smbios, &used) == Some(1));
     }
 
     #[test]
@@ -388,7 +391,7 @@ mod tests {
             smbios_dimm("DIMM_A1", "BANK 0"),
         ];
         let used = vec![false, false];
-        assert_eq!(find_smbios_match(&edac, &smbios, &used), Some(1));
+        check!(find_smbios_match(&edac, &smbios, &used) == Some(1));
     }
 
     #[test]

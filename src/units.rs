@@ -119,65 +119,54 @@ impl fmt::Display for Rate {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
     use proptest::prelude::*;
 
     use super::*;
 
     #[test]
     fn size_binary_scaling() {
-        assert_eq!(Size::new(0.0, UnitSystem::Binary).to_string(), "0.00 B");
-        assert_eq!(Size::new(512.0, UnitSystem::Binary).to_string(), "512 B");
-        assert_eq!(
-            Size::new(1024.0, UnitSystem::Binary).to_string(),
-            "1.00 KiB"
-        );
-        assert_eq!(
-            Size::new(1024.0 * 1024.0, UnitSystem::Binary).to_string(),
-            "1.00 MiB"
-        );
-        assert_eq!(
-            Size::new(1024.0 * 1024.0 * 1024.0, UnitSystem::Binary).to_string(),
-            "1.00 GiB"
-        );
-        assert_eq!(
-            Size::new(1536.0 * 1024.0, UnitSystem::Binary).to_string(),
-            "1.50 MiB"
-        );
+        check!(Size::new(0.0, UnitSystem::Binary).to_string() == "0.00 B");
+        check!(Size::new(512.0, UnitSystem::Binary).to_string() == "512 B");
+        check!(Size::new(1024.0, UnitSystem::Binary).to_string() == "1.00 KiB");
+        check!(Size::new(1024.0 * 1024.0, UnitSystem::Binary).to_string() == "1.00 MiB");
+        check!(Size::new(1024.0 * 1024.0 * 1024.0, UnitSystem::Binary).to_string() == "1.00 GiB");
+        check!(Size::new(1536.0 * 1024.0, UnitSystem::Binary).to_string() == "1.50 MiB");
     }
 
     #[test]
     fn size_decimal_scaling() {
-        assert_eq!(
-            Size::new(1000.0, UnitSystem::Decimal).to_string(),
-            "1.00 KB"
-        );
-        assert_eq!(
-            Size::new(1_000_000.0, UnitSystem::Decimal).to_string(),
-            "1.00 MB"
-        );
-        assert_eq!(
-            Size::new(1_000_000_000.0, UnitSystem::Decimal).to_string(),
-            "1.00 GB"
-        );
+        check!(Size::new(1000.0, UnitSystem::Decimal).to_string() == "1.00 KB");
+        check!(Size::new(1_000_000.0, UnitSystem::Decimal).to_string() == "1.00 MB");
+        check!(Size::new(1_000_000_000.0, UnitSystem::Decimal).to_string() == "1.00 GB");
     }
 
     #[test]
     fn rate_binary_scaling() {
         let rate = Rate::new(10.0 * 1024.0 * 1024.0 * 1024.0, UnitSystem::Binary);
-        assert_eq!(rate.to_string(), "10.0 GiB/s");
+        check!(rate.to_string() == "10.0 GiB/s");
     }
 
     #[test]
     fn rate_decimal_scaling() {
         let rate = Rate::new(25.0 * 1_000_000_000.0, UnitSystem::Decimal);
-        assert_eq!(rate.to_string(), "25.0 GB/s");
+        check!(rate.to_string() == "25.0 GB/s");
     }
 
     #[test]
     fn explicit_precision() {
         let size = Size::new(1536.0 * 1024.0, UnitSystem::Binary);
-        assert_eq!(format!("{size:.1}"), "1.5 MiB");
-        assert_eq!(format!("{size:.3}"), "1.500 MiB");
+        check!(format!("{size:.1}") == "1.5 MiB");
+        check!(format!("{size:.3}") == "1.500 MiB");
+    }
+
+    #[test]
+    fn format_size_all_branches() {
+        check!(format_size(2 * 1024 * 1024 * 1024) == "2G");
+        check!(format_size(5 * 1024 * 1024) == "5M");
+        check!(format_size(16 * 1024) == "16K");
+        check!(format_size(999) == "999");
+        check!(format_size(0) == "0G"); // 0 is divisible by anything
     }
 
     proptest! {

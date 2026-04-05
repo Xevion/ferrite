@@ -414,6 +414,8 @@ fn render_controls(frame: &mut Frame, area: ratatui::layout::Rect) {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
 
     fn make_region(name: &str, size_bytes: usize) -> Arc<RegionState> {
@@ -434,9 +436,8 @@ mod tests {
             SymbolSet::Ascii,
         ] {
             let ch = set.char_for(0.0);
-            assert_eq!(
-                ch,
-                set.chars()[0],
+            check!(
+                ch == set.chars()[0],
                 "{set:?} char_for(0.0) should be first char"
             );
         }
@@ -453,9 +454,8 @@ mod tests {
         ] {
             let ch = set.char_for(1.0);
             let chars = set.chars();
-            assert_eq!(
-                ch,
-                chars[chars.len() - 1],
+            check!(
+                ch == chars[chars.len() - 1],
                 "{set:?} char_for(1.0) should be last char"
             );
         }
@@ -464,13 +464,13 @@ mod tests {
     #[test]
     fn symbol_set_char_for_clamps_above_one() {
         let ch = SymbolSet::Ascii.char_for(5.0);
-        assert_eq!(ch, '@'); // last ASCII char
+        check!(ch == '@'); // last ASCII char
     }
 
     #[test]
     fn symbol_set_char_for_clamps_below_zero() {
         let ch = SymbolSet::Ascii.char_for(-1.0);
-        assert_eq!(ch, '.'); // first ASCII char
+        check!(ch == '.'); // first ASCII char
     }
 
     #[test]
@@ -478,7 +478,7 @@ mod tests {
         let ch = SymbolSet::Ascii.char_for(0.5);
         let chars = SymbolSet::Ascii.chars();
         // 0.5 * 7 = 3.5, rounds to 4 -> '+'
-        assert_eq!(ch, chars[4]);
+        check!(ch == chars[4]);
     }
 
     #[test]
@@ -496,22 +496,22 @@ mod tests {
 
     #[test]
     fn symbol_set_equality() {
-        assert_eq!(SymbolSet::Braille, SymbolSet::Braille);
-        assert_ne!(SymbolSet::Block, SymbolSet::Ascii);
+        check!(SymbolSet::Braille == SymbolSet::Braille);
+        check!(SymbolSet::Block != SymbolSet::Ascii);
     }
 
     #[test]
     fn symbol_set_clone() {
         let s = SymbolSet::Shade;
         let s2 = s;
-        assert_eq!(s, s2);
+        check!(s == s2);
     }
 
     #[test]
     fn region_columns_single_region_gets_full_width() {
         let regions = vec![make_region("r0", 1024)];
         let cols = region_columns(&regions, 80);
-        assert_eq!(cols, vec![(0, 80)]);
+        check!(cols == vec![(0, 80)]);
     }
 
     #[test]
@@ -519,28 +519,28 @@ mod tests {
         let regions = vec![make_region("r0", 1024), make_region("r1", 1024)];
         let cols = region_columns(&regions, 80);
         // Both should be ~40 cols, last gets remainder
-        assert_eq!(cols.len(), 2);
+        check!(cols.len() == 2);
         let total_width: usize = cols.iter().map(|(_, w)| w).sum();
-        assert_eq!(total_width, 80);
+        check!(total_width == 80);
     }
 
     #[test]
     fn region_columns_different_sizes() {
         let regions = vec![make_region("r0", 3000), make_region("r1", 1000)];
         let cols = region_columns(&regions, 100);
-        assert_eq!(cols.len(), 2);
+        check!(cols.len() == 2);
         // r0 should be ~75 cols, r1 ~25 cols
         let (_, w0) = cols[0];
         assert!(w0 > 60, "larger region should get more columns, got {w0}");
         let total: usize = cols.iter().map(|(_, w)| w).sum();
-        assert_eq!(total, 100);
+        check!(total == 100);
     }
 
     #[test]
     fn region_columns_zero_total_bytes() {
         let regions = vec![make_region("r0", 0), make_region("r1", 0)];
         let cols = region_columns(&regions, 80);
-        assert_eq!(cols, vec![(0, 1), (0, 1)]);
+        check!(cols == vec![(0, 1), (0, 1)]);
     }
 
     #[test]

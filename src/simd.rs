@@ -35,6 +35,7 @@ pub(crate) fn avx512_available() -> bool {
 /// buffers are always page-aligned (>= 4096 bytes) and always take the NT path.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) unsafe fn fill_nt(buf: &mut [u64], pattern: u64) {
     use std::arch::x86_64::{__m512i, _mm_sfence, _mm512_set1_epi64, _mm512_stream_si512};
     if !(buf.as_ptr() as usize).is_multiple_of(64) {
@@ -66,6 +67,7 @@ pub(crate) unsafe fn fill_nt(buf: &mut [u64], pattern: u64) {
 /// Falls back to scalar writes if not 64-byte aligned (same reasoning as `fill_nt`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) unsafe fn fill_nt_indexed(buf: &mut [u64], start: usize) {
     use std::arch::x86_64::{
         __m512i, _mm_sfence, _mm512_add_epi64, _mm512_set_epi64, _mm512_set1_epi64,
@@ -109,6 +111,7 @@ pub(crate) unsafe fn fill_nt_indexed(buf: &mut [u64], start: usize) {
 /// buffer, used to compute absolute word indices and addresses in failure records.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) unsafe fn verify_avx512(
     buf: &[u64],
     pattern: u64,
@@ -168,6 +171,7 @@ pub(crate) unsafe fn verify_avx512(
 /// `fill_nt_indexed` to avoid per-iteration recomputation.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) unsafe fn verify_indexed_avx512(
     buf: &[u64],
     base_addr: usize,

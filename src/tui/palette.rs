@@ -104,6 +104,8 @@ pub fn activity_color(brightness: f64) -> Color {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
 
     fn rgb(c: Color) -> (u8, u8, u8) {
@@ -116,60 +118,60 @@ mod tests {
     #[test]
     fn lerp_at_zero_returns_first_color() {
         let result = lerp(Color::Rgb(100, 0, 0), Color::Rgb(0, 100, 0), 0.0);
-        assert_eq!(rgb(result), (100, 0, 0));
+        check!(rgb(result) == (100, 0, 0));
     }
 
     #[test]
     fn lerp_at_one_returns_second_color() {
         let result = lerp(Color::Rgb(100, 0, 0), Color::Rgb(0, 100, 0), 1.0);
-        assert_eq!(rgb(result), (0, 100, 0));
+        check!(rgb(result) == (0, 100, 0));
     }
 
     #[test]
     fn lerp_at_half_midpoint() {
         let result = lerp(Color::Rgb(0, 0, 0), Color::Rgb(100, 100, 100), 0.5);
-        assert_eq!(rgb(result), (50, 50, 50));
+        check!(rgb(result) == (50, 50, 50));
     }
 
     #[test]
     fn lerp_clamps_above_one() {
         let result = lerp(Color::Rgb(0, 0, 0), Color::Rgb(200, 200, 200), 2.0);
-        assert_eq!(rgb(result), (200, 200, 200));
+        check!(rgb(result) == (200, 200, 200));
     }
 
     #[test]
     fn lerp_clamps_below_zero() {
         let result = lerp(Color::Rgb(0, 0, 0), Color::Rgb(200, 200, 200), -1.0);
-        assert_eq!(rgb(result), (0, 0, 0));
+        check!(rgb(result) == (0, 0, 0));
     }
 
     #[test]
     fn lerp_non_rgb_below_half_returns_first() {
         let result = lerp(Color::Red, Color::Blue, 0.3);
-        assert_eq!(result, Color::Red);
+        check!(result == Color::Red);
     }
 
     #[test]
     fn lerp_non_rgb_above_half_returns_second() {
         let result = lerp(Color::Red, Color::Blue, 0.7);
-        assert_eq!(result, Color::Blue);
+        check!(result == Color::Blue);
     }
 
     #[test]
     fn lerp_mixed_rgb_and_named_below_half() {
         let result = lerp(Color::Rgb(10, 20, 30), Color::Green, 0.2);
         // Falls through to non-RGB branch since b is not Rgb
-        assert_eq!(result, Color::Rgb(10, 20, 30));
+        check!(result == Color::Rgb(10, 20, 30));
     }
 
     #[test]
     fn error_severity_zero_is_green() {
-        assert_eq!(error_severity(0), ERR_NONE);
+        check!(error_severity(0) == ERR_NONE);
     }
 
     #[test]
     fn error_severity_one_is_low() {
-        assert_eq!(error_severity(1), ERR_LOW);
+        check!(error_severity(1) == ERR_LOW);
     }
 
     #[test]
@@ -237,20 +239,20 @@ mod tests {
 
     #[test]
     fn activity_color_zero_is_inactive() {
-        assert_eq!(activity_color(0.0), INACTIVE);
+        check!(activity_color(0.0) == INACTIVE);
     }
 
     #[test]
     fn activity_color_negative_is_inactive() {
         // lerp clamps, so -0.1 effectively maps to brightness <= 0.0
-        assert_eq!(activity_color(-0.5), INACTIVE);
+        check!(activity_color(-0.5) == INACTIVE);
     }
 
     #[test]
     fn activity_color_full_brightness() {
         let c = activity_color(1.0);
         // Should be near ACTIVE_BRIGHT
-        assert_eq!(c, ACTIVE_BRIGHT);
+        check!(c == ACTIVE_BRIGHT);
     }
 
     #[test]

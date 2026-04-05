@@ -196,6 +196,8 @@ fn sorted_dir_entries(path: &Path) -> Option<Vec<fs::DirEntry>> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
 
     fn make_snapshot(dimms: Vec<(usize, usize, u64, u64)>) -> EdacSnapshot {
@@ -220,11 +222,11 @@ mod tests {
         let before = make_snapshot(vec![(0, 0, 5, 0), (0, 1, 0, 0)]);
         let after = make_snapshot(vec![(0, 0, 8, 0), (0, 1, 0, 1)]);
         let deltas = before.delta(&after);
-        assert_eq!(deltas.len(), 2);
-        assert_eq!(deltas[0].ce_delta, 3);
-        assert_eq!(deltas[0].ue_delta, 0);
-        assert_eq!(deltas[1].ce_delta, 0);
-        assert_eq!(deltas[1].ue_delta, 1);
+        check!(deltas.len() == 2);
+        check!(deltas[0].ce_delta == 3);
+        check!(deltas[0].ue_delta == 0);
+        check!(deltas[1].ce_delta == 0);
+        check!(deltas[1].ue_delta == 1);
     }
 
     #[test]
@@ -241,7 +243,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("test_count");
         std::fs::write(&path, "42\n").unwrap();
-        assert_eq!(read_u64_file(&path), Some(42));
+        check!(read_u64_file(&path) == Some(42));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -251,13 +253,13 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("bad_count");
         std::fs::write(&path, "not_a_number\n").unwrap();
-        assert_eq!(read_u64_file(&path), None);
+        check!(read_u64_file(&path) == None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn read_u64_file_missing() {
-        assert_eq!(read_u64_file(Path::new("/nonexistent/path")), None);
+        check!(read_u64_file(Path::new("/nonexistent/path")) == None);
     }
 
     #[test]
@@ -266,7 +268,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("label");
         std::fs::write(&path, "  DIMM_A1  \n").unwrap();
-        assert_eq!(read_trimmed(&path), Some("DIMM_A1".to_owned()));
+        check!(read_trimmed(&path) == Some("DIMM_A1".to_owned()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -276,7 +278,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("label");
         std::fs::write(&path, "  \n").unwrap();
-        assert_eq!(read_trimmed(&path), None);
+        check!(read_trimmed(&path) == None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -504,7 +506,7 @@ mod tests {
         let after = make_snapshot(vec![(0, 0, 6, 0), (0, 1, 1, 0)]);
         let deltas = before.delta(&after);
         // Only mc0/dimm0 has a match; dimm1 is new and has no before counterpart
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(deltas[0].dimm_index, 0);
+        check!(deltas.len() == 1);
+        check!(deltas[0].dimm_index == 0);
     }
 }
