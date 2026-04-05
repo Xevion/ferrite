@@ -126,98 +126,107 @@ pub enum ErrorClassification {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::phys::PhysAddr;
+    use assert2::{assert, check};
 
-    fn make_failure(addr: usize, expected: u64, actual: u64, phys: Option<u64>) -> Failure {
-        Failure {
-            addr,
-            expected,
-            actual,
-            word_index: addr / 8,
-            phys_addr: phys.map(PhysAddr),
-        }
+    use super::*;
+    use crate::failure::FailureBuilder;
+
+    fn f(addr: usize, expected: u64, actual: u64) -> crate::Failure {
+        FailureBuilder::default()
+            .addr(addr)
+            .expected(expected)
+            .actual(actual)
+            .build()
+    }
+
+    fn f_phys(addr: usize, expected: u64, actual: u64, phys: u64) -> crate::Failure {
+        FailureBuilder::default()
+            .addr(addr)
+            .expected(expected)
+            .actual(actual)
+            .phys(phys)
+            .build()
     }
 
     #[test]
     fn empty_stats() {
         let stats = BitErrorStats::new();
-        assert_eq!(stats.total_errors, 0);
-        assert_eq!(stats.classification(), ErrorClassification::NoErrors);
-    }
-
-    #[test]
-    fn single_stuck_high_bit() {
-        let mut stats = BitErrorStats::new();
-        // Bit 20 flipped from 0 to 1
-        stats.record(&make_failure(0x1000, 0x0, 1 << 20, Some(0x2000)));
-        stats.record(&make_failure(0x2000, 0x0, 1 << 20, Some(0x3000)));
-
-        assert_eq!(stats.total_errors, 2);
-        assert_eq!(stats.stuck_high_mask(), 1 << 20);
-        assert_eq!(stats.stuck_low_mask(), 0);
-        assert_eq!(stats.union_xor_mask, 1 << 20);
-        assert_eq!(stats.bit_positions[20], 2);
-        assert_eq!(stats.lowest_phys, Some(0x2000));
-        assert_eq!(stats.highest_phys, Some(0x3000));
-        assert_eq!(
-            stats.classification(),
-            ErrorClassification::StuckBit {
-                positions: vec![20]
-            }
-        );
-    }
-
-    #[test]
-    fn single_stuck_low_bit() {
-        let mut stats = BitErrorStats::new();
-        // Bit 5 flipped from 1 to 0
-        stats.record(&make_failure(0x1000, 1 << 5, 0x0, None));
-        stats.record(&make_failure(0x2000, 1 << 5, 0x0, None));
-
-        assert_eq!(stats.stuck_high_mask(), 0);
-        assert_eq!(stats.stuck_low_mask(), 1 << 5);
-        assert_eq!(
-            stats.classification(),
-            ErrorClassification::StuckBit { positions: vec![5] }
-        );
-    }
-
-    #[test]
-    fn coupling_errors_vary() {
-        let mut stats = BitErrorStats::new();
-        // Different bits flip each time
-        stats.record(&make_failure(0x1000, 0xFF, 0xFE, None)); // bit 0 flipped
-        stats.record(&make_failure(0x2000, 0xFF, 0xFD, None)); // bit 1 flipped
-
-        assert_eq!(stats.total_errors, 2);
-        // No single bit is consistently stuck
-        assert_eq!(stats.classification(), ErrorClassification::Coupling);
-    }
-
-    #[test]
-    fn mixed_errors() {
-        let mut stats = BitErrorStats::new();
-        // Bit 20 always flips 0->1, but bit 5 only sometimes
-        stats.record(&make_failure(0x1000, 0x0, (1 << 20) | (1 << 5), None));
-        stats.record(&make_failure(0x2000, 0x0, 1 << 20, None));
-
-        assert_eq!(stats.stuck_high_mask(), 1 << 20);
-        // Bit 5 only flipped once, so it's not in the stuck mask
-        assert_eq!(stats.classification(), ErrorClassification::Mixed);
+        check!(stats.total_errors == 0);
+        assert!(stats.classification() == ErrorClassification::NoErrors);
     }
 
     #[test]
     fn bit_position_counts() {
         let mut stats = BitErrorStats::new();
         // Bits 0, 1, and 2 flip -- bit 0 flips twice
-        stats.record(&make_failure(0x1000, 0x7, 0x4, None)); // bits 0,1 flipped
-        stats.record(&make_failure(0x2000, 0x5, 0x0, None)); // bits 0,2 flipped
+        stats.record(&f(0x1000, 0x7, 0x4)); // bits 0,1 flipped
+        stats.record(&f(0x2000, 0x5, 0x0)); // bits 0,2 flipped
 
-        assert_eq!(stats.bit_positions[0], 2);
-        assert_eq!(stats.bit_positions[1], 1);
-        assert_eq!(stats.bit_positions[2], 1);
-        assert_eq!(stats.bit_positions[3], 0);
-        assert_eq!(stats.union_xor_mask, 0x7);
+        check!(stats.bit_positions[0] == 2);
+        check!(stats.bit_positions[1] == 1);
+        check!(stats.bit_positions[2] == 1);
+        check!(stats.bit_positions[3] == 0);
+        assert!(stats.union_xor_mask == 0x7);
+    }
+
+    mod classification {
+        use assert2::{assert, check};
+
+        use super::*;
+
+        #[test]
+        fn single_stuck_high_bit() {
+            let mut stats = BitErrorStats::new();
+            // Bit 20 flipped from 0 to 1 in every error, with physical addresses
+            stats.record(&f_phys(0x1000, 0x0, 1 << 20, 0x2000));
+            stats.record(&f_phys(0x2000, 0x0, 1 << 20, 0x3000));
+
+            check!(stats.total_errors == 2);
+            check!(stats.stuck_high_mask() == 1 << 20);
+            check!(stats.stuck_low_mask() == 0);
+            check!(stats.union_xor_mask == 1 << 20);
+            check!(stats.bit_positions[20] == 2);
+            check!(stats.lowest_phys == Some(0x2000));
+            check!(stats.highest_phys == Some(0x3000));
+
+            assert!(let ErrorClassification::StuckBit { positions } = stats.classification());
+            assert!(positions == vec![20u8]);
+        }
+
+        #[test]
+        fn single_stuck_low_bit() {
+            let mut stats = BitErrorStats::new();
+            // Bit 5 flipped from 1 to 0 in every error
+            stats.record(&f(0x1000, 1 << 5, 0x0));
+            stats.record(&f(0x2000, 1 << 5, 0x0));
+
+            check!(stats.stuck_high_mask() == 0);
+            check!(stats.stuck_low_mask() == 1 << 5);
+
+            assert!(let ErrorClassification::StuckBit { positions } = stats.classification());
+            assert!(positions == vec![5u8]);
+        }
+
+        #[test]
+        fn coupling_errors_vary() {
+            let mut stats = BitErrorStats::new();
+            // Different bits flip each time — no consistently stuck bit
+            stats.record(&f(0x1000, 0xFF, 0xFE)); // bit 0 flipped
+            stats.record(&f(0x2000, 0xFF, 0xFD)); // bit 1 flipped
+
+            check!(stats.total_errors == 2);
+            assert!(stats.classification() == ErrorClassification::Coupling);
+        }
+
+        #[test]
+        fn mixed_errors() {
+            let mut stats = BitErrorStats::new();
+            // Bit 20 always flips 0->1, but bit 5 only flips once
+            stats.record(&f(0x1000, 0x0, (1 << 20) | (1 << 5)));
+            stats.record(&f(0x2000, 0x0, 1 << 20));
+
+            check!(stats.stuck_high_mask() == 1 << 20);
+            assert!(stats.classification() == ErrorClassification::Mixed);
+        }
     }
 }

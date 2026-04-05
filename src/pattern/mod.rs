@@ -301,6 +301,7 @@ pub(super) fn fill_and_verify(
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
     use strum::EnumCount as _;
 
     use super::*;
@@ -312,99 +313,50 @@ mod tests {
 
     static NOOP_ACTIVITY: fn(f64) = |_| {};
 
-    #[test]
-    fn solid_bits_no_failures_on_good_memory() {
-        let mut buf = make_test_buf();
-        let failures = solid::run(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
-        assert!(failures.is_empty());
-    }
+    /// Parametrized clean-memory tests — one case per pattern × serial/parallel.
+    /// New patterns added to `Pattern::ALL` are automatically covered here.
+    mod clean_memory {
+        use assert2::assert;
+        use rstest::rstest;
 
-    #[test]
-    fn walking_ones_no_failures() {
-        let mut buf = make_test_buf();
-        let failures = walking::run_ones(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
-        assert!(failures.is_empty());
-    }
+        use super::*;
 
-    #[test]
-    fn checkerboard_no_failures() {
-        let mut buf = make_test_buf();
-        let failures = checkerboard::run(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
-        assert!(failures.is_empty());
-    }
-
-    #[test]
-    fn stuck_address_no_failures() {
-        let mut buf = make_test_buf();
-        let failures = stuck_address::run(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
-        assert!(failures.is_empty());
-    }
-
-    #[test]
-    fn parallel_solid_bits_no_failures() {
-        let mut buf = make_test_buf();
-        let failures = solid::run(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
-        assert!(failures.is_empty());
-    }
-
-    #[test]
-    fn parallel_walking_ones_no_failures() {
-        let mut buf = make_test_buf();
-        let failures = walking::run_ones(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
-        assert!(failures.is_empty());
-    }
-
-    #[test]
-    fn parallel_stuck_address_no_failures() {
-        let mut buf = make_test_buf();
-        let failures = stuck_address::run(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
-        assert!(failures.is_empty());
-    }
-
-    #[test]
-    fn walking_zeros_no_failures() {
-        let mut buf = make_test_buf();
-        let failures = walking::run_zeros(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
-        assert!(failures.is_empty());
-    }
-
-    #[test]
-    fn parallel_walking_zeros_no_failures() {
-        let mut buf = make_test_buf();
-        let failures = walking::run_zeros(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
-        assert!(failures.is_empty());
-    }
-
-    #[test]
-    fn parallel_checkerboard_no_failures() {
-        let mut buf = make_test_buf();
-        let failures = checkerboard::run(&mut buf, true, &mut || {}, &NOOP_ACTIVITY);
-        assert!(failures.is_empty());
-    }
-
-    #[test]
-    fn run_pattern_dispatches_all() {
-        let mut buf = make_test_buf();
-        for &pattern in Pattern::ALL {
+        #[rstest]
+        #[case(Pattern::SolidBits)]
+        #[case(Pattern::WalkingOnes)]
+        #[case(Pattern::WalkingZeros)]
+        #[case(Pattern::Checkerboard)]
+        #[case(Pattern::StuckAddress)]
+        fn serial(#[case] pattern: Pattern) {
+            let mut buf = make_test_buf();
             let failures = run_pattern(pattern, &mut buf, false, &mut || {}, &NOOP_ACTIVITY);
-            assert!(failures.is_empty(), "pattern {pattern} had failures");
+            assert!(
+                failures.is_empty(),
+                "pattern {pattern} had failures on clean memory"
+            );
+        }
+
+        #[rstest]
+        #[case(Pattern::SolidBits)]
+        #[case(Pattern::WalkingOnes)]
+        #[case(Pattern::WalkingZeros)]
+        #[case(Pattern::Checkerboard)]
+        #[case(Pattern::StuckAddress)]
+        fn parallel(#[case] pattern: Pattern) {
+            let mut buf = make_test_buf();
+            let failures = run_pattern(pattern, &mut buf, true, &mut || {}, &NOOP_ACTIVITY);
+            assert!(
+                failures.is_empty(),
+                "pattern {pattern} had failures on clean memory (parallel)"
+            );
         }
     }
 
     #[test]
-    fn solid_bits_detects_corruption() {
+    fn fill_verify_constant_clean_memory() {
         let mut buf = make_test_buf();
-        // Manually write all zeros, then corrupt one word before verify
-        for word in &mut buf {
-            unsafe { std::ptr::write_volatile(std::ptr::from_mut::<u64>(word), 0u64) };
-        }
-        // Corrupt word at index 10
-        unsafe { std::ptr::write_volatile(&raw mut buf[10], 0xDEAD) };
-        // Now run solid_bits -- the first sub-pass writes all-zeros then verifies,
-        // but it writes first so the corruption is overwritten. Instead, test
-        // fill_verify_constant directly.
+        // fill_verify_constant overwrites everything, so memory starting corrupt is fine
         let failures = fill_verify_constant(&mut buf, 0xFFFF_FFFF_FFFF_FFFF, false, &NOOP_ACTIVITY);
-        // After filling with all-ones, memory should be clean
         assert!(failures.is_empty());
     }
 
@@ -413,7 +365,7 @@ mod tests {
         let mut buf = make_test_buf();
         let mut count = 0u32;
         solid::run(&mut buf, false, &mut || count += 1, &NOOP_ACTIVITY);
-        assert_eq!(count, 2); // solid_bits has 2 sub-passes
+        check!(count == 2); // solid_bits has 2 sub-passes
     }
 
     #[test]
@@ -425,7 +377,7 @@ mod tests {
             word_index: 0,
             phys_addr: None,
         };
-        assert_eq!(f.flipped_bits(), 1);
+        check!(f.flipped_bits() == 1);
         let s = f.to_string();
         assert!(s.contains("FAIL"));
         assert!(s.contains("1 bit(s)"));
@@ -433,9 +385,8 @@ mod tests {
 
     #[test]
     fn pattern_all_covers_every_variant() {
-        assert_eq!(
-            Pattern::ALL.len(),
-            Pattern::COUNT,
+        assert!(
+            Pattern::ALL.len() == Pattern::COUNT,
             "Pattern::ALL is missing variants — update it when adding new patterns"
         );
     }

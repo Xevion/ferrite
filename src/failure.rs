@@ -53,19 +53,66 @@ impl fmt::Display for Failure {
     }
 }
 
+/// Builder for constructing [`Failure`] values in tests.
+///
+/// `word_index` defaults to `addr / 8` when not set explicitly.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct FailureBuilder {
+    addr: usize,
+    expected: u64,
+    actual: u64,
+    word_index: Option<usize>,
+    phys_addr: Option<PhysAddr>,
+}
+
+#[cfg(test)]
+impl FailureBuilder {
+    pub(crate) fn addr(mut self, addr: usize) -> Self {
+        self.addr = addr;
+        self
+    }
+
+    pub(crate) fn expected(mut self, expected: u64) -> Self {
+        self.expected = expected;
+        self
+    }
+
+    pub(crate) fn actual(mut self, actual: u64) -> Self {
+        self.actual = actual;
+        self
+    }
+
+    pub(crate) fn phys(mut self, phys: u64) -> Self {
+        self.phys_addr = Some(PhysAddr(phys));
+        self
+    }
+
+    pub(crate) fn build(self) -> Failure {
+        Failure {
+            addr: self.addr,
+            expected: self.expected,
+            actual: self.actual,
+            word_index: self.word_index.unwrap_or(self.addr / 8),
+            phys_addr: self.phys_addr,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
 
     #[test]
     fn failure_display_with_phys_addr() {
-        let f = Failure {
-            addr: 0x1000,
-            expected: 0xFF,
-            actual: 0xFE,
-            word_index: 0,
-            phys_addr: Some(PhysAddr(0xdead_beef)),
-        };
+        let f = FailureBuilder::default()
+            .addr(0x1000)
+            .expected(0xFF)
+            .actual(0xFE)
+            .phys(0xdead_beef)
+            .build();
         let s = f.to_string();
         assert!(s.contains("phys=0xdeadbeef"));
         assert!(s.contains("1 bit(s)"));
