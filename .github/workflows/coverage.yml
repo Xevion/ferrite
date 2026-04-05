@@ -35,7 +35,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Run tests with coverage
-        run: cargo llvm-cov nextest --no-fail-fast --hide-progress-bar --failure-output final
+        run: cargo llvm-cov nextest --profile ci --no-fail-fast --hide-progress-bar --failure-output final
         env:
           RUSTFLAGS: --cfg coverage_nightly
 
@@ -61,8 +61,17 @@ jobs:
           path: coverage/lcov.info
           retention-days: 7
 
-      - name: Upload to Codecov
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() }}
         uses: codecov/codecov-action@v6
         with:
           files: coverage/lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v6
+        with:
+          files: target/nextest/ci/junit.xml
+          report_type: test_results
           token: ${{ secrets.CODECOV_TOKEN }}

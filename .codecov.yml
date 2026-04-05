@@ -1,5 +1,62 @@
+codecov:
+  notify:
+    wait_for_ci: true
+
 coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 2%
+        branches:
+          - master
+    patch:
+      default:
+        target: 90%
+        threshold: 0%
   ignore:
     - "src/main.rs"
+    - "src/simd.rs"
     - "src/tui/mod.rs"
     - "src/tui/run.rs"
+
+component_management:
+  individual_components:
+    - component_id: patterns
+      name: Test Patterns
+      paths:
+        - src/pattern/**
+    - component_id: simd
+      name: SIMD
+      paths:
+        - src/simd.rs
+    - component_id: alloc
+      name: Allocator
+      paths:
+        - src/alloc.rs
+    - component_id: runner
+      name: Runner
+      paths:
+        - src/runner.rs
+    - component_id: analysis
+      name: Analysis
+      paths:
+        - src/error_analysis.rs
+        - src/failure.rs
+    - component_id: hardware
+      name: Hardware I/O
+      paths:
+        - src/output.rs
+        - src/phys.rs
+        - src/edac.rs
+        - src/smbios.rs
+        - src/dimm.rs
+
+comment:
+  layout: "condensed_header, diff, components, condensed_footer"
+  behavior: default
+  require_changes: coverage_drop
+  hide_project_coverage: false
+
+github_checks:
+  annotations: true
