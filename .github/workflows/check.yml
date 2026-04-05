@@ -63,7 +63,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.132
 
       - name: Run tests
         run: cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final ${{ matrix.features }}

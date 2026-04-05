@@ -1,6 +1,10 @@
 default:
 	just --list
 
+alias c := check
+alias t := test
+alias l := lint
+
 # Run all checks (format, lint, unused deps, tests, security audit)
 check *args:
     tempo check {{args}}
