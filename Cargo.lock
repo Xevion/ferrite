@@ -570,7 +570,7 @@ checksum = "a043dc74da1e37d6afe657061213aa6f425f855399a11d3463c6ecccc4dfda1f"
 
 [[package]]
 name = "ferrite"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ansi-to-tui",
  "anyhow",

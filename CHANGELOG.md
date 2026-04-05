@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.3](https://github.com/Xevion/ferrite/compare/v0.1.2...v0.1.3) (2026-04-05)
+
+
+### Code Refactoring
+
+* Broken-pipe handling, truncated failures, nextest tracing ([4c12d60](https://github.com/Xevion/ferrite/commit/4c12d6006a6cc79451cdd8978c28cd2e960c3245))
+* Consolidate SMBIOS parsing into focused helper functions ([25e6be0](https://github.com/Xevion/ferrite/commit/25e6be08a69992b68c10d47f85bd2f507c9da2c3))
+* Extract privilege checks and scalar ops into testable units ([f93f867](https://github.com/Xevion/ferrite/commit/f93f8674b44b5360c3751545f0288cd85de3b7de))
+* Reorganize simd.rs and scalar ops into ops/ module ([e9ff3d1](https://github.com/Xevion/ferrite/commit/e9ff3d1dbd60da1a565e0571e669d5375ee5039e))
+
+
+### Miscellaneous
+
+* Configure nextest CI profile, codecov components, ignore simd.rs coverage ([40d13a6](https://github.com/Xevion/ferrite/commit/40d13a686183c675ace321f98c80be64d926a441))
+* Configure nightly coverage attributes and suppress TUI noise ([a0aa8df](https://github.com/Xevion/ferrite/commit/a0aa8dff617cc712455361e955aa74b80197fe12))
+* Wire up samply, perf, and cargo-mutants for dev analysis ([708223f](https://github.com/Xevion/ferrite/commit/708223f20ace80692223bd61c86dc9553f983ac6))
+
 ## [0.1.2](https://github.com/Xevion/ferrite/compare/v0.1.1...v0.1.2) (2026-04-05)
 
 
