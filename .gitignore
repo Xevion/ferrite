@@ -2,3 +2,8 @@
 /coverage
 Justfile.local
 .cargo/config.toml
+profile.json.gz
+mutants.out
+mutants.out.old
+perf.data.old
+perf.data

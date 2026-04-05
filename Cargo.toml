@@ -8,6 +8,22 @@ rust-version = "1.89"
 codegen-units = 1
 opt-level = 3
 
+# Full optimization + debug symbols for perf/flamegraph. lto=false keeps build
+# times reasonable; strip="none" ensures symbols survive to the profiler.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
+lto = false
+
+# Maximizes codegen-unit parallelism for the many small rebuilds cargo-mutants
+# requires. Disabling incremental and debug info keeps each build lean.
+[profile.mutant]
+inherits = "dev"
+incremental = false
+debug = 0
+codegen-units = 256
+
 [features]
 default = ["tui"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:tracing-subscriber", "dep:ansi-to-tui"]
