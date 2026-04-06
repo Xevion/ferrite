@@ -55,34 +55,34 @@ pub fn lerp(a: Color, b: Color, t: f64) -> Color {
 }
 
 #[must_use]
-pub fn error_severity(error_count: usize) -> Color {
-    match error_count {
+pub fn error_severity(failure_count: usize) -> Color {
+    match failure_count {
         0 => ERR_NONE,
         1 => ERR_LOW,
-        2..=5 => lerp(ERR_LOW, ERR_MED, (error_count as f64 - 2.0) / 3.0),
-        6..=20 => lerp(ERR_MED, ERR_HIGH, (error_count as f64 - 6.0) / 14.0),
+        2..=5 => lerp(ERR_LOW, ERR_MED, (failure_count as f64 - 2.0) / 3.0),
+        6..=20 => lerp(ERR_MED, ERR_HIGH, (failure_count as f64 - 6.0) / 14.0),
         _ => lerp(
             ERR_HIGH,
             ERR_FIRE,
-            ((error_count as f64 - 20.0) / 30.0).min(1.0),
+            ((failure_count as f64 - 20.0) / 30.0).min(1.0),
         ),
     }
 }
 
 /// Background color for error cells. Fades with age but has a warm-yellow floor.
 #[must_use]
-pub fn error_bg(error_count: usize, age_secs: f64) -> Option<Color> {
-    if error_count == 0 {
+pub fn error_bg(failure_count: usize, age_secs: f64) -> Option<Color> {
+    if failure_count == 0 {
         return None;
     }
-    let peak = match error_count {
+    let peak = match failure_count {
         1 => ERR_BG_LOW,
-        2..=5 => lerp(ERR_BG_LOW, ERR_BG_MED, (error_count as f64 - 2.0) / 3.0),
-        6..=20 => lerp(ERR_BG_MED, ERR_BG_HIGH, (error_count as f64 - 6.0) / 14.0),
+        2..=5 => lerp(ERR_BG_LOW, ERR_BG_MED, (failure_count as f64 - 2.0) / 3.0),
+        6..=20 => lerp(ERR_BG_MED, ERR_BG_HIGH, (failure_count as f64 - 6.0) / 14.0),
         _ => lerp(
             ERR_BG_HIGH,
             ERR_BG_FIRE,
-            ((error_count as f64 - 20.0) / 30.0).min(1.0),
+            ((failure_count as f64 - 20.0) / 30.0).min(1.0),
         ),
     };
     let fade = (age_secs / 10.0).min(1.0);

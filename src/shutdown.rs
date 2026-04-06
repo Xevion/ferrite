@@ -77,8 +77,8 @@ pub fn quit_reason() -> QuitReason {
 
 /// Compute the appropriate exit code based on quit reason and error count.
 #[must_use]
-pub fn exit_code(total_errors: usize) -> i32 {
-    if total_errors > 0 {
+pub fn exit_code(total_failures: usize) -> i32 {
+    if total_failures > 0 {
         return 1;
     }
     match quit_reason() {

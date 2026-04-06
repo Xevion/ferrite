@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::alloc::CompactionGuard;
-use crate::alloc::LockedRegion;
+use crate::alloc::TestBuffer;
 use crate::edac::EdacSnapshot;
 use crate::output::OutputSink;
 use crate::pattern::{Pattern, run_pattern};
@@ -17,7 +17,7 @@ use crate::phys::{MapStats, PagemapResolver, PhysResolver};
 use crate::shutdown;
 use crate::units::{Size, UnitSystem};
 
-use super::{RegionState, TuiConfig, TuiError, TuiEvent, TuiMakeWriter};
+use super::{Segment, TuiConfig, TuiError, TuiEvent, TuiMakeWriter};
 
 /// Set up the global tracing subscriber with a layered registry.
 ///
@@ -73,7 +73,7 @@ pub fn setup_tracing(json_mode: bool, tui_writer: Option<TuiMakeWriter>) {
 
 /// Resolved test setup passed into [`run_tui_mode`] from the binary.
 pub struct TuiTestSetup {
-    pub region: LockedRegion,
+    pub region: TestBuffer,
     pub resolver: Option<PagemapResolver>,
     pub map_stats: Option<MapStats>,
     /// Keeps the compaction guard alive for the duration of the test.
@@ -139,14 +139,14 @@ pub fn run_tui_mode(
         .iter()
         .map(std::string::ToString::to_string)
         .collect();
-    let regions: Vec<Arc<RegionState>> = (0..n_regions)
+    let regions: Vec<Arc<Segment>> = (0..n_regions)
         .map(|i| {
             let region_words = if i == n_regions - 1 {
                 total_words - i * chunk_words
             } else {
                 chunk_words
             };
-            Arc::new(RegionState::new(
+            Arc::new(Segment::new(
                 format!("region-{i}"),
                 region_words * 8,
                 pattern_names.clone(),
@@ -154,7 +154,7 @@ pub fn run_tui_mode(
         })
         .collect();
 
-    let worker_regions: Vec<Arc<RegionState>> = regions.iter().map(Arc::clone).collect();
+    let worker_regions: Vec<Arc<Segment>> = regions.iter().map(Arc::clone).collect();
     let worker_tx = tx.clone();
     let parallel = !sequential;
 
@@ -218,19 +218,19 @@ pub fn run_tui_mode(
     }
     let _ = worker.join();
 
-    let total_errors: usize = regions
+    let total_failures: usize = regions
         .iter()
-        .map(|r| r.error_count.load(Ordering::Relaxed))
+        .map(|r| r.failure_count.load(Ordering::Relaxed))
         .sum();
 
     {
         let elapsed = run_start.elapsed();
         let mut sink = sink.lock().unwrap();
-        sink.emit_summary(passes, total_errors, elapsed);
-        sink.print_final_result(total_errors);
+        sink.emit_summary(passes, total_failures, elapsed);
+        sink.print_final_result(total_failures);
     }
 
-    std::process::exit(shutdown::exit_code(total_errors))
+    std::process::exit(shutdown::exit_code(total_failures))
 }
 
 /// Worker for a single memory region: runs test patterns and feeds results to the TUI.
@@ -245,7 +245,7 @@ pub fn run_region_worker(
     passes: usize,
     parallel: bool,
     region_idx: usize,
-    tui_state: &Arc<RegionState>,
+    tui_state: &Arc<Segment>,
     tx: &mpsc::SyncSender<TuiEvent>,
     resolver: Option<&(dyn PhysResolver + Sync)>,
     sink: &Mutex<OutputSink>,
@@ -306,7 +306,7 @@ pub fn run_region_worker(
             }
 
             for f in &failures {
-                tui_state.record_error();
+                tui_state.record_failure();
                 let _ = tx.try_send(TuiEvent::Error(TuiError {
                     region_idx,
                     region_name: tui_state.name.clone(),
@@ -372,9 +372,9 @@ mod tests {
 
     use super::*;
 
-    fn make_test_state(patterns: &[Pattern]) -> Arc<RegionState> {
+    fn make_test_state(patterns: &[Pattern]) -> Arc<Segment> {
         let names: Vec<String> = patterns.iter().map(ToString::to_string).collect();
-        Arc::new(RegionState::new("test-region".into(), 8192, names))
+        Arc::new(Segment::new("test-region".into(), 8192, names))
     }
 
     fn make_sink() -> Mutex<OutputSink> {
@@ -457,7 +457,7 @@ mod tests {
             &sink,
         );
 
-        check!(state.error_count.load(Ordering::Relaxed) == 0);
+        check!(state.failure_count.load(Ordering::Relaxed) == 0);
     }
 
     #[test]
@@ -514,7 +514,7 @@ mod tests {
             &sink,
         );
 
-        check!(state.error_count.load(Ordering::Relaxed) == 0);
+        check!(state.failure_count.load(Ordering::Relaxed) == 0);
         check!(state.progress_bp.load(Ordering::Relaxed) == 10000);
     }
 }

@@ -31,18 +31,18 @@ impl AllocError {
     }
 }
 
-/// A region of anonymous memory that is mmap'd and mlock'd.
+/// The full anonymous memory allocation that ferrite mmap's and mlock's.
 /// Automatically unmaps on drop.
-pub struct LockedRegion {
+pub struct TestBuffer {
     ptr: NonNull<c_void>,
     len: usize,
 }
 
 // SAFETY: The memory region is exclusively owned and not shared across threads
 // without synchronization. Raw pointer access is confined to this struct.
-unsafe impl Send for LockedRegion {}
+unsafe impl Send for TestBuffer {}
 
-impl LockedRegion {
+impl TestBuffer {
     /// Allocate and lock `size` bytes of anonymous memory.
     /// Pages are faulted in via parallel volatile writes before returning.
     ///
@@ -112,14 +112,14 @@ impl LockedRegion {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr() as *const u64, word_count) }
     }
 
-    /// The base virtual address of the locked region.
+    /// The base virtual address of the allocation.
     #[must_use]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn as_ptr(&self) -> usize {
         self.ptr.as_ptr() as usize
     }
 
-    /// The size in bytes of the locked region.
+    /// The size in bytes of the allocation.
     #[must_use]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn len(&self) -> usize {
@@ -134,7 +134,7 @@ impl LockedRegion {
     }
 }
 
-impl Drop for LockedRegion {
+impl Drop for TestBuffer {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn drop(&mut self) {
         // SAFETY: ptr and len were produced by a successful mmap call.

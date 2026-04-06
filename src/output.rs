@@ -336,7 +336,7 @@ impl OutputSink {
             }
         } else {
             let line = format!(
-                "  {} {:<20} {:>8.1}ms  {throughput:>}  ({} errors)",
+                "  {} {:<20} {:>8.1}ms  {throughput:>}  ({} failures)",
                 "FAIL".red().bold(),
                 pattern.to_string(),
                 ms,

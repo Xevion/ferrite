@@ -85,19 +85,19 @@ impl Default for TuiConfig {
 /// Shared state for a single memory region being tested.
 ///
 /// Workers update atomics from their threads; the TUI reads them for rendering.
-pub struct RegionState {
+pub struct Segment {
     pub name: String,
     pub size_bytes: usize,
     patterns: Vec<String>,
     pub current_pattern_idx: AtomicUsize,
     pub progress_bp: AtomicU64,
-    pub error_count: AtomicUsize,
+    pub failure_count: AtomicUsize,
     pub paused: AtomicBool,
     pub activity: ActivityBuffer,
     last_error_time: Mutex<Option<Instant>>,
 }
 
-impl RegionState {
+impl Segment {
     #[must_use]
     pub fn new(name: String, size_bytes: usize, patterns: Vec<String>) -> Self {
         Self {
@@ -106,7 +106,7 @@ impl RegionState {
             patterns,
             current_pattern_idx: AtomicUsize::new(0),
             progress_bp: AtomicU64::new(0),
-            error_count: AtomicUsize::new(0),
+            failure_count: AtomicUsize::new(0),
             paused: AtomicBool::new(false),
             activity: ActivityBuffer::new(),
             last_error_time: Mutex::new(None),
@@ -127,13 +127,13 @@ impl RegionState {
         self.progress_bp.store(0, Ordering::Relaxed);
     }
 
-    /// Record that an error was found (increments count, updates timestamp).
+    /// Record that a failure was found (increments count, updates timestamp).
     ///
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
-    pub fn record_error(&self) {
-        self.error_count.fetch_add(1, Ordering::Relaxed);
+    pub fn record_failure(&self) {
+        self.failure_count.fetch_add(1, Ordering::Relaxed);
         *self.last_error_time.lock().unwrap() = Some(Instant::now());
     }
 
@@ -152,14 +152,14 @@ impl RegionState {
 }
 
 #[allow(clippy::missing_fields_in_debug)]
-impl fmt::Debug for RegionState {
+impl fmt::Debug for Segment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RegionState")
+        f.debug_struct("Segment")
             .field("name", &self.name)
             .field("size_bytes", &self.size_bytes)
             .field("pattern", &self.current_pattern())
             .field("progress_bp", &self.progress_bp.load(Ordering::Relaxed))
-            .field("errors", &self.error_count.load(Ordering::Relaxed))
+            .field("failures", &self.failure_count.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -236,7 +236,7 @@ impl Drop for TuiWriter {
 pub fn run_event_loop<B>(
     terminal: &mut Terminal<B>,
     config: &TuiConfig,
-    regions: &[Arc<RegionState>],
+    regions: &[Arc<Segment>],
     rx: &mpsc::Receiver<TuiEvent>,
 ) -> anyhow::Result<TuiLoopResult>
 where
@@ -378,7 +378,7 @@ where
 /// Panics if the input or tick thread cannot be spawned.
 pub fn run_tui(
     config: &TuiConfig,
-    regions: &[Arc<RegionState>],
+    regions: &[Arc<Segment>],
     tx: &mpsc::SyncSender<TuiEvent>,
     rx: &mpsc::Receiver<TuiEvent>,
 ) -> anyhow::Result<()> {
@@ -425,14 +425,14 @@ pub fn run_tui(
 
     // Render summary line above the viewport.
     let elapsed = start_time.elapsed();
-    let total_errors: usize = regions
+    let total_failures: usize = regions
         .iter()
-        .map(|r| r.error_count.load(Ordering::Relaxed))
+        .map(|r| r.failure_count.load(Ordering::Relaxed))
         .sum();
-    let (summary_text, summary_style) = if total_errors > 0 {
+    let (summary_text, summary_style) = if total_failures > 0 {
         (
             format!(
-                "FAIL: {total_errors} error(s) found in {:.1}s",
+                "FAIL: {total_failures} failure(s) found in {:.1}s",
                 elapsed.as_secs_f64()
             ),
             ratatui::style::Style::default()
@@ -441,7 +441,7 @@ pub fn run_tui(
         )
     } else {
         (
-            format!("PASS: no errors in {:.1}s", elapsed.as_secs_f64()),
+            format!("PASS: no failures in {:.1}s", elapsed.as_secs_f64()),
             ratatui::style::Style::default()
                 .fg(palette::ERR_NONE)
                 .add_modifier(ratatui::style::Modifier::BOLD),
@@ -475,18 +475,18 @@ mod tests {
 
     #[test]
     fn region_state_new_defaults() {
-        let rs = RegionState::new("test".into(), 4096, vec!["solid".into(), "walk".into()]);
+        let rs = Segment::new("test".into(), 4096, vec!["solid".into(), "walk".into()]);
         check!(rs.name == "test");
         check!(rs.size_bytes == 4096);
         check!(rs.current_pattern() == "solid");
         check!(rs.progress_bp.load(Ordering::Relaxed) == 0);
-        check!(rs.error_count.load(Ordering::Relaxed) == 0);
+        check!(rs.failure_count.load(Ordering::Relaxed) == 0);
         assert!(!rs.paused.load(Ordering::Relaxed));
     }
 
     #[test]
     fn current_pattern_returns_correct_pattern() {
-        let rs = RegionState::new("r0".into(), 1024, vec!["a".into(), "b".into(), "c".into()]);
+        let rs = Segment::new("r0".into(), 1024, vec!["a".into(), "b".into(), "c".into()]);
         check!(rs.current_pattern() == "a");
         rs.current_pattern_idx.store(1, Ordering::Relaxed);
         check!(rs.current_pattern() == "b");
@@ -496,14 +496,14 @@ mod tests {
 
     #[test]
     fn current_pattern_returns_done_past_end() {
-        let rs = RegionState::new("r0".into(), 1024, vec!["a".into()]);
+        let rs = Segment::new("r0".into(), 1024, vec!["a".into()]);
         rs.current_pattern_idx.store(5, Ordering::Relaxed);
         check!(rs.current_pattern() == "done");
     }
 
     #[test]
     fn set_pattern_updates_index_and_resets_progress() {
-        let rs = RegionState::new("r0".into(), 1024, vec!["a".into(), "b".into()]);
+        let rs = Segment::new("r0".into(), 1024, vec!["a".into(), "b".into()]);
         rs.progress_bp.store(5000, Ordering::Relaxed);
         rs.set_pattern(1);
         check!(rs.current_pattern() == "b");
@@ -511,25 +511,25 @@ mod tests {
     }
 
     #[test]
-    fn record_error_increments_count() {
-        let rs = RegionState::new("r0".into(), 1024, vec!["a".into()]);
-        check!(rs.error_count.load(Ordering::Relaxed) == 0);
-        rs.record_error();
-        check!(rs.error_count.load(Ordering::Relaxed) == 1);
-        rs.record_error();
-        check!(rs.error_count.load(Ordering::Relaxed) == 2);
+    fn record_failure_increments_count() {
+        let rs = Segment::new("r0".into(), 1024, vec!["a".into()]);
+        check!(rs.failure_count.load(Ordering::Relaxed) == 0);
+        rs.record_failure();
+        check!(rs.failure_count.load(Ordering::Relaxed) == 1);
+        rs.record_failure();
+        check!(rs.failure_count.load(Ordering::Relaxed) == 2);
     }
 
     #[test]
     fn last_error_age_max_when_no_errors() {
-        let rs = RegionState::new("r0".into(), 1024, vec!["a".into()]);
+        let rs = Segment::new("r0".into(), 1024, vec!["a".into()]);
         check!(rs.last_error_age_secs() == f64::MAX);
     }
 
     #[test]
     fn last_error_age_small_after_error() {
-        let rs = RegionState::new("r0".into(), 1024, vec!["a".into()]);
-        rs.record_error();
+        let rs = Segment::new("r0".into(), 1024, vec!["a".into()]);
+        rs.record_failure();
         let age = rs.last_error_age_secs();
         assert!(
             age < 1.0,
@@ -539,8 +539,8 @@ mod tests {
 
     #[test]
     fn debug_format_includes_fields() {
-        let rs = RegionState::new("test-region".into(), 8192, vec!["solid".into()]);
-        rs.error_count.store(3, Ordering::Relaxed);
+        let rs = Segment::new("test-region".into(), 8192, vec!["solid".into()]);
+        rs.failure_count.store(3, Ordering::Relaxed);
         rs.progress_bp.store(5000, Ordering::Relaxed);
         let debug = format!("{rs:?}");
         assert!(debug.contains("test-region"));
@@ -606,11 +606,11 @@ mod tests {
             .unwrap()
         }
 
-        fn make_regions(n: usize, patterns: &[&str]) -> Vec<Arc<RegionState>> {
+        fn make_regions(n: usize, patterns: &[&str]) -> Vec<Arc<Segment>> {
             let names: Vec<String> = patterns.iter().map(|s| (*s).to_string()).collect();
             (0..n)
                 .map(|i| {
-                    Arc::new(RegionState::new(
+                    Arc::new(Segment::new(
                         format!("r{i}"),
                         8 * 1024 * 1024,
                         names.clone(),
@@ -901,7 +901,7 @@ mod tests {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
             let regions = make_regions(1, &["solid"]);
-            regions[0].record_error();
+            regions[0].record_failure();
             let mut term = make_terminal(120, 15);
 
             tx.send(make_error(0)).unwrap();
@@ -940,11 +940,11 @@ mod tests {
 
         #[test]
         #[serial]
-        fn header_shows_error_count() {
+        fn header_shows_failure_count() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
             let regions = make_regions(1, &["solid"]);
-            regions[0].error_count.store(7, Ordering::Relaxed);
+            regions[0].failure_count.store(7, Ordering::Relaxed);
             let mut term = make_terminal(80, 15);
 
             tx.send(TuiEvent::Tick).unwrap();
@@ -954,8 +954,8 @@ mod tests {
             let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
             let text = buf_text(&term);
             assert!(
-                text.contains("7 errors"),
-                "expected '7 errors' in header: {text}"
+                text.contains("7 failures"),
+                "expected '7 failures' in header: {text}"
             );
         }
 

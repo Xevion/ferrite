@@ -10,7 +10,7 @@ use nix::unistd::geteuid;
 use owo_colors::OwoColorize;
 use tracing::{info, warn};
 
-use ferrite::alloc::{CompactionGuard, LockedRegion};
+use ferrite::alloc::{CompactionGuard, TestBuffer};
 use ferrite::dimm::DimmTopology;
 use ferrite::phys::{MapStats, PagemapResolver, PhysResolver, PhysResolverError};
 use ferrite::units::UnitSystem;
@@ -225,7 +225,7 @@ pub(crate) fn parse_capability_from_status(status: &str, cap_bit: u32) -> bool {
 
 /// Set up physical address resolution, returning the resolver and map stats if successful.
 pub fn setup_phys(
-    region: &LockedRegion,
+    region: &TestBuffer,
     need_phys: bool,
 ) -> (Option<PagemapResolver>, Option<MapStats>) {
     if !need_phys {
@@ -276,7 +276,7 @@ pub fn setup_phys(
 }
 
 pub struct TestSetup {
-    pub region: LockedRegion,
+    pub region: TestBuffer,
     /// Held for its [`Drop`] side-effect -- restores the compaction sysctl on teardown.
     #[allow(dead_code)]
     pub compaction_guard: Option<CompactionGuard>,
@@ -286,7 +286,7 @@ pub struct TestSetup {
 
 pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
     let need_phys = !cli.no_phys;
-    let region = match LockedRegion::new(cli.size) {
+    let region = match TestBuffer::new(cli.size) {
         Ok(r) => r,
         Err(e) => {
             if let Some(hint) = e.help() {

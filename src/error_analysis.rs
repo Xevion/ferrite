@@ -3,7 +3,7 @@ use crate::Failure;
 /// Aggregate bit-flip statistics across multiple failures.
 #[derive(Debug, Clone)]
 pub struct BitErrorStats {
-    pub total_errors: usize,
+    pub total_failures: usize,
     /// Lowest physical address with an error (None if no physical addresses available).
     pub lowest_phys: Option<u64>,
     /// Highest physical address with an error.
@@ -30,7 +30,7 @@ impl BitErrorStats {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            total_errors: 0,
+            total_failures: 0,
             lowest_phys: None,
             highest_phys: None,
             union_xor_mask: 0,
@@ -42,7 +42,7 @@ impl BitErrorStats {
 
     /// Accumulate a failure into the statistics.
     pub fn record(&mut self, failure: &Failure) {
-        self.total_errors += 1;
+        self.total_failures += 1;
 
         if let Some(phys) = failure.phys_addr {
             let p = phys.0;
@@ -89,7 +89,7 @@ impl BitErrorStats {
     /// Classify the overall error pattern.
     #[must_use]
     pub fn classification(&self) -> ErrorClassification {
-        if self.total_errors == 0 {
+        if self.total_failures == 0 {
             return ErrorClassification::NoErrors;
         }
 
@@ -163,14 +163,14 @@ mod tests {
     fn default_is_new() {
         let d = BitErrorStats::default();
         let n = BitErrorStats::new();
-        check!(d.total_errors == n.total_errors);
+        check!(d.total_failures == n.total_failures);
         check!(d.union_xor_mask == n.union_xor_mask);
     }
 
     #[test]
     fn empty_stats() {
         let stats = BitErrorStats::new();
-        check!(stats.total_errors == 0);
+        check!(stats.total_failures == 0);
         assert!(stats.classification() == ErrorClassification::NoErrors);
     }
 
@@ -200,7 +200,7 @@ mod tests {
             stats.record(&f_phys(0x1000, 0x0, 1 << 20, 0x2000));
             stats.record(&f_phys(0x2000, 0x0, 1 << 20, 0x3000));
 
-            check!(stats.total_errors == 2);
+            check!(stats.total_failures == 2);
             check!(stats.stuck_high_mask() == 1 << 20);
             check!(stats.stuck_low_mask() == 0);
             check!(stats.union_xor_mask == 1 << 20);
@@ -233,7 +233,7 @@ mod tests {
             stats.record(&f(0x1000, 0xFF, 0xFE)); // bit 0 flipped
             stats.record(&f(0x2000, 0xFF, 0xFD)); // bit 1 flipped
 
-            check!(stats.total_errors == 2);
+            check!(stats.total_failures == 2);
             assert!(stats.classification() == ErrorClassification::Coupling);
         }
 
@@ -302,7 +302,7 @@ mod tests {
             for (f, _) in &keyed { fwd.record(f); }
             for (f, _) in &permuted { perm.record(f); }
 
-            prop_assert_eq!(fwd.total_errors, perm.total_errors);
+            prop_assert_eq!(fwd.total_failures, perm.total_failures);
             prop_assert_eq!(fwd.union_xor_mask, perm.union_xor_mask);
             prop_assert_eq!(fwd.bit_positions, perm.bit_positions);
             prop_assert_eq!(fwd.stuck_high_mask(), perm.stuck_high_mask());

@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 
 use super::activity::ACTIVITY_CELLS;
 use super::palette;
-use super::{RegionState, TuiError};
+use super::{Segment, TuiError};
 
 /// Symbol sets for fine-grained activity display.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,7 +43,7 @@ impl SymbolSet {
 }
 
 /// Compute region-to-column mappings for the memory map display.
-fn region_columns(regions: &[Arc<RegionState>], usable_width: usize) -> Vec<(usize, usize)> {
+fn region_columns(regions: &[Arc<Segment>], usable_width: usize) -> Vec<(usize, usize)> {
     let total_bytes: usize = regions.iter().map(|r| r.size_bytes).sum();
     if total_bytes == 0 {
         return vec![(0, 1); regions.len()];
@@ -66,7 +66,7 @@ fn region_columns(regions: &[Arc<RegionState>], usable_width: usize) -> Vec<(usi
 /// Top-level renderer: draws all TUI sections into the frame.
 pub fn render_heatmap(
     frame: &mut Frame,
-    regions: &[Arc<RegionState>],
+    regions: &[Arc<Segment>],
     errors: &[TuiError],
     elapsed: Duration,
     verbose: bool,
@@ -112,14 +112,14 @@ pub fn render_heatmap(
 
 fn render_header(
     frame: &mut Frame,
-    regions: &[Arc<RegionState>],
+    regions: &[Arc<Segment>],
     elapsed: Duration,
     verbose: bool,
     area: ratatui::layout::Rect,
 ) {
-    let total_errors: usize = regions
+    let total_failures: usize = regions
         .iter()
-        .map(|r| r.error_count.load(Ordering::Relaxed))
+        .map(|r| r.failure_count.load(Ordering::Relaxed))
         .sum();
 
     let mut spans = vec![
@@ -139,12 +139,12 @@ fn render_header(
         ),
     ];
 
-    if total_errors > 0 {
+    if total_failures > 0 {
         spans.push(Span::styled("│", Style::default().fg(palette::SEPARATOR)));
         spans.push(Span::styled(
-            format!(" {total_errors} errors "),
+            format!(" {total_failures} failures "),
             Style::default()
-                .fg(palette::error_severity(total_errors))
+                .fg(palette::error_severity(total_failures))
                 .bold(),
         ));
     }
@@ -163,7 +163,7 @@ fn render_header(
 /// Continuous memory map bar: bg=error severity, fg=activity brightness.
 fn render_memory_map(
     frame: &mut Frame,
-    regions: &[Arc<RegionState>],
+    regions: &[Arc<Segment>],
     errors: &[TuiError],
     area: ratatui::layout::Rect,
     symbols: SymbolSet,
@@ -221,7 +221,7 @@ fn render_memory_map(
 
 fn render_memory_map_labels(
     frame: &mut Frame,
-    regions: &[Arc<RegionState>],
+    regions: &[Arc<Segment>],
     area: ratatui::layout::Rect,
 ) {
     if area.width < 4 {
@@ -254,7 +254,7 @@ fn render_memory_map_labels(
 
 fn render_heatmap_region(
     frame: &mut Frame,
-    region: &RegionState,
+    region: &Segment,
     errors: &[TuiError],
     region_idx: usize,
     area: ratatui::layout::Rect,
@@ -263,7 +263,7 @@ fn render_heatmap_region(
     let pattern_name = region.current_pattern();
     let progress_bp = region.progress_bp.load(Ordering::Relaxed);
     let pct = progress_bp as f64 / 100.0;
-    let errs = region.error_count.load(Ordering::Relaxed);
+    let errs = region.failure_count.load(Ordering::Relaxed);
     let paused = region.paused.load(Ordering::Relaxed);
 
     let bar_chars = 20;
@@ -418,8 +418,8 @@ mod tests {
 
     use super::*;
 
-    fn make_region(name: &str, size_bytes: usize) -> Arc<RegionState> {
-        Arc::new(RegionState::new(
+    fn make_region(name: &str, size_bytes: usize) -> Arc<Segment> {
+        Arc::new(Segment::new(
             name.to_string(),
             size_bytes,
             vec!["solid".to_string(), "walk".to_string()],
@@ -592,14 +592,17 @@ mod tests {
     fn render_header_with_errors() {
         let mut term = test_terminal(80, 1);
         let regions = vec![make_region("r0", 1024)];
-        regions[0].error_count.store(5, Ordering::Relaxed);
+        regions[0].failure_count.store(5, Ordering::Relaxed);
         let elapsed = Duration::from_secs(10);
         term.draw(|frame| {
             render_header(frame, &regions, elapsed, false, frame.area());
         })
         .unwrap();
         let text = buf_text(&term);
-        assert!(text.contains("5 errors"), "header should show error count");
+        assert!(
+            text.contains("5 failures"),
+            "header should show failure count"
+        );
     }
 
     #[test]
@@ -653,7 +656,7 @@ mod tests {
             pattern: "solid".into(),
             progress_fraction: 0.5,
         }];
-        regions[0].record_error();
+        regions[0].record_failure();
         term.draw(|frame| {
             render_memory_map(frame, &regions, &errors, frame.area(), SymbolSet::Braille);
         })
@@ -714,7 +717,7 @@ mod tests {
     fn render_heatmap_region_shows_errors() {
         let mut term = test_terminal(80, 1);
         let regions = [make_region("r0", 1024)];
-        regions[0].error_count.store(3, Ordering::Relaxed);
+        regions[0].failure_count.store(3, Ordering::Relaxed);
         let errors: Vec<TuiError> = vec![];
         term.draw(|frame| {
             render_heatmap_region(
@@ -830,8 +833,8 @@ mod tests {
     fn render_heatmap_with_errors_full() {
         let mut term = test_terminal(80, 15);
         let regions = vec![make_region("r0", 1024)];
-        regions[0].error_count.store(2, Ordering::Relaxed);
-        regions[0].record_error();
+        regions[0].failure_count.store(2, Ordering::Relaxed);
+        regions[0].record_failure();
         let errors = vec![TuiError {
             region_idx: 0,
             region_name: "r0".into(),
@@ -871,7 +874,7 @@ mod tests {
     fn render_heatmap_region_with_error_overlays() {
         let mut term = test_terminal(80, 1);
         let regions = [make_region("r0", 1024)];
-        regions[0].record_error();
+        regions[0].record_failure();
         let errors = vec![
             TuiError {
                 region_idx: 0,

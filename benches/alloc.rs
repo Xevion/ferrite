@@ -1,6 +1,6 @@
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
-use ferrite::alloc::LockedRegion;
+use ferrite::alloc::TestBuffer;
 
 const SIZES: [usize; 3] = [4 << 20, 64 << 20, 256 << 20]; // 4 / 64 / 256 MiB
 
@@ -19,7 +19,7 @@ fn alloc_lock_free(bencher: Bencher, bytes: usize) {
     bencher
         .counter(BytesCount::new(bytes as u64))
         .bench_local(|| {
-            let region = LockedRegion::new(black_box(bytes)).expect("LockedRegion::new failed");
+            let region = TestBuffer::new(black_box(bytes)).expect("TestBuffer::new failed");
             drop(region);
         });
 }
