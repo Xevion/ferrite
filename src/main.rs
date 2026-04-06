@@ -8,9 +8,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use ferrite::events::{EventRx, RegionEvent, RunEvent};
+use ferrite::headless::HeadlessPrinter;
 use ferrite::output::OutputSink;
 use ferrite::pattern::Pattern;
 use ferrite::phys::PhysResolver;
+use ferrite::results::{ResultsDoc, ResultsRenderer, TableRenderer};
 use ferrite::runner;
 use ferrite::shutdown;
 #[cfg(feature = "tui")]
@@ -85,40 +87,27 @@ fn main() -> Result<()> {
     result
 }
 
-/// Consume events from the runner and drive [`OutputSink`] for live output.
+/// Consume events from the runner and drive human-readable output + JSON emission.
 ///
-/// Runs on a dedicated thread. Returns the sink when the channel disconnects
-/// or `RunComplete` is received.
-fn consume_headless_events(rx: &EventRx, sink: &mut OutputSink) {
-    let mut total_passes: usize = 0;
-
+/// Runs on a dedicated thread. The [`HeadlessPrinter`] handles human-readable
+/// text while [`OutputSink`] handles JSON emission (when active).
+fn consume_headless_events(
+    rx: &EventRx,
+    printer: &mut HeadlessPrinter<std::io::Stdout>,
+    sink: &mut OutputSink,
+) {
     while let Ok(event) = rx.recv() {
-        match event {
-            RunEvent::RunStart {
-                size,
-                passes,
-                ref patterns,
-                parallel,
-                ..
-            } => {
-                total_passes = passes;
-                sink.print_banner(size, passes, patterns.len(), parallel);
-            }
-            RunEvent::MapInfo { ref stats } => {
-                sink.emit_map_info(stats);
-                sink.print_map_info(stats);
-            }
-            RunEvent::Region(
-                _,
-                RegionEvent::PassStart {
-                    pass,
-                    total_passes: tp,
-                },
-            ) => {
-                sink.emit_pass_start(pass, tp);
+        // Human-readable output
+        printer.handle_event(&event);
+
+        // JSON emission (no-ops when sink is Human)
+        match &event {
+            RunEvent::MapInfo { stats } => sink.emit_map_info(stats),
+            RunEvent::Region(_, RegionEvent::PassStart { pass, total_passes }) => {
+                sink.emit_pass_start(*pass, *total_passes);
             }
             RunEvent::Region(_, RegionEvent::TestStart { pattern, pass }) => {
-                sink.emit_test_start(pattern, pass);
+                sink.emit_test_start(*pattern, *pass);
             }
             RunEvent::Region(
                 _,
@@ -128,9 +117,7 @@ fn consume_headless_events(rx: &EventRx, sink: &mut OutputSink) {
                     sub_pass,
                     total,
                 },
-            ) => {
-                sink.emit_progress(pattern, pass, sub_pass, total);
-            }
+            ) => sink.emit_progress(*pattern, *pass, *sub_pass, *total),
             RunEvent::Region(
                 _,
                 RegionEvent::TestComplete {
@@ -138,12 +125,9 @@ fn consume_headless_events(rx: &EventRx, sink: &mut OutputSink) {
                     pass,
                     elapsed,
                     bytes,
-                    ref failures,
+                    failures,
                 },
-            ) => {
-                sink.emit_test_complete(pattern, pass, elapsed, bytes, failures);
-                sink.print_test_result(pattern, elapsed, bytes, failures);
-            }
+            ) => sink.emit_test_complete(*pattern, *pass, *elapsed, *bytes, failures),
             RunEvent::Region(
                 _,
                 RegionEvent::PassComplete {
@@ -151,16 +135,15 @@ fn consume_headless_events(rx: &EventRx, sink: &mut OutputSink) {
                     failures,
                     elapsed,
                 },
-            ) => {
-                sink.emit_pass_complete(pass, failures, elapsed);
-                sink.print_pass_summary(pass, total_passes, failures);
+            ) => sink.emit_pass_complete(*pass, *failures, *elapsed),
+            RunEvent::Region(_, RegionEvent::EccDeltas { pass, deltas }) => {
+                sink.emit_ecc_deltas(*pass, deltas);
             }
-            RunEvent::Region(_, RegionEvent::EccDeltas { pass, ref deltas }) => {
-                sink.emit_ecc_deltas(pass, deltas);
-                sink.print_ecc_deltas(pass, deltas);
-            }
-            RunEvent::RunComplete => break,
-            RunEvent::DimmInfo { .. } | RunEvent::Log { .. } => {}
+            _ => {}
+        }
+
+        if matches!(event, RunEvent::RunComplete) {
+            break;
         }
     }
 }
@@ -189,10 +172,13 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
         });
     }
 
-    // Consumer thread drives OutputSink from events
+    let unit_system = sink.unit_system();
+
+    // Consumer thread drives HeadlessPrinter + OutputSink from events
     let consumer = std::thread::spawn(move || {
-        consume_headless_events(&rx, &mut sink);
-        sink
+        let mut printer = HeadlessPrinter::new(std::io::stdout(), unit_system);
+        consume_headless_events(&rx, &mut printer, &mut sink);
+        (printer, sink)
     });
 
     let run_start = std::time::Instant::now();
@@ -215,7 +201,7 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
     let _ = tx.send(RunEvent::RunComplete);
     drop(tx);
 
-    let mut sink = consumer.join().expect("event consumer thread panicked");
+    let (_printer, mut sink) = consumer.join().expect("event consumer thread panicked");
 
     let config = ferrite::runner::RunConfig {
         size: cli.size,
@@ -228,30 +214,13 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
 
     ferrite::error_analysis::analyze(&mut results);
 
-    if let Some(ref ea) = results.error_analysis {
-        let class_str = match &ea.classification {
-            ferrite::error_analysis::ErrorClassification::StuckBit { positions } => {
-                let pos_str: Vec<String> = positions.iter().map(|p| format!("bit {p}")).collect();
-                format!("stuck bit(s): {}", pos_str.join(", "))
-            }
-            ferrite::error_analysis::ErrorClassification::Coupling => {
-                "coupling/disturbance errors".to_owned()
-            }
-            ferrite::error_analysis::ErrorClassification::Mixed => {
-                "mixed (stuck + coupling)".to_owned()
-            }
-            ferrite::error_analysis::ErrorClassification::NoErrors => unreachable!(),
-        };
-
-        eprintln!("  Error analysis: {class_str}");
-        eprintln!("  Affected bits: 0x{:016x}", ea.union_xor_mask);
-        if let (Some(lo), Some(hi)) = (ea.lowest_phys, ea.highest_phys) {
-            eprintln!("  Physical address range: 0x{lo:x} -- 0x{hi:x}");
-        }
-    }
-
     sink.emit_summary(cli.passes, results.total_failures, run_elapsed);
-    sink.print_final_result(results.total_failures);
+
+    let doc = ResultsDoc::from_results(&results);
+    let renderer = TableRenderer::new(cli.units);
+    renderer
+        .render(&doc, &mut std::io::stdout())
+        .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
 
     let code = shutdown::exit_code(results.total_failures);
     if code != 0 {

@@ -155,7 +155,8 @@ impl OutputSink {
         })
     }
 
-    fn unit_system(&self) -> UnitSystem {
+    #[must_use]
+    pub fn unit_system(&self) -> UnitSystem {
         match self {
             Self::Human { unit_system } | Self::Json { unit_system, .. } => *unit_system,
         }
