@@ -18,6 +18,7 @@ pub enum RunEvent {
         passes: usize,
         patterns: Vec<Pattern>,
         regions: usize,
+        parallel: bool,
     },
 
     /// Physical address map statistics, emitted after pagemap resolution.
@@ -112,6 +113,7 @@ mod tests {
             passes: 1,
             patterns: vec![Pattern::SolidBits],
             regions: 1,
+            parallel: true,
         })
         .unwrap();
 

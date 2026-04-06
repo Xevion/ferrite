@@ -7,6 +7,7 @@ use std::io::IsTerminal;
 use anyhow::{Context, Result};
 use clap::Parser;
 
+use ferrite::events::{EventRx, RegionEvent, RunEvent};
 use ferrite::output::OutputSink;
 use ferrite::pattern::Pattern;
 use ferrite::phys::PhysResolver;
@@ -67,7 +68,6 @@ fn main() -> Result<()> {
                 map_stats: s.map_stats,
                 compaction_guard: s.compaction_guard,
             };
-            // run_tui_mode calls process::exit internally
             return run_tui_mode(
                 cli.size,
                 cli.passes,
@@ -85,6 +85,86 @@ fn main() -> Result<()> {
     result
 }
 
+/// Consume events from the runner and drive [`OutputSink`] for live output.
+///
+/// Runs on a dedicated thread. Returns the sink when the channel disconnects
+/// or `RunComplete` is received.
+fn consume_headless_events(rx: &EventRx, sink: &mut OutputSink) {
+    let mut total_passes: usize = 0;
+
+    while let Ok(event) = rx.recv() {
+        match event {
+            RunEvent::RunStart {
+                size,
+                passes,
+                ref patterns,
+                parallel,
+                ..
+            } => {
+                total_passes = passes;
+                sink.print_banner(size, passes, patterns.len(), parallel);
+            }
+            RunEvent::MapInfo { ref stats } => {
+                sink.emit_map_info(stats);
+                sink.print_map_info(stats);
+            }
+            RunEvent::Region(
+                _,
+                RegionEvent::PassStart {
+                    pass,
+                    total_passes: tp,
+                },
+            ) => {
+                sink.emit_pass_start(pass, tp);
+            }
+            RunEvent::Region(_, RegionEvent::TestStart { pattern, pass }) => {
+                sink.emit_test_start(pattern, pass);
+            }
+            RunEvent::Region(
+                _,
+                RegionEvent::Progress {
+                    pattern,
+                    pass,
+                    sub_pass,
+                    total,
+                },
+            ) => {
+                sink.emit_progress(pattern, pass, sub_pass, total);
+            }
+            RunEvent::Region(
+                _,
+                RegionEvent::TestComplete {
+                    pattern,
+                    pass,
+                    elapsed,
+                    bytes,
+                    ref failures,
+                },
+            ) => {
+                sink.emit_test_complete(pattern, pass, elapsed, bytes, failures);
+                sink.print_test_result(pattern, elapsed, bytes, failures);
+            }
+            RunEvent::Region(
+                _,
+                RegionEvent::PassComplete {
+                    pass,
+                    failures,
+                    elapsed,
+                },
+            ) => {
+                sink.emit_pass_complete(pass, failures, elapsed);
+                sink.print_pass_summary(pass, total_passes, failures);
+            }
+            RunEvent::Region(_, RegionEvent::EccDeltas { pass, ref deltas }) => {
+                sink.emit_ecc_deltas(pass, deltas);
+                sink.print_ecc_deltas(pass, deltas);
+            }
+            RunEvent::RunComplete => break,
+            RunEvent::DimmInfo { .. } | RunEvent::Log { .. } => {}
+        }
+    }
+}
+
 /// Non-TUI mode: headless output with tracing to stderr.
 fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<()> {
     #[cfg(feature = "tui")]
@@ -92,23 +172,50 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
 
     let mut setup = setup_test(cli)?;
 
+    let (tx, rx) = ferrite::events::event_bus();
+
+    // Emit global events before the run
+    let _ = tx.send(RunEvent::RunStart {
+        size: cli.size,
+        passes: cli.passes,
+        patterns: patterns.to_vec(),
+        regions: 1,
+        parallel: !cli.sequential,
+    });
+
     if let Some(ref stats) = setup.map_stats {
-        sink.emit_map_info(stats);
-        sink.print_map_info(stats);
+        let _ = tx.send(RunEvent::MapInfo {
+            stats: stats.clone(),
+        });
     }
+
+    // Consumer thread drives OutputSink from events
+    let consumer = std::thread::spawn(move || {
+        consume_headless_events(&rx, &mut sink);
+        sink
+    });
 
     let run_start = std::time::Instant::now();
     let pass_results = runner::run(
         setup.region.as_u64_slice_mut(),
+        0,
         patterns,
         cli.passes,
         !cli.sequential,
-        &mut sink,
-        setup.resolver.as_ref().map(|r| r as &dyn PhysResolver),
+        &tx,
+        setup
+            .resolver
+            .as_ref()
+            .map(|r| r as &(dyn PhysResolver + Sync)),
         &|_| {},
     )
     .context("pattern execution failed")?;
     let run_elapsed = run_start.elapsed();
+
+    let _ = tx.send(RunEvent::RunComplete);
+    drop(tx);
+
+    let mut sink = consumer.join().expect("event consumer thread panicked");
 
     let config = ferrite::runner::RunConfig {
         size: cli.size,

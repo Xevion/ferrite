@@ -152,7 +152,7 @@ impl PageFlags {
 }
 
 /// Statistics from building the page map.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct MapStats {
     pub total_pages: usize,
     pub huge_pages: usize,

@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::Failure;
 use crate::edac::{EccDelta, EdacSnapshot};
-use crate::output::OutputSink;
+use crate::events::{EventTx, RegionEvent, RunEvent};
 use crate::pattern::{Pattern, run_pattern};
 use crate::phys::PhysResolver;
 use crate::shutdown;
@@ -101,7 +101,11 @@ impl RunResults {
     }
 }
 
-/// Run all selected patterns for the given number of passes.
+/// Run all selected patterns for the given number of passes on a single buffer region.
+///
+/// Emits `RunEvent::Region(region_idx, ...)` events via the provided channel as
+/// testing proceeds. The caller is responsible for emitting global events
+/// (`RunStart`, `RunComplete`, `MapInfo`, etc.).
 ///
 /// When `parallel` is true, each pattern's write and verify phases run across
 /// all available CPU cores via Rayon. Pass `false` to force single-threaded
@@ -116,19 +120,18 @@ impl RunResults {
 ///
 /// Returns [`PatternError::Unrecoverable`] if a pattern worker panics. The
 /// test buffer should be considered corrupted after this error.
-///
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     buf: &mut [u64],
+    region_idx: usize,
     patterns: &[Pattern],
     passes: usize,
     parallel: bool,
-    sink: &mut OutputSink,
-    resolver: Option<&dyn PhysResolver>,
+    tx: &EventTx,
+    resolver: Option<&(dyn PhysResolver + Sync)>,
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Result<Vec<PassResult>, PatternError> {
     let buf_bytes = buf.len() as u64 * 8;
-    sink.print_banner(buf_bytes as usize, passes, patterns.len(), parallel);
-
     let mut results = Vec::with_capacity(passes);
 
     for pass in 0..passes {
@@ -137,9 +140,14 @@ pub fn run(
         }
 
         let pass_start = Instant::now();
-        sink.emit_pass_start(pass + 1, passes);
+        let _ = tx.send(RunEvent::Region(
+            region_idx,
+            RegionEvent::PassStart {
+                pass: pass + 1,
+                total_passes: passes,
+            },
+        ));
 
-        // Snapshot EDAC counters before this pass
         let edac_before = EdacSnapshot::capture();
 
         let mut pattern_results = Vec::with_capacity(patterns.len());
@@ -149,12 +157,18 @@ pub fn run(
             }
             let sub_passes = pattern.sub_passes();
 
-            sink.emit_test_start(pattern, pass + 1);
+            let _ = tx.send(RunEvent::Region(
+                region_idx,
+                RegionEvent::TestStart {
+                    pattern,
+                    pass: pass + 1,
+                },
+            ));
 
             let start = Instant::now();
 
             let mut sub_pass_count: u64 = 0;
-            // SAFETY: captured state (sub_pass_count, sink) is not used after
+            // SAFETY: captured state (sub_pass_count, tx) is not used after
             // an unwind -- we return Err immediately on panic.
             let pattern_result = panic::catch_unwind(AssertUnwindSafe(|| {
                 run_pattern(
@@ -163,7 +177,15 @@ pub fn run(
                     parallel,
                     &mut || {
                         sub_pass_count += 1;
-                        sink.emit_progress(pattern, pass + 1, sub_pass_count, sub_passes);
+                        let _ = tx.send(RunEvent::Region(
+                            region_idx,
+                            RegionEvent::Progress {
+                                pattern,
+                                pass: pass + 1,
+                                sub_pass: sub_pass_count,
+                                total: sub_passes,
+                            },
+                        ));
                     },
                     on_activity,
                 )
@@ -180,15 +202,22 @@ pub fn run(
             let elapsed = start.elapsed();
             let bytes_processed = buf_bytes * 2 * pattern.sub_passes();
 
-            // Post-process: resolve physical addresses for any failures
             if let Some(resolver) = resolver {
                 for f in &mut failures {
                     f.phys_addr = resolver.resolve(f.addr).ok();
                 }
             }
 
-            sink.emit_test_complete(pattern, pass + 1, elapsed, bytes_processed, &failures);
-            sink.print_test_result(pattern, elapsed, bytes_processed, &failures);
+            let _ = tx.send(RunEvent::Region(
+                region_idx,
+                RegionEvent::TestComplete {
+                    pattern,
+                    pass: pass + 1,
+                    elapsed,
+                    bytes: bytes_processed,
+                    failures: failures.clone(),
+                },
+            ));
 
             pattern_results.push(PatternResult {
                 pattern,
@@ -198,13 +227,17 @@ pub fn run(
             });
         }
 
-        // Compute EDAC deltas for this pass
         let ecc_deltas = match (&edac_before, EdacSnapshot::capture()) {
             (Some(before), Some(after)) => {
                 let deltas = before.delta(&after);
                 if !deltas.is_empty() {
-                    sink.emit_ecc_deltas(pass + 1, &deltas);
-                    sink.print_ecc_deltas(pass + 1, &deltas);
+                    let _ = tx.send(RunEvent::Region(
+                        region_idx,
+                        RegionEvent::EccDeltas {
+                            pass: pass + 1,
+                            deltas: deltas.clone(),
+                        },
+                    ));
                 }
                 deltas
             }
@@ -219,8 +252,14 @@ pub fn run(
         let total = pass_result.total_failures();
         let pass_elapsed = pass_start.elapsed();
 
-        sink.emit_pass_complete(pass + 1, total, pass_elapsed);
-        sink.print_pass_summary(pass + 1, passes, total);
+        let _ = tx.send(RunEvent::Region(
+            region_idx,
+            RegionEvent::PassComplete {
+                pass: pass + 1,
+                failures: total,
+                elapsed: pass_elapsed,
+            },
+        ));
 
         results.push(pass_result);
     }
@@ -233,14 +272,13 @@ mod tests {
     use assert2::{assert, check};
     use serial_test::serial;
 
-    use crate::output::OutputSink;
+    use crate::events::{self, RegionEvent, RunEvent};
     use crate::pattern::Pattern;
-    use crate::units::UnitSystem;
 
     use super::*;
 
-    fn make_sink() -> OutputSink {
-        OutputSink::human(UnitSystem::Binary)
+    fn make_tx() -> (EventTx, events::EventRx) {
+        events::event_bus()
     }
 
     #[test]
@@ -300,34 +338,43 @@ mod tests {
     #[test]
     fn run_single_pass_clean_memory() {
         let mut buf = vec![0u64; 1024];
-        let mut sink = make_sink();
+        let (tx, rx) = make_tx();
         let results = run(
             &mut buf,
+            0,
             &[Pattern::SolidBits],
             1,
             false,
-            &mut sink,
+            &tx,
             None,
             &|_| {},
         )
         .unwrap();
+        drop(tx);
+
         check!(results.len() == 1);
         check!(results[0].pass_number == 1);
         check!(results[0].total_failures() == 0);
         check!(results[0].pattern_results.len() == 1);
         check!(results[0].pattern_results[0].pattern == Pattern::SolidBits);
+
+        // Verify expected events were emitted
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(!events.is_empty());
+        assert!(let RunEvent::Region(0, RegionEvent::PassStart { .. }) = &events[0]);
     }
 
     #[test]
     fn run_multi_pass() {
         let mut buf = vec![0u64; 1024];
-        let mut sink = make_sink();
+        let (tx, _rx) = make_tx();
         let results = run(
             &mut buf,
+            0,
             &[Pattern::SolidBits],
             3,
             false,
-            &mut sink,
+            &tx,
             None,
             &|_| {},
         )
@@ -342,8 +389,8 @@ mod tests {
     #[test]
     fn run_all_patterns_clean() {
         let mut buf = vec![0u64; 1024];
-        let mut sink = make_sink();
-        let results = run(&mut buf, Pattern::ALL, 1, false, &mut sink, None, &|_| {}).unwrap();
+        let (tx, _rx) = make_tx();
+        let results = run(&mut buf, 0, Pattern::ALL, 1, false, &tx, None, &|_| {}).unwrap();
         assert!(results.len() == 1);
         check!(results[0].pattern_results.len() == Pattern::ALL.len());
         check!(results[0].total_failures() == 0);
@@ -352,8 +399,8 @@ mod tests {
     #[test]
     fn run_empty_patterns() {
         let mut buf = vec![0u64; 1024];
-        let mut sink = make_sink();
-        let results = run(&mut buf, &[], 1, false, &mut sink, None, &|_| {}).unwrap();
+        let (tx, _rx) = make_tx();
+        let results = run(&mut buf, 0, &[], 1, false, &tx, None, &|_| {}).unwrap();
         check!(results.len() == 1);
         check!(results[0].pattern_results.is_empty());
         check!(results[0].total_failures() == 0);
@@ -362,8 +409,8 @@ mod tests {
     #[test]
     fn run_parallel_clean() {
         let mut buf = vec![0u64; 4096];
-        let mut sink = make_sink();
-        let results = run(&mut buf, Pattern::ALL, 1, true, &mut sink, None, &|_| {}).unwrap();
+        let (tx, _rx) = make_tx();
+        let results = run(&mut buf, 0, Pattern::ALL, 1, true, &tx, None, &|_| {}).unwrap();
         assert!(results.len() == 1);
         check!(results[0].total_failures() == 0);
     }
@@ -399,13 +446,14 @@ mod tests {
     fn run_with_resolver() {
         let mut buf = vec![0u64; 1024];
         let resolver = StubResolver;
-        let mut sink = make_sink();
+        let (tx, _rx) = make_tx();
         let results = run(
             &mut buf,
+            0,
             &[Pattern::SolidBits],
             1,
             false,
-            &mut sink,
+            &tx,
             Some(&resolver),
             &|_| {},
         )
@@ -433,10 +481,64 @@ mod tests {
         shutdown::reset();
         shutdown::request_quit(shutdown::QuitReason::UserQuit);
         let mut buf = vec![0u64; 1024];
-        let mut sink = make_sink();
-        let results = run(&mut buf, Pattern::ALL, 100, false, &mut sink, None, &|_| {}).unwrap();
-        // With quit set before running, no passes should execute
+        let (tx, _rx) = make_tx();
+        let results = run(&mut buf, 0, Pattern::ALL, 100, false, &tx, None, &|_| {}).unwrap();
         check!(results.is_empty());
+    }
+
+    #[test]
+    fn emits_expected_event_sequence() {
+        let mut buf = vec![0u64; 1024];
+        let (tx, rx) = make_tx();
+        let _ = run(
+            &mut buf,
+            7,
+            &[Pattern::SolidBits],
+            1,
+            false,
+            &tx,
+            None,
+            &|_| {},
+        )
+        .unwrap();
+        drop(tx);
+
+        let events: Vec<_> = rx.try_iter().collect();
+
+        // PassStart, TestStart, Progress..., TestComplete, PassComplete
+        assert!(let RunEvent::Region(7, RegionEvent::PassStart { pass: 1, total_passes: 1 }) = &events[0]);
+        assert!(let RunEvent::Region(7, RegionEvent::TestStart { pattern: Pattern::SolidBits, pass: 1 }) = &events[1]);
+
+        // Last two should be TestComplete and PassComplete
+        let last = &events[events.len() - 1];
+        assert!(let RunEvent::Region(7, RegionEvent::PassComplete { pass: 1, .. }) = last);
+        let second_last = &events[events.len() - 2];
+        assert!(let RunEvent::Region(7, RegionEvent::TestComplete { pattern: Pattern::SolidBits, .. }) = second_last);
+    }
+
+    #[test]
+    fn region_idx_propagated() {
+        let mut buf = vec![0u64; 1024];
+        let (tx, rx) = make_tx();
+        let _ = run(
+            &mut buf,
+            42,
+            &[Pattern::SolidBits],
+            1,
+            false,
+            &tx,
+            None,
+            &|_| {},
+        )
+        .unwrap();
+        drop(tx);
+
+        for event in rx.try_iter() {
+            match event {
+                RunEvent::Region(idx, _) => assert!(idx == 42),
+                _ => panic!("unexpected non-region event"),
+            }
+        }
     }
 
     mod extract_panic_msg_tests {
