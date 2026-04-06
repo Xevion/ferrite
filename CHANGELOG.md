@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.4](https://github.com/Xevion/ferrite/compare/v0.1.3...v0.1.4) (2026-04-06)
+
+
+### Features
+
+* Add unified shutdown module with signal handling and escalation ([0fae03b](https://github.com/Xevion/ferrite/commit/0fae03b78b6cf6299b0b957e898b02eeaadff204))
+* Catch runner panics and surface actionable permission hints ([679ffdc](https://github.com/Xevion/ferrite/commit/679ffdc23b959d63c076365fd390f793c239ed90))
+
+
+### Code Refactoring
+
+* Extract run_event_loop&lt;B&gt; and add event loop test suite ([7c0e346](https://github.com/Xevion/ferrite/commit/7c0e346a7594818659cc54a9abc3505da303eb02))
+* Remove indicatif now that ratatui covers progress display ([26d98b7](https://github.com/Xevion/ferrite/commit/26d98b7049223c8806710aa19264eff07c30b1a0))
+* Rename LockedRegion to TestBuffer, RegionState to Segment; fix error to failure vocabulary ([705f3c3](https://github.com/Xevion/ferrite/commit/705f3c3c65b4b2be5f97594036819bbec22f4c3a))
+
+
+### Miscellaneous
+
+* Drop MSRV badge and rust-version constraint ([1755b3e](https://github.com/Xevion/ferrite/commit/1755b3e1f337c3696e7dacb05f19973864bc441c))
+* Pin rust toolchain, CI tool versions, and add Justfile aliases ([cb52c10](https://github.com/Xevion/ferrite/commit/cb52c10951d00981fcff1831c419379393cea08c))
+
 ## [0.1.3](https://github.com/Xevion/ferrite/compare/v0.1.2...v0.1.3) (2026-04-05)
 
 
