@@ -34,15 +34,18 @@ pub enum PatternError {
 }
 
 /// Result of running a single pattern.
+#[derive(Debug, serde::Serialize)]
 pub struct PatternResult {
     pub pattern: Pattern,
     pub failures: Vec<Failure>,
+    #[serde(with = "crate::units::duration_ms")]
     pub elapsed: std::time::Duration,
     /// Total bytes touched (writes + reads across all sub-passes).
     pub bytes_processed: u64,
 }
 
 /// Result of a full pass (all patterns).
+#[derive(Debug, serde::Serialize)]
 pub struct PassResult {
     pub pass_number: usize,
     pub pattern_results: Vec<PatternResult>,
@@ -53,6 +56,48 @@ impl PassResult {
     #[must_use]
     pub fn total_failures(&self) -> usize {
         self.pattern_results.iter().map(|r| r.failures.len()).sum()
+    }
+}
+
+/// Configuration snapshot captured at the start of a run.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunConfig {
+    pub size: usize,
+    pub passes: usize,
+    pub patterns: Vec<Pattern>,
+    pub regions: usize,
+    pub parallel: bool,
+}
+
+/// Complete results of a test run, suitable for serialization and post-processing.
+#[derive(Debug, serde::Serialize)]
+pub struct RunResults {
+    pub config: RunConfig,
+    pub passes: Vec<PassResult>,
+    #[serde(with = "crate::units::duration_ms")]
+    pub elapsed: std::time::Duration,
+    pub total_failures: usize,
+    /// Populated by [`crate::error_analysis::analyze`] after the run completes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_analysis: Option<crate::error_analysis::ErrorAnalysis>,
+}
+
+impl RunResults {
+    /// Build `RunResults` from pass results and configuration.
+    #[must_use]
+    pub fn from_passes(
+        passes: Vec<PassResult>,
+        config: RunConfig,
+        elapsed: std::time::Duration,
+    ) -> Self {
+        let total_failures = passes.iter().map(PassResult::total_failures).sum();
+        Self {
+            config,
+            passes,
+            elapsed,
+            total_failures,
+            error_analysis: None,
+        }
     }
 }
 

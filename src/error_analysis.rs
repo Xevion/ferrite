@@ -1,4 +1,8 @@
+use serde::Serialize;
+
 use crate::Failure;
+use crate::pattern::Pattern;
+use crate::runner::RunResults;
 
 /// Aggregate bit-flip statistics across multiple failures.
 #[derive(Debug, Clone)]
@@ -112,7 +116,7 @@ impl BitErrorStats {
 }
 
 /// Classification of error patterns across all failures.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum ErrorClassification {
     /// No errors recorded.
     NoErrors,
@@ -122,6 +126,70 @@ pub enum ErrorClassification {
     Coupling,
     /// Some bits are consistently stuck, but other bits also flip inconsistently.
     Mixed,
+}
+
+/// Enriched error analysis attached to [`RunResults`] after post-processing.
+#[derive(Debug, Serialize)]
+pub struct ErrorAnalysis {
+    pub classification: ErrorClassification,
+    /// `(bit_position, flip_count)` pairs for every bit that flipped at least once.
+    pub bit_positions: Vec<(u8, u32)>,
+    /// OR of all XOR masks -- which bit positions have ever flipped.
+    pub union_xor_mask: u64,
+    /// Lowest physical address with an error.
+    pub lowest_phys: Option<u64>,
+    /// Highest physical address with an error.
+    pub highest_phys: Option<u64>,
+    /// Per-pattern failure counts.
+    pub per_pattern_failures: Vec<(Pattern, usize)>,
+}
+
+/// Analyze raw run results and attach enriched error analysis.
+///
+/// Computes [`BitErrorStats`] from all failures across all passes, classifies
+/// the error pattern, and stores the result in `results.error_analysis`.
+///
+/// This is a no-op when there are no failures.
+pub fn analyze(results: &mut RunResults) {
+    if results.total_failures == 0 {
+        return;
+    }
+
+    let mut stats = BitErrorStats::new();
+    let mut per_pattern: Vec<(Pattern, usize)> = Vec::new();
+
+    for pass_result in &results.passes {
+        for pattern_result in &pass_result.pattern_results {
+            let count = pattern_result.failures.len();
+            if count > 0 {
+                if let Some(entry) = per_pattern
+                    .iter_mut()
+                    .find(|(p, _)| *p == pattern_result.pattern)
+                {
+                    entry.1 += count;
+                } else {
+                    per_pattern.push((pattern_result.pattern, count));
+                }
+            }
+            for f in &pattern_result.failures {
+                stats.record(f);
+            }
+        }
+    }
+
+    let bit_positions: Vec<(u8, u32)> = (0u8..64)
+        .filter(|&bit| stats.bit_positions[bit as usize] > 0)
+        .map(|bit| (bit, stats.bit_positions[bit as usize]))
+        .collect();
+
+    results.error_analysis = Some(ErrorAnalysis {
+        classification: stats.classification(),
+        bit_positions,
+        union_xor_mask: stats.union_xor_mask,
+        lowest_phys: stats.lowest_phys,
+        highest_phys: stats.highest_phys,
+        per_pattern_failures: per_pattern,
+    });
 }
 
 #[cfg(test)]
@@ -340,6 +408,197 @@ mod tests {
                 }
                 other => prop_assert!(false, "expected StuckBit, got {other:?}"),
             }
+        }
+    }
+
+    mod analyze_fn {
+        use std::time::Duration;
+
+        use assert2::{assert, check};
+
+        use crate::pattern::Pattern;
+        use crate::runner::{PassResult, PatternResult, RunConfig, RunResults};
+
+        use super::*;
+
+        fn make_config() -> RunConfig {
+            RunConfig {
+                size: 8192,
+                passes: 1,
+                patterns: vec![Pattern::SolidBits],
+                regions: 1,
+                parallel: false,
+            }
+        }
+
+        #[test]
+        fn no_failures_leaves_none() {
+            let mut results = RunResults::from_passes(
+                vec![PassResult {
+                    pass_number: 1,
+                    pattern_results: vec![PatternResult {
+                        pattern: Pattern::SolidBits,
+                        failures: vec![],
+                        elapsed: Duration::from_millis(100),
+                        bytes_processed: 8192,
+                    }],
+                    ecc_deltas: vec![],
+                }],
+                make_config(),
+                Duration::from_millis(100),
+            );
+
+            analyze(&mut results);
+            assert!(results.error_analysis.is_none());
+        }
+
+        #[test]
+        fn stuck_bit_detected() {
+            let failures = vec![f(0x1000, 0x0, 1 << 20), f(0x2000, 0x0, 1 << 20)];
+            let mut results = RunResults::from_passes(
+                vec![PassResult {
+                    pass_number: 1,
+                    pattern_results: vec![PatternResult {
+                        pattern: Pattern::SolidBits,
+                        failures,
+                        elapsed: Duration::from_millis(50),
+                        bytes_processed: 8192,
+                    }],
+                    ecc_deltas: vec![],
+                }],
+                make_config(),
+                Duration::from_millis(50),
+            );
+
+            analyze(&mut results);
+            let ea = results.error_analysis.as_ref().unwrap();
+            assert!(let ErrorClassification::StuckBit { .. } = &ea.classification);
+            check!(ea.union_xor_mask == 1 << 20);
+            check!(ea.bit_positions == vec![(20, 2)]);
+            check!(ea.per_pattern_failures == vec![(Pattern::SolidBits, 2)]);
+        }
+
+        #[test]
+        fn per_pattern_aggregation() {
+            let mut config = make_config();
+            config.patterns = vec![Pattern::SolidBits, Pattern::Checkerboard];
+
+            let mut results = RunResults::from_passes(
+                vec![PassResult {
+                    pass_number: 1,
+                    pattern_results: vec![
+                        PatternResult {
+                            pattern: Pattern::SolidBits,
+                            failures: vec![f(0x1000, 0x0, 1 << 5)],
+                            elapsed: Duration::from_millis(50),
+                            bytes_processed: 8192,
+                        },
+                        PatternResult {
+                            pattern: Pattern::Checkerboard,
+                            failures: vec![f(0x2000, 0x0, 1 << 5), f(0x3000, 0x0, 1 << 5)],
+                            elapsed: Duration::from_millis(50),
+                            bytes_processed: 8192,
+                        },
+                    ],
+                    ecc_deltas: vec![],
+                }],
+                config,
+                Duration::from_millis(100),
+            );
+
+            analyze(&mut results);
+            let ea = results.error_analysis.as_ref().unwrap();
+            check!(ea.per_pattern_failures.len() == 2);
+            check!(ea.per_pattern_failures[0] == (Pattern::SolidBits, 1));
+            check!(ea.per_pattern_failures[1] == (Pattern::Checkerboard, 2));
+        }
+
+        #[test]
+        fn multi_pass_aggregation() {
+            let mut results = RunResults::from_passes(
+                vec![
+                    PassResult {
+                        pass_number: 1,
+                        pattern_results: vec![PatternResult {
+                            pattern: Pattern::SolidBits,
+                            failures: vec![f(0x1000, 0x0, 1 << 3)],
+                            elapsed: Duration::from_millis(50),
+                            bytes_processed: 8192,
+                        }],
+                        ecc_deltas: vec![],
+                    },
+                    PassResult {
+                        pass_number: 2,
+                        pattern_results: vec![PatternResult {
+                            pattern: Pattern::SolidBits,
+                            failures: vec![f(0x2000, 0x0, 1 << 3)],
+                            elapsed: Duration::from_millis(50),
+                            bytes_processed: 8192,
+                        }],
+                        ecc_deltas: vec![],
+                    },
+                ],
+                make_config(),
+                Duration::from_millis(100),
+            );
+
+            analyze(&mut results);
+            let ea = results.error_analysis.as_ref().unwrap();
+            check!(ea.per_pattern_failures == vec![(Pattern::SolidBits, 2)]);
+            check!(ea.bit_positions == vec![(3, 2)]);
+        }
+
+        #[test]
+        fn physical_address_range() {
+            let failures = vec![
+                f_phys(0x1000, 0x0, 1 << 10, 0x5000),
+                f_phys(0x2000, 0x0, 1 << 10, 0x9000),
+            ];
+            let mut results = RunResults::from_passes(
+                vec![PassResult {
+                    pass_number: 1,
+                    pattern_results: vec![PatternResult {
+                        pattern: Pattern::SolidBits,
+                        failures,
+                        elapsed: Duration::from_millis(50),
+                        bytes_processed: 8192,
+                    }],
+                    ecc_deltas: vec![],
+                }],
+                make_config(),
+                Duration::from_millis(50),
+            );
+
+            analyze(&mut results);
+            let ea = results.error_analysis.as_ref().unwrap();
+            check!(ea.lowest_phys == Some(0x5000));
+            check!(ea.highest_phys == Some(0x9000));
+        }
+
+        #[test]
+        fn serializes_to_json() {
+            let failures = vec![f(0x1000, 0xFF, 0xFE)];
+            let mut results = RunResults::from_passes(
+                vec![PassResult {
+                    pass_number: 1,
+                    pattern_results: vec![PatternResult {
+                        pattern: Pattern::SolidBits,
+                        failures,
+                        elapsed: Duration::from_millis(50),
+                        bytes_processed: 8192,
+                    }],
+                    ecc_deltas: vec![],
+                }],
+                make_config(),
+                Duration::from_millis(50),
+            );
+
+            analyze(&mut results);
+            let json = serde_json::to_value(&results).unwrap();
+            check!(json["total_failures"] == 1);
+            assert!(json["error_analysis"].is_object());
+            assert!(json["error_analysis"]["classification"].is_object());
+            assert!(json["config"]["size"] == 8192);
         }
     }
 }

@@ -98,7 +98,7 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
     }
 
     let run_start = std::time::Instant::now();
-    let results = runner::run(
+    let pass_results = runner::run(
         setup.region.as_u64_slice_mut(),
         patterns,
         cli.passes,
@@ -110,23 +110,19 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
     .context("pattern execution failed")?;
     let run_elapsed = run_start.elapsed();
 
-    let total_failures: usize = results
-        .iter()
-        .map(ferrite::runner::PassResult::total_failures)
-        .sum();
+    let config = ferrite::runner::RunConfig {
+        size: cli.size,
+        passes: cli.passes,
+        patterns: patterns.to_vec(),
+        regions: 1,
+        parallel: !cli.sequential,
+    };
+    let mut results = ferrite::runner::RunResults::from_passes(pass_results, config, run_elapsed);
 
-    if total_failures > 0 {
-        let mut stats = ferrite::error_analysis::BitErrorStats::new();
-        for pass_result in &results {
-            for pattern_result in &pass_result.pattern_results {
-                for f in &pattern_result.failures {
-                    stats.record(f);
-                }
-            }
-        }
+    ferrite::error_analysis::analyze(&mut results);
 
-        let classification = stats.classification();
-        let class_str = match &classification {
+    if let Some(ref ea) = results.error_analysis {
+        let class_str = match &ea.classification {
             ferrite::error_analysis::ErrorClassification::StuckBit { positions } => {
                 let pos_str: Vec<String> = positions.iter().map(|p| format!("bit {p}")).collect();
                 format!("stuck bit(s): {}", pos_str.join(", "))
@@ -141,16 +137,16 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
         };
 
         eprintln!("  Error analysis: {class_str}");
-        eprintln!("  Affected bits: 0x{:016x}", stats.union_xor_mask);
-        if let (Some(lo), Some(hi)) = (stats.lowest_phys, stats.highest_phys) {
+        eprintln!("  Affected bits: 0x{:016x}", ea.union_xor_mask);
+        if let (Some(lo), Some(hi)) = (ea.lowest_phys, ea.highest_phys) {
             eprintln!("  Physical address range: 0x{lo:x} -- 0x{hi:x}");
         }
     }
 
-    sink.emit_summary(cli.passes, total_failures, run_elapsed);
-    sink.print_final_result(total_failures);
+    sink.emit_summary(cli.passes, results.total_failures, run_elapsed);
+    sink.print_final_result(results.total_failures);
 
-    let code = shutdown::exit_code(total_failures);
+    let code = shutdown::exit_code(results.total_failures);
     if code != 0 {
         std::process::exit(code);
     }

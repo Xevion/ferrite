@@ -117,6 +117,20 @@ impl fmt::Display for Rate {
     }
 }
 
+/// Serde helper: serialize `Duration` as fractional milliseconds (`f64`).
+pub mod duration_ms {
+    use std::time::Duration;
+
+    use serde::Serializer;
+
+    /// # Errors
+    ///
+    /// Returns `Err` if the serializer rejects the `f64` value.
+    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_f64(d.as_secs_f64() * 1000.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::check;

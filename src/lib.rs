@@ -4,6 +4,7 @@ pub mod alloc;
 pub mod dimm;
 pub mod edac;
 pub mod error_analysis;
+pub mod events;
 pub mod failure;
 pub mod ops;
 pub mod output;

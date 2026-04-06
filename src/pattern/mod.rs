@@ -9,7 +9,9 @@ mod stuck_address;
 mod walking;
 
 /// All supported test patterns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, strum::EnumCount)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, strum::EnumCount, serde::Serialize,
+)]
 pub enum Pattern {
     SolidBits,
     WalkingOnes,

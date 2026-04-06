@@ -3,7 +3,7 @@ use std::fmt;
 use crate::phys::PhysAddr;
 
 /// A single test failure record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Failure {
     /// Virtual address of the failing word.
     pub addr: usize,
