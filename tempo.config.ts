@@ -19,8 +19,7 @@ export default defineConfig({
           "cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final --no-default-features",
         "dep-check": {
           cmd: "cargo machete",
-          hint: "Remove the unused dependency from Cargo.toml",
-          requires: ["cargo-machete"],
+          requires: [{ tool: "cargo-machete", hint: "Install with `cargo install cargo-machete`" }],
         },
       },
     },
@@ -30,8 +29,7 @@ export default defineConfig({
       commands: {
         audit: {
           cmd: "cargo deny check advisories bans sources",
-          requires: ["cargo-deny"],
-          hint: "Install cargo-deny: cargo install cargo-deny",
+          requires: [{ tool: "cargo-deny", hint: "Install with `cargo install cargo-deny`" }],
         },
       },
     },
