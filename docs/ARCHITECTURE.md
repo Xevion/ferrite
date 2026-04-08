@@ -30,19 +30,19 @@ Each layer is an `Option<Layer>` (`None` = no-op). Setup lives in `tui/run.rs::s
 
 Tracing is for moment-by-moment operational detail, not final results.
 
-### Results (`OutputSink`)
+### Results (Event Consumers + Renderers)
 
-Final test results and structured events go through `OutputSink`. The format is controlled by `--json`:
+Output is split into three independent concerns:
 
-- **Default:** Human-readable summary via `OutputSink::Human`.
-- **`--json` / `--json -`:** NDJSON events to stdout.
-- **`--json path`:** NDJSON events to a file, human output to stdout.
+- **Live human text:** `HeadlessPrinter` consumes `RunEvent`s and writes PASS/FAIL lines, banners, ECC info to stdout. Active in headless (non-TUI) mode.
+- **NDJSON events:** `NdjsonEventWriter` serializes `RunEvent`s as newline-delimited JSON. Active when `--json` is specified. Writes to stdout (`--json -`) or a file (`--json path`).
+- **Post-run results:** `ResultsDoc` + `ResultsRenderer` trait (`TableRenderer`, `JsonRenderer`) render the final summary after the run completes.
 
-**Constraint:** `--json -` (stdout) is incompatible with `--tui` because both claim stdout. ferrite errors with guidance: use `--json <file>` or `--tui never`.
+**Constraint:** `--json` is incompatible with `--tui` (TUI handles its own live display). ferrite errors with guidance: use `--tui never` for JSON output.
 
-In TUI mode, `OutputSink` is wrapped in `Arc<Mutex<>>` so segment workers can emit JSON events concurrently. The `print_*()` methods (human output) are suppressed during TUI mode since the TUI itself provides the visual display.
+In TUI mode, the `EventBridge` translates `RunEvent`s to `TuiEvent`s for the TUI event loop. No NDJSON or headless printing occurs.
 
-Code: `src/output.rs` (`OutputSink` enum, event emission, human-readable printing)
+Code: `src/headless.rs`, `src/ndjson.rs`, `src/results.rs`, `src/tui/bridge.rs`
 
 ## Module Map
 
@@ -60,7 +60,9 @@ Code: `src/output.rs` (`OutputSink` enum, event emission, human-readable printin
 | `smbios.rs` | DIMM info from `/sys/firmware/dmi/tables/` |
 | `dimm.rs` | `DimmTopology` — merges SMBIOS + EDAC into a per-DIMM view |
 | `error_analysis.rs` | Post-test bit error classification: `BitErrorStats`, `ErrorClassification` (StuckBit, Coupling, Mixed) |
-| `output.rs` | `OutputSink` — human-readable and NDJSON output |
+| `headless.rs` | `HeadlessPrinter` — human-readable live output from event bus |
+| `ndjson.rs` | `NdjsonEventWriter` — NDJSON event serialization for `--json` |
+| `results.rs` | `ResultsDoc`, `ResultsRenderer` trait, `TableRenderer`, `JsonRenderer` |
 | `units.rs` | Binary/decimal size and rate formatting |
 | `shutdown.rs` | Signal handling, panic hook, coordinated shutdown, exit codes |
 | `tui/mod.rs` | `RegionState`, `TuiEvent`, `TuiConfig`, `run_tui()`, `run_event_loop<B>()` |
@@ -76,35 +78,28 @@ main()
  ├─ install_signal_handlers(), install_panic_hook()
  ├─ check_privileges(size, need_phys)         [cli.rs]
  ├─ select patterns (Pattern::ALL or --test)
- ├─ create OutputSink (Human or Json)
- ├─ conflict check: --json stdout + --tui → error
+ ├─ conflict check: --json + --tui → error
  │
  ├─ TUI mode:
  │   ├─ setup_test() → TestSetup              [cli.rs]
- │   │   ├─ LockedRegion::new(size)           [alloc.rs]
- │   │   ├─ CompactionGuard::new()            [alloc.rs, optional]
- │   │   ├─ PagemapResolver + build_map()     [phys.rs, optional]
- │   │   └─ DimmTopology::build()             [dimm.rs, optional]
  │   └─ run_tui_mode(...)                     [tui/run.rs]
- │       ├─ setup_tracing(json, Some(TuiMakeWriter))
- │       ├─ emit_map_info to sink
+ │       ├─ setup_tracing(json_mode, Some(TuiMakeWriter))
  │       ├─ split allocation into N segments  (--regions or CPU count)
- │       ├─ spawn "test-driver" thread
- │       │   └─ thread::scope → N scoped segment threads
- │       │       └─ run_region_worker(chunk, patterns, passes, ...)
- │       │           ├─ run_pattern() per pattern × pass   [pattern/]
- │       │           ├─ emit_test_start / emit_test_complete to sink (Arc<Mutex>)
- │       │           ├─ send TuiEvent to TUI channel
- │       │           └─ ECC snapshot delta → emit_ecc_deltas
+ │       ├─ spawn "test-driver" thread → runner::run() emits RunEvents
+ │       ├─ spawn "event-bridge" thread → EventBridge translates RunEvent → TuiEvent
  │       ├─ run_tui(config, segments, tx, rx)  ← event loop [tui/mod.rs]
- │       ├─ wait for test-driver (5 s timeout)
- │       └─ emit_summary + print_final_result + process::exit
+ │       └─ wait for test-driver (5 s timeout) + process::exit
  │
  └─ Headless mode:
      ├─ setup_tracing(json, None)
      ├─ setup_test() → TestSetup              [cli.rs]
-     ├─ emit_map_info / print_map_info
-     ├─ runner::run(buf, patterns, passes, parallel, sink, resolver)   [runner.rs]
+     ├─ create NdjsonEventWriter (if --json)  [ndjson.rs]
+     ├─ spawn consumer thread:
+     │   ├─ HeadlessPrinter.handle_event()    [headless.rs]
+     │   └─ NdjsonEventWriter.handle_event()  [ndjson.rs, optional]
+     ├─ runner::run(buf, patterns, passes, parallel, &tx, resolver)   [runner.rs]
      ├─ error_analysis (if failures)          [error_analysis.rs]
-     └─ emit_summary + print_final_result + exit code
+     ├─ NdjsonEventWriter.write_summary()     [optional]
+     ├─ TableRenderer.render(ResultsDoc)      [results.rs]
+     └─ exit code
 ```

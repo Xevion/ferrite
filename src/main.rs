@@ -7,9 +7,9 @@ use std::io::IsTerminal;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use ferrite::events::{EventRx, RegionEvent, RunEvent};
+use ferrite::events::{EventRx, RunEvent};
 use ferrite::headless::HeadlessPrinter;
-use ferrite::output::OutputSink;
+use ferrite::ndjson::NdjsonEventWriter;
 use ferrite::pattern::Pattern;
 use ferrite::phys::PhysResolver;
 use ferrite::results::{ResultsDoc, ResultsRenderer, TableRenderer};
@@ -71,13 +71,14 @@ fn main() -> Result<()> {
         }
     }
 
-    let sink = if let Some(ref json_path) = cli.json {
-        OutputSink::json(json_path, cli.units).context("failed to open JSON output")?
-    } else {
-        OutputSink::human(cli.units)
-    };
+    let ndjson_writer = cli
+        .json
+        .as_deref()
+        .map(NdjsonEventWriter::from_path)
+        .transpose()
+        .context("failed to open JSON output")?;
 
-    let result = run_non_tui(&cli, &patterns, sink);
+    let result = run_non_tui(&cli, &patterns, ndjson_writer);
     shutdown_handle.shutdown();
     result
 }
@@ -85,58 +86,17 @@ fn main() -> Result<()> {
 /// Consume events from the runner and drive human-readable output + JSON emission.
 ///
 /// Runs on a dedicated thread. The [`HeadlessPrinter`] handles human-readable
-/// text while [`OutputSink`] handles JSON emission (when active).
+/// text while [`NdjsonEventWriter`] handles JSON emission (when present).
 fn consume_headless_events(
     rx: &EventRx,
     printer: &mut HeadlessPrinter<std::io::Stdout>,
-    sink: &mut OutputSink,
+    ndjson: &mut Option<NdjsonEventWriter>,
 ) {
     while let Ok(event) = rx.recv() {
-        // Human-readable output
         printer.handle_event(&event);
-
-        // JSON emission (no-ops when sink is Human)
-        match &event {
-            RunEvent::MapInfo { stats } => sink.emit_map_info(stats),
-            RunEvent::Region(_, RegionEvent::PassStart { pass, total_passes }) => {
-                sink.emit_pass_start(*pass, *total_passes);
-            }
-            RunEvent::Region(_, RegionEvent::TestStart { pattern, pass }) => {
-                sink.emit_test_start(*pattern, *pass);
-            }
-            RunEvent::Region(
-                _,
-                RegionEvent::Progress {
-                    pattern,
-                    pass,
-                    sub_pass,
-                    total,
-                },
-            ) => sink.emit_progress(*pattern, *pass, *sub_pass, *total),
-            RunEvent::Region(
-                _,
-                RegionEvent::TestComplete {
-                    pattern,
-                    pass,
-                    elapsed,
-                    bytes,
-                    failures,
-                },
-            ) => sink.emit_test_complete(*pattern, *pass, *elapsed, *bytes, failures),
-            RunEvent::Region(
-                _,
-                RegionEvent::PassComplete {
-                    pass,
-                    failures,
-                    elapsed,
-                },
-            ) => sink.emit_pass_complete(*pass, *failures, *elapsed),
-            RunEvent::Region(_, RegionEvent::EccDeltas { pass, deltas }) => {
-                sink.emit_ecc_deltas(*pass, deltas);
-            }
-            _ => {}
+        if let Some(w) = ndjson.as_mut() {
+            w.handle_event(&event);
         }
-
         if matches!(event, RunEvent::RunComplete) {
             break;
         }
@@ -144,9 +104,13 @@ fn consume_headless_events(
 }
 
 /// Non-TUI mode: headless output with tracing to stderr.
-fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<()> {
+fn run_non_tui(
+    cli: &Cli,
+    patterns: &[Pattern],
+    mut ndjson_writer: Option<NdjsonEventWriter>,
+) -> Result<()> {
     #[cfg(feature = "tui")]
-    setup_tracing(sink.is_json(), None);
+    setup_tracing(ndjson_writer.is_some(), None);
 
     let mut setup = setup_test(cli)?;
 
@@ -167,13 +131,13 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
         });
     }
 
-    let unit_system = sink.unit_system();
+    let unit_system = cli.units;
 
-    // Consumer thread drives HeadlessPrinter + OutputSink from events
+    // Consumer thread drives HeadlessPrinter + optional NdjsonEventWriter
     let consumer = std::thread::spawn(move || {
         let mut printer = HeadlessPrinter::new(std::io::stdout(), unit_system);
-        consume_headless_events(&rx, &mut printer, &mut sink);
-        (printer, sink)
+        consume_headless_events(&rx, &mut printer, &mut ndjson_writer);
+        (printer, ndjson_writer)
     });
 
     let run_start = std::time::Instant::now();
@@ -196,7 +160,7 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
     let _ = tx.send(RunEvent::RunComplete);
     drop(tx);
 
-    let (_printer, mut sink) = consumer.join().expect("event consumer thread panicked");
+    let (_printer, mut ndjson_writer) = consumer.join().expect("event consumer thread panicked");
 
     let config = ferrite::runner::RunConfig {
         size: cli.size,
@@ -209,7 +173,9 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], mut sink: OutputSink) -> Result<
 
     ferrite::error_analysis::analyze(&mut results);
 
-    sink.emit_summary(cli.passes, results.total_failures, run_elapsed);
+    if let Some(w) = ndjson_writer.as_mut() {
+        w.write_summary(cli.passes, results.total_failures, run_elapsed);
+    }
 
     let doc = ResultsDoc::from_results(&results);
     let renderer = TableRenderer::new(cli.units);
