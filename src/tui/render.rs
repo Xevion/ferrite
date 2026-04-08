@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 
 use super::activity::ACTIVITY_CELLS;
 use super::palette;
-use super::{Segment, TuiError};
+use super::{Segment, TuiFailure};
 
 /// Symbol sets for fine-grained activity display.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -67,7 +67,7 @@ fn region_columns(regions: &[Arc<Segment>], usable_width: usize) -> Vec<(usize, 
 pub fn render_heatmap(
     frame: &mut Frame,
     regions: &[Arc<Segment>],
-    errors: &[TuiError],
+    errors: &[TuiFailure],
     elapsed: Duration,
     verbose: bool,
     symbols: SymbolSet,
@@ -164,7 +164,7 @@ fn render_header(
 fn render_memory_map(
     frame: &mut Frame,
     regions: &[Arc<Segment>],
-    errors: &[TuiError],
+    errors: &[TuiFailure],
     area: ratatui::layout::Rect,
     symbols: SymbolSet,
 ) {
@@ -255,7 +255,7 @@ fn render_memory_map_labels(
 fn render_heatmap_region(
     frame: &mut Frame,
     region: &Segment,
-    errors: &[TuiError],
+    errors: &[TuiFailure],
     region_idx: usize,
     area: ratatui::layout::Rect,
     symbols: SymbolSet,
@@ -341,7 +341,7 @@ fn render_heatmap_region(
     frame.render_widget(Paragraph::new(Line::from(line_spans)), area);
 }
 
-fn render_error_area(frame: &mut Frame, errors: &[TuiError], area: ratatui::layout::Rect) {
+fn render_error_area(frame: &mut Frame, errors: &[TuiFailure], area: ratatui::layout::Rect) {
     if errors.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -377,7 +377,7 @@ fn render_error_area(frame: &mut Frame, errors: &[TuiError], area: ratatui::layo
                 format!("{:#018x}", e.address),
                 format!("{:#018x}", e.expected),
                 format!("{:#018x}", e.actual),
-                format!("{}", e.bit_position),
+                format!("{}", e.flipped_bits),
                 e.pattern.clone(),
             ])
             .style(Style::default().fg(palette::error_severity(region_errs)))
@@ -416,6 +416,7 @@ fn render_controls(frame: &mut Frame, area: ratatui::layout::Rect) {
 mod tests {
     use assert2::{assert, check};
 
+    use super::super::FlippedBits;
     use super::*;
 
     fn make_region(name: &str, size_bytes: usize) -> Arc<Segment> {
@@ -622,7 +623,7 @@ mod tests {
     fn render_memory_map_narrow_width_returns_early() {
         let mut term = test_terminal(3, 1);
         let regions = vec![make_region("r0", 1024)];
-        let errors: Vec<TuiError> = vec![];
+        let errors: Vec<TuiFailure> = vec![];
         // Should not panic on very narrow width
         term.draw(|frame| {
             render_memory_map(frame, &regions, &errors, frame.area(), SymbolSet::Ascii);
@@ -635,7 +636,7 @@ mod tests {
         let mut term = test_terminal(40, 1);
         let regions = vec![make_region("r0", 1024)];
         regions[0].activity.touch(0.5);
-        let errors: Vec<TuiError> = vec![];
+        let errors: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
             render_memory_map(frame, &regions, &errors, frame.area(), SymbolSet::Ascii);
         })
@@ -646,13 +647,13 @@ mod tests {
     fn render_memory_map_with_errors() {
         let mut term = test_terminal(40, 1);
         let regions = vec![make_region("r0", 1024)];
-        let errors = vec![TuiError {
+        let errors = vec![TuiFailure {
             region_idx: 0,
             region_name: "r0".into(),
             address: 0x1000,
             expected: 0xFF,
             actual: 0xFE,
-            bit_position: 0,
+            flipped_bits: FlippedBits::Single(0),
             pattern: "solid".into(),
             progress_fraction: 0.5,
         }];
@@ -694,7 +695,7 @@ mod tests {
         let mut term = test_terminal(80, 1);
         let regions = [make_region("r0", 1024)];
         regions[0].progress_bp.store(5000, Ordering::Relaxed);
-        let errors: Vec<TuiError> = vec![];
+        let errors: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
             render_heatmap_region(
                 frame,
@@ -718,7 +719,7 @@ mod tests {
         let mut term = test_terminal(80, 1);
         let regions = [make_region("r0", 1024)];
         regions[0].failure_count.store(3, Ordering::Relaxed);
-        let errors: Vec<TuiError> = vec![];
+        let errors: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
             render_heatmap_region(
                 frame,
@@ -739,7 +740,7 @@ mod tests {
         let mut term = test_terminal(80, 1);
         let regions = [make_region("r0", 1024)];
         regions[0].paused.store(true, Ordering::Relaxed);
-        let errors: Vec<TuiError> = vec![];
+        let errors: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
             render_heatmap_region(
                 frame,
@@ -758,7 +759,7 @@ mod tests {
     #[test]
     fn render_error_area_empty() {
         let mut term = test_terminal(80, 3);
-        let errors: Vec<TuiError> = vec![];
+        let errors: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
             render_error_area(frame, &errors, frame.area());
         })
@@ -771,23 +772,23 @@ mod tests {
     fn render_error_area_with_errors() {
         let mut term = test_terminal(120, 5);
         let errors = vec![
-            TuiError {
+            TuiFailure {
                 region_idx: 0,
                 region_name: "r0".into(),
                 address: 0xdead,
                 expected: 0xFF,
                 actual: 0xFE,
-                bit_position: 0,
+                flipped_bits: FlippedBits::Single(0),
                 pattern: "solid".into(),
                 progress_fraction: 0.1,
             },
-            TuiError {
+            TuiFailure {
                 region_idx: 0,
                 region_name: "r0".into(),
                 address: 0xbeef,
                 expected: 0xAA,
                 actual: 0xBB,
-                bit_position: 4,
+                flipped_bits: FlippedBits::Single(4),
                 pattern: "walk".into(),
                 progress_fraction: 0.5,
             },
@@ -820,7 +821,7 @@ mod tests {
         let regions = vec![make_region("r0", 1024), make_region("r1", 2048)];
         regions[0].progress_bp.store(3000, Ordering::Relaxed);
         regions[1].progress_bp.store(7500, Ordering::Relaxed);
-        let errors: Vec<TuiError> = vec![];
+        let errors: Vec<TuiFailure> = vec![];
         let elapsed = Duration::from_secs(5);
         term.draw(|frame| {
             render_heatmap(frame, &regions, &errors, elapsed, false, SymbolSet::Ascii);
@@ -835,13 +836,13 @@ mod tests {
         let regions = vec![make_region("r0", 1024)];
         regions[0].failure_count.store(2, Ordering::Relaxed);
         regions[0].record_failure();
-        let errors = vec![TuiError {
+        let errors = vec![TuiFailure {
             region_idx: 0,
             region_name: "r0".into(),
             address: 0x1000,
             expected: 0xFF,
             actual: 0xFE,
-            bit_position: 0,
+            flipped_bits: FlippedBits::Single(0),
             pattern: "solid".into(),
             progress_fraction: 0.3,
         }];
@@ -863,7 +864,7 @@ mod tests {
         for r in &regions {
             r.activity.touch(0.3);
         }
-        let errors: Vec<TuiError> = vec![];
+        let errors: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
             render_memory_map(frame, &regions, &errors, frame.area(), SymbolSet::Shade);
         })
@@ -876,23 +877,23 @@ mod tests {
         let regions = [make_region("r0", 1024)];
         regions[0].record_failure();
         let errors = vec![
-            TuiError {
+            TuiFailure {
                 region_idx: 0,
                 region_name: "r0".into(),
                 address: 0x100,
                 expected: 0xFF,
                 actual: 0x00,
-                bit_position: 0,
+                flipped_bits: FlippedBits::Single(0),
                 pattern: "solid".into(),
                 progress_fraction: 0.25,
             },
-            TuiError {
+            TuiFailure {
                 region_idx: 0,
                 region_name: "r0".into(),
                 address: 0x200,
                 expected: 0xFF,
                 actual: 0x00,
-                bit_position: 0,
+                flipped_bits: FlippedBits::Single(0),
                 pattern: "solid".into(),
                 progress_fraction: 0.25, // same column as first
             },
@@ -915,13 +916,13 @@ mod tests {
         let mut term = test_terminal(40, 1);
         let regions = vec![make_region("r0", 1024)];
         // Error referencing non-existent region
-        let errors = vec![TuiError {
+        let errors = vec![TuiFailure {
             region_idx: 99,
             region_name: "r99".into(),
             address: 0x1000,
             expected: 0,
             actual: 1,
-            bit_position: 0,
+            flipped_bits: FlippedBits::Single(0),
             pattern: "solid".into(),
             progress_fraction: 0.5,
         }];

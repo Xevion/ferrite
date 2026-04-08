@@ -3,22 +3,22 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::alloc::CompactionGuard;
 use crate::alloc::TestBuffer;
-use crate::events::{self, RegionEvent, RunEvent};
-use crate::output::OutputSink;
+use crate::events::{self, RunEvent};
 use crate::pattern::Pattern;
 use crate::phys::{MapStats, PagemapResolver, PhysResolver};
 use crate::runner;
 use crate::shutdown;
 use crate::units::{Size, UnitSystem};
 
-use super::{Segment, TuiConfig, TuiError, TuiEvent, TuiMakeWriter};
+use super::bridge::EventBridge;
+use super::{Segment, TuiConfig, TuiEvent, TuiMakeWriter};
 
 /// Set up the global tracing subscriber with a layered registry.
 ///
@@ -90,7 +90,7 @@ pub struct TuiTestSetup {
 ///
 /// # Panics
 ///
-/// Panics if the output sink mutex is poisoned (indicates a prior panic
+/// Panics if internal mutexes are poisoned (indicates a prior panic
 /// in a worker thread).
 #[allow(clippy::too_many_lines)]
 pub fn run_tui_mode(
@@ -100,12 +100,9 @@ pub fn run_tui_mode(
     sequential: bool,
     mut setup: TuiTestSetup,
     patterns: Vec<Pattern>,
-    sink: OutputSink,
+    json_mode: bool,
 ) -> Result<()> {
     let (tui_tx, tui_rx) = mpsc::sync_channel::<TuiEvent>(256);
-
-    let json_mode = sink.is_json();
-    let sink = Arc::new(Mutex::new(sink));
 
     // Set up tracing: human ANSI layer -> TUI channel, stderr layer based on mode
     let writer = TuiMakeWriter::new(tui_tx.clone());
@@ -164,7 +161,9 @@ pub fn run_tui_mode(
         parallel: !sequential,
     });
     if let Some(ref stats) = setup.map_stats {
-        sink.lock().unwrap().emit_map_info(stats);
+        let _ = event_tx.send(RunEvent::MapInfo {
+            stats: stats.clone(),
+        });
     }
 
     let worker_regions: Vec<Arc<Segment>> = regions.iter().map(Arc::clone).collect();
@@ -227,101 +226,15 @@ pub fn run_tui_mode(
     // Bridge thread: receives RunEvents, updates Segment state, forwards to TUI channel
     let bridge_regions: Vec<Arc<Segment>> = regions.iter().map(Arc::clone).collect();
     let bridge_tui_tx = tui_tx.clone();
-    let bridge_sink = Arc::clone(&sink);
     let bridge_handle = thread::Builder::new()
         .name("event-bridge".into())
         .spawn(move || {
-            let n = bridge_regions.len();
-            let mut pattern_indices = vec![0usize; n];
-            let mut regions_done = vec![false; n];
-
-            while let Ok(event) = event_rx.recv() {
-                match event {
-                    RunEvent::Region(idx, ref region_event) if idx < n => {
-                        let segment = &bridge_regions[idx];
-                        match region_event {
-                            RegionEvent::TestStart { .. } => {
-                                segment.set_pattern(pattern_indices[idx]);
-                            }
-                            RegionEvent::Progress {
-                                sub_pass, total, ..
-                            } => {
-                                let bp = if *total > 0 {
-                                    (sub_pass * 10000) / total
-                                } else {
-                                    0
-                                };
-                                segment.progress_bp.store(bp, Ordering::Relaxed);
-                            }
-                            RegionEvent::TestComplete {
-                                pattern,
-                                pass,
-                                elapsed,
-                                bytes,
-                                failures,
-                            } => {
-                                segment.progress_bp.store(10000, Ordering::Relaxed);
-                                pattern_indices[idx] += 1;
-
-                                for f in failures {
-                                    segment.record_failure();
-                                    let _ = bridge_tui_tx.try_send(TuiEvent::Error(TuiError {
-                                        region_idx: idx,
-                                        region_name: segment.name.clone(),
-                                        address: f.addr as u64,
-                                        expected: f.expected,
-                                        actual: f.actual,
-                                        bit_position: f.xor().trailing_zeros() as u8,
-                                        pattern: pattern.to_string(),
-                                        progress_fraction: 1.0,
-                                    }));
-                                }
-
-                                bridge_sink.lock().unwrap().emit_test_complete(
-                                    *pattern, *pass, *elapsed, *bytes, failures,
-                                );
-                            }
-                            RegionEvent::PassComplete {
-                                pass, failures: _, ..
-                            } => {
-                                pattern_indices[idx] = 0;
-                                // If this was the last pass, signal region done
-                                if *pass >= passes {
-                                    regions_done[idx] = true;
-                                    let _ = bridge_tui_tx.try_send(TuiEvent::RegionDone(idx));
-                                }
-                            }
-                            RegionEvent::EccDeltas { pass, deltas } => {
-                                bridge_sink.lock().unwrap().emit_ecc_deltas(*pass, deltas);
-                                for d in deltas {
-                                    warn!(
-                                        mc = d.mc,
-                                        dimm = d.dimm_index,
-                                        ce = d.ce_delta,
-                                        ue = d.ue_delta,
-                                        "ECC event detected"
-                                    );
-                                }
-                            }
-                            RegionEvent::PassStart { .. } => {}
-                        }
-                    }
-                    RunEvent::RunComplete => break,
-                    _ => {}
-                }
-            }
-
-            // Signal done for any regions that didn't complete naturally (e.g. quit)
-            for (i, done) in regions_done.iter().enumerate() {
-                if !done {
-                    let _ = bridge_tui_tx.try_send(TuiEvent::RegionDone(i));
-                }
-            }
+            let bridge = EventBridge::new(bridge_regions, bridge_tui_tx, passes);
+            bridge.run(&event_rx);
         })
         .expect("failed to spawn event-bridge thread");
 
     let config = TuiConfig::default();
-    let run_start = Instant::now();
     crate::tui::run_tui(&config, &regions, &tui_tx, &tui_rx).context("TUI failed")?;
 
     // Wait for the worker with a bounded timeout.
@@ -344,13 +257,6 @@ pub fn run_tui_mode(
         .map(|r| r.failure_count.load(Ordering::Relaxed))
         .sum();
 
-    {
-        let elapsed = run_start.elapsed();
-        let mut sink = sink.lock().unwrap();
-        sink.emit_summary(passes, total_failures, elapsed);
-        sink.print_final_result(total_failures);
-    }
-
     std::process::exit(shutdown::exit_code(total_failures))
 }
 
@@ -359,12 +265,10 @@ mod tests {
     use assert2::{assert, check};
     use serial_test::serial;
 
-    use crate::events;
+    use crate::events::{self, RegionEvent, RunEvent};
     use crate::pattern::Pattern;
     use crate::runner;
     use crate::shutdown;
-
-    use super::*;
 
     #[test]
     #[serial]

@@ -37,12 +37,6 @@ fn main() -> Result<()> {
         std::mem::take(&mut cli.patterns)
     };
 
-    let sink = if let Some(ref json_path) = cli.json {
-        OutputSink::json(json_path, cli.units).context("failed to open JSON output")?
-    } else {
-        OutputSink::human(cli.units)
-    };
-
     #[cfg(feature = "tui")]
     {
         let use_tui = match cli.tui {
@@ -51,14 +45,9 @@ fn main() -> Result<()> {
             TuiMode::Auto => std::io::stdout().is_terminal(),
         };
 
-        // JSON-to-stdout + TUI = both claim stdout
-        if use_tui
-            && let Some(ref path) = cli.json
-            && (path == "-" || path.is_empty())
-        {
+        if use_tui && cli.json.is_some() {
             anyhow::bail!(
-                "--json to stdout conflicts with --tui (both use stdout). \
-                 Use --json <file> or --tui never."
+                "--json is not yet supported with --tui. Use --tui never for JSON output."
             );
         }
 
@@ -77,10 +66,16 @@ fn main() -> Result<()> {
                 cli.sequential,
                 tui_setup,
                 patterns,
-                sink,
+                false,
             );
         }
     }
+
+    let sink = if let Some(ref json_path) = cli.json {
+        OutputSink::json(json_path, cli.units).context("failed to open JSON output")?
+    } else {
+        OutputSink::human(cli.units)
+    };
 
     let result = run_non_tui(&cli, &patterns, sink);
     shutdown_handle.shutdown();

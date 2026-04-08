@@ -1,6 +1,7 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
 
 pub mod activity;
+pub mod bridge;
 pub mod palette;
 pub mod render;
 pub mod run;
@@ -40,20 +41,55 @@ pub enum TuiOutcome {
 /// Result returned by [`run_event_loop`], capturing loop state for the caller.
 pub struct TuiLoopResult {
     pub outcome: TuiOutcome,
-    pub errors: Vec<TuiError>,
+    pub errors: Vec<TuiFailure>,
     pub verbose: bool,
 }
 
-/// A test error record for TUI display. String-based so it's decoupled from
-/// the main crate's `Failure` type.
+/// Which bits flipped in a memory test failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlippedBits {
+    /// Exactly one bit flipped.
+    Single(u8),
+    /// Multiple bits flipped — stores bit count and the full XOR mask.
+    Multi { count: u8, xor: u64 },
+}
+
+impl fmt::Display for FlippedBits {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Single(pos) => write!(f, "bit {pos}"),
+            Self::Multi { count, .. } => write!(f, "{count} bits"),
+        }
+    }
+}
+
+impl FlippedBits {
+    /// Construct from expected and actual values.
+    #[must_use]
+    pub fn from_mismatch(expected: u64, actual: u64) -> Self {
+        let xor = expected ^ actual;
+        let count = xor.count_ones();
+        if count == 1 {
+            Self::Single(xor.trailing_zeros() as u8)
+        } else {
+            Self::Multi {
+                count: count as u8,
+                xor,
+            }
+        }
+    }
+}
+
+/// A memory test failure record for TUI display, decoupled from the
+/// main crate's `Failure` type.
 #[derive(Debug)]
-pub struct TuiError {
+pub struct TuiFailure {
     pub region_idx: usize,
     pub region_name: String,
     pub address: u64,
     pub expected: u64,
     pub actual: u64,
-    pub bit_position: u8,
+    pub flipped_bits: FlippedBits,
     pub pattern: String,
     pub progress_fraction: f64,
 }
@@ -65,7 +101,7 @@ pub enum TuiEvent {
     Tick,
     /// A pre-formatted ANSI log line from `tracing_subscriber::fmt`.
     Log(String),
-    Error(TuiError),
+    Failure(TuiFailure),
     RegionDone(usize),
 }
 
@@ -244,7 +280,7 @@ where
     B::Error: Send + Sync + 'static,
 {
     let start_time = Instant::now();
-    let mut errors: Vec<TuiError> = Vec::new();
+    let mut errors: Vec<TuiFailure> = Vec::new();
     // Pending log lines, drained once per tick to bound insert_before calls.
     let mut log_buf: VecDeque<ratatui::text::Text<'static>> = VecDeque::with_capacity(32);
     let mut regions_done = 0;
@@ -310,8 +346,8 @@ where
                     log_buf.push_back(text);
                 }
             }
-            Ok(TuiEvent::Error(err)) => {
-                errors.push(err);
+            Ok(TuiEvent::Failure(failure)) => {
+                errors.push(failure);
             }
             Ok(TuiEvent::RegionDone(idx)) => {
                 regions_done += 1;
@@ -637,13 +673,13 @@ mod tests {
         }
 
         fn make_error(region_idx: usize) -> TuiEvent {
-            TuiEvent::Error(TuiError {
+            TuiEvent::Failure(TuiFailure {
                 region_idx,
                 region_name: format!("r{region_idx}"),
                 address: 0xdead_0000 + region_idx as u64,
                 expected: 0xFF,
                 actual: 0xFE,
-                bit_position: 0,
+                flipped_bits: FlippedBits::Single(0),
                 pattern: "solid".into(),
                 progress_fraction: 0.5,
             })
