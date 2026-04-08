@@ -1,7 +1,7 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
 
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ use crate::shutdown;
 use crate::units::{Size, UnitSystem};
 
 use super::bridge::EventBridge;
-use super::{Segment, TuiConfig, TuiEvent, TuiMakeWriter};
+use super::{Segment, TuiConfig, TuiEvent, TuiMakeWriter, TuiTraceGuard, TuiTraceState};
 
 /// Set up the global tracing subscriber with a layered registry.
 ///
@@ -104,8 +104,10 @@ pub fn run_tui_mode(
 ) -> Result<()> {
     let (tui_tx, tui_rx) = mpsc::sync_channel::<TuiEvent>(256);
 
-    // Set up tracing: human ANSI layer -> TUI channel, stderr layer based on mode
-    let writer = TuiMakeWriter::new(tui_tx.clone());
+    // Set up tracing: human ANSI layer -> TUI channel, stderr layer based on mode.
+    // The TuiTraceState lets us reroute to stderr after the TUI exits.
+    let trace_state = Arc::new(TuiTraceState::new());
+    let writer = TuiMakeWriter::new(tui_tx.clone(), Arc::clone(&trace_state));
     setup_tracing(json_mode, Some(writer));
 
     // Compute region count
@@ -169,8 +171,7 @@ pub fn run_tui_mode(
     let worker_regions: Vec<Arc<Segment>> = regions.iter().map(Arc::clone).collect();
     let parallel = !sequential;
 
-    let worker_done = Arc::new((Mutex::new(false), Condvar::new()));
-    let worker_done2 = Arc::clone(&worker_done);
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let worker = thread::Builder::new()
         .name("test-driver".into())
         .spawn(move || {
@@ -189,8 +190,6 @@ pub fn run_tui_mode(
                     thread::Builder::new()
                         .name(format!("region-{i}"))
                         .spawn_scoped(s, move || {
-                            // Wait while paused before each pattern (checked inside run via on_activity isn't ideal,
-                            // but the pause loop was per-pattern-start, so we handle it here at region level)
                             let on_activity = |pos: f64| {
                                 tui_region.activity.touch(pos);
                             };
@@ -216,10 +215,7 @@ pub fn run_tui_mode(
 
             // All region threads have finished -- signal completion
             let _ = event_tx.send(RunEvent::RunComplete);
-
-            let (lock, cvar) = &*worker_done2;
-            *lock.lock().unwrap() = true;
-            cvar.notify_one();
+            let _ = done_tx.send(());
         })
         .expect("failed to spawn test-driver thread");
 
@@ -237,15 +233,14 @@ pub fn run_tui_mode(
     let config = TuiConfig::default();
     crate::tui::run_tui(&config, &regions, &tui_tx, &tui_rx).context("TUI failed")?;
 
-    // Wait for the worker with a bounded timeout.
-    {
-        let (lock, cvar) = &*worker_done;
-        let guard = lock.lock().unwrap();
-        let (done, _) = cvar.wait_timeout(guard, Duration::from_secs(5)).unwrap();
-        if !*done {
-            eprintln!("Worker did not exit within 5s, forcing exit");
-            shutdown::force_exit(2);
-        }
+    // TUI exited. Reroute tracing to stderr and drain buffered log events.
+    drop(TuiTraceGuard::new(trace_state, tui_rx));
+
+    // Wait for the worker with a bounded timeout (recv_timeout is race-free
+    // unlike Condvar::wait_timeout — the message sits in the buffer).
+    if done_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+        eprintln!("Worker did not exit within 5s, forcing exit");
+        shutdown::force_exit(2);
     }
     let _ = worker.join();
     if bridge_handle.join().is_err() {

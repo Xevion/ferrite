@@ -200,18 +200,68 @@ impl fmt::Debug for Segment {
     }
 }
 
-/// A [`MakeWriter`] that sends `tracing_subscriber::fmt`-formatted lines through
-/// a channel while the TUI is active. When the channel disconnects (TUI exited),
-/// output falls back to stderr so post-TUI tracing isn't lost.
+/// Shared routing state between [`TuiMakeWriter`] and [`TuiTraceGuard`].
+///
+/// While `active` is true, formatted trace output is sent to the TUI channel.
+/// Once flipped to false (by dropping the guard), output routes to stderr.
+pub struct TuiTraceState {
+    active: AtomicBool,
+}
+
+impl TuiTraceState {
+    fn new() -> Self {
+        Self {
+            active: AtomicBool::new(true),
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+/// RAII guard that reroutes tracing from the TUI channel to stderr on drop.
+///
+/// When dropped:
+/// 1. Flips the routing flag so future traces write to stderr.
+/// 2. Drains any buffered `TuiEvent::Log` events from the channel to stderr.
+pub struct TuiTraceGuard {
+    state: Arc<TuiTraceState>,
+    rx: mpsc::Receiver<TuiEvent>,
+}
+
+impl TuiTraceGuard {
+    #[must_use]
+    pub fn new(state: Arc<TuiTraceState>, rx: mpsc::Receiver<TuiEvent>) -> Self {
+        Self { state, rx }
+    }
+}
+
+impl Drop for TuiTraceGuard {
+    fn drop(&mut self) {
+        self.state.active.store(false, Ordering::Release);
+
+        while let Ok(event) = self.rx.try_recv() {
+            if let TuiEvent::Log(msg) = event {
+                let _ = io::stderr().write_all(msg.as_bytes());
+                let _ = io::stderr().write_all(b"\n");
+            }
+        }
+    }
+}
+
+/// A [`MakeWriter`] that routes formatted trace lines to the TUI channel
+/// while the TUI is active, then to stderr after the [`TuiTraceGuard`] drops.
 #[derive(Clone)]
 pub struct TuiMakeWriter {
     tx: mpsc::SyncSender<TuiEvent>,
+    state: Arc<TuiTraceState>,
 }
 
 impl TuiMakeWriter {
     #[must_use]
-    pub fn new(tx: mpsc::SyncSender<TuiEvent>) -> Self {
-        Self { tx }
+    pub fn new(tx: mpsc::SyncSender<TuiEvent>, state: Arc<TuiTraceState>) -> Self {
+        Self { tx, state }
     }
 }
 
@@ -221,15 +271,17 @@ impl<'a> MakeWriter<'a> for TuiMakeWriter {
     fn make_writer(&'a self) -> Self::Writer {
         TuiWriter {
             tx: self.tx.clone(),
+            state: Arc::clone(&self.state),
             buf: Vec::with_capacity(256),
         }
     }
 }
 
 /// Per-event writer that buffers a single formatted log line.
-/// On drop, sends the line through the channel or falls back to stderr.
+/// On drop, routes to the TUI channel or stderr based on [`TuiTraceState`].
 pub struct TuiWriter {
     tx: mpsc::SyncSender<TuiEvent>,
+    state: Arc<TuiTraceState>,
     buf: Vec<u8>,
 }
 
@@ -254,9 +306,12 @@ impl Drop for TuiWriter {
         if trimmed.is_empty() {
             return;
         }
-        // Send to TUI for inline display (best-effort).
-        // A separate tracing layer handles stderr output independently.
-        let _ = self.tx.try_send(TuiEvent::Log(trimmed));
+        if self.state.is_active() {
+            let _ = self.tx.try_send(TuiEvent::Log(trimmed));
+        } else {
+            let _ = io::stderr().write_all(trimmed.as_bytes());
+            let _ = io::stderr().write_all(b"\n");
+        }
     }
 }
 
@@ -586,11 +641,17 @@ mod tests {
         assert!(debug.contains('3'));
     }
 
+    fn make_active_state() -> Arc<TuiTraceState> {
+        Arc::new(TuiTraceState::new())
+    }
+
     #[test]
     fn tui_writer_sends_through_channel() {
         let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+        let state = make_active_state();
         let mut writer = TuiWriter {
             tx,
+            state,
             buf: Vec::new(),
         };
         writer.write_all(b" INFO ferrite: hello world\n").unwrap();
@@ -607,8 +668,10 @@ mod tests {
     #[test]
     fn tui_writer_empty_buffer_sends_nothing() {
         let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+        let state = make_active_state();
         let writer = TuiWriter {
             tx,
+            state,
             buf: Vec::new(),
         };
         drop(writer);
@@ -616,6 +679,37 @@ mod tests {
             rx.try_recv().is_err(),
             "empty buffer should not send an event"
         );
+    }
+
+    #[test]
+    fn tui_writer_routes_to_stderr_when_inactive() {
+        let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+        let state = make_active_state();
+        state.active.store(false, Ordering::Release);
+        let mut writer = TuiWriter {
+            tx,
+            state,
+            buf: Vec::new(),
+        };
+        writer.write_all(b"routed to stderr\n").unwrap();
+        drop(writer);
+        // Nothing sent to the TUI channel
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn tui_trace_guard_drains_and_deactivates() {
+        let state = make_active_state();
+        let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+        let _ = tx.try_send(TuiEvent::Log("buffered msg".into()));
+        let _ = tx.try_send(TuiEvent::Tick); // non-Log events are discarded
+        let _ = tx.try_send(TuiEvent::Log("second msg".into()));
+
+        let guard = TuiTraceGuard::new(Arc::clone(&state), rx);
+        assert!(state.is_active());
+        drop(guard);
+        assert!(!state.is_active());
+        // rx is consumed by the guard — channel fully disconnected
     }
 
     mod event_loop {
