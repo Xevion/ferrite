@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.0](https://github.com/Xevion/ferrite/compare/v0.1.4...v0.2.0) (2026-04-09)
+
+
+### Features
+
+* Add event bus, RunResults type, and post-run error analysis ([65d0286](https://github.com/Xevion/ferrite/commit/65d0286e99493d89d3b967c96624815a1006b1c5))
+* Add HeadlessPrinter and ResultsDoc/ResultsRenderer abstractions ([c58befc](https://github.com/Xevion/ferrite/commit/c58befc11c4b803c72a17309279cc365a7bc0dde))
+* Versioned NDJSON schema, reloadable tracing, and Log event ([d5b3eac](https://github.com/Xevion/ferrite/commit/d5b3eac74733d8f7e4dac200b2740f1bdd15e3a8))
+
+
+### Bug Fixes
+
+* Eliminate 5s exit delay and restore post-TUI tracing ([a81a8ab](https://github.com/Xevion/ferrite/commit/a81a8ab9224fad4cfcf59cb18ada1a41e6bc2859))
+* **tempo:** Update tempo config to latest format ([1fc81ef](https://github.com/Xevion/ferrite/commit/1fc81efbb8a9ff2cbe053ddea31a0cf8d8ce0f14))
+
+
+### Code Refactoring
+
+* Extract EventBridge and rename TuiError to TuiFailure ([47eaff0](https://github.com/Xevion/ferrite/commit/47eaff03a3ea8ba1a275ac8b43fa43e6db6cca3d))
+* Replace OutputSink in runner with EventTx; add bridge threads ([38fa60e](https://github.com/Xevion/ferrite/commit/38fa60e556718ccad65d13e5e34829fc4994b54d))
+* Replace OutputSink with NdjsonEventWriter + HeadlessPrinter ([38ce935](https://github.com/Xevion/ferrite/commit/38ce935bf7ba46bbd79c046693d25301d11e37a8))
+
 ## [0.1.4](https://github.com/Xevion/ferrite/compare/v0.1.3...v0.1.4) (2026-04-06)
 
 
