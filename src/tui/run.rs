@@ -1,7 +1,6 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
 
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -13,7 +12,7 @@ use crate::alloc::TestBuffer;
 use crate::events::{self, RunEvent};
 use crate::pattern::Pattern;
 use crate::phys::{MapStats, PagemapResolver, PhysResolver};
-use crate::runner;
+use crate::runner::{self, PassResult, RunConfig, RunResults};
 use crate::shutdown;
 use crate::units::{Size, UnitSystem};
 
@@ -58,7 +57,7 @@ pub fn run_tui_mode(
     mut setup: TuiTestSetup,
     patterns: Vec<Pattern>,
     tracing_handle: &TracingReloadHandle,
-) -> Result<()> {
+) -> Result<RunResults> {
     let (tui_tx, tui_rx) = mpsc::sync_channel::<TuiEvent>(256);
 
     // Hot-swap the tracing layer from stderr to the TUI channel.
@@ -97,6 +96,7 @@ pub fn run_tui_mode(
         patterns.len()
     );
 
+    let patterns_for_config = patterns.clone();
     let pattern_names: Vec<String> = patterns
         .iter()
         .map(std::string::ToString::to_string)
@@ -135,6 +135,12 @@ pub fn run_tui_mode(
 
     let worker_regions: Vec<Arc<Segment>> = regions.iter().map(Arc::clone).collect();
     let parallel = !sequential;
+    let run_start = std::time::Instant::now();
+
+    // Collect pass results from all region workers for post-TUI rendering.
+    let collected_results: Arc<Mutex<Vec<Vec<PassResult>>>> =
+        Arc::new(Mutex::new(Vec::with_capacity(n_regions)));
+    let worker_collected = Arc::clone(&collected_results);
 
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let worker = thread::Builder::new()
@@ -152,6 +158,7 @@ pub fn run_tui_mode(
                         .as_ref()
                         .map(|r| r as &(dyn PhysResolver + Sync));
                     let patterns = &patterns;
+                    let collected = Arc::clone(&worker_collected);
                     thread::Builder::new()
                         .name(format!("region-{i}"))
                         .spawn_scoped(s, move || {
@@ -159,7 +166,7 @@ pub fn run_tui_mode(
                                 tui_region.activity.touch(pos);
                             };
 
-                            let result = runner::run(
+                            match runner::run(
                                 chunk,
                                 i,
                                 patterns,
@@ -168,10 +175,13 @@ pub fn run_tui_mode(
                                 &tx,
                                 resolver_ref,
                                 &on_activity,
-                            );
-
-                            if let Err(e) = result {
-                                warn!(region = i, "runner error: {e}");
+                            ) {
+                                Ok(pass_results) => {
+                                    collected.lock().unwrap().push(pass_results);
+                                }
+                                Err(e) => {
+                                    warn!(region = i, "runner error: {e}");
+                                }
                             }
                         })
                         .expect("failed to spawn region worker thread");
@@ -212,12 +222,25 @@ pub fn run_tui_mode(
         eprintln!("event bridge thread panicked");
     }
 
-    let total_failures: usize = regions
-        .iter()
-        .map(|r| r.failure_count.load(Ordering::Relaxed))
-        .sum();
+    let run_elapsed = run_start.elapsed();
 
-    std::process::exit(shutdown::exit_code(total_failures))
+    // Merge pass results from all regions. Each region produces its own Vec<PassResult>;
+    // flatten them into a single list for RunResults.
+    let all_region_results = Arc::try_unwrap(collected_results)
+        .expect("worker threads have exited")
+        .into_inner()
+        .unwrap();
+    let merged_passes: Vec<PassResult> = all_region_results.into_iter().flatten().collect();
+
+    let config = RunConfig {
+        size,
+        passes,
+        patterns: patterns_for_config,
+        regions: n_regions,
+        parallel,
+    };
+    let results = RunResults::from_passes(merged_passes, config, run_elapsed);
+    Ok(results)
 }
 
 #[cfg(test)]

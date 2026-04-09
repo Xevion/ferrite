@@ -253,15 +253,33 @@ pub trait ResultsRenderer {
 }
 
 /// Human-readable summary table with error detail and color support.
+///
+/// When `full` is true, includes per-pass/per-pattern result lines
+/// (suitable for post-TUI rendering where no live output was shown).
+/// When false, only renders the error analysis and final verdict
+/// (suitable after `HeadlessPrinter` already streamed live results).
 pub struct TableRenderer {
-    #[allow(dead_code)]
     unit_system: UnitSystem,
+    full: bool,
 }
 
 impl TableRenderer {
+    /// Summary-only renderer (after live headless output).
     #[must_use]
     pub fn new(unit_system: UnitSystem) -> Self {
-        Self { unit_system }
+        Self {
+            unit_system,
+            full: false,
+        }
+    }
+
+    /// Full renderer including per-pattern results (after TUI exit).
+    #[must_use]
+    pub fn full(unit_system: UnitSystem) -> Self {
+        Self {
+            unit_system,
+            full: true,
+        }
     }
 }
 
@@ -270,6 +288,54 @@ impl ResultsRenderer for TableRenderer {
         let total_failures = doc.total_failures();
         let elapsed_ms = doc.elapsed_ms();
         let elapsed_secs = elapsed_ms / 1000.0;
+
+        // Per-pass, per-pattern results (only in full mode)
+        if self.full {
+            for pass in doc.passes() {
+                let pass_failures: u64 = pass.total_failures();
+                for pr in pass.pattern_results() {
+                    let pr_ms = pr.elapsed_ms();
+                    let bytes = pr.bytes_processed();
+                    let throughput =
+                        crate::units::Rate::new(bytes as f64 / (pr_ms / 1000.0), self.unit_system);
+                    let failures = pr.failure_count();
+                    if failures == 0 {
+                        writeln!(
+                            out,
+                            "  {} {:<20} {:>8.1}ms  {throughput:>}",
+                            "PASS".green(),
+                            pr.pattern_name(),
+                            pr_ms,
+                        )?;
+                    } else {
+                        writeln!(
+                            out,
+                            "  {} {:<20} {:>8.1}ms  {throughput:>}  ({failures} failures)",
+                            "FAIL".red().bold(),
+                            pr.pattern_name(),
+                            pr_ms,
+                        )?;
+                    }
+                }
+                let total_passes = doc.config().passes();
+                if pass_failures == 0 {
+                    writeln!(
+                        out,
+                        "  Pass {}/{total_passes}: {}",
+                        pass.pass_number(),
+                        "all patterns passed".green(),
+                    )?;
+                } else {
+                    writeln!(
+                        out,
+                        "  Pass {}/{total_passes}: {}",
+                        pass.pass_number(),
+                        format!("{pass_failures} total failure(s)").red().bold(),
+                    )?;
+                }
+                writeln!(out)?;
+            }
+        }
 
         // Error analysis block
         if let Some(ea) = doc.error_analysis() {

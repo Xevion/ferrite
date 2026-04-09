@@ -511,37 +511,7 @@ pub fn run_tui(
         })
         .expect("failed to spawn tui-tick thread");
 
-    let start_time = Instant::now();
     run_event_loop(&mut terminal, config, regions, rx)?;
-
-    // Render summary line above the viewport.
-    let elapsed = start_time.elapsed();
-    let total_failures: usize = regions
-        .iter()
-        .map(|r| r.failure_count.load(Ordering::Relaxed))
-        .sum();
-    let (summary_text, summary_style) = if total_failures > 0 {
-        (
-            format!(
-                "FAIL: {total_failures} failure(s) found in {:.1}s",
-                elapsed.as_secs_f64()
-            ),
-            ratatui::style::Style::default()
-                .fg(palette::ERR_HIGH)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        )
-    } else {
-        (
-            format!("PASS: no failures in {:.1}s", elapsed.as_secs_f64()),
-            ratatui::style::Style::default()
-                .fg(palette::ERR_NONE)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        )
-    };
-    terminal.insert_before(1, |buf| {
-        use ratatui::text::{Line, Span};
-        Paragraph::new(Line::from(Span::styled(summary_text, summary_style))).render(buf.area, buf);
-    })?;
 
     // Clear the inline viewport while raw mode is still active (guard drops after return).
     terminal.clear().context("failed to clear terminal")?;

@@ -66,15 +66,7 @@ fn main() -> Result<()> {
                 map_stats: s.map_stats,
                 compaction_guard: s.compaction_guard,
             };
-            // TUI + --log <file>: events saved to file while TUI renders
-            let ndjson_writer = output
-                .log_file
-                .as_deref()
-                .map(|p| NdjsonEventWriter::from_path(p.to_str().unwrap_or("")))
-                .transpose()
-                .context("failed to open log file")?;
-            drop(ndjson_writer); // TODO: wire into TUI path in unified runner
-            return run_tui_mode(
+            let mut results = run_tui_mode(
                 cli.size,
                 cli.passes,
                 cli.regions,
@@ -82,7 +74,17 @@ fn main() -> Result<()> {
                 tui_setup,
                 patterns,
                 &tracing_handle,
-            );
+            )?;
+
+            ferrite::error_analysis::analyze(&mut results);
+            render_results(&output, &results, cli.units, true);
+
+            let code = shutdown::exit_code(results.total_failures);
+            shutdown_handle.shutdown();
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return Ok(());
         }
     }
 
@@ -92,6 +94,38 @@ fn main() -> Result<()> {
     let result = run_non_tui(&cli, &patterns, &output);
     shutdown_handle.shutdown();
     result
+}
+
+/// Render final results to stdout based on output configuration.
+///
+/// When `full_table` is true, the table renderer includes per-pattern detail
+/// (used after TUI exit, where no live output was shown). When false, only
+/// the summary and error analysis are rendered (after `HeadlessPrinter`
+/// already streamed live results).
+fn render_results(
+    output: &OutputConfig,
+    results: &ferrite::runner::RunResults,
+    unit_system: ferrite::units::UnitSystem,
+    full_table: bool,
+) {
+    let doc = ResultsDoc::from_results(results);
+    match output.format {
+        OutputFormat::Json => {
+            ferrite::results::JsonRenderer
+                .render(&doc, &mut std::io::stdout())
+                .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
+        }
+        OutputFormat::Table => {
+            let renderer = if full_table {
+                TableRenderer::full(unit_system)
+            } else {
+                TableRenderer::new(unit_system)
+            };
+            renderer
+                .render(&doc, &mut std::io::stdout())
+                .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
+        }
+    }
 }
 
 /// Consume events from the runner and drive human-readable output + JSON emission.
@@ -223,26 +257,11 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], output: &OutputConfig) -> Result
         w.write_run_complete(cli.passes, results.total_failures, run_elapsed);
     }
 
-    // Final results rendering
-    match format {
-        OutputFormat::Json if json_events_to_file => {
-            // Events went to log file; render final JSON results to stdout
-            let doc = ResultsDoc::from_results(&results);
-            let renderer = ferrite::results::JsonRenderer;
-            renderer
-                .render(&doc, &mut std::io::stdout())
-                .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
-        }
-        OutputFormat::Json => {
-            // Events already streamed to stdout; run_complete event is the final record
-        }
-        OutputFormat::Table => {
-            let doc = ResultsDoc::from_results(&results);
-            let renderer = TableRenderer::new(cli.units);
-            renderer
-                .render(&doc, &mut std::io::stdout())
-                .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
-        }
+    // Final results rendering.
+    // When --format json without --log: events already streamed to stdout,
+    // run_complete event is the final record — no separate rendering needed.
+    if format != OutputFormat::Json || json_events_to_file {
+        render_results(output, &results, cli.units, false);
     }
 
     let code = shutdown::exit_code(results.total_failures);
