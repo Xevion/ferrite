@@ -29,9 +29,9 @@ audit:
 build:
     cargo build --release
 
-# Build and run with release profile
+# Build and run with dev profile (use sudo-run for release)
 run *args:
-    cargo run --release -- {{args}}
+    cargo run -- {{args}}
 
 # Build then run as root (avoids sudo needing to find cargo)
 sudo-run *args:

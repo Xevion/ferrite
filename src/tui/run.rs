@@ -20,57 +20,14 @@ use crate::units::{Size, UnitSystem};
 use super::bridge::EventBridge;
 use super::{Segment, TuiConfig, TuiEvent, TuiMakeWriter, TuiTraceGuard, TuiTraceState};
 
-/// Set up the global tracing subscriber with a layered registry.
-///
-/// - `json_mode`: whether to emit JSON-formatted trace events on stderr
-/// - `tui_writer`: if present, adds a human-readable ANSI layer for the TUI channel
-///
-/// Layer matrix:
-/// | Mode              | TUI layer           | stderr layer          |
-/// |-------------------|---------------------|-----------------------|
-/// | TUI + JSON        | human ANSI -> TUI    | json -> stderr         |
-/// | TUI + no JSON     | human ANSI -> TUI    | (none)                 |
-/// | no TUI + JSON     | None                | json -> stderr         |
-/// | no TUI + no JSON  | None                | human -> stderr        |
-pub fn setup_tracing(json_mode: bool, tui_writer: Option<TuiMakeWriter>) {
-    use tracing_subscriber::prelude::*;
-    use tracing_subscriber::util::SubscriberInitExt;
+/// Type alias for the boxed tracing layer used with the reload handle.
+pub type BoxedTracingLayer =
+    Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
 
-    let in_nextest = std::env::var("NEXTEST").is_ok();
-    let has_tui = tui_writer.is_some();
-
-    let tui_layer = tui_writer.map(|w| {
-        tracing_subscriber::fmt::layer()
-            .with_writer(w)
-            .with_ansi(true)
-    });
-
-    // Under nextest, route all tracing through the test writer so output is
-    // captured per-test and only shown on failure. Use try_init to tolerate
-    // multiple calls within a single test binary.
-    if in_nextest {
-        let _ = tracing_subscriber::registry()
-            .with(tui_layer)
-            .with(tracing_subscriber::fmt::layer().with_test_writer())
-            .try_init();
-        return;
-    }
-
-    let stderr_json = json_mode.then(|| {
-        tracing_subscriber::fmt::layer()
-            .json()
-            .with_writer(std::io::stderr)
-    });
-
-    let stderr_human_headless = (!json_mode && !has_tui)
-        .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
-
-    tracing_subscriber::registry()
-        .with(tui_layer)
-        .with(stderr_json)
-        .with(stderr_human_headless)
-        .init();
-}
+/// Handle returned by tracing init, used to hot-swap the output layer
+/// (e.g. from stderr to the TUI channel).
+pub type TracingReloadHandle =
+    tracing_subscriber::reload::Handle<BoxedTracingLayer, tracing_subscriber::Registry>;
 
 /// Resolved test setup passed into [`run_tui_mode`] from the binary.
 pub struct TuiTestSetup {
@@ -100,15 +57,23 @@ pub fn run_tui_mode(
     sequential: bool,
     mut setup: TuiTestSetup,
     patterns: Vec<Pattern>,
-    json_mode: bool,
+    tracing_handle: &TracingReloadHandle,
 ) -> Result<()> {
     let (tui_tx, tui_rx) = mpsc::sync_channel::<TuiEvent>(256);
 
-    // Set up tracing: human ANSI layer -> TUI channel, stderr layer based on mode.
-    // The TuiTraceState lets us reroute to stderr after the TUI exits.
+    // Hot-swap the tracing layer from stderr to the TUI channel.
+    // The TuiTraceState lets us reroute back to stderr after the TUI exits.
     let trace_state = Arc::new(TuiTraceState::new());
     let writer = TuiMakeWriter::new(tui_tx.clone(), Arc::clone(&trace_state));
-    setup_tracing(json_mode, Some(writer));
+    tracing_handle
+        .modify(|layer| {
+            *layer = Box::new(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(writer)
+                    .with_ansi(true),
+            );
+        })
+        .expect("tracing reload failed");
 
     // Compute region count
     let total_words = setup.region.as_u64_slice().len();

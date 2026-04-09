@@ -7,7 +7,6 @@ use clap::Parser;
 use clap::ValueEnum;
 use nix::sys::resource::{Resource, getrlimit};
 use nix::unistd::geteuid;
-use owo_colors::OwoColorize;
 use tracing::{info, warn};
 
 use ferrite::alloc::{CompactionGuard, TestBuffer};
@@ -167,37 +166,24 @@ pub fn check_privileges(requested_bytes: usize, need_phys: bool) {
     for w in &warnings {
         match w {
             PrivilegeWarning::NoSysAdmin => {
-                eprintln!(
-                    "{} CAP_SYS_ADMIN not detected -- physical addresses will be unavailable",
-                    "warning:".yellow().bold(),
-                );
-                eprintln!("         run as root: {}", "sudo ferrite".bold());
-                eprintln!(
-                    "         or grant the capability: {}",
-                    "sudo setcap cap_sys_admin+ep $(which ferrite)".bold()
+                tracing::warn!(
+                    "CAP_SYS_ADMIN not detected -- physical addresses will be unavailable. \
+                     Run as root (sudo ferrite) or grant the capability \
+                     (sudo setcap cap_sys_admin+ep $(which ferrite))"
                 );
             }
             PrivilegeWarning::MlockLimitExceeded { soft, requested } => {
-                eprintln!(
-                    "{} RLIMIT_MEMLOCK is {soft} bytes, but {requested} bytes requested",
-                    "warning:".yellow().bold(),
-                );
-                eprintln!("         mlock will likely fail. Options:");
-                eprintln!("           - run as root: {}", "sudo ferrite".bold());
-                eprintln!(
-                    "           - raise the limit: {}",
-                    "ulimit -l unlimited".bold()
-                );
-                eprintln!(
-                    "           - grant the capability: {}",
-                    "sudo setcap cap_ipc_lock+ep $(which ferrite)".bold()
+                tracing::warn!(
+                    soft,
+                    requested,
+                    "RLIMIT_MEMLOCK is {soft} bytes, but {requested} bytes requested. \
+                     mlock will likely fail. Run as root (sudo ferrite), \
+                     raise the limit (ulimit -l unlimited), or grant the capability \
+                     (sudo setcap cap_ipc_lock+ep $(which ferrite))"
                 );
             }
             PrivilegeWarning::MlockQueryFailed(e) => {
-                eprintln!(
-                    "{} could not query RLIMIT_MEMLOCK: {e}",
-                    "warning:".yellow().bold(),
-                );
+                tracing::warn!("could not query RLIMIT_MEMLOCK: {e}");
             }
         }
     }
@@ -290,7 +276,7 @@ pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
         Ok(r) => r,
         Err(e) => {
             if let Some(hint) = e.help() {
-                eprintln!("hint: {hint}");
+                tracing::warn!("hint: {hint}");
             }
             return Err(e).context("failed to allocate and lock memory");
         }

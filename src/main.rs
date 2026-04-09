@@ -16,7 +16,7 @@ use ferrite::results::{ResultsDoc, ResultsRenderer, TableRenderer};
 use ferrite::runner;
 use ferrite::shutdown;
 #[cfg(feature = "tui")]
-use ferrite::tui::run::{TuiTestSetup, run_tui_mode, setup_tracing};
+use ferrite::tui::run::{TuiTestSetup, run_tui_mode};
 
 mod cli;
 #[cfg(feature = "tui")]
@@ -27,6 +27,10 @@ fn main() -> Result<()> {
     let mut cli = Cli::parse();
     let shutdown_handle = shutdown::install_signal_handlers()?;
     shutdown::install_panic_hook();
+
+    // Init tracing early with stderr output so privilege warnings are visible.
+    // The TUI path hot-swaps to its channel writer via the reload handle.
+    let tracing_handle = init_tracing();
 
     let need_phys = !cli.no_phys;
     check_privileges(cli.size, need_phys);
@@ -66,10 +70,13 @@ fn main() -> Result<()> {
                 cli.sequential,
                 tui_setup,
                 patterns,
-                false,
+                &tracing_handle,
             );
         }
     }
+
+    // Non-TUI path: handle is no longer needed (stderr layer stays).
+    drop(tracing_handle);
 
     let ndjson_writer = cli
         .json
@@ -91,9 +98,12 @@ fn consume_headless_events(
     rx: &EventRx,
     printer: &mut HeadlessPrinter<std::io::Stdout>,
     ndjson: &mut Option<NdjsonEventWriter>,
+    json_mode: bool,
 ) {
     while let Ok(event) = rx.recv() {
-        printer.handle_event(&event);
+        if !json_mode {
+            printer.handle_event(&event);
+        }
         if let Some(w) = ndjson.as_mut() {
             w.handle_event(&event);
         }
@@ -109,9 +119,6 @@ fn run_non_tui(
     patterns: &[Pattern],
     mut ndjson_writer: Option<NdjsonEventWriter>,
 ) -> Result<()> {
-    #[cfg(feature = "tui")]
-    setup_tracing(ndjson_writer.is_some(), None);
-
     let mut setup = setup_test(cli)?;
 
     let (tx, rx) = ferrite::events::event_bus();
@@ -132,11 +139,13 @@ fn run_non_tui(
     }
 
     let unit_system = cli.units;
+    let json_mode = ndjson_writer.is_some();
 
-    // Consumer thread drives HeadlessPrinter + optional NdjsonEventWriter
+    // Consumer thread drives HeadlessPrinter (human) + optional NdjsonEventWriter (JSON).
+    // When JSON mode is active, suppress human output — stdout is exclusively NDJSON.
     let consumer = std::thread::spawn(move || {
         let mut printer = HeadlessPrinter::new(std::io::stdout(), unit_system);
-        consume_headless_events(&rx, &mut printer, &mut ndjson_writer);
+        consume_headless_events(&rx, &mut printer, &mut ndjson_writer, json_mode);
         (printer, ndjson_writer)
     });
 
@@ -174,14 +183,14 @@ fn run_non_tui(
     ferrite::error_analysis::analyze(&mut results);
 
     if let Some(w) = ndjson_writer.as_mut() {
-        w.write_summary(cli.passes, results.total_failures, run_elapsed);
+        w.write_run_complete(cli.passes, results.total_failures, run_elapsed);
+    } else {
+        let doc = ResultsDoc::from_results(&results);
+        let renderer = TableRenderer::new(cli.units);
+        renderer
+            .render(&doc, &mut std::io::stdout())
+            .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
     }
-
-    let doc = ResultsDoc::from_results(&results);
-    let renderer = TableRenderer::new(cli.units);
-    renderer
-        .render(&doc, &mut std::io::stdout())
-        .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
 
     let code = shutdown::exit_code(results.total_failures);
     if code != 0 {
@@ -189,4 +198,22 @@ fn run_non_tui(
     }
 
     Ok(())
+}
+
+type BoxedTracingLayer =
+    Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
+
+/// Initialize the global tracing subscriber with a reloadable layer.
+///
+/// Starts with human-readable output on stderr. The returned handle can be used
+/// to hot-swap the layer (e.g. to route tracing through the TUI channel).
+fn init_tracing()
+-> tracing_subscriber::reload::Handle<BoxedTracingLayer, tracing_subscriber::Registry> {
+    use tracing_subscriber::prelude::*;
+
+    let initial: BoxedTracingLayer =
+        Box::new(tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
+    let (reload_layer, handle) = tracing_subscriber::reload::Layer::new(initial);
+    tracing_subscriber::registry().with(reload_layer).init();
+    handle
 }
