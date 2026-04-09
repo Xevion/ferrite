@@ -21,12 +21,21 @@ use ferrite::tui::run::{TuiTestSetup, run_tui_mode};
 mod cli;
 #[cfg(feature = "tui")]
 use cli::TuiMode;
-use cli::{Cli, check_privileges, setup_test};
+use cli::{Cli, OutputConfig, OutputFormat, check_privileges, setup_test};
 
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
     let shutdown_handle = shutdown::install_signal_handlers()?;
     shutdown::install_panic_hook();
+
+    let output = cli.resolve_output()?;
+
+    // Apply color override globally via owo-colors.
+    if !output.color_enabled {
+        owo_colors::set_override(false);
+    } else if matches!(cli.color, cli::ColorMode::Always) {
+        owo_colors::set_override(true);
+    }
 
     // Init tracing early with stderr output so privilege warnings are visible.
     // The TUI path hot-swaps to its channel writer via the reload handle.
@@ -49,12 +58,6 @@ fn main() -> Result<()> {
             TuiMode::Auto => std::io::stdout().is_terminal(),
         };
 
-        if use_tui && cli.json.is_some() {
-            anyhow::bail!(
-                "--json is not yet supported with --tui. Use --tui never for JSON output."
-            );
-        }
-
         if use_tui {
             let s = setup_test(&cli)?;
             let tui_setup = TuiTestSetup {
@@ -63,6 +66,14 @@ fn main() -> Result<()> {
                 map_stats: s.map_stats,
                 compaction_guard: s.compaction_guard,
             };
+            // TUI + --log <file>: events saved to file while TUI renders
+            let ndjson_writer = output
+                .log_file
+                .as_deref()
+                .map(|p| NdjsonEventWriter::from_path(p.to_str().unwrap_or("")))
+                .transpose()
+                .context("failed to open log file")?;
+            drop(ndjson_writer); // TODO: wire into TUI path in unified runner
             return run_tui_mode(
                 cli.size,
                 cli.passes,
@@ -78,14 +89,7 @@ fn main() -> Result<()> {
     // Non-TUI path: handle is no longer needed (stderr layer stays).
     drop(tracing_handle);
 
-    let ndjson_writer = cli
-        .json
-        .as_deref()
-        .map(NdjsonEventWriter::from_path)
-        .transpose()
-        .context("failed to open JSON output")?;
-
-    let result = run_non_tui(&cli, &patterns, ndjson_writer);
+    let result = run_non_tui(&cli, &patterns, &output);
     shutdown_handle.shutdown();
     result
 }
@@ -97,14 +101,18 @@ fn main() -> Result<()> {
 fn consume_headless_events(
     rx: &EventRx,
     printer: &mut HeadlessPrinter<std::io::Stdout>,
-    ndjson: &mut Option<NdjsonEventWriter>,
-    json_mode: bool,
+    stdout_ndjson: &mut Option<NdjsonEventWriter>,
+    log_ndjson: &mut Option<NdjsonEventWriter>,
+    suppress_human: bool,
 ) {
     while let Ok(event) = rx.recv() {
-        if !json_mode {
+        if !suppress_human {
             printer.handle_event(&event);
         }
-        if let Some(w) = ndjson.as_mut() {
+        if let Some(w) = stdout_ndjson.as_mut() {
+            w.handle_event(&event);
+        }
+        if let Some(w) = log_ndjson.as_mut() {
             w.handle_event(&event);
         }
         if matches!(event, RunEvent::RunComplete) {
@@ -114,11 +122,7 @@ fn consume_headless_events(
 }
 
 /// Non-TUI mode: headless output with tracing to stderr.
-fn run_non_tui(
-    cli: &Cli,
-    patterns: &[Pattern],
-    mut ndjson_writer: Option<NdjsonEventWriter>,
-) -> Result<()> {
+fn run_non_tui(cli: &Cli, patterns: &[Pattern], output: &OutputConfig) -> Result<()> {
     let mut setup = setup_test(cli)?;
 
     let (tx, rx) = ferrite::events::event_bus();
@@ -139,14 +143,42 @@ fn run_non_tui(
     }
 
     let unit_system = cli.units;
-    let json_mode = ndjson_writer.is_some();
+    let format = output.format;
 
-    // Consumer thread drives HeadlessPrinter (human) + optional NdjsonEventWriter (JSON).
-    // When JSON mode is active, suppress human output — stdout is exclusively NDJSON.
+    // --format json without --log <file>: NDJSON events stream to stdout
+    let json_to_stdout = format == OutputFormat::Json && output.log_file.is_none();
+    // --format json + --log <file>: events go to file, only final results on stdout
+    let json_events_to_file = format == OutputFormat::Json && output.log_file.is_some();
+
+    // Suppress human output when stdout is used for JSON
+    let suppress_human = format == OutputFormat::Json;
+
+    // NDJSON writer for stdout (live events when --format json, no --log file)
+    let mut stdout_ndjson = if json_to_stdout {
+        Some(NdjsonEventWriter::new(Box::new(std::io::stdout())))
+    } else {
+        None
+    };
+
+    // NDJSON writer for --log <file>
+    let mut log_ndjson = output
+        .log_file
+        .as_deref()
+        .map(|p| NdjsonEventWriter::from_path(p.to_str().unwrap_or("")))
+        .transpose()
+        .context("failed to open log file")?;
+
+    // Consumer thread drives HeadlessPrinter (human) + optional NDJSON writers.
     let consumer = std::thread::spawn(move || {
         let mut printer = HeadlessPrinter::new(std::io::stdout(), unit_system);
-        consume_headless_events(&rx, &mut printer, &mut ndjson_writer, json_mode);
-        (printer, ndjson_writer)
+        consume_headless_events(
+            &rx,
+            &mut printer,
+            &mut stdout_ndjson,
+            &mut log_ndjson,
+            suppress_human,
+        );
+        (printer, stdout_ndjson, log_ndjson)
     });
 
     let run_start = std::time::Instant::now();
@@ -169,7 +201,8 @@ fn run_non_tui(
     let _ = tx.send(RunEvent::RunComplete);
     drop(tx);
 
-    let (_printer, mut ndjson_writer) = consumer.join().expect("event consumer thread panicked");
+    let (_printer, mut stdout_ndjson, mut log_ndjson) =
+        consumer.join().expect("event consumer thread panicked");
 
     let config = ferrite::runner::RunConfig {
         size: cli.size,
@@ -182,14 +215,34 @@ fn run_non_tui(
 
     ferrite::error_analysis::analyze(&mut results);
 
-    if let Some(w) = ndjson_writer.as_mut() {
+    // Write run_complete to whichever NDJSON writers are active
+    if let Some(w) = stdout_ndjson.as_mut() {
         w.write_run_complete(cli.passes, results.total_failures, run_elapsed);
-    } else {
-        let doc = ResultsDoc::from_results(&results);
-        let renderer = TableRenderer::new(cli.units);
-        renderer
-            .render(&doc, &mut std::io::stdout())
-            .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
+    }
+    if let Some(w) = log_ndjson.as_mut() {
+        w.write_run_complete(cli.passes, results.total_failures, run_elapsed);
+    }
+
+    // Final results rendering
+    match format {
+        OutputFormat::Json if json_events_to_file => {
+            // Events went to log file; render final JSON results to stdout
+            let doc = ResultsDoc::from_results(&results);
+            let renderer = ferrite::results::JsonRenderer;
+            renderer
+                .render(&doc, &mut std::io::stdout())
+                .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
+        }
+        OutputFormat::Json => {
+            // Events already streamed to stdout; run_complete event is the final record
+        }
+        OutputFormat::Table => {
+            let doc = ResultsDoc::from_results(&results);
+            let renderer = TableRenderer::new(cli.units);
+            renderer
+                .render(&doc, &mut std::io::stdout())
+                .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
+        }
     }
 
     let code = shutdown::exit_code(results.total_failures);
