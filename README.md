@@ -37,10 +37,10 @@ ferrite --passes 3
 ferrite --test solid-bits --test checkerboard
 
 # NDJSON event stream to stdout
-ferrite --json
+ferrite --format json
 
-# NDJSON to a file, human output to stdout
-ferrite --json results.ndjson
+# NDJSON events saved to a file, human output to stdout
+ferrite --events results.ndjson
 ```
 
 Large allocations require sufficient `RLIMIT_MEMLOCK` -- either run as root, raise the limit with `ulimit -l unlimited`, or grant `CAP_IPC_LOCK` to the binary.

@@ -15,32 +15,30 @@ Code: `src/tui/` (event loop, rendering, `TuiMakeWriter` for tracing integration
 
 ### Tracing (stderr)
 
-Diagnostic logs (`info!`, `warn!`, etc.) go to stderr via `tracing-subscriber`. This includes physical address map stats, DIMM topology, segment lifecycle events, ECC deltas, and warnings.
+Diagnostic logs (`info!`, `warn!`, etc.) carry moment-by-moment operational detail: physical address map stats, DIMM topology, segment lifecycle events, ECC deltas, and warnings. They are human-readable, never JSON, and independent of `--format` (which governs the results surface on stdout, not tracing).
 
-Tracing uses a layered subscriber (`tracing_subscriber::registry`) with conditional layers:
+Tracing uses a single reloadable layer (`tracing_subscriber::reload`) over a `registry`, initialized in `main.rs::init_tracing()`:
 
-| Mode              | TUI layer                  | stderr layer                |
-|-------------------|----------------------------|-----------------------------|
-| TUI + `--json`    | human ANSI → TUI channel   | JSON → stderr               |
-| TUI + no `--json` | human ANSI → TUI channel   | (none — events to TUI only) |
-| no TUI + `--json` | —                          | JSON → stderr               |
-| no TUI + no JSON  | —                          | human → stderr              |
+| Mode    | Tracing destination                                                                                  |
+|---------|-----------------------------------------------------------------------------------------------------|
+| non-TUI | human text → stderr                                                                                  |
+| TUI     | human text → TUI channel (hot-swapped via the reload handle; restored to stderr after the TUI exits) |
 
-Each layer is an `Option<Layer>` (`None` = no-op). Setup lives in `tui/run.rs::setup_tracing()`.
+The reload handle lets `run_tui_mode()` swap the stderr writer for a `TuiMakeWriter` that routes log lines into the TUI, then reroute back to stderr on exit via `TuiTraceState`.
 
-Tracing is for moment-by-moment operational detail, not final results.
+> The NDJSON schema reserves a `RunEvent::Log` variant for carrying diagnostics as structured events, but no production code emits it yet — tracing currently reaches only stderr or the TUI.
 
 ### Results (Event Consumers + Renderers)
 
 Output is split into three independent concerns:
 
 - **Live human text:** `HeadlessPrinter` consumes `RunEvent`s and writes PASS/FAIL lines, banners, ECC info to stdout. Active in headless (non-TUI) mode.
-- **NDJSON events:** `NdjsonEventWriter` serializes `RunEvent`s as newline-delimited JSON. Active when `--json` is specified. Writes to stdout (`--json -`) or a file (`--json path`).
+- **NDJSON events:** `NdjsonEventWriter` serializes `RunEvent`s as newline-delimited JSON. Streams to stdout when `--format json`; additionally written to a file when `--events <path>` is given (independent of `--format`).
 - **Post-run results:** `ResultsDoc` + `ResultsRenderer` trait (`TableRenderer`, `JsonRenderer`) render the final summary after the run completes.
 
-**Constraint:** `--json` is incompatible with `--tui` (TUI handles its own live display). ferrite errors with guidance: use `--tui never` for JSON output.
+**Constraint:** `--format json` is incompatible with `--tui` (the TUI owns stdout for its live display). ferrite errors with guidance: use `--tui never` for JSON output. `--events <file>` *is* supported alongside the TUI — the event stream is written to the file while the TUI renders.
 
-In TUI mode, the `EventBridge` translates `RunEvent`s to `TuiEvent`s for the TUI event loop. No NDJSON or headless printing occurs.
+In TUI mode, the `EventBridge` translates `RunEvent`s to `TuiEvent`s for the TUI event loop, and optionally writes the NDJSON event stream to the `--events` file. No headless human printing occurs.
 
 Code: `src/headless.rs`, `src/ndjson.rs`, `src/results.rs`, `src/tui/bridge.rs`
 
@@ -61,7 +59,7 @@ Code: `src/headless.rs`, `src/ndjson.rs`, `src/results.rs`, `src/tui/bridge.rs`
 | `dimm.rs` | `DimmTopology` — merges SMBIOS + EDAC into a per-DIMM view |
 | `error_analysis.rs` | Post-test bit error classification: `BitErrorStats`, `ErrorClassification` (StuckBit, Coupling, Mixed) |
 | `headless.rs` | `HeadlessPrinter` — human-readable live output from event bus |
-| `ndjson.rs` | `NdjsonEventWriter` — NDJSON event serialization for `--json` |
+| `ndjson.rs` | `NdjsonEventWriter` — NDJSON event serialization for `--format json` / `--events` |
 | `results.rs` | `ResultsDoc`, `ResultsRenderer` trait, `TableRenderer`, `JsonRenderer` |
 | `units.rs` | Binary/decimal size and rate formatting |
 | `shutdown.rs` | Signal handling, panic hook, coordinated shutdown, exit codes |
@@ -76,30 +74,30 @@ Code: `src/headless.rs`, `src/ndjson.rs`, `src/results.rs`, `src/tui/bridge.rs`
 ```
 main()
  ├─ install_signal_handlers(), install_panic_hook()
+ ├─ init_tracing() → reloadable stderr layer  [main.rs]
  ├─ check_privileges(size, need_phys)         [cli.rs]
  ├─ select patterns (Pattern::ALL or --test)
- ├─ conflict check: --json + --tui → error
+ ├─ conflict check: --format json + --tui → error
  │
  ├─ TUI mode:
  │   ├─ setup_test() → TestSetup              [cli.rs]
  │   └─ run_tui_mode(...)                     [tui/run.rs]
- │       ├─ setup_tracing(json_mode, Some(TuiMakeWriter))
+ │       ├─ hot-swap tracing layer → TUI channel (reload handle)
  │       ├─ split allocation into N segments  (--regions or CPU count)
  │       ├─ spawn "test-driver" thread → runner::run() emits RunEvents
  │       ├─ spawn "event-bridge" thread → EventBridge translates RunEvent → TuiEvent
  │       ├─ run_tui(config, segments, tx, rx)  ← event loop [tui/mod.rs]
  │       └─ wait for test-driver (5 s timeout) + process::exit
  │
- └─ Headless mode:
-     ├─ setup_tracing(json, None)
+ └─ Headless mode:                            (tracing stays on stderr)
      ├─ setup_test() → TestSetup              [cli.rs]
-     ├─ create NdjsonEventWriter (if --json)  [ndjson.rs]
+     ├─ create NdjsonEventWriter (if --format json or --events)  [ndjson.rs]
      ├─ spawn consumer thread:
      │   ├─ HeadlessPrinter.handle_event()    [headless.rs]
      │   └─ NdjsonEventWriter.handle_event()  [ndjson.rs, optional]
      ├─ runner::run(buf, patterns, passes, parallel, &tx, resolver)   [runner.rs]
      ├─ error_analysis (if failures)          [error_analysis.rs]
-     ├─ NdjsonEventWriter.write_summary()     [optional]
+     ├─ NdjsonEventWriter.write_run_complete()  [optional]
      ├─ TableRenderer.render(ResultsDoc)      [results.rs]
      └─ exit code
 ```

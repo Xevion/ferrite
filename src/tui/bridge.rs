@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use tracing::warn;
 
 use crate::events::{EventRx, RegionEvent, RunEvent};
+use crate::ndjson::NdjsonEventWriter;
 
 use super::{FlippedBits, Segment, TuiEvent, TuiFailure};
 
@@ -126,10 +127,20 @@ impl EventBridge {
     /// Run the bridge loop, consuming events until [`RunEvent::RunComplete`]
     /// or channel disconnect.
     ///
+    /// If an [`NdjsonEventWriter`] is provided, each event is also written
+    /// to the NDJSON stream (for `--events <file>` support).
+    ///
     /// After exiting, sends [`TuiEvent::RegionDone`] for any regions that
     /// didn't complete naturally (e.g. user quit early).
-    pub fn run(mut self, event_rx: &EventRx) {
+    pub fn run(
+        mut self,
+        event_rx: &EventRx,
+        mut ndjson: Option<NdjsonEventWriter>,
+    ) -> Option<NdjsonEventWriter> {
         while let Ok(event) = event_rx.recv() {
+            if let Some(w) = ndjson.as_mut() {
+                w.handle_event(&event);
+            }
             if !self.handle_event(&event) {
                 break;
             }
@@ -144,6 +155,8 @@ impl EventBridge {
                 );
             }
         }
+
+        ndjson
     }
 }
 
@@ -421,7 +434,7 @@ mod tests {
         event_tx.send(RunEvent::RunComplete).unwrap();
         drop(event_tx);
 
-        bridge.run(&event_rx);
+        bridge.run(&event_rx, None);
 
         let mut done_indices = vec![];
         while let Ok(event) = rx.try_recv() {
@@ -453,7 +466,7 @@ mod tests {
         event_tx.send(RunEvent::RunComplete).unwrap();
         drop(event_tx);
 
-        bridge.run(&event_rx);
+        bridge.run(&event_rx, None);
 
         let done_count = std::iter::from_fn(|| rx.try_recv().ok())
             .filter(|e| matches!(e, TuiEvent::RegionDone(_)))
@@ -537,7 +550,7 @@ mod tests {
         // Drop sender without sending RunComplete — simulates disconnect
         drop(event_tx);
 
-        bridge.run(&event_rx);
+        bridge.run(&event_rx, None);
 
         let mut done_indices = vec![];
         while let Ok(event) = rx.try_recv() {

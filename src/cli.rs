@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
 use clap::ValueEnum;
 use nix::sys::resource::{Resource, getrlimit};
@@ -26,9 +26,10 @@ pub enum TuiMode {
 }
 
 /// Controls how live output and final results render to stdout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     /// Human-readable text output with results table.
+    #[default]
     Table,
     /// NDJSON event stream with JSON results.
     Json,
@@ -71,23 +72,17 @@ pub struct Cli {
     pub units: UnitSystem,
 
     /// Output format: "table" (default) for human-readable text, "json" for NDJSON events.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
-    pub format: OutputFormat,
+    #[arg(long, value_enum)]
+    pub format: Option<OutputFormat>,
 
-    /// Save the NDJSON event stream to a file. Use "-" to write events to stdout.
-    /// Always NDJSON regardless of --format.
+    /// Save the NDJSON event stream to a file (always NDJSON regardless of --format).
     #[arg(long, value_name = "FILE")]
-    pub log: Option<String>,
+    pub events: Option<PathBuf>,
 
     /// Color output mode: "auto" detects terminal color support,
     /// "always" forces color, "never" disables it.
     #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
     pub color: ColorMode,
-
-    /// Shorthand for --format json. If given a file path, errors with a suggestion
-    /// to use --log instead.
-    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "-")]
-    pub json: Option<String>,
 
     /// TUI mode: "auto" (default) uses the TUI when stdout is a terminal,
     /// "always" forces the TUI, "never" uses plain non-interactive output.
@@ -110,8 +105,8 @@ pub struct Cli {
 pub struct OutputConfig {
     /// Format for stdout (human table or JSON).
     pub format: OutputFormat,
-    /// Optional path for the NDJSON event log file. `None` = no log file.
-    pub log_file: Option<PathBuf>,
+    /// Optional path for the NDJSON event file. `None` = no event file.
+    pub events_file: Option<PathBuf>,
     /// Whether ANSI colors should be emitted.
     pub color_enabled: bool,
 }
@@ -121,51 +116,19 @@ impl Cli {
     ///
     /// # Errors
     ///
-    /// Returns an error if flags conflict (e.g. `--log - --format table`),
-    /// or if `--json <file>` is used (hard error suggesting `--log`).
+    /// Returns an error if the events file path is not valid UTF-8.
     pub fn resolve_output(&self) -> Result<OutputConfig> {
-        let mut format = self.format;
+        let format = self.format.unwrap_or_default();
 
-        // --json handling: bare --json (or --json -) is alias for --format json.
-        // --json <file> is a hard error directing users to --log.
-        if let Some(ref path) = self.json {
-            if path != "-" {
-                bail!(
-                    "--json <file> is no longer supported. \
-                     Use --log {path} instead (optionally with --format json)."
-                );
-            }
-            if self.format == OutputFormat::Table {
-                // --json without explicit --format: treat as --format json
-                format = OutputFormat::Json;
-            }
+        // Validate events file path is valid UTF-8 (from_path expects &str)
+        if let Some(ref p) = self.events {
+            p.to_str().with_context(|| {
+                format!("--events path is not valid UTF-8: {}", p.to_string_lossy())
+            })?;
         }
-
-        // --log - implies --format json
-        if self.log.as_deref() == Some("-") {
-            if self.format == OutputFormat::Table && self.json.is_none() {
-                // User explicitly passed --format table + --log -: conflict
-                if self.format_was_explicit() {
-                    bail!(
-                        "--log - streams NDJSON to stdout, which conflicts with --format table. \
-                         Use --format json with --log -, or write to a file: --log <file>."
-                    );
-                }
-                format = OutputFormat::Json;
-            } else if self.format == OutputFormat::Table {
-                // --json (alias for --format json) + --log - is fine, format already set above
-            }
-        }
-
-        let log_file = self.log.as_deref().and_then(|p| {
-            if p == "-" {
-                None // stdout, handled by format=json
-            } else {
-                Some(PathBuf::from(p))
-            }
-        });
 
         let color_enabled = match self.color {
+            _ if format == OutputFormat::Json => false,
             ColorMode::Always => true,
             ColorMode::Never => false,
             ColorMode::Auto => {
@@ -175,19 +138,9 @@ impl Cli {
 
         Ok(OutputConfig {
             format,
-            log_file,
+            events_file: self.events.clone(),
             color_enabled,
         })
-    }
-
-    /// Returns true if `--format` was explicitly provided on the command line.
-    ///
-    /// Clap sets the default value for `format`, so we detect explicit usage by
-    /// checking if `--format` appears in the raw args. This is a heuristic used
-    /// only for conflict detection with `--log -`.
-    #[allow(clippy::unused_self)]
-    fn format_was_explicit(&self) -> bool {
-        std::env::args().any(|a| a == "--format")
     }
 }
 
@@ -644,16 +597,17 @@ CapEff:\t0000000000000000";
     }
 
     mod output_resolution {
-        use assert2::{assert, check};
+        use std::path::PathBuf;
+
+        use assert2::check;
 
         use crate::cli::{ColorMode, OutputFormat};
 
         /// Build a minimal `Cli` with only the output-relevant fields set.
         fn cli(
-            format: OutputFormat,
-            log: Option<&str>,
+            format: Option<OutputFormat>,
+            events: Option<&str>,
             color: ColorMode,
-            json: Option<&str>,
         ) -> crate::cli::Cli {
             crate::cli::Cli {
                 size: 64 * 1024 * 1024,
@@ -662,9 +616,8 @@ CapEff:\t0000000000000000";
                 sequential: false,
                 units: ferrite::units::UnitSystem::Binary,
                 format,
-                log: log.map(String::from),
+                events: events.map(PathBuf::from),
                 color,
-                json: json.map(String::from),
                 #[cfg(feature = "tui")]
                 tui: crate::cli::TuiMode::Never,
                 no_phys: true,
@@ -674,88 +627,101 @@ CapEff:\t0000000000000000";
 
         #[test]
         fn defaults_produce_table_format() {
-            let c = cli(OutputFormat::Table, None, ColorMode::Auto, None);
-            let out = c.resolve_output().unwrap();
+            let out = cli(None, None, ColorMode::Auto).resolve_output().unwrap();
             check!(out.format == OutputFormat::Table);
-            check!(out.log_file.is_none());
+            check!(out.events_file.is_none());
+        }
+
+        #[test]
+        fn explicit_table_format() {
+            let out = cli(Some(OutputFormat::Table), None, ColorMode::Auto)
+                .resolve_output()
+                .unwrap();
+            check!(out.format == OutputFormat::Table);
         }
 
         #[test]
         fn format_json_alone() {
-            let c = cli(OutputFormat::Json, None, ColorMode::Auto, None);
-            let out = c.resolve_output().unwrap();
+            let out = cli(Some(OutputFormat::Json), None, ColorMode::Auto)
+                .resolve_output()
+                .unwrap();
             check!(out.format == OutputFormat::Json);
-            check!(out.log_file.is_none());
+            check!(out.events_file.is_none());
         }
 
         #[test]
-        fn format_json_with_log_file() {
-            let c = cli(
-                OutputFormat::Json,
+        fn format_json_with_events_file() {
+            let out = cli(
+                Some(OutputFormat::Json),
                 Some("/tmp/test.ndjson"),
                 ColorMode::Auto,
-                None,
-            );
-            let out = c.resolve_output().unwrap();
+            )
+            .resolve_output()
+            .unwrap();
             check!(out.format == OutputFormat::Json);
-            assert!(out.log_file.is_some());
-            check!(out.log_file.unwrap().to_str().unwrap() == "/tmp/test.ndjson");
+            check!(out.events_file.as_deref() == Some(std::path::Path::new("/tmp/test.ndjson")));
         }
 
         #[test]
-        fn log_dash_implies_json_format() {
-            let c = cli(OutputFormat::Table, Some("-"), ColorMode::Auto, None);
-            let out = c.resolve_output().unwrap();
-            check!(out.format == OutputFormat::Json);
-            check!(out.log_file.is_none());
+        fn events_file_with_table_format() {
+            let out = cli(None, Some("/tmp/events.ndjson"), ColorMode::Auto)
+                .resolve_output()
+                .unwrap();
+            check!(out.format == OutputFormat::Table);
+            check!(out.events_file.is_some());
         }
 
         #[test]
-        fn log_file_with_table_format() {
-            let c = cli(
-                OutputFormat::Table,
+        fn events_file_with_explicit_table_format() {
+            let out = cli(
+                Some(OutputFormat::Table),
                 Some("/tmp/events.ndjson"),
                 ColorMode::Auto,
-                None,
-            );
-            let out = c.resolve_output().unwrap();
+            )
+            .resolve_output()
+            .unwrap();
             check!(out.format == OutputFormat::Table);
-            assert!(out.log_file.is_some());
-        }
-
-        #[test]
-        fn json_flag_bare_aliases_format_json() {
-            let c = cli(OutputFormat::Table, None, ColorMode::Auto, Some("-"));
-            let out = c.resolve_output().unwrap();
-            check!(out.format == OutputFormat::Json);
-        }
-
-        #[test]
-        fn json_flag_with_path_errors() {
-            let c = cli(
-                OutputFormat::Table,
-                None,
-                ColorMode::Auto,
-                Some("/tmp/out.json"),
-            );
-            let err = c.resolve_output().unwrap_err();
-            let msg = err.to_string();
-            assert!(msg.contains("--json <file> is no longer supported"));
-            assert!(msg.contains("--log"));
+            check!(out.events_file.is_some());
         }
 
         #[test]
         fn color_always() {
-            let c = cli(OutputFormat::Table, None, ColorMode::Always, None);
-            let out = c.resolve_output().unwrap();
+            let out = cli(None, None, ColorMode::Always).resolve_output().unwrap();
             check!(out.color_enabled);
         }
 
         #[test]
         fn color_never() {
-            let c = cli(OutputFormat::Table, None, ColorMode::Never, None);
-            let out = c.resolve_output().unwrap();
+            let out = cli(None, None, ColorMode::Never).resolve_output().unwrap();
             check!(!out.color_enabled);
+        }
+
+        #[test]
+        fn json_format_forces_color_off() {
+            let out = cli(Some(OutputFormat::Json), None, ColorMode::Always)
+                .resolve_output()
+                .unwrap();
+            check!(!out.color_enabled);
+        }
+
+        #[test]
+        fn json_format_with_events_forces_color_off() {
+            let out = cli(
+                Some(OutputFormat::Json),
+                Some("/tmp/events.ndjson"),
+                ColorMode::Always,
+            )
+            .resolve_output()
+            .unwrap();
+            check!(!out.color_enabled);
+        }
+
+        #[test]
+        fn implicit_format_defaults_to_table() {
+            let out = cli(None, Some("/tmp/events.ndjson"), ColorMode::Auto)
+                .resolve_output()
+                .unwrap();
+            check!(out.format == OutputFormat::Table);
         }
     }
 }

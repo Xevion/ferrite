@@ -32,8 +32,8 @@ impl fmt::Display for Truncated<'_> {
 /// Headless live event consumer that prints human-readable output from the
 /// event bus during a test run.
 ///
-/// Replaces `OutputSink::print_*()` methods. Writes directly to a `Write`
-/// target (typically stdout). Active when `--format table` (the default).
+/// Writes directly to a `Write` target (typically stdout).
+/// Active when `--format table` (the default).
 pub struct HeadlessPrinter<W: Write> {
     out: W,
     unit_system: UnitSystem,

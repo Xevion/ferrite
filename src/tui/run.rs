@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use crate::alloc::CompactionGuard;
 use crate::alloc::TestBuffer;
 use crate::events::{self, RunEvent};
+use crate::ndjson::NdjsonEventWriter;
 use crate::pattern::Pattern;
 use crate::phys::{MapStats, PagemapResolver, PhysResolver};
 use crate::runner::{self, PassResult, RunConfig, RunResults};
@@ -48,7 +49,7 @@ pub struct TuiTestSetup {
 ///
 /// Panics if internal mutexes are poisoned (indicates a prior panic
 /// in a worker thread).
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn run_tui_mode(
     size: usize,
     passes: usize,
@@ -57,6 +58,7 @@ pub fn run_tui_mode(
     mut setup: TuiTestSetup,
     patterns: Vec<Pattern>,
     tracing_handle: &TracingReloadHandle,
+    events_writer: Option<NdjsonEventWriter>,
 ) -> Result<RunResults> {
     let (tui_tx, tui_rx) = mpsc::sync_channel::<TuiEvent>(256);
 
@@ -80,9 +82,7 @@ pub fn run_tui_mode(
     let n_regions = if regions_arg > 0 {
         regions_arg
     } else {
-        std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(1)
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
     }
     .min(total_words / min_words_per_region)
     .max(1);
@@ -194,14 +194,15 @@ pub fn run_tui_mode(
         })
         .expect("failed to spawn test-driver thread");
 
-    // Bridge thread: receives RunEvents, updates Segment state, forwards to TUI channel
+    // Bridge thread: receives RunEvents, updates Segment state, forwards to TUI channel,
+    // and optionally writes NDJSON events to a file.
     let bridge_regions: Vec<Arc<Segment>> = regions.iter().map(Arc::clone).collect();
     let bridge_tui_tx = tui_tx.clone();
     let bridge_handle = thread::Builder::new()
         .name("event-bridge".into())
         .spawn(move || {
             let bridge = EventBridge::new(bridge_regions, bridge_tui_tx, passes);
-            bridge.run(&event_rx);
+            bridge.run(&event_rx, events_writer)
         })
         .expect("failed to spawn event-bridge thread");
 
@@ -218,9 +219,10 @@ pub fn run_tui_mode(
         shutdown::force_exit(2);
     }
     let _ = worker.join();
-    if bridge_handle.join().is_err() {
+    let mut events_writer = bridge_handle.join().unwrap_or_else(|_| {
         eprintln!("event bridge thread panicked");
-    }
+        None
+    });
 
     let run_elapsed = run_start.elapsed();
 
@@ -240,6 +242,12 @@ pub fn run_tui_mode(
         parallel,
     };
     let results = RunResults::from_passes(merged_passes, config, run_elapsed);
+
+    // Write the summary run_complete event to the NDJSON file
+    if let Some(w) = events_writer.as_mut() {
+        w.write_run_complete(passes, results.total_failures, run_elapsed);
+    }
+
     Ok(results)
 }
 
