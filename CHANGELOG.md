@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.2.0](https://github.com/Xevion/ferrite/compare/v0.1.4...v0.2.0) (2026-06-20)
+
+
+### Features
+
+* Add --format, --log, and --color flags with OutputConfig resolver ([3dc197e](https://github.com/Xevion/ferrite/commit/3dc197e2cbebc11648c819c4e4ad4419a054641c))
+* Add event bus, RunResults type, and post-run error analysis ([65d0286](https://github.com/Xevion/ferrite/commit/65d0286e99493d89d3b967c96624815a1006b1c5))
+* Add HeadlessPrinter and ResultsDoc/ResultsRenderer abstractions ([c58befc](https://github.com/Xevion/ferrite/commit/c58befc11c4b803c72a17309279cc365a7bc0dde))
+* Return RunResults from TUI mode and render post-exit summary ([c3917e1](https://github.com/Xevion/ferrite/commit/c3917e164a4b232bcb96213a7b3667fecbd9e5f8))
+* Versioned NDJSON schema, reloadable tracing, and Log event ([d5b3eac](https://github.com/Xevion/ferrite/commit/d5b3eac74733d8f7e4dac200b2740f1bdd15e3a8))
+
+
+### Bug Fixes
+
+* Eliminate 5s exit delay and restore post-TUI tracing ([a81a8ab](https://github.com/Xevion/ferrite/commit/a81a8ab9224fad4cfcf59cb18ada1a41e6bc2859))
+* **tempo:** Update tempo config to latest format ([1fc81ef](https://github.com/Xevion/ferrite/commit/1fc81efbb8a9ff2cbe053ddea31a0cf8d8ce0f14))
+
+
+### Code Refactoring
+
+* Extract EventBridge and rename TuiError to TuiFailure ([47eaff0](https://github.com/Xevion/ferrite/commit/47eaff03a3ea8ba1a275ac8b43fa43e6db6cca3d))
+* Replace --json/--log flags with --format and --events ([1118f40](https://github.com/Xevion/ferrite/commit/1118f40236f70129084370211b7234626d112022))
+* Replace OutputSink in runner with EventTx; add bridge threads ([38fa60e](https://github.com/Xevion/ferrite/commit/38fa60e556718ccad65d13e5e34829fc4994b54d))
+* Replace OutputSink with NdjsonEventWriter + HeadlessPrinter ([38ce935](https://github.com/Xevion/ferrite/commit/38ce935bf7ba46bbd79c046693d25301d11e37a8))
+
+
+### Miscellaneous
+
+* **deps:** Bump actions/checkout from 6 to 7 ([#26](https://github.com/Xevion/ferrite/issues/26)) ([1dca9b3](https://github.com/Xevion/ferrite/commit/1dca9b385863f42a78047965b4c7046b2dbb6757))
+* **deps:** Bump codecov/codecov-action from 6 to 7 ([2993873](https://github.com/Xevion/ferrite/commit/2993873570fc1ff724d1171e50c43336dc06000d))
+* **deps:** Bump googleapis/release-please-action from 4 to 5 ([#11](https://github.com/Xevion/ferrite/issues/11)) ([89595d9](https://github.com/Xevion/ferrite/commit/89595d96e5fe901000106b0ffbb457c602647543))
+* **deps:** Bump jiff from 0.2.23 to 0.2.28 ([1f56e43](https://github.com/Xevion/ferrite/commit/1f56e43f20f354d233a79321b12cc8f4e9ddc8b3))
+* **deps:** Bump nix from 0.31.2 to 0.31.3 ([c7e095e](https://github.com/Xevion/ferrite/commit/c7e095e58f92b8b0db8d8b46b0dac2c7dbdd1d12))
+* **deps:** Bump ratatui from 0.30.0 to 0.30.1 ([#25](https://github.com/Xevion/ferrite/issues/25)) ([c598a4b](https://github.com/Xevion/ferrite/commit/c598a4b71e87e8d5744dd0c367705aad36eac044))
+* **deps:** Bump serde_json from 1.0.149 to 1.0.150 ([#19](https://github.com/Xevion/ferrite/issues/19)) ([d1318a8](https://github.com/Xevion/ferrite/commit/d1318a8eb8f34c017cd9a159d6a2f7f026a10a05))
+* **deps:** Bump serial_test from 3.4.0 to 3.5.0 ([#23](https://github.com/Xevion/ferrite/issues/23)) ([ed16fe5](https://github.com/Xevion/ferrite/commit/ed16fe5b0f04324c7767218061688c639e5a620c))
+
 ## [0.1.4](https://github.com/Xevion/ferrite/compare/v0.1.3...v0.1.4) (2026-04-06)
 
 
