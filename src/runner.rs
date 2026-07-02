@@ -72,11 +72,19 @@ pub struct RunConfig {
     pub parallel: bool,
 }
 
+/// Results from one region (segment) of the allocation. Regions are spatial
+/// subdivisions tested by concurrent workers; each runs its own passes.
+#[derive(Debug, serde::Serialize)]
+pub struct RegionResult {
+    pub region_index: usize,
+    pub passes: Vec<PassResult>,
+}
+
 /// Complete results of a test run, suitable for serialization and post-processing.
 #[derive(Debug, serde::Serialize)]
 pub struct RunResults {
     pub config: RunConfig,
-    pub passes: Vec<PassResult>,
+    pub regions: Vec<RegionResult>,
     #[serde(with = "crate::units::duration_ms")]
     pub elapsed: std::time::Duration,
     pub total_failures: usize,
@@ -86,17 +94,43 @@ pub struct RunResults {
 }
 
 impl RunResults {
-    /// Build `RunResults` from pass results and configuration.
+    /// Build `RunResults` from a single region's pass results (the
+    /// whole-allocation, non-segmented path).
     #[must_use]
     pub fn from_passes(
         passes: Vec<PassResult>,
         config: RunConfig,
         elapsed: std::time::Duration,
     ) -> Self {
-        let total_failures = passes.iter().map(PassResult::total_failures).sum();
+        Self::from_indexed_regions(vec![(0, passes)], config, elapsed)
+    }
+
+    /// Build `RunResults` from per-region pass results, keyed by region index.
+    ///
+    /// Accepts regions in any order (workers push results in completion
+    /// order) and sorts them by index.
+    #[must_use]
+    pub fn from_indexed_regions(
+        mut indexed: Vec<(usize, Vec<PassResult>)>,
+        config: RunConfig,
+        elapsed: std::time::Duration,
+    ) -> Self {
+        indexed.sort_by_key(|(i, _)| *i);
+        let regions: Vec<RegionResult> = indexed
+            .into_iter()
+            .map(|(region_index, passes)| RegionResult {
+                region_index,
+                passes,
+            })
+            .collect();
+        let total_failures = regions
+            .iter()
+            .flat_map(|r| &r.passes)
+            .map(PassResult::total_failures)
+            .sum();
         Self {
             config,
-            passes,
+            regions,
             elapsed,
             total_failures,
             error_analysis: None,
@@ -343,6 +377,94 @@ mod tests {
             ecc_deltas: vec![],
         };
         check!(pr.total_failures() == 3);
+    }
+
+    mod run_results {
+        use std::time::Duration;
+
+        use assert2::{assert, check};
+
+        use crate::failure::FailureBuilder;
+
+        use super::*;
+
+        fn config(regions: usize) -> RunConfig {
+            RunConfig {
+                size: 8192,
+                passes: 1,
+                patterns: vec![Pattern::SolidBits],
+                regions,
+                parallel: false,
+            }
+        }
+
+        fn pass_with_failures(pass_number: usize, n: usize) -> PassResult {
+            let failures = (0..n)
+                .map(|i| {
+                    FailureBuilder::default()
+                        .addr(i * 8)
+                        .expected(0)
+                        .actual(1)
+                        .build()
+                })
+                .collect();
+            PassResult {
+                pass_number,
+                pattern_results: vec![PatternResult {
+                    pattern: Pattern::SolidBits,
+                    failures,
+                    elapsed: Duration::from_millis(10),
+                    bytes_processed: 8192,
+                    interrupted: false,
+                }],
+                ecc_deltas: vec![],
+            }
+        }
+
+        #[test]
+        fn from_passes_wraps_single_region() {
+            let results = RunResults::from_passes(
+                vec![pass_with_failures(1, 2)],
+                config(1),
+                Duration::from_millis(10),
+            );
+            check!(results.regions.len() == 1);
+            check!(results.regions[0].region_index == 0);
+            check!(results.total_failures == 2);
+        }
+
+        #[test]
+        fn from_indexed_regions_sorts_and_totals() {
+            let results = RunResults::from_indexed_regions(
+                vec![
+                    (2, vec![pass_with_failures(1, 1)]),
+                    (0, vec![pass_with_failures(1, 0)]),
+                    (1, vec![pass_with_failures(1, 3)]),
+                ],
+                config(3),
+                Duration::from_millis(10),
+            );
+            let indices: Vec<usize> = results.regions.iter().map(|r| r.region_index).collect();
+            check!(indices == vec![0, 1, 2]);
+            check!(results.total_failures == 4);
+        }
+
+        #[test]
+        fn serializes_regions_dimension() {
+            let results = RunResults::from_indexed_regions(
+                vec![
+                    (0, vec![pass_with_failures(1, 0)]),
+                    (1, vec![pass_with_failures(1, 1)]),
+                ],
+                config(2),
+                Duration::from_millis(10),
+            );
+            let json = serde_json::to_value(&results).unwrap();
+            assert!(json["regions"].is_array());
+            check!(json["regions"][0]["region_index"] == 0);
+            assert!(json["regions"][0]["passes"].is_array());
+            assert!(json.get("passes").is_none());
+        }
     }
 
     #[test]

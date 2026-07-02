@@ -20,6 +20,9 @@ use crate::units::{Size, UnitSystem};
 use super::bridge::EventBridge;
 use super::{Segment, TuiConfig, TuiEvent, TuiMakeWriter, TuiTraceGuard, TuiTraceState};
 
+/// Pass results per region, keyed by region index, in worker completion order.
+type RegionPasses = Vec<(usize, Vec<PassResult>)>;
+
 /// Type alias for the boxed tracing layer used with the reload handle.
 pub type BoxedTracingLayer =
     Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
@@ -138,7 +141,8 @@ pub fn run_tui_mode(
     let run_start = std::time::Instant::now();
 
     // Collect pass results from all region workers for post-TUI rendering.
-    let collected_results: Arc<Mutex<Vec<Vec<PassResult>>>> =
+    // Workers push in completion order; results carry their region index.
+    let collected_results: Arc<Mutex<RegionPasses>> =
         Arc::new(Mutex::new(Vec::with_capacity(n_regions)));
     let worker_collected = Arc::clone(&collected_results);
 
@@ -177,7 +181,7 @@ pub fn run_tui_mode(
                                 &on_activity,
                             ) {
                                 Ok(pass_results) => {
-                                    collected.lock().unwrap().push(pass_results);
+                                    collected.lock().unwrap().push((i, pass_results));
                                 }
                                 Err(e) => {
                                     warn!(region = i, "runner error: {e}");
@@ -226,13 +230,10 @@ pub fn run_tui_mode(
 
     let run_elapsed = run_start.elapsed();
 
-    // Merge pass results from all regions. Each region produces its own Vec<PassResult>;
-    // flatten them into a single list for RunResults.
-    let all_region_results = Arc::try_unwrap(collected_results)
+    let region_passes = Arc::try_unwrap(collected_results)
         .expect("worker threads have exited")
         .into_inner()
         .unwrap();
-    let merged_passes: Vec<PassResult> = all_region_results.into_iter().flatten().collect();
 
     let config = RunConfig {
         size,
@@ -241,7 +242,7 @@ pub fn run_tui_mode(
         regions: n_regions,
         parallel,
     };
-    let results = RunResults::from_passes(merged_passes, config, run_elapsed);
+    let results = RunResults::from_indexed_regions(region_passes, config, run_elapsed);
 
     // Write the summary run_complete event to the NDJSON file
     if let Some(w) = events_writer.as_mut() {

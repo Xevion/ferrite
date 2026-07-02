@@ -146,8 +146,9 @@ pub struct ErrorAnalysis {
 
 /// Analyze raw run results and attach enriched error analysis.
 ///
-/// Computes [`BitErrorStats`] from all failures across all passes, classifies
-/// the error pattern, and stores the result in `results.error_analysis`.
+/// Computes [`BitErrorStats`] from all failures across all regions and
+/// passes, classifies the error pattern, and stores the result in
+/// `results.error_analysis`.
 ///
 /// This is a no-op when there are no failures.
 pub fn analyze(results: &mut RunResults) {
@@ -158,7 +159,7 @@ pub fn analyze(results: &mut RunResults) {
     let mut stats = BitErrorStats::new();
     let mut per_pattern: Vec<(Pattern, usize)> = Vec::new();
 
-    for pass_result in &results.passes {
+    for pass_result in results.regions.iter().flat_map(|r| &r.passes) {
         for pattern_result in &pass_result.pattern_results {
             let count = pattern_result.failures.len();
             if count > 0 {
@@ -543,6 +544,36 @@ mod tests {
                         }],
                         ecc_deltas: vec![],
                     },
+                ],
+                make_config(),
+                Duration::from_millis(100),
+            );
+
+            analyze(&mut results);
+            let ea = results.error_analysis.as_ref().unwrap();
+            check!(ea.per_pattern_failures == vec![(Pattern::SolidBits, 2)]);
+            check!(ea.bit_positions == vec![(3, 2)]);
+        }
+
+        #[test]
+        fn aggregates_across_regions() {
+            let region_pass = |failure: crate::Failure| {
+                vec![PassResult {
+                    pass_number: 1,
+                    pattern_results: vec![PatternResult {
+                        pattern: Pattern::SolidBits,
+                        failures: vec![failure],
+                        elapsed: Duration::from_millis(50),
+                        bytes_processed: 8192,
+                        interrupted: false,
+                    }],
+                    ecc_deltas: vec![],
+                }]
+            };
+            let mut results = RunResults::from_indexed_regions(
+                vec![
+                    (0, region_pass(f(0x1000, 0x0, 1 << 3))),
+                    (1, region_pass(f(0x2000, 0x0, 1 << 3))),
                 ],
                 make_config(),
                 Duration::from_millis(100),
