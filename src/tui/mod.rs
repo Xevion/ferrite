@@ -32,7 +32,7 @@ use render::render_heatmap;
 pub enum TuiOutcome {
     /// User pressed 'q', Esc, or Ctrl+C.
     Quit,
-    /// All regions finished testing.
+    /// The segment finished testing.
     AllComplete,
     /// Event channel disconnected (all senders dropped).
     Disconnected,
@@ -84,8 +84,7 @@ impl FlippedBits {
 /// main crate's `Failure` type.
 #[derive(Debug)]
 pub struct TuiFailure {
-    pub region_idx: usize,
-    pub region_name: String,
+    pub segment_name: String,
     pub address: u64,
     pub expected: u64,
     pub actual: u64,
@@ -102,7 +101,8 @@ pub enum TuiEvent {
     /// A pre-formatted ANSI log line from `tracing_subscriber::fmt`.
     Log(String),
     Failure(TuiFailure),
-    RegionDone(usize),
+    /// The segment finished all configured passes.
+    Done,
 }
 
 /// TUI display configuration.
@@ -118,9 +118,9 @@ impl Default for TuiConfig {
     }
 }
 
-/// Shared state for a single memory region being tested.
+/// Shared state for the test segment displayed by the TUI.
 ///
-/// Workers update atomics from their threads; the TUI reads them for rendering.
+/// Worker threads update atomics from their threads; the TUI reads them for rendering.
 pub struct Segment {
     pub name: String,
     pub size_bytes: usize,
@@ -327,7 +327,7 @@ impl Drop for TuiWriter {
 pub fn run_event_loop<B>(
     terminal: &mut Terminal<B>,
     config: &TuiConfig,
-    regions: &[Arc<Segment>],
+    segment: &Segment,
     rx: &mpsc::Receiver<TuiEvent>,
 ) -> anyhow::Result<TuiLoopResult>
 where
@@ -338,16 +338,14 @@ where
     let mut errors: Vec<TuiFailure> = Vec::new();
     // Pending log lines, drained once per tick to bound insert_before calls.
     let mut log_buf: VecDeque<ratatui::text::Text<'static>> = VecDeque::with_capacity(32);
-    let mut regions_done = 0;
     let mut verbose = false;
-    let total_regions = regions.len();
 
     // Establish the viewport before processing any events -- insert_before
     // misbehaves if called before the first draw.
     terminal.draw(|frame| {
         render_heatmap(
             frame,
-            regions,
+            segment,
             &errors,
             start_time.elapsed(),
             verbose,
@@ -373,14 +371,12 @@ where
                         break TuiOutcome::Quit;
                     }
                     KeyCode::Char('p') => {
-                        let any_paused = regions.iter().any(|r| r.paused.load(Ordering::Relaxed));
-                        for r in regions {
-                            r.paused.store(!any_paused, Ordering::Relaxed);
-                        }
-                        if any_paused {
-                            info!("resumed all regions");
+                        let paused = segment.paused.load(Ordering::Relaxed);
+                        segment.paused.store(!paused, Ordering::Relaxed);
+                        if paused {
+                            info!("resumed segment");
                         } else {
-                            info!("paused all regions");
+                            info!("paused segment");
                         }
                     }
                     KeyCode::Char('s') => {
@@ -404,17 +400,10 @@ where
             Ok(TuiEvent::Failure(failure)) => {
                 errors.push(failure);
             }
-            Ok(TuiEvent::RegionDone(idx)) => {
-                regions_done += 1;
-                let region = regions.get(idx).with_context(|| {
-                    format!("RegionDone({idx}) out of bounds (len={})", regions.len())
-                })?;
-                info!(region = region.name.as_str(), "region complete");
-                if regions_done >= total_regions {
-                    info!("all regions complete");
-                    crate::shutdown::request_quit(crate::shutdown::QuitReason::UserQuit);
-                    break TuiOutcome::AllComplete;
-                }
+            Ok(TuiEvent::Done) => {
+                info!(segment = segment.name.as_str(), "segment complete");
+                crate::shutdown::request_quit(crate::shutdown::QuitReason::UserQuit);
+                break TuiOutcome::AllComplete;
             }
             Ok(TuiEvent::Tick) | Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !log_buf.is_empty() {
@@ -436,14 +425,14 @@ where
 
         let elapsed = start_time.elapsed();
         terminal.draw(|frame| {
-            render_heatmap(frame, regions, &errors, elapsed, verbose, config.symbols);
+            render_heatmap(frame, segment, &errors, elapsed, verbose, config.symbols);
         })?;
     };
 
     // Final render to capture end state.
     let elapsed = start_time.elapsed();
     terminal.draw(|frame| {
-        render_heatmap(frame, regions, &errors, elapsed, verbose, config.symbols);
+        render_heatmap(frame, segment, &errors, elapsed, verbose, config.symbols);
     })?;
 
     Ok(TuiLoopResult {
@@ -454,7 +443,7 @@ where
 }
 
 /// Run the TUI event loop with a real terminal. Blocks until the user quits
-/// or all regions complete.
+/// or the segment completes.
 ///
 /// This is the production entry point: it sets up raw mode, an inline viewport,
 /// and spawns input/tick threads, then delegates to [`run_event_loop`].
@@ -469,13 +458,14 @@ where
 /// Panics if the input or tick thread cannot be spawned.
 pub fn run_tui(
     config: &TuiConfig,
-    regions: &[Arc<Segment>],
+    segment: &Segment,
     tx: &mpsc::SyncSender<TuiEvent>,
     rx: &mpsc::Receiver<TuiEvent>,
 ) -> anyhow::Result<()> {
     let guard = crate::shutdown::TerminalGuard::new()?;
 
-    let viewport_height = (regions.len() + 8) as u16;
+    // Header + memory map + labels + segment row + separator + errors (min 3) + controls.
+    let viewport_height: u16 = 9;
     let mut terminal = Terminal::with_options(
         ratatui::backend::CrosstermBackend::new(io::stdout()),
         TerminalOptions {
@@ -511,7 +501,7 @@ pub fn run_tui(
         })
         .expect("failed to spawn tui-tick thread");
 
-    run_event_loop(&mut terminal, config, regions, rx)?;
+    run_event_loop(&mut terminal, config, segment, rx)?;
 
     // Clear the inline viewport while raw mode is still active (guard drops after return).
     terminal.clear().context("failed to clear terminal")?;
@@ -535,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn region_state_new_defaults() {
+    fn segment_new_defaults() {
         let rs = Segment::new("test".into(), 4096, vec!["solid".into(), "walk".into()]);
         check!(rs.name == "test");
         check!(rs.size_bytes == 4096);
@@ -600,11 +590,11 @@ mod tests {
 
     #[test]
     fn debug_format_includes_fields() {
-        let rs = Segment::new("test-region".into(), 8192, vec!["solid".into()]);
+        let rs = Segment::new("test-segment".into(), 8192, vec!["solid".into()]);
         rs.failure_count.store(3, Ordering::Relaxed);
         rs.progress_bp.store(5000, Ordering::Relaxed);
         let debug = format!("{rs:?}");
-        assert!(debug.contains("test-region"));
+        assert!(debug.contains("test-segment"));
         assert!(debug.contains("8192"));
         assert!(debug.contains("solid"));
         assert!(debug.contains("5000"));
@@ -706,17 +696,9 @@ mod tests {
             .unwrap()
         }
 
-        fn make_regions(n: usize, patterns: &[&str]) -> Vec<Arc<Segment>> {
+        fn make_segment(name: &str, patterns: &[&str]) -> Arc<Segment> {
             let names: Vec<String> = patterns.iter().map(|s| (*s).to_string()).collect();
-            (0..n)
-                .map(|i| {
-                    Arc::new(Segment::new(
-                        format!("r{i}"),
-                        8 * 1024 * 1024,
-                        names.clone(),
-                    ))
-                })
-                .collect()
+            Arc::new(Segment::new(name.to_string(), 8 * 1024 * 1024, names))
         }
 
         fn press(code: KeyCode) -> TuiEvent {
@@ -736,11 +718,10 @@ mod tests {
             })
         }
 
-        fn make_error(region_idx: usize) -> TuiEvent {
+        fn make_error() -> TuiEvent {
             TuiEvent::Failure(TuiFailure {
-                region_idx,
-                region_name: format!("r{region_idx}"),
-                address: 0xdead_0000 + region_idx as u64,
+                segment_name: "r0".into(),
+                address: 0xdead_0000,
                 expected: 0xFF,
                 actual: 0xFE,
                 flipped_bits: FlippedBits::Single(0),
@@ -768,10 +749,10 @@ mod tests {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
             drop(tx);
-            let regions = make_regions(2, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 15);
 
-            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             check!(result.outcome == TuiOutcome::Disconnected);
         }
 
@@ -780,13 +761,13 @@ mod tests {
         fn exits_on_quit_key() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(2, &["solid", "walk"]);
+            let segment = make_segment("r0", &["solid", "walk"]);
             let mut term = make_terminal(80, 15);
 
             tx.send(press(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
-            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             check!(result.outcome == TuiOutcome::Quit);
         }
 
@@ -795,13 +776,13 @@ mod tests {
         fn exits_on_esc_key() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(1, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 15);
 
             tx.send(press(KeyCode::Esc)).unwrap();
             drop(tx);
 
-            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             check!(result.outcome == TuiOutcome::Quit);
         }
 
@@ -810,48 +791,30 @@ mod tests {
         fn exits_on_ctrl_c() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(1, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 15);
 
             tx.send(press_modified(KeyCode::Char('c'), KeyModifiers::CONTROL))
                 .unwrap();
             drop(tx);
 
-            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             check!(result.outcome == TuiOutcome::Quit);
         }
 
         #[test]
         #[serial]
-        fn exits_on_all_regions_done() {
+        fn exits_on_segment_done() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(3, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 18);
 
-            tx.send(TuiEvent::RegionDone(0)).unwrap();
-            tx.send(TuiEvent::RegionDone(1)).unwrap();
-            tx.send(TuiEvent::RegionDone(2)).unwrap();
+            tx.send(TuiEvent::Done).unwrap();
             drop(tx);
 
-            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             check!(result.outcome == TuiOutcome::AllComplete);
-        }
-
-        #[test]
-        #[serial]
-        fn region_done_partial_continues() {
-            shutdown::reset();
-            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(2, &["solid"]);
-            let mut term = make_terminal(80, 15);
-
-            // Only 1 of 2 regions done — loop should continue until disconnect.
-            tx.send(TuiEvent::RegionDone(0)).unwrap();
-            drop(tx);
-
-            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
-            check!(result.outcome == TuiOutcome::Disconnected);
         }
 
         #[test]
@@ -859,33 +822,31 @@ mod tests {
         fn key_release_ignored() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(1, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 15);
 
             // Release 'q' should not cause a quit.
             tx.send(release(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
-            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             check!(result.outcome == TuiOutcome::Disconnected);
         }
 
         #[test]
         #[serial]
-        fn pause_toggles_region_state() {
+        fn pause_toggles_segment_state() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(2, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 15);
 
             // Press 'p' to pause, then disconnect.
             tx.send(press(KeyCode::Char('p'))).unwrap();
             drop(tx);
 
-            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
-            for r in &regions {
-                assert!(r.paused.load(Ordering::Relaxed));
-            }
+            let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
+            assert!(segment.paused.load(Ordering::Relaxed));
         }
 
         #[test]
@@ -893,7 +854,7 @@ mod tests {
         fn unpause_toggles_back() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(2, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 15);
 
             // Two presses: pause then unpause.
@@ -901,10 +862,8 @@ mod tests {
             tx.send(press(KeyCode::Char('p'))).unwrap();
             drop(tx);
 
-            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
-            for r in &regions {
-                assert!(!r.paused.load(Ordering::Relaxed));
-            }
+            let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
+            assert!(!segment.paused.load(Ordering::Relaxed));
         }
 
         #[test]
@@ -912,13 +871,13 @@ mod tests {
         fn verbose_toggle() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(1, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 15);
 
             tx.send(press(KeyCode::Char('v'))).unwrap();
             drop(tx);
 
-            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             assert!(result.verbose);
         }
 
@@ -927,14 +886,14 @@ mod tests {
         fn verbose_double_toggle_off() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(1, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 15);
 
             tx.send(press(KeyCode::Char('v'))).unwrap();
             tx.send(press(KeyCode::Char('v'))).unwrap();
             drop(tx);
 
-            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             assert!(!result.verbose);
         }
 
@@ -943,19 +902,16 @@ mod tests {
         fn error_events_collected() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(2, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 15);
 
-            tx.send(make_error(0)).unwrap();
-            tx.send(make_error(1)).unwrap();
-            tx.send(make_error(0)).unwrap();
+            tx.send(make_error()).unwrap();
+            tx.send(make_error()).unwrap();
+            tx.send(make_error()).unwrap();
             drop(tx);
 
-            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             check!(result.errors.len() == 3);
-            check!(result.errors[0].region_idx == 0);
-            check!(result.errors[1].region_idx == 1);
-            check!(result.errors[2].region_idx == 0);
         }
 
         #[test]
@@ -963,8 +919,8 @@ mod tests {
         fn progress_renders_correctly() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(1, &["solid", "walk"]);
-            regions[0].progress_bp.store(5000, Ordering::Relaxed);
+            let segment = make_segment("r0", &["solid", "walk"]);
+            segment.progress_bp.store(5000, Ordering::Relaxed);
             let mut term = make_terminal(80, 15);
 
             // Single tick to trigger a render, then quit.
@@ -972,7 +928,7 @@ mod tests {
             tx.send(press(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
-            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             let text = buf_text(&term);
             assert!(text.contains("50.0%"), "expected '50.0%' in: {text}");
         }
@@ -982,15 +938,15 @@ mod tests {
         fn pattern_name_renders() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(1, &["solid", "walk"]);
-            regions[0].set_pattern(1); // "walk"
+            let segment = make_segment("r0", &["solid", "walk"]);
+            segment.set_pattern(1); // "walk"
             let mut term = make_terminal(80, 15);
 
             tx.send(TuiEvent::Tick).unwrap();
             tx.send(press(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
-            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             let text = buf_text(&term);
             assert!(text.contains("walk"), "expected 'walk' in: {text}");
         }
@@ -1000,18 +956,18 @@ mod tests {
         fn error_table_renders() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(1, &["solid"]);
-            regions[0].record_failure();
+            let segment = make_segment("r0", &["solid"]);
+            segment.record_failure();
             let mut term = make_terminal(120, 15);
 
-            tx.send(make_error(0)).unwrap();
+            tx.send(make_error()).unwrap();
             tx.send(TuiEvent::Tick).unwrap();
             tx.send(press(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
-            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             let text = buf_text(&term);
-            assert!(text.contains("r0"), "expected region name in error table");
+            assert!(text.contains("r0"), "expected segment name in error table");
             assert!(
                 text.contains("solid"),
                 "expected pattern name in error table"
@@ -1020,21 +976,21 @@ mod tests {
 
         #[test]
         #[serial]
-        fn header_shows_region_count() {
+        fn header_shows_segment_name() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(3, &["solid"]);
+            let segment = make_segment("4.0 GiB", &["solid"]);
             let mut term = make_terminal(80, 18);
 
             tx.send(TuiEvent::Tick).unwrap();
             tx.send(press(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
-            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             let text = buf_text(&term);
             assert!(
-                text.contains("3 regions"),
-                "expected '3 regions' in header: {text}"
+                text.contains("4.0 GiB"),
+                "expected segment name in header: {text}"
             );
         }
 
@@ -1043,15 +999,15 @@ mod tests {
         fn header_shows_failure_count() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(1, &["solid"]);
-            regions[0].failure_count.store(7, Ordering::Relaxed);
+            let segment = make_segment("r0", &["solid"]);
+            segment.failure_count.store(7, Ordering::Relaxed);
             let mut term = make_terminal(80, 15);
 
             tx.send(TuiEvent::Tick).unwrap();
             tx.send(press(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
-            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             let text = buf_text(&term);
             assert!(
                 text.contains("7 failures"),
@@ -1064,13 +1020,13 @@ mod tests {
         fn controls_bar_present() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-            let regions = make_regions(1, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 15);
 
             tx.send(press(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
-            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             let text = buf_text(&term);
             assert!(text.contains("ause"), "expected pause control");
             assert!(text.contains("uit"), "expected quit control");
@@ -1081,15 +1037,14 @@ mod tests {
         fn log_events_dont_corrupt_viewport() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(64);
-            let regions = make_regions(2, &["solid", "walk"]);
-            regions[0].progress_bp.store(5000, Ordering::Relaxed);
-            regions[1].progress_bp.store(7500, Ordering::Relaxed);
+            let segment = make_segment("r0", &["solid", "walk"]);
+            segment.progress_bp.store(5000, Ordering::Relaxed);
             let mut term = make_terminal(100, 18);
 
             // Flood with log events interleaved with ticks.
             for i in 0..20 {
                 tx.send(TuiEvent::Log(format!(
-                    "2026-01-01 INFO region-0: test log line {i}"
+                    "2026-01-01 INFO segment: test log line {i}"
                 )))
                 .unwrap();
                 if i % 5 == 0 {
@@ -1099,18 +1054,14 @@ mod tests {
             tx.send(press(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
-            let _ = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             let text = buf_text(&term);
 
             // The viewport should contain the heatmap content, not log fragments.
             assert!(text.contains("ferrite"), "header should be present");
             assert!(
                 text.contains("50.0%"),
-                "region 0 progress should render cleanly"
-            );
-            assert!(
-                text.contains("75.0%"),
-                "region 1 progress should render cleanly"
+                "segment progress should render cleanly"
             );
             // Log text should NOT appear in the rendered viewport buffer.
             assert!(
@@ -1124,19 +1075,19 @@ mod tests {
         fn rapid_mixed_events() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(128);
-            let regions = make_regions(2, &["solid"]);
+            let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(100, 18);
 
             // Burst of mixed events.
             for i in 0..10 {
                 tx.send(TuiEvent::Log(format!("log line {i}"))).unwrap();
-                tx.send(make_error(i % 2)).unwrap();
+                tx.send(make_error()).unwrap();
                 tx.send(TuiEvent::Tick).unwrap();
             }
             tx.send(press(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
-            let result = run_event_loop(&mut term, &config(), &regions, &rx).unwrap();
+            let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             check!(result.errors.len() == 10);
 
             let text = buf_text(&term);

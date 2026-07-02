@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -42,31 +41,10 @@ impl SymbolSet {
     }
 }
 
-/// Compute region-to-column mappings for the memory map display.
-fn region_columns(regions: &[Arc<Segment>], usable_width: usize) -> Vec<(usize, usize)> {
-    let total_bytes: usize = regions.iter().map(|r| r.size_bytes).sum();
-    if total_bytes == 0 {
-        return vec![(0, 1); regions.len()];
-    }
-    let mut result = Vec::with_capacity(regions.len());
-    let mut col = 0;
-    for (i, region) in regions.iter().enumerate() {
-        let w = if i == regions.len() - 1 {
-            usable_width - col
-        } else {
-            ((region.size_bytes as f64 / total_bytes as f64) * usable_width as f64).round() as usize
-        }
-        .max(1);
-        result.push((col, w));
-        col += w;
-    }
-    result
-}
-
 /// Top-level renderer: draws all TUI sections into the frame.
 pub fn render_heatmap(
     frame: &mut Frame,
-    regions: &[Arc<Segment>],
+    segment: &Segment,
     errors: &[TuiFailure],
     elapsed: Duration,
     verbose: bool,
@@ -74,53 +52,43 @@ pub fn render_heatmap(
 ) {
     let area = frame.area();
 
-    let mut constraints = vec![
+    let constraints = vec![
         Constraint::Length(1), // header
         Constraint::Length(1), // memory map
         Constraint::Length(1), // labels
+        Constraint::Length(1), // segment bar
+        Constraint::Length(1), // separator
+        Constraint::Min(3),    // errors
+        Constraint::Length(1), // controls
     ];
-    for _ in regions {
-        constraints.push(Constraint::Length(1));
-    }
-    constraints.push(Constraint::Length(1)); // separator
-    constraints.push(Constraint::Min(3)); // errors
-    constraints.push(Constraint::Length(1)); // controls
 
     let chunks = ratatui::layout::Layout::vertical(constraints).split(area);
 
-    render_header(frame, regions, elapsed, verbose, chunks[0]);
-    render_memory_map(frame, regions, errors, chunks[1], symbols);
-    render_memory_map_labels(frame, regions, chunks[2]);
-
-    for (i, region) in regions.iter().enumerate() {
-        render_heatmap_region(frame, region, errors, i, chunks[i + 3], symbols);
-    }
-
-    let sep_idx = regions.len() + 3;
+    render_header(frame, segment, elapsed, verbose, chunks[0]);
+    render_memory_map(frame, segment, errors, chunks[1], symbols);
+    render_memory_map_labels(frame, segment, chunks[2]);
+    render_segment_bar(frame, segment, errors, chunks[3], symbols);
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "─".repeat(chunks[sep_idx].width as usize),
+            "─".repeat(chunks[4].width as usize),
             Style::default().fg(palette::SEPARATOR),
         ))),
-        chunks[sep_idx],
+        chunks[4],
     );
 
-    render_error_area(frame, errors, chunks[sep_idx + 1]);
-    render_controls(frame, chunks[sep_idx + 2]);
+    render_error_area(frame, errors, chunks[5]);
+    render_controls(frame, chunks[6]);
 }
 
 fn render_header(
     frame: &mut Frame,
-    regions: &[Arc<Segment>],
+    segment: &Segment,
     elapsed: Duration,
     verbose: bool,
     area: ratatui::layout::Rect,
 ) {
-    let total_failures: usize = regions
-        .iter()
-        .map(|r| r.failure_count.load(Ordering::Relaxed))
-        .sum();
+    let total_failures = segment.failure_count.load(Ordering::Relaxed);
 
     let mut spans = vec![
         Span::styled(
@@ -129,7 +97,7 @@ fn render_header(
         ),
         Span::styled("│", Style::default().fg(palette::SEPARATOR)),
         Span::styled(
-            format!(" {} regions ", regions.len()),
+            format!(" {} ", segment.name),
             Style::default().fg(palette::TEXT),
         ),
         Span::styled("│", Style::default().fg(palette::SEPARATOR)),
@@ -163,7 +131,7 @@ fn render_header(
 /// Continuous memory map bar: bg=error severity, fg=activity brightness.
 fn render_memory_map(
     frame: &mut Frame,
-    regions: &[Arc<Segment>],
+    segment: &Segment,
     errors: &[TuiFailure],
     area: ratatui::layout::Rect,
     symbols: SymbolSet,
@@ -172,76 +140,58 @@ fn render_memory_map(
         return;
     }
     let usable_width = (area.width - 2) as usize;
-    let boundaries = region_columns(regions, usable_width);
 
     // Build per-column error counts
     let mut col_errors: Vec<usize> = vec![0; usable_width];
     for err in errors {
-        if err.region_idx < boundaries.len() {
-            let (start, width) = boundaries[err.region_idx];
-            let err_col = start + (err.progress_fraction * (width as f64 - 1.0)).round() as usize;
-            if err_col < usable_width {
-                col_errors[err_col] += 1;
-            }
+        let err_col = (err.progress_fraction * (usable_width as f64 - 1.0)).round() as usize;
+        if err_col < usable_width {
+            col_errors[err_col] += 1;
         }
     }
 
+    let err_age = segment.last_error_age_secs();
+
     let mut spans = vec![Span::raw(" ")];
-    for (i, region) in regions.iter().enumerate() {
-        let (start, width) = boundaries[i];
-        let err_age = region.last_error_age_secs();
+    for c in 0..usable_width {
+        let cell_frac = c as f64 / usable_width as f64;
+        let cell_idx =
+            (cell_frac * ACTIVITY_CELLS as f64).min(ACTIVITY_CELLS as f64 - 1.0) as usize;
+        let brightness = segment.activity.brightness(cell_idx);
 
-        for c in 0..width {
-            let col_idx = start + c;
-            let cell_frac = c as f64 / width as f64;
-            let cell_idx =
-                (cell_frac * ACTIVITY_CELLS as f64).min(ACTIVITY_CELLS as f64 - 1.0) as usize;
-            let brightness = region.activity.brightness(cell_idx);
+        let ch = symbols.char_for(brightness);
+        let fg = palette::activity_color(brightness);
 
-            let ch = symbols.char_for(brightness);
-            let fg = palette::activity_color(brightness);
+        let local_errs = col_errors.get(c).copied().unwrap_or(0);
+        let bg = if local_errs > 0 {
+            palette::error_bg(local_errs, err_age)
+        } else {
+            None
+        };
 
-            let local_errs = col_errors.get(col_idx).copied().unwrap_or(0);
-            let bg = if local_errs > 0 {
-                palette::error_bg(local_errs, err_age)
-            } else {
-                None
-            };
-
-            let mut style = Style::default().fg(fg);
-            if let Some(bg_color) = bg {
-                style = style.bg(bg_color);
-            }
-            spans.push(Span::styled(ch.to_string(), style));
+        let mut style = Style::default().fg(fg);
+        if let Some(bg_color) = bg {
+            style = style.bg(bg_color);
         }
+        spans.push(Span::styled(ch.to_string(), style));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_memory_map_labels(
-    frame: &mut Frame,
-    regions: &[Arc<Segment>],
-    area: ratatui::layout::Rect,
-) {
+fn render_memory_map_labels(frame: &mut Frame, segment: &Segment, area: ratatui::layout::Rect) {
     if area.width < 4 {
         return;
     }
     let usable_width = (area.width - 2) as usize;
-    let boundaries = region_columns(regions, usable_width);
-    let mut label_chars: Vec<(char, Color)> = vec![(' ', palette::DIM); usable_width];
+    let label_len = segment.name.len().min(usable_width);
+    let offset = usable_width.saturating_sub(label_len) / 2;
 
-    for (i, region) in regions.iter().enumerate() {
-        let (col, w) = boundaries[i];
-        let mb = region.size_bytes / (1024 * 1024);
-        let label = format!("r{i}:{mb}M");
-        let label_len = label.len().min(w);
-        let offset = w.saturating_sub(label_len) / 2;
-        for (j, ch) in label.chars().take(label_len).enumerate() {
-            let idx = col + offset + j;
-            if idx < usable_width {
-                label_chars[idx] = (ch, palette::DIM);
-            }
+    let mut label_chars: Vec<(char, Color)> = vec![(' ', palette::DIM); usable_width];
+    for (j, ch) in segment.name.chars().take(label_len).enumerate() {
+        let idx = offset + j;
+        if idx < usable_width {
+            label_chars[idx] = (ch, palette::DIM);
         }
     }
 
@@ -252,38 +202,33 @@ fn render_memory_map_labels(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_heatmap_region(
+fn render_segment_bar(
     frame: &mut Frame,
-    region: &Segment,
+    segment: &Segment,
     errors: &[TuiFailure],
-    region_idx: usize,
     area: ratatui::layout::Rect,
     symbols: SymbolSet,
 ) {
-    let pattern_name = region.current_pattern();
-    let progress_bp = region.progress_bp.load(Ordering::Relaxed);
+    let pattern_name = segment.current_pattern();
+    let progress_bp = segment.progress_bp.load(Ordering::Relaxed);
     let pct = progress_bp as f64 / 100.0;
-    let errs = region.failure_count.load(Ordering::Relaxed);
-    let paused = region.paused.load(Ordering::Relaxed);
+    let errs = segment.failure_count.load(Ordering::Relaxed);
+    let paused = segment.paused.load(Ordering::Relaxed);
 
     let bar_chars = 20;
-    let region_errors: Vec<f64> = errors
-        .iter()
-        .filter(|e| e.region_idx == region_idx)
-        .map(|e| e.progress_fraction)
-        .collect();
+    let error_fractions: Vec<f64> = errors.iter().map(|e| e.progress_fraction).collect();
 
-    let err_age = region.last_error_age_secs();
+    let err_age = segment.last_error_age_secs();
 
     let mut bar_spans: Vec<Span> = Vec::with_capacity(bar_chars);
     for c in 0..bar_chars {
         let col_frac = (c as f64 + 0.5) / bar_chars as f64;
         let cell_idx = (col_frac * ACTIVITY_CELLS as f64).min(ACTIVITY_CELLS as f64 - 1.0) as usize;
-        let brightness = region.activity.brightness(cell_idx);
+        let brightness = segment.activity.brightness(cell_idx);
 
         let col_frac_start = c as f64 / bar_chars as f64;
         let col_frac_end = (c + 1) as f64 / bar_chars as f64;
-        let errors_here = region_errors
+        let errors_here = error_fractions
             .iter()
             .filter(|&&f| f >= col_frac_start && f < col_frac_end)
             .count();
@@ -321,7 +266,7 @@ fn render_heatmap_region(
     };
 
     let mut line_spans = vec![Span::styled(
-        format!(" {:<10}", region.name),
+        format!(" {:<10}", segment.name),
         Style::default().fg(palette::TEXT),
     )];
     line_spans.extend(bar_spans);
@@ -355,7 +300,7 @@ fn render_error_area(frame: &mut Frame, errors: &[TuiFailure], area: ratatui::la
     }
 
     let header_row = Row::new(vec![
-        "Region", "Address", "Expected", "Actual", "Bit", "Pattern",
+        "Segment", "Address", "Expected", "Actual", "Bit", "Pattern",
     ])
     .style(
         Style::default()
@@ -363,24 +308,21 @@ fn render_error_area(frame: &mut Frame, errors: &[TuiFailure], area: ratatui::la
             .add_modifier(Modifier::BOLD),
     );
 
+    let severity = palette::error_severity(errors.len());
     let rows: Vec<Row> = errors
         .iter()
         .rev()
         .take(area.height.saturating_sub(1) as usize)
         .map(|e| {
-            let region_errs = errors
-                .iter()
-                .filter(|o| o.region_idx == e.region_idx)
-                .count();
             Row::new(vec![
-                e.region_name.clone(),
+                e.segment_name.clone(),
                 format!("{:#018x}", e.address),
                 format!("{:#018x}", e.expected),
                 format!("{:#018x}", e.actual),
                 format!("{}", e.flipped_bits),
                 e.pattern.clone(),
             ])
-            .style(Style::default().fg(palette::error_severity(region_errs)))
+            .style(Style::default().fg(severity))
         })
         .collect();
 
@@ -419,12 +361,12 @@ mod tests {
     use super::super::FlippedBits;
     use super::*;
 
-    fn make_region(name: &str, size_bytes: usize) -> Arc<Segment> {
-        Arc::new(Segment::new(
+    fn make_segment(name: &str, size_bytes: usize) -> Segment {
+        Segment::new(
             name.to_string(),
             size_bytes,
             vec!["solid".to_string(), "walk".to_string()],
-        ))
+        )
     }
 
     #[test]
@@ -508,52 +450,6 @@ mod tests {
         check!(s == s2);
     }
 
-    #[test]
-    fn region_columns_single_region_gets_full_width() {
-        let regions = vec![make_region("r0", 1024)];
-        let cols = region_columns(&regions, 80);
-        check!(cols == vec![(0, 80)]);
-    }
-
-    #[test]
-    fn region_columns_two_equal_regions() {
-        let regions = vec![make_region("r0", 1024), make_region("r1", 1024)];
-        let cols = region_columns(&regions, 80);
-        // Both should be ~40 cols, last gets remainder
-        check!(cols.len() == 2);
-        let total_width: usize = cols.iter().map(|(_, w)| w).sum();
-        check!(total_width == 80);
-    }
-
-    #[test]
-    fn region_columns_different_sizes() {
-        let regions = vec![make_region("r0", 3000), make_region("r1", 1000)];
-        let cols = region_columns(&regions, 100);
-        check!(cols.len() == 2);
-        // r0 should be ~75 cols, r1 ~25 cols
-        let (_, w0) = cols[0];
-        assert!(w0 > 60, "larger region should get more columns, got {w0}");
-        let total: usize = cols.iter().map(|(_, w)| w).sum();
-        check!(total == 100);
-    }
-
-    #[test]
-    fn region_columns_zero_total_bytes() {
-        let regions = vec![make_region("r0", 0), make_region("r1", 0)];
-        let cols = region_columns(&regions, 80);
-        check!(cols == vec![(0, 1), (0, 1)]);
-    }
-
-    #[test]
-    fn region_columns_minimum_width_is_one() {
-        // One tiny region and one huge -- tiny should still get at least 1 col
-        let regions = vec![make_region("r0", 1), make_region("r1", 1_000_000)];
-        let cols = region_columns(&regions, 80);
-        for (_, w) in &cols {
-            assert!(*w >= 1, "every region should get at least 1 column");
-        }
-    }
-
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -573,18 +469,15 @@ mod tests {
     #[test]
     fn render_header_no_errors_no_verbose() {
         let mut term = test_terminal(80, 1);
-        let regions = vec![make_region("r0", 1024)];
+        let segment = make_segment("r0", 1024);
         let elapsed = Duration::from_secs_f64(1.5);
         term.draw(|frame| {
-            render_header(frame, &regions, elapsed, false, frame.area());
+            render_header(frame, &segment, elapsed, false, frame.area());
         })
         .unwrap();
         let text = buf_text(&term);
         assert!(text.contains("ferrite"), "header should contain 'ferrite'");
-        assert!(
-            text.contains("1 regions"),
-            "header should show region count"
-        );
+        assert!(text.contains("r0"), "header should show segment name");
         assert!(text.contains("1.5s"), "header should show elapsed time");
         assert!(!text.contains("VERBOSE"));
     }
@@ -592,11 +485,11 @@ mod tests {
     #[test]
     fn render_header_with_errors() {
         let mut term = test_terminal(80, 1);
-        let regions = vec![make_region("r0", 1024)];
-        regions[0].failure_count.store(5, Ordering::Relaxed);
+        let segment = make_segment("r0", 1024);
+        segment.failure_count.store(5, Ordering::Relaxed);
         let elapsed = Duration::from_secs(10);
         term.draw(|frame| {
-            render_header(frame, &regions, elapsed, false, frame.area());
+            render_header(frame, &segment, elapsed, false, frame.area());
         })
         .unwrap();
         let text = buf_text(&term);
@@ -609,10 +502,10 @@ mod tests {
     #[test]
     fn render_header_verbose_mode() {
         let mut term = test_terminal(80, 1);
-        let regions = vec![make_region("r0", 1024)];
+        let segment = make_segment("r0", 1024);
         let elapsed = Duration::from_secs(0);
         term.draw(|frame| {
-            render_header(frame, &regions, elapsed, true, frame.area());
+            render_header(frame, &segment, elapsed, true, frame.area());
         })
         .unwrap();
         let text = buf_text(&term);
@@ -622,11 +515,11 @@ mod tests {
     #[test]
     fn render_memory_map_narrow_width_returns_early() {
         let mut term = test_terminal(3, 1);
-        let regions = vec![make_region("r0", 1024)];
+        let segment = make_segment("r0", 1024);
         let errors: Vec<TuiFailure> = vec![];
         // Should not panic on very narrow width
         term.draw(|frame| {
-            render_memory_map(frame, &regions, &errors, frame.area(), SymbolSet::Ascii);
+            render_memory_map(frame, &segment, &errors, frame.area(), SymbolSet::Ascii);
         })
         .unwrap();
     }
@@ -634,11 +527,11 @@ mod tests {
     #[test]
     fn render_memory_map_with_activity() {
         let mut term = test_terminal(40, 1);
-        let regions = vec![make_region("r0", 1024)];
-        regions[0].activity.touch(0.5);
+        let segment = make_segment("r0", 1024);
+        segment.activity.touch(0.5);
         let errors: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
-            render_memory_map(frame, &regions, &errors, frame.area(), SymbolSet::Ascii);
+            render_memory_map(frame, &segment, &errors, frame.area(), SymbolSet::Ascii);
         })
         .unwrap();
     }
@@ -646,10 +539,9 @@ mod tests {
     #[test]
     fn render_memory_map_with_errors() {
         let mut term = test_terminal(40, 1);
-        let regions = vec![make_region("r0", 1024)];
+        let segment = make_segment("r0", 1024);
         let errors = vec![TuiFailure {
-            region_idx: 0,
-            region_name: "r0".into(),
+            segment_name: "r0".into(),
             address: 0x1000,
             expected: 0xFF,
             actual: 0xFE,
@@ -657,9 +549,9 @@ mod tests {
             pattern: "solid".into(),
             progress_fraction: 0.5,
         }];
-        regions[0].record_failure();
+        segment.record_failure();
         term.draw(|frame| {
-            render_memory_map(frame, &regions, &errors, frame.area(), SymbolSet::Braille);
+            render_memory_map(frame, &segment, &errors, frame.area(), SymbolSet::Braille);
         })
         .unwrap();
     }
@@ -667,68 +559,53 @@ mod tests {
     #[test]
     fn render_memory_map_labels_narrow_returns_early() {
         let mut term = test_terminal(3, 1);
-        let regions = vec![make_region("r0", 1024)];
+        let segment = make_segment("r0", 1024);
         term.draw(|frame| {
-            render_memory_map_labels(frame, &regions, frame.area());
+            render_memory_map_labels(frame, &segment, frame.area());
         })
         .unwrap();
     }
 
     #[test]
-    fn render_memory_map_labels_shows_region_info() {
+    fn render_memory_map_labels_shows_segment_name() {
         let mut term = test_terminal(80, 1);
-        let mb = 64 * 1024 * 1024;
-        let regions = vec![make_region("r0", mb)];
+        let segment = make_segment("64.0 MiB", 64 * 1024 * 1024);
         term.draw(|frame| {
-            render_memory_map_labels(frame, &regions, frame.area());
+            render_memory_map_labels(frame, &segment, frame.area());
         })
         .unwrap();
         let text = buf_text(&term);
         assert!(
-            text.contains("r0:64M"),
-            "labels should show region size in MB, got: '{text}'"
+            text.contains("64.0 MiB"),
+            "labels should show segment name, got: '{text}'"
         );
     }
 
     #[test]
-    fn render_heatmap_region_shows_pattern_and_progress() {
+    fn render_segment_bar_shows_pattern_and_progress() {
         let mut term = test_terminal(80, 1);
-        let regions = [make_region("r0", 1024)];
-        regions[0].progress_bp.store(5000, Ordering::Relaxed);
+        let segment = make_segment("r0", 1024);
+        segment.progress_bp.store(5000, Ordering::Relaxed);
         let errors: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
-            render_heatmap_region(
-                frame,
-                &regions[0],
-                &errors,
-                0,
-                frame.area(),
-                SymbolSet::Ascii,
-            );
+            render_segment_bar(frame, &segment, &errors, frame.area(), SymbolSet::Ascii);
         })
         .unwrap();
         let text = buf_text(&term);
-        assert!(text.contains("r0"), "should show region name");
+        assert!(text.contains("r0"), "should show segment name");
         assert!(text.contains("50.0%"), "should show progress percentage");
         assert!(text.contains("solid"), "should show pattern name");
         assert!(text.contains("ok"), "should show ok for no errors");
     }
 
     #[test]
-    fn render_heatmap_region_shows_errors() {
+    fn render_segment_bar_shows_errors() {
         let mut term = test_terminal(80, 1);
-        let regions = [make_region("r0", 1024)];
-        regions[0].failure_count.store(3, Ordering::Relaxed);
+        let segment = make_segment("r0", 1024);
+        segment.failure_count.store(3, Ordering::Relaxed);
         let errors: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
-            render_heatmap_region(
-                frame,
-                &regions[0],
-                &errors,
-                0,
-                frame.area(),
-                SymbolSet::Ascii,
-            );
+            render_segment_bar(frame, &segment, &errors, frame.area(), SymbolSet::Ascii);
         })
         .unwrap();
         let text = buf_text(&term);
@@ -736,20 +613,13 @@ mod tests {
     }
 
     #[test]
-    fn render_heatmap_region_paused() {
+    fn render_segment_bar_paused() {
         let mut term = test_terminal(80, 1);
-        let regions = [make_region("r0", 1024)];
-        regions[0].paused.store(true, Ordering::Relaxed);
+        let segment = make_segment("r0", 1024);
+        segment.paused.store(true, Ordering::Relaxed);
         let errors: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
-            render_heatmap_region(
-                frame,
-                &regions[0],
-                &errors,
-                0,
-                frame.area(),
-                SymbolSet::Ascii,
-            );
+            render_segment_bar(frame, &segment, &errors, frame.area(), SymbolSet::Ascii);
         })
         .unwrap();
         let text = buf_text(&term);
@@ -773,8 +643,7 @@ mod tests {
         let mut term = test_terminal(120, 5);
         let errors = vec![
             TuiFailure {
-                region_idx: 0,
-                region_name: "r0".into(),
+                segment_name: "r0".into(),
                 address: 0xdead,
                 expected: 0xFF,
                 actual: 0xFE,
@@ -783,8 +652,7 @@ mod tests {
                 progress_fraction: 0.1,
             },
             TuiFailure {
-                region_idx: 0,
-                region_name: "r0".into(),
+                segment_name: "r0".into(),
                 address: 0xbeef,
                 expected: 0xAA,
                 actual: 0xBB,
@@ -798,8 +666,11 @@ mod tests {
         })
         .unwrap();
         let text = buf_text(&term);
-        assert!(text.contains("Region"), "should have table header");
-        assert!(text.contains("r0"), "should show region name in error rows");
+        assert!(text.contains("Segment"), "should have table header");
+        assert!(
+            text.contains("r0"),
+            "should show segment name in error rows"
+        );
     }
 
     #[test]
@@ -818,13 +689,12 @@ mod tests {
     #[test]
     fn render_heatmap_full_layout() {
         let mut term = test_terminal(80, 15);
-        let regions = vec![make_region("r0", 1024), make_region("r1", 2048)];
-        regions[0].progress_bp.store(3000, Ordering::Relaxed);
-        regions[1].progress_bp.store(7500, Ordering::Relaxed);
+        let segment = make_segment("r0", 1024);
+        segment.progress_bp.store(3000, Ordering::Relaxed);
         let errors: Vec<TuiFailure> = vec![];
         let elapsed = Duration::from_secs(5);
         term.draw(|frame| {
-            render_heatmap(frame, &regions, &errors, elapsed, false, SymbolSet::Ascii);
+            render_heatmap(frame, &segment, &errors, elapsed, false, SymbolSet::Ascii);
         })
         .unwrap();
         // Should not panic -- layout fits all sections
@@ -833,12 +703,11 @@ mod tests {
     #[test]
     fn render_heatmap_with_errors_full() {
         let mut term = test_terminal(80, 15);
-        let regions = vec![make_region("r0", 1024)];
-        regions[0].failure_count.store(2, Ordering::Relaxed);
-        regions[0].record_failure();
+        let segment = make_segment("r0", 1024);
+        segment.failure_count.store(2, Ordering::Relaxed);
+        segment.record_failure();
         let errors = vec![TuiFailure {
-            region_idx: 0,
-            region_name: "r0".into(),
+            segment_name: "r0".into(),
             address: 0x1000,
             expected: 0xFF,
             actual: 0xFE,
@@ -848,86 +717,7 @@ mod tests {
         }];
         let elapsed = Duration::from_secs(2);
         term.draw(|frame| {
-            render_heatmap(frame, &regions, &errors, elapsed, true, SymbolSet::Braille);
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn render_memory_map_multiple_regions() {
-        let mut term = test_terminal(80, 1);
-        let regions = vec![
-            make_region("r0", 1024),
-            make_region("r1", 2048),
-            make_region("r2", 512),
-        ];
-        for r in &regions {
-            r.activity.touch(0.3);
-        }
-        let errors: Vec<TuiFailure> = vec![];
-        term.draw(|frame| {
-            render_memory_map(frame, &regions, &errors, frame.area(), SymbolSet::Shade);
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn render_heatmap_region_with_error_overlays() {
-        let mut term = test_terminal(80, 1);
-        let regions = [make_region("r0", 1024)];
-        regions[0].record_failure();
-        let errors = vec![
-            TuiFailure {
-                region_idx: 0,
-                region_name: "r0".into(),
-                address: 0x100,
-                expected: 0xFF,
-                actual: 0x00,
-                flipped_bits: FlippedBits::Single(0),
-                pattern: "solid".into(),
-                progress_fraction: 0.25,
-            },
-            TuiFailure {
-                region_idx: 0,
-                region_name: "r0".into(),
-                address: 0x200,
-                expected: 0xFF,
-                actual: 0x00,
-                flipped_bits: FlippedBits::Single(0),
-                pattern: "solid".into(),
-                progress_fraction: 0.25, // same column as first
-            },
-        ];
-        term.draw(|frame| {
-            render_heatmap_region(
-                frame,
-                &regions[0],
-                &errors,
-                0,
-                frame.area(),
-                SymbolSet::Eighth,
-            );
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn render_memory_map_error_out_of_bounds_region() {
-        let mut term = test_terminal(40, 1);
-        let regions = vec![make_region("r0", 1024)];
-        // Error referencing non-existent region
-        let errors = vec![TuiFailure {
-            region_idx: 99,
-            region_name: "r99".into(),
-            address: 0x1000,
-            expected: 0,
-            actual: 1,
-            flipped_bits: FlippedBits::Single(0),
-            pattern: "solid".into(),
-            progress_fraction: 0.5,
-        }];
-        term.draw(|frame| {
-            render_memory_map(frame, &regions, &errors, frame.area(), SymbolSet::Ascii);
+            render_heatmap(frame, &segment, &errors, elapsed, true, SymbolSet::Braille);
         })
         .unwrap();
     }

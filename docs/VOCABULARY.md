@@ -66,10 +66,10 @@ The full anonymous memory block that ferrite mmap's and mlock's before testing. 
 
 Code type: `TestBuffer`.
 
-**Avoid:** "region" to mean the full allocation. Region is reserved for parallel segments.
+**Avoid:** "region" as a domain term. The allocation is tested as a single whole by one `runner::run()` call; parallelism (`--parallel <N|auto>`) happens inside the pattern loop via Rayon, not by splitting the allocation into worker-owned pieces. The only exception is `LockedRegion` in `alloc.rs`, an unrelated low-level mmap/mlock wrapper.
 
 ### segment
-A subdivision of the allocation assigned to one worker thread for concurrent testing. In TUI mode, the allocation is split into N segments (controlled by `--regions`, defaulting to CPU count). Each segment runs all selected patterns independently across its slice of the allocation.
+The TUI's display unit for the allocation. Since the allocation is tested as a whole, there is exactly one segment per run; it tracks pattern progress, activity, and failures for rendering the heatmap and header.
 
 Code type: `Segment`.
 

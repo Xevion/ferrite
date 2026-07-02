@@ -20,9 +20,6 @@ use crate::units::{Size, UnitSystem};
 use super::bridge::EventBridge;
 use super::{Segment, TuiConfig, TuiEvent, TuiMakeWriter, TuiTraceGuard, TuiTraceState};
 
-/// Pass results per region, keyed by region index, in worker completion order.
-type RegionPasses = Vec<(usize, Vec<PassResult>)>;
-
 /// Type alias for the boxed tracing layer used with the reload handle.
 pub type BoxedTracingLayer =
     Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
@@ -34,7 +31,7 @@ pub type TracingReloadHandle =
 
 /// Resolved test setup passed into [`run_tui_mode`] from the binary.
 pub struct TuiTestSetup {
-    pub region: TestBuffer,
+    pub buffer: TestBuffer,
     pub resolver: Option<PagemapResolver>,
     pub map_stats: Option<MapStats>,
     /// Keeps the compaction guard alive for the duration of the test.
@@ -45,19 +42,18 @@ pub struct TuiTestSetup {
 ///
 /// # Errors
 ///
-/// Returns an error if terminal initialization, TUI event loop, or any
+/// Returns an error if terminal initialization, the TUI event loop, or the
 /// worker thread reports a fatal failure.
 ///
 /// # Panics
 ///
 /// Panics if internal mutexes are poisoned (indicates a prior panic
-/// in a worker thread).
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+/// in the worker thread).
+#[allow(clippy::too_many_lines)]
 pub fn run_tui_mode(
     size: usize,
     passes: usize,
-    regions_arg: usize,
-    sequential: bool,
+    workers: usize,
     mut setup: TuiTestSetup,
     patterns: Vec<Pattern>,
     tracing_handle: &TracingReloadHandle,
@@ -79,23 +75,11 @@ pub fn run_tui_mode(
         })
         .expect("tracing reload failed");
 
-    // Compute region count
-    let total_words = setup.region.as_u64_slice().len();
-    let min_words_per_region = 1024 * 1024; // 8 MiB minimum per region
-    let n_regions = if regions_arg > 0 {
-        regions_arg
-    } else {
-        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
-    }
-    .min(total_words / min_words_per_region)
-    .max(1);
-
-    let chunk_words = total_words / n_regions;
     info!(
-        regions = n_regions,
-        "testing {} across {} region(s) with {} pattern(s)",
+        workers,
+        "testing {} with {} worker thread(s), {} pattern(s)",
         Size::new(size as f64, UnitSystem::Binary),
-        n_regions,
+        workers,
         patterns.len()
     );
 
@@ -104,20 +88,11 @@ pub fn run_tui_mode(
         .iter()
         .map(std::string::ToString::to_string)
         .collect();
-    let regions: Vec<Arc<Segment>> = (0..n_regions)
-        .map(|i| {
-            let region_words = if i == n_regions - 1 {
-                total_words - i * chunk_words
-            } else {
-                chunk_words
-            };
-            Arc::new(Segment::new(
-                format!("region-{i}"),
-                region_words * 8,
-                pattern_names.clone(),
-            ))
-        })
-        .collect();
+    let segment = Arc::new(Segment::new(
+        Size::new(size as f64, UnitSystem::Binary).to_string(),
+        size,
+        pattern_names,
+    ));
 
     // Create the event bus for the runner
     let (event_tx, event_rx) = events::event_bus();
@@ -127,8 +102,7 @@ pub fn run_tui_mode(
         size,
         passes,
         patterns: patterns.clone(),
-        regions: n_regions,
-        parallel: !sequential,
+        workers,
     });
     if let Some(ref stats) = setup.map_stats {
         let _ = event_tx.send(RunEvent::MapInfo {
@@ -136,63 +110,44 @@ pub fn run_tui_mode(
         });
     }
 
-    let worker_regions: Vec<Arc<Segment>> = regions.iter().map(Arc::clone).collect();
-    let parallel = !sequential;
+    let parallel = workers > 1;
     let run_start = std::time::Instant::now();
 
-    // Collect pass results from all region workers for post-TUI rendering.
-    // Workers push in completion order; results carry their region index.
-    let collected_results: Arc<Mutex<RegionPasses>> =
-        Arc::new(Mutex::new(Vec::with_capacity(n_regions)));
+    // Pass results produced by the worker thread, collected for post-TUI rendering.
+    let collected_results: Arc<Mutex<Option<Vec<PassResult>>>> = Arc::new(Mutex::new(None));
     let worker_collected = Arc::clone(&collected_results);
+    let worker_segment = Arc::clone(&segment);
 
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let worker = thread::Builder::new()
         .name("test-driver".into())
         .spawn(move || {
-            let buf = setup.region.as_u64_slice_mut();
+            let buf = setup.buffer.as_u64_slice_mut();
+            let resolver_ref = setup
+                .resolver
+                .as_ref()
+                .map(|r| r as &(dyn PhysResolver + Sync));
+            let on_activity = |pos: f64| {
+                worker_segment.activity.touch(pos);
+            };
 
-            thread::scope(|s| {
-                let chunks: Vec<&mut [u64]> = buf.chunks_mut(chunk_words).collect();
-                for (i, chunk) in chunks.into_iter().enumerate() {
-                    let tx = event_tx.clone();
-                    let tui_region = Arc::clone(&worker_regions[i]);
-                    let resolver_ref = setup
-                        .resolver
-                        .as_ref()
-                        .map(|r| r as &(dyn PhysResolver + Sync));
-                    let patterns = &patterns;
-                    let collected = Arc::clone(&worker_collected);
-                    thread::Builder::new()
-                        .name(format!("region-{i}"))
-                        .spawn_scoped(s, move || {
-                            let on_activity = |pos: f64| {
-                                tui_region.activity.touch(pos);
-                            };
-
-                            match runner::run(
-                                chunk,
-                                i,
-                                patterns,
-                                passes,
-                                parallel,
-                                &tx,
-                                resolver_ref,
-                                &on_activity,
-                            ) {
-                                Ok(pass_results) => {
-                                    collected.lock().unwrap().push((i, pass_results));
-                                }
-                                Err(e) => {
-                                    warn!(region = i, "runner error: {e}");
-                                }
-                            }
-                        })
-                        .expect("failed to spawn region worker thread");
+            match runner::run(
+                buf,
+                &patterns,
+                passes,
+                parallel,
+                &event_tx,
+                resolver_ref,
+                &on_activity,
+            ) {
+                Ok(pass_results) => {
+                    *worker_collected.lock().unwrap() = Some(pass_results);
                 }
-            });
+                Err(e) => {
+                    warn!("runner error: {e}");
+                }
+            }
 
-            // All region threads have finished -- signal completion
             let _ = event_tx.send(RunEvent::RunComplete);
             let _ = done_tx.send(());
         })
@@ -200,18 +155,18 @@ pub fn run_tui_mode(
 
     // Bridge thread: receives RunEvents, updates Segment state, forwards to TUI channel,
     // and optionally writes NDJSON events to a file.
-    let bridge_regions: Vec<Arc<Segment>> = regions.iter().map(Arc::clone).collect();
+    let bridge_segment = Arc::clone(&segment);
     let bridge_tui_tx = tui_tx.clone();
     let bridge_handle = thread::Builder::new()
         .name("event-bridge".into())
         .spawn(move || {
-            let bridge = EventBridge::new(bridge_regions, bridge_tui_tx, passes);
+            let bridge = EventBridge::new(bridge_segment, bridge_tui_tx, passes);
             bridge.run(&event_rx, events_writer)
         })
         .expect("failed to spawn event-bridge thread");
 
     let config = TuiConfig::default();
-    crate::tui::run_tui(&config, &regions, &tui_tx, &tui_rx).context("TUI failed")?;
+    crate::tui::run_tui(&config, &segment, &tui_tx, &tui_rx).context("TUI failed")?;
 
     // TUI exited. Reroute tracing to stderr and drain buffered log events.
     drop(TuiTraceGuard::new(trace_state, tui_rx));
@@ -230,19 +185,19 @@ pub fn run_tui_mode(
 
     let run_elapsed = run_start.elapsed();
 
-    let region_passes = Arc::try_unwrap(collected_results)
-        .expect("worker threads have exited")
+    let pass_results = Arc::try_unwrap(collected_results)
+        .expect("worker thread has exited")
         .into_inner()
-        .unwrap();
+        .unwrap()
+        .unwrap_or_default();
 
     let config = RunConfig {
         size,
         passes,
         patterns: patterns_for_config,
-        regions: n_regions,
-        parallel,
+        workers,
     };
-    let results = RunResults::from_indexed_regions(region_passes, config, run_elapsed);
+    let results = RunResults::from_passes(pass_results, config, run_elapsed);
 
     // Write the summary run_complete event to the NDJSON file
     if let Some(w) = events_writer.as_mut() {
@@ -257,7 +212,7 @@ mod tests {
     use assert2::{assert, check};
     use serial_test::serial;
 
-    use crate::events::{self, RegionEvent, RunEvent};
+    use crate::events::{self, RunEvent};
     use crate::pattern::Pattern;
     use crate::runner;
     use crate::shutdown;
@@ -271,7 +226,6 @@ mod tests {
 
         let results = runner::run(
             &mut buf,
-            0,
             &[Pattern::SolidBits],
             1,
             false,
@@ -299,7 +253,6 @@ mod tests {
 
         let _ = runner::run(
             &mut buf,
-            0,
             &[Pattern::SolidBits],
             1,
             false,
@@ -314,7 +267,7 @@ mod tests {
         let events: Vec<_> = rx.try_iter().collect();
         let progress_count = events
             .iter()
-            .filter(|e| matches!(e, RunEvent::Region(_, RegionEvent::Progress { .. })))
+            .filter(|e| matches!(e, RunEvent::Progress { .. }))
             .count();
         // SolidBits has 2 sub-passes
         check!(progress_count == 2);
@@ -328,8 +281,7 @@ mod tests {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = events::event_bus();
 
-        let results =
-            runner::run(&mut buf, 0, Pattern::ALL, 100, false, &tx, None, &|_| {}).unwrap();
+        let results = runner::run(&mut buf, Pattern::ALL, 100, false, &tx, None, &|_| {}).unwrap();
 
         check!(results.is_empty());
     }
@@ -343,7 +295,6 @@ mod tests {
 
         let results = runner::run(
             &mut buf,
-            0,
             &[Pattern::SolidBits],
             3,
             false,
@@ -366,7 +317,7 @@ mod tests {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = events::event_bus();
 
-        let results = runner::run(&mut buf, 0, Pattern::ALL, 1, false, &tx, None, &|_| {}).unwrap();
+        let results = runner::run(&mut buf, Pattern::ALL, 1, false, &tx, None, &|_| {}).unwrap();
 
         let total: usize = results.iter().map(runner::PassResult::total_failures).sum();
         check!(total == 0);

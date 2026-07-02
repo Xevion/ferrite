@@ -63,9 +63,10 @@ pub struct Cli {
     #[arg(short = 't', long = "test", value_enum)]
     pub patterns: Vec<ferrite::pattern::Pattern>,
 
-    /// Run patterns sequentially on a single core instead of using all CPU cores.
-    #[arg(long)]
-    pub sequential: bool,
+    /// Worker threads for pattern execution: a count (>= 1) or "auto" (all CPU cores).
+    /// 1 runs fully serial.
+    #[arg(long, default_value = "auto", value_parser = parse_parallel)]
+    pub parallel: Parallelism,
 
     /// Unit system for sizes and throughput: binary (KiB, MiB, GiB) or decimal (KB, MB, GB).
     #[arg(long, value_enum, default_value_t = UnitSystem::Binary)]
@@ -93,11 +94,43 @@ pub struct Cli {
     /// Disable physical address resolution (skip pagemap/EDAC/SMBIOS).
     #[arg(long)]
     pub no_phys: bool,
+}
 
-    /// Number of memory regions to test in parallel (default: CPU core count).
-    /// Each region runs all patterns independently.
-    #[arg(long, default_value_t = 0)]
-    pub regions: usize,
+/// Worker-thread count for pattern execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Parallelism {
+    /// Use all available CPU cores.
+    Auto,
+    /// Use exactly this many threads.
+    Fixed(std::num::NonZeroUsize),
+}
+
+impl Parallelism {
+    /// Resolve to a concrete worker-thread count.
+    #[must_use]
+    pub fn resolve(self) -> usize {
+        match self {
+            Self::Auto => std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+            Self::Fixed(n) => n.get(),
+        }
+    }
+}
+
+/// Parse the `--parallel` flag: either `"auto"` or a positive integer.
+///
+/// # Errors
+///
+/// Returns a descriptive error string if the value is `0` or not `"auto"`/an integer.
+pub fn parse_parallel(s: &str) -> Result<Parallelism, String> {
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(Parallelism::Auto);
+    }
+    let n: usize = s.parse().map_err(|_| {
+        format!("invalid --parallel value: {s} (expected \"auto\" or a positive integer)")
+    })?;
+    std::num::NonZeroUsize::new(n)
+        .map(Parallelism::Fixed)
+        .ok_or_else(|| "--parallel must be at least 1".to_owned())
 }
 
 /// Resolved output configuration after validating CLI flag interactions.
@@ -283,14 +316,14 @@ pub(crate) fn parse_capability_from_status(status: &str, cap_bit: u32) -> bool {
 
 /// Set up physical address resolution, returning the resolver and map stats if successful.
 pub fn setup_phys(
-    region: &TestBuffer,
+    buffer: &TestBuffer,
     need_phys: bool,
 ) -> (Option<PagemapResolver>, Option<MapStats>) {
     if !need_phys {
         return (None, None);
     }
     let resolver_result = match PagemapResolver::new() {
-        Ok(mut r) => match r.build_map(region.as_ptr(), region.len()) {
+        Ok(mut r) => match r.build_map(buffer.as_ptr(), buffer.len()) {
             Ok(stats) => Ok((r, stats)),
             Err(e) => Err(PhysResolverError::from_build(e)),
         },
@@ -308,7 +341,7 @@ pub fn setup_phys(
             );
 
             std::thread::sleep(Duration::from_millis(100));
-            match r.verify_stability(region.as_ptr(), region.len()) {
+            match r.verify_stability(buffer.as_ptr(), buffer.len()) {
                 Ok(0) => {}
                 Ok(n) => warn!(changed = n, "pages changed physical address after locking"),
                 Err(e) => warn!("PFN stability check failed: {e}"),
@@ -334,7 +367,7 @@ pub fn setup_phys(
 }
 
 pub struct TestSetup {
-    pub region: TestBuffer,
+    pub buffer: TestBuffer,
     /// Held for its [`Drop`] side-effect -- restores the compaction sysctl on teardown.
     #[allow(dead_code)]
     pub compaction_guard: Option<CompactionGuard>,
@@ -344,7 +377,7 @@ pub struct TestSetup {
 
 pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
     let need_phys = !cli.no_phys;
-    let region = match TestBuffer::new(cli.size) {
+    let buffer = match TestBuffer::new(cli.size) {
         Ok(r) => r,
         Err(e) => {
             if let Some(hint) = e.help() {
@@ -358,7 +391,7 @@ pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
     } else {
         None
     };
-    let (resolver, map_stats) = setup_phys(&region, need_phys);
+    let (resolver, map_stats) = setup_phys(&buffer, need_phys);
 
     if need_phys && let Some(topo) = DimmTopology::build() {
         let dimm_str = topo
@@ -371,7 +404,7 @@ pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
     }
 
     Ok(TestSetup {
-        region,
+        buffer,
         compaction_guard,
         resolver,
         map_stats,
@@ -596,12 +629,63 @@ CapEff:\t0000000000000000";
         }
     }
 
+    mod parallelism {
+        use assert2::{assert, check};
+
+        use crate::cli::{Parallelism, parse_parallel};
+
+        #[test]
+        fn auto_lowercase() {
+            check!(parse_parallel("auto") == Ok(Parallelism::Auto));
+        }
+
+        #[test]
+        fn auto_case_insensitive() {
+            check!(parse_parallel("AUTO") == Ok(Parallelism::Auto));
+            check!(parse_parallel("Auto") == Ok(Parallelism::Auto));
+        }
+
+        #[test]
+        fn valid_counts() {
+            let one = parse_parallel("1").unwrap();
+            assert!(let Parallelism::Fixed(n) = one);
+            check!(n.get() == 1);
+
+            let eight = parse_parallel("8").unwrap();
+            assert!(let Parallelism::Fixed(n) = eight);
+            check!(n.get() == 8);
+        }
+
+        #[test]
+        fn rejects_zero() {
+            assert!(parse_parallel("0").is_err());
+        }
+
+        #[test]
+        fn rejects_junk() {
+            assert!(parse_parallel("banana").is_err());
+            assert!(parse_parallel("").is_err());
+            assert!(parse_parallel("-1").is_err());
+        }
+
+        #[test]
+        fn resolve_fixed_returns_n() {
+            let p = parse_parallel("6").unwrap();
+            check!(p.resolve() == 6);
+        }
+
+        #[test]
+        fn resolve_auto_returns_positive() {
+            check!(Parallelism::Auto.resolve() >= 1);
+        }
+    }
+
     mod output_resolution {
         use std::path::PathBuf;
 
         use assert2::check;
 
-        use crate::cli::{ColorMode, OutputFormat};
+        use crate::cli::{ColorMode, OutputFormat, Parallelism};
 
         /// Build a minimal `Cli` with only the output-relevant fields set.
         fn cli(
@@ -613,7 +697,7 @@ CapEff:\t0000000000000000";
                 size: 64 * 1024 * 1024,
                 passes: 1,
                 patterns: vec![],
-                sequential: false,
+                parallel: Parallelism::Auto,
                 units: ferrite::units::UnitSystem::Binary,
                 format,
                 events: events.map(PathBuf::from),
@@ -621,7 +705,6 @@ CapEff:\t0000000000000000";
                 #[cfg(feature = "tui")]
                 tui: crate::cli::TuiMode::Never,
                 no_phys: true,
-                regions: 0,
             }
         }
 

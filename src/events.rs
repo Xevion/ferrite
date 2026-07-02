@@ -17,8 +17,8 @@ pub enum RunEvent {
         size: usize,
         passes: usize,
         patterns: Vec<Pattern>,
-        regions: usize,
-        parallel: bool,
+        /// Resolved worker-thread count for pattern execution; 1 means serial.
+        workers: usize,
     },
 
     /// Physical address map statistics, emitted after pagemap resolution.
@@ -27,25 +27,7 @@ pub enum RunEvent {
     /// Installed DIMM topology, emitted when SMBIOS/EDAC data is available.
     DimmInfo { topology: DimmTopology },
 
-    /// A per-region event, tagged with the region index.
-    Region(usize, RegionEvent),
-
-    /// Tracing log event injected by a custom subscriber layer.
-    Log {
-        level: tracing::Level,
-        target: String,
-        message: String,
-        fields: serde_json::Value,
-    },
-
-    /// Emitted once when the entire run is complete.
-    RunComplete,
-}
-
-/// Per-region events emitted during testing.
-#[derive(Debug)]
-pub enum RegionEvent {
-    /// A new pass is starting for this region.
+    /// A new pass is starting.
     PassStart { pass: usize, total_passes: usize },
 
     /// A pattern test is starting within a pass.
@@ -72,7 +54,7 @@ pub enum RegionEvent {
         interrupted: bool,
     },
 
-    /// All patterns in a pass finished for this region.
+    /// All patterns in a pass finished.
     PassComplete {
         pass: usize,
         failures: usize,
@@ -81,6 +63,17 @@ pub enum RegionEvent {
 
     /// ECC counter deltas detected after a pass.
     EccDeltas { pass: usize, deltas: Vec<EccDelta> },
+
+    /// Tracing log event injected by a custom subscriber layer.
+    Log {
+        level: tracing::Level,
+        target: String,
+        message: String,
+        fields: serde_json::Value,
+    },
+
+    /// Emitted once when the entire run is complete.
+    RunComplete,
 }
 
 /// Shorthand for the sender half of the event bus.
@@ -92,7 +85,7 @@ pub type EventRx = crossbeam_channel::Receiver<RunEvent>;
 /// Create an unbounded event bus channel.
 ///
 /// Returns `(sender, receiver)`. The sender can be cloned for multiple
-/// producers (e.g. one per region worker thread).
+/// producers.
 #[must_use]
 pub fn event_bus() -> (EventTx, EventRx) {
     crossbeam_channel::unbounded()
@@ -116,8 +109,7 @@ mod tests {
             size: 1024,
             passes: 1,
             patterns: vec![Pattern::SolidBits],
-            regions: 1,
-            parallel: true,
+            workers: 1,
         })
         .unwrap();
 
@@ -129,33 +121,24 @@ mod tests {
     fn event_bus_multiple_events() {
         let (tx, rx) = event_bus();
 
-        tx.send(RunEvent::Region(
-            0,
-            RegionEvent::PassStart {
-                pass: 1,
-                total_passes: 2,
-            },
-        ))
+        tx.send(RunEvent::PassStart {
+            pass: 1,
+            total_passes: 2,
+        })
         .unwrap();
-        tx.send(RunEvent::Region(
-            0,
-            RegionEvent::TestStart {
-                pattern: Pattern::SolidBits,
-                pass: 1,
-            },
-        ))
+        tx.send(RunEvent::TestStart {
+            pattern: Pattern::SolidBits,
+            pass: 1,
+        })
         .unwrap();
-        tx.send(RunEvent::Region(
-            0,
-            RegionEvent::TestComplete {
-                pattern: Pattern::SolidBits,
-                pass: 1,
-                elapsed: Duration::from_millis(100),
-                bytes: 8192,
-                failures: vec![],
-                interrupted: false,
-            },
-        ))
+        tx.send(RunEvent::TestComplete {
+            pattern: Pattern::SolidBits,
+            pass: 1,
+            elapsed: Duration::from_millis(100),
+            bytes: 8192,
+            failures: vec![],
+            interrupted: false,
+        })
         .unwrap();
         tx.send(RunEvent::RunComplete).unwrap();
 
@@ -198,60 +181,51 @@ mod tests {
     }
 
     #[test]
-    fn region_event_progress() {
+    fn progress_event() {
         let (tx, rx) = event_bus();
-        tx.send(RunEvent::Region(
-            2,
-            RegionEvent::Progress {
-                pattern: Pattern::WalkingOnes,
-                pass: 1,
-                sub_pass: 32,
-                total: 64,
-            },
-        ))
+        tx.send(RunEvent::Progress {
+            pattern: Pattern::WalkingOnes,
+            pass: 1,
+            sub_pass: 32,
+            total: 64,
+        })
         .unwrap();
 
         let event = rx.recv().unwrap();
-        assert!(let RunEvent::Region(2, RegionEvent::Progress { .. }) = event);
+        assert!(let RunEvent::Progress { .. } = event);
     }
 
     #[test]
-    fn region_event_ecc_deltas() {
+    fn ecc_deltas_event() {
         let (tx, rx) = event_bus();
-        tx.send(RunEvent::Region(
-            0,
-            RegionEvent::EccDeltas {
-                pass: 1,
-                deltas: vec![crate::edac::EccDelta {
-                    mc: 0,
-                    dimm_index: 1,
-                    label: Some("DIMM_A1".to_owned()),
-                    ce_delta: 2,
-                    ue_delta: 0,
-                }],
-            },
-        ))
+        tx.send(RunEvent::EccDeltas {
+            pass: 1,
+            deltas: vec![crate::edac::EccDelta {
+                mc: 0,
+                dimm_index: 1,
+                label: Some("DIMM_A1".to_owned()),
+                ce_delta: 2,
+                ue_delta: 0,
+            }],
+        })
         .unwrap();
 
         let event = rx.recv().unwrap();
-        assert!(let RunEvent::Region(0, RegionEvent::EccDeltas { .. }) = event);
+        assert!(let RunEvent::EccDeltas { .. } = event);
     }
 
     #[test]
-    fn region_event_pass_complete() {
+    fn pass_complete_event() {
         let (tx, rx) = event_bus();
-        tx.send(RunEvent::Region(
-            1,
-            RegionEvent::PassComplete {
-                pass: 1,
-                failures: 3,
-                elapsed: Duration::from_secs(5),
-            },
-        ))
+        tx.send(RunEvent::PassComplete {
+            pass: 1,
+            failures: 3,
+            elapsed: Duration::from_secs(5),
+        })
         .unwrap();
 
         let event = rx.recv().unwrap();
-        assert!(let RunEvent::Region(1, RegionEvent::PassComplete { .. }) = event);
+        assert!(let RunEvent::PassComplete { .. } = event);
     }
 
     #[test]

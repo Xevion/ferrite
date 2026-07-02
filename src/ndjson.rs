@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::Failure;
 use crate::edac::EccDelta;
-use crate::events::{RegionEvent, RunEvent};
+use crate::events::RunEvent;
 use crate::phys::MapStats;
 
 /// Current schema version for the NDJSON event stream.
@@ -27,8 +27,7 @@ enum Event {
         size: usize,
         passes: usize,
         patterns: Vec<String>,
-        regions: usize,
-        parallel: bool,
+        workers: usize,
     },
     MapInfo {
         total_pages: usize,
@@ -41,24 +40,20 @@ enum Event {
         dimm_count: usize,
     },
     PassStart {
-        region: usize,
         pass: usize,
         total_passes: usize,
     },
     TestStart {
-        region: usize,
         pattern: String,
         pass: usize,
     },
     Progress {
-        region: usize,
         pattern: String,
         pass: usize,
         sub_pass: u64,
         total_sub_passes: u64,
     },
     TestPass {
-        region: usize,
         pattern: String,
         pass: usize,
         duration_ms: f64,
@@ -67,7 +62,6 @@ enum Event {
         interrupted: bool,
     },
     TestFail {
-        region: usize,
         pattern: String,
         pass: usize,
         duration_ms: f64,
@@ -77,13 +71,11 @@ enum Event {
         interrupted: bool,
     },
     PassComplete {
-        region: usize,
         pass: usize,
         failures: usize,
         duration_ms: f64,
     },
     EccDeltas {
-        region: usize,
         pass: usize,
         deltas: Vec<EccDelta>,
     },
@@ -184,15 +176,13 @@ impl NdjsonEventWriter {
                 size,
                 passes,
                 patterns,
-                regions,
-                parallel,
+                workers,
             } => {
                 self.write_event(&Event::RunStart {
                     size: *size,
                     passes: *passes,
                     patterns: patterns.iter().map(ToString::to_string).collect(),
-                    regions: *regions,
-                    parallel: *parallel,
+                    workers: *workers,
                 });
             }
             RunEvent::MapInfo { stats } => self.write_map_info(stats),
@@ -201,8 +191,75 @@ impl NdjsonEventWriter {
                     dimm_count: topology.dimms.len(),
                 });
             }
-            RunEvent::Region(idx, region_event) => {
-                self.handle_region_event(*idx, region_event);
+            RunEvent::PassStart { pass, total_passes } => {
+                self.write_event(&Event::PassStart {
+                    pass: *pass,
+                    total_passes: *total_passes,
+                });
+            }
+            RunEvent::TestStart { pattern, pass } => {
+                self.write_event(&Event::TestStart {
+                    pattern: pattern.to_string(),
+                    pass: *pass,
+                });
+            }
+            RunEvent::Progress {
+                pattern,
+                pass,
+                sub_pass,
+                total,
+            } => {
+                self.write_event(&Event::Progress {
+                    pattern: pattern.to_string(),
+                    pass: *pass,
+                    sub_pass: *sub_pass,
+                    total_sub_passes: *total,
+                });
+            }
+            RunEvent::TestComplete {
+                pattern,
+                pass,
+                elapsed,
+                bytes,
+                failures,
+                interrupted,
+            } => {
+                let duration_ms = elapsed.as_secs_f64() * 1000.0;
+                if failures.is_empty() {
+                    self.write_event(&Event::TestPass {
+                        pattern: pattern.to_string(),
+                        pass: *pass,
+                        duration_ms,
+                        bytes_processed: *bytes,
+                        interrupted: *interrupted,
+                    });
+                } else {
+                    self.write_event(&Event::TestFail {
+                        pattern: pattern.to_string(),
+                        pass: *pass,
+                        duration_ms,
+                        bytes_processed: *bytes,
+                        failures: failures.iter().map(FailureRecord::from).collect(),
+                        interrupted: *interrupted,
+                    });
+                }
+            }
+            RunEvent::PassComplete {
+                pass,
+                failures,
+                elapsed,
+            } => {
+                self.write_event(&Event::PassComplete {
+                    pass: *pass,
+                    failures: *failures,
+                    duration_ms: elapsed.as_secs_f64() * 1000.0,
+                });
+            }
+            RunEvent::EccDeltas { pass, deltas } => {
+                self.write_event(&Event::EccDeltas {
+                    pass: *pass,
+                    deltas: deltas.clone(),
+                });
             }
             RunEvent::Log {
                 level,
@@ -228,88 +285,6 @@ impl NdjsonEventWriter {
             total_failures,
             duration_ms: elapsed.as_secs_f64() * 1000.0,
         });
-    }
-
-    fn handle_region_event(&mut self, region: usize, event: &RegionEvent) {
-        match event {
-            RegionEvent::PassStart { pass, total_passes } => {
-                self.write_event(&Event::PassStart {
-                    region,
-                    pass: *pass,
-                    total_passes: *total_passes,
-                });
-            }
-            RegionEvent::TestStart { pattern, pass } => {
-                self.write_event(&Event::TestStart {
-                    region,
-                    pattern: pattern.to_string(),
-                    pass: *pass,
-                });
-            }
-            RegionEvent::Progress {
-                pattern,
-                pass,
-                sub_pass,
-                total,
-            } => {
-                self.write_event(&Event::Progress {
-                    region,
-                    pattern: pattern.to_string(),
-                    pass: *pass,
-                    sub_pass: *sub_pass,
-                    total_sub_passes: *total,
-                });
-            }
-            RegionEvent::TestComplete {
-                pattern,
-                pass,
-                elapsed,
-                bytes,
-                failures,
-                interrupted,
-            } => {
-                let duration_ms = elapsed.as_secs_f64() * 1000.0;
-                if failures.is_empty() {
-                    self.write_event(&Event::TestPass {
-                        region,
-                        pattern: pattern.to_string(),
-                        pass: *pass,
-                        duration_ms,
-                        bytes_processed: *bytes,
-                        interrupted: *interrupted,
-                    });
-                } else {
-                    self.write_event(&Event::TestFail {
-                        region,
-                        pattern: pattern.to_string(),
-                        pass: *pass,
-                        duration_ms,
-                        bytes_processed: *bytes,
-                        failures: failures.iter().map(FailureRecord::from).collect(),
-                        interrupted: *interrupted,
-                    });
-                }
-            }
-            RegionEvent::PassComplete {
-                pass,
-                failures,
-                elapsed,
-            } => {
-                self.write_event(&Event::PassComplete {
-                    region,
-                    pass: *pass,
-                    failures: *failures,
-                    duration_ms: elapsed.as_secs_f64() * 1000.0,
-                });
-            }
-            RegionEvent::EccDeltas { pass, deltas } => {
-                self.write_event(&Event::EccDeltas {
-                    region,
-                    pass: *pass,
-                    deltas: deltas.clone(),
-                });
-            }
-        }
     }
 
     fn write_map_info(&mut self, stats: &MapStats) {
@@ -369,7 +344,6 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
-    use crate::events::RegionEvent;
     use crate::pattern::Pattern;
     use crate::phys::{MapStats, PhysAddr};
 
@@ -424,8 +398,7 @@ mod tests {
             size: 1_073_741_824,
             passes: 2,
             patterns: vec![Pattern::SolidBits, Pattern::WalkingOnes],
-            regions: 4,
-            parallel: true,
+            workers: 4,
         });
         drop(w);
 
@@ -436,8 +409,7 @@ mod tests {
         check!(e["event"] == "run_start");
         check!(e["size"] == 1_073_741_824);
         check!(e["passes"] == 2);
-        check!(e["regions"] == 4);
-        check!(e["parallel"] == true);
+        check!(e["workers"] == 4);
         check!(e["patterns"].as_array().unwrap().len() == 2);
         assert_has_timestamp(e);
         let _ = std::fs::remove_file(&path);
@@ -545,22 +517,18 @@ mod tests {
     }
 
     #[test]
-    fn pass_start_includes_region() {
+    fn pass_start_event() {
         let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::Region(
-            3,
-            RegionEvent::PassStart {
-                pass: 1,
-                total_passes: 3,
-            },
-        ));
+        w.handle_event(&RunEvent::PassStart {
+            pass: 1,
+            total_passes: 3,
+        });
         drop(w);
 
         let events = read_events(&path);
         check!(events.len() == 2);
         let e = &events[1];
         check!(e["event"] == "pass_start");
-        check!(e["region"] == 3);
         check!(e["pass"] == 1);
         check!(e["total_passes"] == 3);
         assert_has_timestamp(e);
@@ -568,45 +536,37 @@ mod tests {
     }
 
     #[test]
-    fn test_start_includes_region() {
+    fn test_start_event() {
         let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::Region(
-            2,
-            RegionEvent::TestStart {
-                pattern: Pattern::SolidBits,
-                pass: 1,
-            },
-        ));
+        w.handle_event(&RunEvent::TestStart {
+            pattern: Pattern::SolidBits,
+            pass: 1,
+        });
         drop(w);
 
         let events = read_events(&path);
         let e = &events[1];
         check!(e["event"] == "test_start");
-        check!(e["region"] == 2);
         check!(e["pattern"] == "Solid Bits");
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn test_pass_includes_region() {
+    fn test_pass_event() {
         let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::Region(
-            1,
-            RegionEvent::TestComplete {
-                pattern: Pattern::Checkerboard,
-                pass: 1,
-                elapsed: Duration::from_millis(100),
-                bytes: 1024,
-                failures: vec![],
-                interrupted: false,
-            },
-        ));
+        w.handle_event(&RunEvent::TestComplete {
+            pattern: Pattern::Checkerboard,
+            pass: 1,
+            elapsed: Duration::from_millis(100),
+            bytes: 1024,
+            failures: vec![],
+            interrupted: false,
+        });
         drop(w);
 
         let events = read_events(&path);
         let e = &events[1];
         check!(e["event"] == "test_pass");
-        check!(e["region"] == 1);
         check!(e["pattern"] == "Checkerboard");
         assert!(e["duration_ms"].as_f64().unwrap() > 0.0);
         // A non-interrupted pass omits the field entirely.
@@ -618,17 +578,14 @@ mod tests {
     #[test]
     fn test_pass_emits_interrupted_flag_when_set() {
         let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::TestComplete {
-                pattern: Pattern::WalkingOnes,
-                pass: 1,
-                elapsed: Duration::from_millis(10),
-                bytes: 1024,
-                failures: vec![],
-                interrupted: true,
-            },
-        ));
+        w.handle_event(&RunEvent::TestComplete {
+            pattern: Pattern::WalkingOnes,
+            pass: 1,
+            elapsed: Duration::from_millis(10),
+            bytes: 1024,
+            failures: vec![],
+            interrupted: true,
+        });
         drop(w);
 
         let events = read_events(&path);
@@ -639,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fail_includes_region_and_failures() {
+    fn test_fail_includes_failures() {
         let (mut w, path) = test_writer();
         let failures = vec![Failure {
             addr: 0x1000,
@@ -648,23 +605,19 @@ mod tests {
             word_index: 0,
             phys_addr: Some(PhysAddr(0xABCD)),
         }];
-        w.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::TestComplete {
-                pattern: Pattern::WalkingOnes,
-                pass: 2,
-                elapsed: Duration::from_millis(50),
-                bytes: 512,
-                failures,
-                interrupted: false,
-            },
-        ));
+        w.handle_event(&RunEvent::TestComplete {
+            pattern: Pattern::WalkingOnes,
+            pass: 2,
+            elapsed: Duration::from_millis(50),
+            bytes: 512,
+            failures,
+            interrupted: false,
+        });
         drop(w);
 
         let events = read_events(&path);
         let e = &events[1];
         check!(e["event"] == "test_fail");
-        check!(e["region"] == 0);
         let f = &e["failures"][0];
         check!(f["flipped_bits"] == 1);
         assert!(f["phys_addr"].as_str().is_some());
@@ -673,71 +626,59 @@ mod tests {
     }
 
     #[test]
-    fn pass_complete_includes_region() {
+    fn pass_complete_event() {
         let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::PassComplete {
-                pass: 1,
-                failures: 5,
-                elapsed: Duration::from_secs(2),
-            },
-        ));
+        w.handle_event(&RunEvent::PassComplete {
+            pass: 1,
+            failures: 5,
+            elapsed: Duration::from_secs(2),
+        });
         drop(w);
 
         let events = read_events(&path);
         let e = &events[1];
         check!(e["event"] == "pass_complete");
-        check!(e["region"] == 0);
         check!(e["failures"] == 5);
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn progress_includes_region() {
+    fn progress_event() {
         let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::Progress {
-                pattern: Pattern::StuckAddress,
-                pass: 1,
-                sub_pass: 3,
-                total: 5,
-            },
-        ));
+        w.handle_event(&RunEvent::Progress {
+            pattern: Pattern::StuckAddress,
+            pass: 1,
+            sub_pass: 3,
+            total: 5,
+        });
         drop(w);
 
         let events = read_events(&path);
         let e = &events[1];
         check!(e["event"] == "progress");
-        check!(e["region"] == 0);
         check!(e["sub_pass"] == 3);
         check!(e["total_sub_passes"] == 5);
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn ecc_deltas_includes_region() {
+    fn ecc_deltas_event() {
         let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::EccDeltas {
-                pass: 1,
-                deltas: vec![crate::edac::EccDelta {
-                    mc: 0,
-                    dimm_index: 1,
-                    label: Some("DIMM_A1".to_owned()),
-                    ce_delta: 2,
-                    ue_delta: 0,
-                }],
-            },
-        ));
+        w.handle_event(&RunEvent::EccDeltas {
+            pass: 1,
+            deltas: vec![crate::edac::EccDelta {
+                mc: 0,
+                dimm_index: 1,
+                label: Some("DIMM_A1".to_owned()),
+                ce_delta: 2,
+                ue_delta: 0,
+            }],
+        });
         drop(w);
 
         let events = read_events(&path);
         let e = &events[1];
         check!(e["event"] == "ecc_deltas");
-        check!(e["region"] == 0);
         check!(e["deltas"][0]["ce_delta"] == 2);
         let _ = std::fs::remove_file(&path);
     }
@@ -788,42 +729,29 @@ mod tests {
             size: 1024,
             passes: 1,
             patterns: vec![Pattern::SolidBits],
-            regions: 1,
-            parallel: false,
+            workers: 1,
         });
-        w.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::PassStart {
-                pass: 1,
-                total_passes: 1,
-            },
-        ));
-        w.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::TestStart {
-                pattern: Pattern::SolidBits,
-                pass: 1,
-            },
-        ));
-        w.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::TestComplete {
-                pattern: Pattern::SolidBits,
-                pass: 1,
-                elapsed: Duration::from_millis(50),
-                bytes: 1024,
-                failures: vec![],
-                interrupted: false,
-            },
-        ));
-        w.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::PassComplete {
-                pass: 1,
-                failures: 0,
-                elapsed: Duration::from_millis(100),
-            },
-        ));
+        w.handle_event(&RunEvent::PassStart {
+            pass: 1,
+            total_passes: 1,
+        });
+        w.handle_event(&RunEvent::TestStart {
+            pattern: Pattern::SolidBits,
+            pass: 1,
+        });
+        w.handle_event(&RunEvent::TestComplete {
+            pattern: Pattern::SolidBits,
+            pass: 1,
+            elapsed: Duration::from_millis(50),
+            bytes: 1024,
+            failures: vec![],
+            interrupted: false,
+        });
+        w.handle_event(&RunEvent::PassComplete {
+            pass: 1,
+            failures: 0,
+            elapsed: Duration::from_millis(100),
+        });
         w.write_run_complete(1, 0, Duration::from_millis(100));
         drop(w);
 
@@ -874,25 +802,19 @@ mod tests {
             broken_pipe: false,
         };
 
-        w.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::PassStart {
-                pass: 1,
-                total_passes: 1,
-            },
-        ));
+        w.handle_event(&RunEvent::PassStart {
+            pass: 1,
+            total_passes: 1,
+        });
         assert!(w.broken_pipe);
         let count_after_break = count.load(AtomicOrdering::Relaxed);
         check!(count_after_break > 0);
 
         // Second event should be suppressed — no additional write calls
-        w.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::PassStart {
-                pass: 2,
-                total_passes: 2,
-            },
-        ));
+        w.handle_event(&RunEvent::PassStart {
+            pass: 2,
+            total_passes: 2,
+        });
         check!(count.load(AtomicOrdering::Relaxed) == count_after_break);
     }
 

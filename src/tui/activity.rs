@@ -4,7 +4,7 @@ use std::time::Instant;
 pub const ACTIVITY_CELLS: usize = 128;
 pub const ACTIVITY_FADE_SECS: f64 = 4.0;
 
-/// Per-region activity heatmap buffer.
+/// Per-segment activity heatmap buffer.
 ///
 /// Each cell tracks the last time it was "touched" (written to during a test).
 /// The TUI reads brightness values to render activity indicators.

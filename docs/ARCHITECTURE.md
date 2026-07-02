@@ -63,8 +63,8 @@ Code: `src/headless.rs`, `src/ndjson.rs`, `src/results.rs`, `src/tui/bridge.rs`
 | `results.rs` | `ResultsDoc`, `ResultsRenderer` trait, `TableRenderer`, `JsonRenderer` |
 | `units.rs` | Binary/decimal size and rate formatting |
 | `shutdown.rs` | Signal handling, panic hook, coordinated shutdown, exit codes |
-| `tui/mod.rs` | `RegionState`, `TuiEvent`, `TuiConfig`, `run_tui()`, `run_event_loop<B>()` |
-| `tui/run.rs` | `run_tui_mode()`, `run_region_worker()`, `setup_tracing()`, `TuiTestSetup` |
+| `tui/mod.rs` | `Segment`, `TuiEvent`, `TuiConfig`, `run_tui()`, `run_event_loop<B>()` |
+| `tui/run.rs` | `run_tui_mode()`, `TuiTestSetup` |
 | `tui/render.rs` | Frame rendering: heatmaps, progress bars, status header |
 | `tui/activity.rs` | Activity tracking for heatmap data |
 | `tui/palette.rs` | Color palette functions (error severity, background fade) |
@@ -83,10 +83,10 @@ main()
  │   ├─ setup_test() → TestSetup              [cli.rs]
  │   └─ run_tui_mode(...)                     [tui/run.rs]
  │       ├─ hot-swap tracing layer → TUI channel (reload handle)
- │       ├─ split allocation into N segments  (--regions or CPU count)
- │       ├─ spawn "test-driver" thread → runner::run() emits RunEvents
+ │       ├─ spawn "test-driver" thread → runner::run() over the whole allocation, emits RunEvents
+ │       │   (rayon parallelism inside the pattern loop when --parallel > 1)
  │       ├─ spawn "event-bridge" thread → EventBridge translates RunEvent → TuiEvent
- │       ├─ run_tui(config, segments, tx, rx)  ← event loop [tui/mod.rs]
+ │       ├─ run_tui(config, segment, tx, rx)  ← event loop [tui/mod.rs]
  │       └─ wait for test-driver (5 s timeout) + process::exit
  │
  └─ Headless mode:                            (tracing stays on stderr)

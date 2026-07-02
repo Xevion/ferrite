@@ -54,63 +54,13 @@ impl ResultsDoc {
         self.0["elapsed"].as_f64().unwrap_or(0.0)
     }
 
-    /// Iterator over region documents.
-    pub fn regions(&self) -> impl Iterator<Item = RegionDoc<'_>> {
-        self.0["regions"]
+    /// Iterator over pass documents.
+    pub fn passes(&self) -> impl Iterator<Item = PassDoc<'_>> {
+        self.0["passes"]
             .as_array()
-            .map(|a| a.iter().map(RegionDoc).collect::<Vec<_>>())
+            .map(|a| a.iter().map(PassDoc).collect::<Vec<_>>())
             .unwrap_or_default()
             .into_iter()
-    }
-
-    /// Merge per-region results into one aggregate per temporal pass.
-    ///
-    /// Regions run concurrently, so per-pattern `elapsed_ms` is the max
-    /// across regions (~wall time) while `bytes_processed` and `failures`
-    /// are summed; sum-of-bytes over max-elapsed yields aggregate
-    /// throughput. `interrupted` is true if any region was interrupted.
-    /// Passes are sorted by pass number; pattern order follows first
-    /// appearance.
-    #[must_use]
-    pub fn aggregated_passes(&self) -> Vec<AggregatedPass> {
-        let mut passes: Vec<AggregatedPass> = Vec::new();
-        for region in self.regions() {
-            for pass in region.passes() {
-                let n = pass.pass_number();
-                let idx = if let Some(i) = passes.iter().position(|p| p.pass_number == n) {
-                    i
-                } else {
-                    passes.push(AggregatedPass {
-                        pass_number: n,
-                        patterns: Vec::new(),
-                    });
-                    passes.len() - 1
-                };
-                let agg = &mut passes[idx];
-                for pr in pass.pattern_results() {
-                    if let Some(p) = agg
-                        .patterns
-                        .iter_mut()
-                        .find(|p| p.name == pr.pattern_name())
-                    {
-                        p.elapsed_ms = p.elapsed_ms.max(pr.elapsed_ms());
-                        p.bytes_processed += pr.bytes_processed();
-                        p.failures += pr.failure_count();
-                        p.interrupted |= pr.interrupted();
-                    } else {
-                        agg.patterns.push(AggregatedPattern {
-                            name: pr.pattern_name().to_owned(),
-                            elapsed_ms: pr.elapsed_ms(),
-                            bytes_processed: pr.bytes_processed(),
-                            failures: pr.failure_count(),
-                            interrupted: pr.interrupted(),
-                        });
-                    }
-                }
-            }
-        }
-        passes.sort_by_key(|p| p.pass_number);
-        passes
     }
 
     /// Error analysis, if present.
@@ -131,44 +81,6 @@ impl ResultsDoc {
     #[must_use]
     pub fn as_value(&self) -> &serde_json::Value {
         &self.0
-    }
-}
-
-/// Per-pattern results merged across all regions for one temporal pass.
-pub struct AggregatedPass {
-    pub pass_number: u64,
-    pub patterns: Vec<AggregatedPattern>,
-}
-
-/// One pattern's results merged across all regions of a pass.
-pub struct AggregatedPattern {
-    pub name: String,
-    /// Max elapsed across regions (regions run concurrently).
-    pub elapsed_ms: f64,
-    /// Sum of bytes across regions.
-    pub bytes_processed: u64,
-    /// Sum of failures across regions.
-    pub failures: u64,
-    /// True if the pattern was interrupted in any region.
-    pub interrupted: bool,
-}
-
-/// Borrowed view into a single region within the results.
-pub struct RegionDoc<'a>(&'a serde_json::Value);
-
-impl<'a> RegionDoc<'a> {
-    #[must_use]
-    pub fn region_index(&self) -> u64 {
-        self.0["region_index"].as_u64().unwrap_or(0)
-    }
-
-    /// Iterator over pass documents in this region.
-    pub fn passes(&self) -> impl Iterator<Item = PassDoc<'a>> {
-        self.0["passes"]
-            .as_array()
-            .map(|a| a.iter().map(PassDoc).collect::<Vec<_>>())
-            .unwrap_or_default()
-            .into_iter()
     }
 }
 
@@ -241,13 +153,8 @@ impl ConfigDoc<'_> {
     }
 
     #[must_use]
-    pub fn regions(&self) -> u64 {
-        self.0["regions"].as_u64().unwrap_or(1)
-    }
-
-    #[must_use]
-    pub fn parallel(&self) -> bool {
-        self.0["parallel"].as_bool().unwrap_or(true)
+    pub fn workers(&self) -> u64 {
+        self.0["workers"].as_u64().unwrap_or(1)
     }
 }
 
@@ -382,22 +289,25 @@ impl ResultsRenderer for TableRenderer {
         let elapsed_ms = doc.elapsed_ms();
         let elapsed_secs = elapsed_ms / 1000.0;
 
-        // Per-pass, per-pattern results merged across regions (only in full mode)
+        // Per-pass, per-pattern results (only in full mode)
         if self.full {
             let total_passes = doc.config().passes();
-            for pass in doc.aggregated_passes() {
+            for pass in doc.passes() {
                 let mut pass_failures: u64 = 0;
-                for p in &pass.patterns {
-                    pass_failures += p.failures;
+                for p in pass.pattern_results() {
+                    let failures = p.failure_count();
+                    pass_failures += failures;
+                    let elapsed_ms = p.elapsed_ms();
                     let throughput = crate::units::Rate::new(
-                        p.bytes_processed as f64 / (p.elapsed_ms / 1000.0),
+                        p.bytes_processed() as f64 / (elapsed_ms / 1000.0),
                         self.unit_system,
                     );
                     // An interrupted pattern is incomplete: a clean result
                     // can't be trusted as a PASS, so flag it distinctly.
-                    let suffix = if p.interrupted { "  (interrupted)" } else { "" };
-                    if p.failures == 0 {
-                        let label = if p.interrupted {
+                    let interrupted = p.interrupted();
+                    let suffix = if interrupted { "  (interrupted)" } else { "" };
+                    if failures == 0 {
+                        let label = if interrupted {
                             "INTR".yellow().bold().to_string()
                         } else {
                             "PASS".green().to_string()
@@ -405,31 +315,31 @@ impl ResultsRenderer for TableRenderer {
                         writeln!(
                             out,
                             "  {} {:<20} {:>8.1}ms  {throughput:>}{suffix}",
-                            label, p.name, p.elapsed_ms,
+                            label,
+                            p.pattern_name(),
+                            elapsed_ms,
                         )?;
                     } else {
                         writeln!(
                             out,
-                            "  {} {:<20} {:>8.1}ms  {throughput:>}  ({} failures){suffix}",
+                            "  {} {:<20} {:>8.1}ms  {throughput:>}  ({failures} failures){suffix}",
                             "FAIL".red().bold(),
-                            p.name,
-                            p.elapsed_ms,
-                            p.failures,
+                            p.pattern_name(),
+                            elapsed_ms,
                         )?;
                     }
                 }
+                let pass_number = pass.pass_number();
                 if pass_failures == 0 {
                     writeln!(
                         out,
-                        "  Pass {}/{total_passes}: {}",
-                        pass.pass_number,
+                        "  Pass {pass_number}/{total_passes}: {}",
                         "all patterns passed".green(),
                     )?;
                 } else {
                     writeln!(
                         out,
-                        "  Pass {}/{total_passes}: {}",
-                        pass.pass_number,
+                        "  Pass {pass_number}/{total_passes}: {}",
                         format!("{pass_failures} total failure(s)").red().bold(),
                     )?;
                 }
@@ -522,8 +432,7 @@ mod tests {
             size: 8192,
             passes: 1,
             patterns: vec![Pattern::SolidBits],
-            regions: 1,
-            parallel: false,
+            workers: 1,
         }
     }
 
@@ -579,44 +488,37 @@ mod tests {
         results
     }
 
-    /// Two regions, one temporal pass each, two patterns -- distinct timings
-    /// and sizes so aggregation math is observable.
-    fn multi_region_results() -> RunResults {
-        let region_pass = |elapsed_ms: u64, bytes: u64, interrupted: bool| {
+    /// One pass, two patterns -- distinct timings and sizes so per-pattern
+    /// rendering is observable.
+    fn multi_pattern_results() -> RunResults {
+        RunResults::from_passes(
             vec![PassResult {
                 pass_number: 1,
                 pattern_results: vec![
                     PatternResult {
                         pattern: Pattern::SolidBits,
                         failures: vec![],
-                        elapsed: Duration::from_millis(elapsed_ms),
-                        bytes_processed: bytes,
-                        interrupted,
+                        elapsed: Duration::from_millis(100),
+                        bytes_processed: 8192,
+                        interrupted: false,
                     },
                     PatternResult {
                         pattern: Pattern::Checkerboard,
                         failures: vec![],
-                        elapsed: Duration::from_millis(elapsed_ms / 2),
-                        bytes_processed: bytes,
+                        elapsed: Duration::from_millis(50),
+                        bytes_processed: 4096,
                         interrupted: false,
                     },
                 ],
                 ecc_deltas: vec![],
-            }]
-        };
-        RunResults::from_indexed_regions(
-            vec![
-                (0, region_pass(100, 8192, false)),
-                (1, region_pass(200, 4096, false)),
-            ],
+            }],
             RunConfig {
                 size: 16384,
                 passes: 1,
                 patterns: vec![Pattern::SolidBits, Pattern::Checkerboard],
-                regions: 2,
-                parallel: true,
+                workers: 4,
             },
-            Duration::from_millis(200),
+            Duration::from_millis(150),
         )
     }
 
@@ -645,12 +547,9 @@ mod tests {
         }
 
         #[test]
-        fn regions_iteration() {
+        fn passes_iteration() {
             let doc = ResultsDoc::from_results(&clean_results());
-            let regions: Vec<_> = doc.regions().collect();
-            check!(regions.len() == 1);
-            check!(regions[0].region_index() == 0);
-            let passes: Vec<_> = regions[0].passes().collect();
+            let passes: Vec<_> = doc.passes().collect();
             check!(passes.len() == 1);
             check!(passes[0].pass_number() == 1);
             check!(passes[0].total_failures() == 0);
@@ -659,8 +558,7 @@ mod tests {
         #[test]
         fn pattern_results_iteration() {
             let doc = ResultsDoc::from_results(&clean_results());
-            let region = doc.regions().next().unwrap();
-            let pass = region.passes().next().unwrap();
+            let pass = doc.passes().next().unwrap();
             let patterns: Vec<_> = pass.pattern_results().collect();
             check!(patterns.len() == 1);
             check!(patterns[0].pattern_name() == "SolidBits");
@@ -675,8 +573,7 @@ mod tests {
             let cfg = doc.config();
             check!(cfg.size() == 8192);
             check!(cfg.passes() == 1);
-            check!(cfg.regions() == 1);
-            check!(!cfg.parallel());
+            check!(cfg.workers() == 1);
         }
 
         #[test]
@@ -744,128 +641,8 @@ mod tests {
             check!(doc.total_failures() == 0);
             assert!(doc.elapsed_ms().abs() < f64::EPSILON);
             assert!(doc.error_analysis().is_none());
-            check!(doc.regions().count() == 0);
-            assert!(doc.aggregated_passes().is_empty());
+            check!(doc.passes().count() == 0);
             check!(doc.config().size() == 0);
-        }
-    }
-
-    mod aggregation {
-        use assert2::{assert, check};
-
-        use super::*;
-
-        #[test]
-        fn merges_regions_into_single_pass() {
-            let doc = ResultsDoc::from_results(&multi_region_results());
-            let agg = doc.aggregated_passes();
-            check!(agg.len() == 1);
-            check!(agg[0].pass_number == 1);
-            check!(agg[0].patterns.len() == 2);
-
-            let solid = &agg[0].patterns[0];
-            check!(solid.name == "SolidBits");
-            // bytes summed across regions
-            check!(solid.bytes_processed == 8192 + 4096);
-            // elapsed is the max across concurrently-running regions
-            assert!((solid.elapsed_ms - 200.0).abs() < 0.5);
-            check!(solid.failures == 0);
-            check!(!solid.interrupted);
-        }
-
-        #[test]
-        fn preserves_pattern_order() {
-            let doc = ResultsDoc::from_results(&multi_region_results());
-            let agg = doc.aggregated_passes();
-            let names: Vec<&str> = agg[0].patterns.iter().map(|p| p.name.as_str()).collect();
-            check!(names == vec!["SolidBits", "Checkerboard"]);
-        }
-
-        #[test]
-        fn sorts_by_pass_number() {
-            let pass = |n: usize| PassResult {
-                pass_number: n,
-                pattern_results: vec![PatternResult {
-                    pattern: Pattern::SolidBits,
-                    failures: vec![],
-                    elapsed: Duration::from_millis(10),
-                    bytes_processed: 1024,
-                    interrupted: false,
-                }],
-                ecc_deltas: vec![],
-            };
-            // Region 1 reports its passes before region 0 (completion order).
-            let results = RunResults::from_indexed_regions(
-                vec![(1, vec![pass(1), pass(2)]), (0, vec![pass(1)])],
-                make_config(),
-                Duration::from_millis(30),
-            );
-            let doc = ResultsDoc::from_results(&results);
-            let agg = doc.aggregated_passes();
-            let numbers: Vec<u64> = agg.iter().map(|p| p.pass_number).collect();
-            check!(numbers == vec![1, 2]);
-            // Pass 1 merges both regions; pass 2 exists only in region 1.
-            check!(agg[0].patterns[0].bytes_processed == 2048);
-            check!(agg[1].patterns[0].bytes_processed == 1024);
-        }
-
-        #[test]
-        fn failures_summed_across_regions() {
-            let region_pass = |n_failures: usize| {
-                let failures = (0..n_failures)
-                    .map(|i| {
-                        FailureBuilder::default()
-                            .addr(i * 8)
-                            .expected(0u64)
-                            .actual(1u64)
-                            .build()
-                    })
-                    .collect();
-                vec![PassResult {
-                    pass_number: 1,
-                    pattern_results: vec![PatternResult {
-                        pattern: Pattern::SolidBits,
-                        failures,
-                        elapsed: Duration::from_millis(10),
-                        bytes_processed: 1024,
-                        interrupted: false,
-                    }],
-                    ecc_deltas: vec![],
-                }]
-            };
-            let results = RunResults::from_indexed_regions(
-                vec![(0, region_pass(1)), (1, region_pass(2))],
-                make_config(),
-                Duration::from_millis(10),
-            );
-            let doc = ResultsDoc::from_results(&results);
-            let agg = doc.aggregated_passes();
-            check!(agg[0].patterns[0].failures == 3);
-        }
-
-        #[test]
-        fn interrupted_ors_across_regions() {
-            let region_pass = |interrupted: bool| {
-                vec![PassResult {
-                    pass_number: 1,
-                    pattern_results: vec![PatternResult {
-                        pattern: Pattern::SolidBits,
-                        failures: vec![],
-                        elapsed: Duration::from_millis(10),
-                        bytes_processed: 1024,
-                        interrupted,
-                    }],
-                    ecc_deltas: vec![],
-                }]
-            };
-            let results = RunResults::from_indexed_regions(
-                vec![(0, region_pass(false)), (1, region_pass(true))],
-                make_config(),
-                Duration::from_millis(10),
-            );
-            let doc = ResultsDoc::from_results(&results);
-            let agg = doc.aggregated_passes();
-            assert!(agg[0].patterns[0].interrupted);
         }
     }
 
@@ -943,8 +720,8 @@ mod tests {
         }
 
         #[test]
-        fn multi_region_renders_single_pass_block() {
-            let out = render_full_to_string(&multi_region_results());
+        fn full_renders_one_pass_block_per_pass() {
+            let out = render_full_to_string(&multi_pattern_results());
             assert!(out.matches("Pass 1/1").count() == 1);
             assert!(out.matches("SolidBits").count() == 1);
             assert!(out.matches("Checkerboard").count() == 1);

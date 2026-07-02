@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::Failure;
 use crate::edac::{EccDelta, EdacSnapshot};
-use crate::events::{EventTx, RegionEvent, RunEvent};
+use crate::events::{EventTx, RunEvent};
 use crate::pattern::{Pattern, run_pattern};
 use crate::phys::PhysResolver;
 use crate::shutdown;
@@ -68,23 +68,15 @@ pub struct RunConfig {
     pub size: usize,
     pub passes: usize,
     pub patterns: Vec<Pattern>,
-    pub regions: usize,
-    pub parallel: bool,
-}
-
-/// Results from one region (segment) of the allocation. Regions are spatial
-/// subdivisions tested by concurrent workers; each runs its own passes.
-#[derive(Debug, serde::Serialize)]
-pub struct RegionResult {
-    pub region_index: usize,
-    pub passes: Vec<PassResult>,
+    /// Resolved worker-thread count for pattern execution; 1 means serial.
+    pub workers: usize,
 }
 
 /// Complete results of a test run, suitable for serialization and post-processing.
 #[derive(Debug, serde::Serialize)]
 pub struct RunResults {
     pub config: RunConfig,
-    pub regions: Vec<RegionResult>,
+    pub passes: Vec<PassResult>,
     #[serde(with = "crate::units::duration_ms")]
     pub elapsed: std::time::Duration,
     pub total_failures: usize,
@@ -94,43 +86,17 @@ pub struct RunResults {
 }
 
 impl RunResults {
-    /// Build `RunResults` from a single region's pass results (the
-    /// whole-allocation, non-segmented path).
+    /// Build `RunResults` from pass results.
     #[must_use]
     pub fn from_passes(
         passes: Vec<PassResult>,
         config: RunConfig,
         elapsed: std::time::Duration,
     ) -> Self {
-        Self::from_indexed_regions(vec![(0, passes)], config, elapsed)
-    }
-
-    /// Build `RunResults` from per-region pass results, keyed by region index.
-    ///
-    /// Accepts regions in any order (workers push results in completion
-    /// order) and sorts them by index.
-    #[must_use]
-    pub fn from_indexed_regions(
-        mut indexed: Vec<(usize, Vec<PassResult>)>,
-        config: RunConfig,
-        elapsed: std::time::Duration,
-    ) -> Self {
-        indexed.sort_by_key(|(i, _)| *i);
-        let regions: Vec<RegionResult> = indexed
-            .into_iter()
-            .map(|(region_index, passes)| RegionResult {
-                region_index,
-                passes,
-            })
-            .collect();
-        let total_failures = regions
-            .iter()
-            .flat_map(|r| &r.passes)
-            .map(PassResult::total_failures)
-            .sum();
+        let total_failures = passes.iter().map(PassResult::total_failures).sum();
         Self {
             config,
-            regions,
+            passes,
             elapsed,
             total_failures,
             error_analysis: None,
@@ -138,11 +104,11 @@ impl RunResults {
     }
 }
 
-/// Run all selected patterns for the given number of passes on a single buffer region.
+/// Run all selected patterns for the given number of passes on the whole test buffer.
 ///
-/// Emits `RunEvent::Region(region_idx, ...)` events via the provided channel as
-/// testing proceeds. The caller is responsible for emitting global events
-/// (`RunStart`, `RunComplete`, `MapInfo`, etc.).
+/// Emits `RunEvent`s via the provided channel as testing proceeds. The caller
+/// is responsible for emitting global events (`RunStart`, `RunComplete`,
+/// `MapInfo`, etc.).
 ///
 /// When `parallel` is true, each pattern's write and verify phases run across
 /// all available CPU cores via Rayon. Pass `false` to force single-threaded
@@ -157,10 +123,8 @@ impl RunResults {
 ///
 /// Returns [`PatternError::Unrecoverable`] if a pattern worker panics. The
 /// test buffer should be considered corrupted after this error.
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     buf: &mut [u64],
-    region_idx: usize,
     patterns: &[Pattern],
     passes: usize,
     parallel: bool,
@@ -177,13 +141,10 @@ pub fn run(
         }
 
         let pass_start = Instant::now();
-        let _ = tx.send(RunEvent::Region(
-            region_idx,
-            RegionEvent::PassStart {
-                pass: pass + 1,
-                total_passes: passes,
-            },
-        ));
+        let _ = tx.send(RunEvent::PassStart {
+            pass: pass + 1,
+            total_passes: passes,
+        });
 
         let edac_before = EdacSnapshot::capture();
 
@@ -194,13 +155,10 @@ pub fn run(
             }
             let sub_passes = pattern.sub_passes();
 
-            let _ = tx.send(RunEvent::Region(
-                region_idx,
-                RegionEvent::TestStart {
-                    pattern,
-                    pass: pass + 1,
-                },
-            ));
+            let _ = tx.send(RunEvent::TestStart {
+                pattern,
+                pass: pass + 1,
+            });
 
             let start = Instant::now();
 
@@ -214,15 +172,12 @@ pub fn run(
                     parallel,
                     &mut || {
                         sub_pass_count += 1;
-                        let _ = tx.send(RunEvent::Region(
-                            region_idx,
-                            RegionEvent::Progress {
-                                pattern,
-                                pass: pass + 1,
-                                sub_pass: sub_pass_count,
-                                total: sub_passes,
-                            },
-                        ));
+                        let _ = tx.send(RunEvent::Progress {
+                            pattern,
+                            pass: pass + 1,
+                            sub_pass: sub_pass_count,
+                            total: sub_passes,
+                        });
                     },
                     on_activity,
                 )
@@ -248,17 +203,14 @@ pub fn run(
                 }
             }
 
-            let _ = tx.send(RunEvent::Region(
-                region_idx,
-                RegionEvent::TestComplete {
-                    pattern,
-                    pass: pass + 1,
-                    elapsed,
-                    bytes: bytes_processed,
-                    failures: failures.clone(),
-                    interrupted,
-                },
-            ));
+            let _ = tx.send(RunEvent::TestComplete {
+                pattern,
+                pass: pass + 1,
+                elapsed,
+                bytes: bytes_processed,
+                failures: failures.clone(),
+                interrupted,
+            });
 
             pattern_results.push(PatternResult {
                 pattern,
@@ -273,13 +225,10 @@ pub fn run(
             (Some(before), Some(after)) => {
                 let deltas = before.delta(&after);
                 if !deltas.is_empty() {
-                    let _ = tx.send(RunEvent::Region(
-                        region_idx,
-                        RegionEvent::EccDeltas {
-                            pass: pass + 1,
-                            deltas: deltas.clone(),
-                        },
-                    ));
+                    let _ = tx.send(RunEvent::EccDeltas {
+                        pass: pass + 1,
+                        deltas: deltas.clone(),
+                    });
                 }
                 deltas
             }
@@ -294,14 +243,11 @@ pub fn run(
         let total = pass_result.total_failures();
         let pass_elapsed = pass_start.elapsed();
 
-        let _ = tx.send(RunEvent::Region(
-            region_idx,
-            RegionEvent::PassComplete {
-                pass: pass + 1,
-                failures: total,
-                elapsed: pass_elapsed,
-            },
-        ));
+        let _ = tx.send(RunEvent::PassComplete {
+            pass: pass + 1,
+            failures: total,
+            elapsed: pass_elapsed,
+        });
 
         results.push(pass_result);
     }
@@ -314,7 +260,7 @@ mod tests {
     use assert2::{assert, check};
     use serial_test::serial;
 
-    use crate::events::{self, RegionEvent, RunEvent};
+    use crate::events::{self, RunEvent};
     use crate::pattern::Pattern;
 
     use super::*;
@@ -388,13 +334,12 @@ mod tests {
 
         use super::*;
 
-        fn config(regions: usize) -> RunConfig {
+        fn config() -> RunConfig {
             RunConfig {
                 size: 8192,
                 passes: 1,
                 patterns: vec![Pattern::SolidBits],
-                regions,
-                parallel: false,
+                workers: 1,
             }
         }
 
@@ -422,48 +367,37 @@ mod tests {
         }
 
         #[test]
-        fn from_passes_wraps_single_region() {
+        fn from_passes_totals_failures() {
             let results = RunResults::from_passes(
                 vec![pass_with_failures(1, 2)],
-                config(1),
+                config(),
                 Duration::from_millis(10),
             );
-            check!(results.regions.len() == 1);
-            check!(results.regions[0].region_index == 0);
+            check!(results.passes.len() == 1);
             check!(results.total_failures == 2);
         }
 
         #[test]
-        fn from_indexed_regions_sorts_and_totals() {
-            let results = RunResults::from_indexed_regions(
-                vec![
-                    (2, vec![pass_with_failures(1, 1)]),
-                    (0, vec![pass_with_failures(1, 0)]),
-                    (1, vec![pass_with_failures(1, 3)]),
-                ],
-                config(3),
+        fn from_passes_sums_across_multiple_passes() {
+            let results = RunResults::from_passes(
+                vec![pass_with_failures(1, 1), pass_with_failures(2, 3)],
+                config(),
                 Duration::from_millis(10),
             );
-            let indices: Vec<usize> = results.regions.iter().map(|r| r.region_index).collect();
-            check!(indices == vec![0, 1, 2]);
             check!(results.total_failures == 4);
         }
 
         #[test]
-        fn serializes_regions_dimension() {
-            let results = RunResults::from_indexed_regions(
-                vec![
-                    (0, vec![pass_with_failures(1, 0)]),
-                    (1, vec![pass_with_failures(1, 1)]),
-                ],
-                config(2),
+        fn serializes_passes_dimension() {
+            let results = RunResults::from_passes(
+                vec![pass_with_failures(1, 0), pass_with_failures(2, 1)],
+                config(),
                 Duration::from_millis(10),
             );
             let json = serde_json::to_value(&results).unwrap();
-            assert!(json["regions"].is_array());
-            check!(json["regions"][0]["region_index"] == 0);
-            assert!(json["regions"][0]["passes"].is_array());
-            assert!(json.get("passes").is_none());
+            assert!(json["passes"].is_array());
+            check!(json["passes"][0]["pass_number"] == 1);
+            assert!(json.get("regions").is_none());
         }
     }
 
@@ -473,7 +407,6 @@ mod tests {
         let (tx, rx) = make_tx();
         let results = run(
             &mut buf,
-            0,
             &[Pattern::SolidBits],
             1,
             false,
@@ -493,7 +426,7 @@ mod tests {
         // Verify expected events were emitted
         let events: Vec<_> = rx.try_iter().collect();
         assert!(!events.is_empty());
-        assert!(let RunEvent::Region(0, RegionEvent::PassStart { .. }) = &events[0]);
+        assert!(let RunEvent::PassStart { .. } = &events[0]);
     }
 
     #[test]
@@ -502,7 +435,6 @@ mod tests {
         let (tx, _rx) = make_tx();
         let results = run(
             &mut buf,
-            0,
             &[Pattern::SolidBits],
             3,
             false,
@@ -522,7 +454,7 @@ mod tests {
     fn run_all_patterns_clean() {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, 0, Pattern::ALL, 1, false, &tx, None, &|_| {}).unwrap();
+        let results = run(&mut buf, Pattern::ALL, 1, false, &tx, None, &|_| {}).unwrap();
         assert!(results.len() == 1);
         check!(results[0].pattern_results.len() == Pattern::ALL.len());
         check!(results[0].total_failures() == 0);
@@ -532,7 +464,7 @@ mod tests {
     fn run_empty_patterns() {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, 0, &[], 1, false, &tx, None, &|_| {}).unwrap();
+        let results = run(&mut buf, &[], 1, false, &tx, None, &|_| {}).unwrap();
         check!(results.len() == 1);
         check!(results[0].pattern_results.is_empty());
         check!(results[0].total_failures() == 0);
@@ -542,7 +474,7 @@ mod tests {
     fn run_parallel_clean() {
         let mut buf = vec![0u64; 4096];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, 0, Pattern::ALL, 1, true, &tx, None, &|_| {}).unwrap();
+        let results = run(&mut buf, Pattern::ALL, 1, true, &tx, None, &|_| {}).unwrap();
         assert!(results.len() == 1);
         check!(results[0].total_failures() == 0);
     }
@@ -581,7 +513,6 @@ mod tests {
         let (tx, _rx) = make_tx();
         let results = run(
             &mut buf,
-            0,
             &[Pattern::SolidBits],
             1,
             false,
@@ -617,7 +548,6 @@ mod tests {
         // quit lands mid-pattern rather than at the between-pattern boundary.
         let results = run(
             &mut buf,
-            0,
             &[Pattern::WalkingOnes],
             1,
             false,
@@ -640,7 +570,6 @@ mod tests {
         let (tx, _rx) = make_tx();
         let results = run(
             &mut buf,
-            0,
             &[Pattern::SolidBits],
             1,
             false,
@@ -659,7 +588,7 @@ mod tests {
         shutdown::request_quit(shutdown::QuitReason::UserQuit);
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, 0, Pattern::ALL, 100, false, &tx, None, &|_| {}).unwrap();
+        let results = run(&mut buf, Pattern::ALL, 100, false, &tx, None, &|_| {}).unwrap();
         check!(results.is_empty());
     }
 
@@ -669,7 +598,6 @@ mod tests {
         let (tx, rx) = make_tx();
         let _ = run(
             &mut buf,
-            7,
             &[Pattern::SolidBits],
             1,
             false,
@@ -683,39 +611,14 @@ mod tests {
         let events: Vec<_> = rx.try_iter().collect();
 
         // PassStart, TestStart, Progress..., TestComplete, PassComplete
-        assert!(let RunEvent::Region(7, RegionEvent::PassStart { pass: 1, total_passes: 1 }) = &events[0]);
-        assert!(let RunEvent::Region(7, RegionEvent::TestStart { pattern: Pattern::SolidBits, pass: 1 }) = &events[1]);
+        assert!(let RunEvent::PassStart { pass: 1, total_passes: 1 } = &events[0]);
+        assert!(let RunEvent::TestStart { pattern: Pattern::SolidBits, pass: 1 } = &events[1]);
 
         // Last two should be TestComplete and PassComplete
         let last = &events[events.len() - 1];
-        assert!(let RunEvent::Region(7, RegionEvent::PassComplete { pass: 1, .. }) = last);
+        assert!(let RunEvent::PassComplete { pass: 1, .. } = last);
         let second_last = &events[events.len() - 2];
-        assert!(let RunEvent::Region(7, RegionEvent::TestComplete { pattern: Pattern::SolidBits, .. }) = second_last);
-    }
-
-    #[test]
-    fn region_idx_propagated() {
-        let mut buf = vec![0u64; 1024];
-        let (tx, rx) = make_tx();
-        let _ = run(
-            &mut buf,
-            42,
-            &[Pattern::SolidBits],
-            1,
-            false,
-            &tx,
-            None,
-            &|_| {},
-        )
-        .unwrap();
-        drop(tx);
-
-        for event in rx.try_iter() {
-            match event {
-                RunEvent::Region(idx, _) => assert!(idx == 42),
-                _ => panic!("unexpected non-region event"),
-            }
-        }
+        assert!(let RunEvent::TestComplete { pattern: Pattern::SolidBits, .. } = second_last);
     }
 
     mod extract_panic_msg_tests {

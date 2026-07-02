@@ -52,6 +52,16 @@ fn main() -> Result<()> {
         std::mem::take(&mut cli.patterns)
     };
 
+    let workers = cli.parallel.resolve();
+    if workers > 1
+        && let Err(e) = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build_global()
+    {
+        tracing::warn!("failed to configure {workers}-thread rayon pool: {e}");
+    }
+    let parallel = workers > 1;
+
     #[cfg(feature = "tui")]
     {
         let use_tui = match cli.tui {
@@ -72,7 +82,7 @@ fn main() -> Result<()> {
 
             let s = setup_test(&cli)?;
             let tui_setup = TuiTestSetup {
-                region: s.region,
+                buffer: s.buffer,
                 resolver: s.resolver,
                 map_stats: s.map_stats,
                 compaction_guard: s.compaction_guard,
@@ -80,8 +90,7 @@ fn main() -> Result<()> {
             let mut results = run_tui_mode(
                 cli.size,
                 cli.passes,
-                cli.regions,
-                cli.sequential,
+                workers,
                 tui_setup,
                 patterns,
                 &tracing_handle,
@@ -103,7 +112,7 @@ fn main() -> Result<()> {
     // Non-TUI path: handle is no longer needed (stderr layer stays).
     drop(tracing_handle);
 
-    let result = run_non_tui(&cli, &patterns, &output);
+    let result = run_non_tui(&cli, &patterns, &output, workers, parallel);
     shutdown_handle.shutdown();
     result
 }
@@ -183,7 +192,13 @@ fn consume_headless_events(
 }
 
 /// Non-TUI mode: headless output with tracing to stderr.
-fn run_non_tui(cli: &Cli, patterns: &[Pattern], output: &OutputConfig) -> Result<()> {
+fn run_non_tui(
+    cli: &Cli,
+    patterns: &[Pattern],
+    output: &OutputConfig,
+    workers: usize,
+    parallel: bool,
+) -> Result<()> {
     let mut setup = setup_test(cli)?;
 
     let (tx, rx) = ferrite::events::event_bus();
@@ -193,8 +208,7 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], output: &OutputConfig) -> Result
         size: cli.size,
         passes: cli.passes,
         patterns: patterns.to_vec(),
-        regions: 1,
-        parallel: !cli.sequential,
+        workers,
     });
 
     if let Some(ref stats) = setup.map_stats {
@@ -237,11 +251,10 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], output: &OutputConfig) -> Result
 
     let run_start = std::time::Instant::now();
     let pass_results = runner::run(
-        setup.region.as_u64_slice_mut(),
-        0,
+        setup.buffer.as_u64_slice_mut(),
         patterns,
         cli.passes,
-        !cli.sequential,
+        parallel,
         &tx,
         setup
             .resolver
@@ -262,8 +275,7 @@ fn run_non_tui(cli: &Cli, patterns: &[Pattern], output: &OutputConfig) -> Result
         size: cli.size,
         passes: cli.passes,
         patterns: patterns.to_vec(),
-        regions: 1,
-        parallel: !cli.sequential,
+        workers,
     };
     let mut results = ferrite::runner::RunResults::from_passes(pass_results, config, run_elapsed);
 

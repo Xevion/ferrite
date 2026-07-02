@@ -7,7 +7,7 @@ use owo_colors::OwoColorize;
 use crate::Failure;
 use crate::dimm::DimmTopology;
 use crate::edac::EccDelta;
-use crate::events::{EventRx, RegionEvent, RunEvent};
+use crate::events::{EventRx, RunEvent};
 use crate::pattern::Pattern;
 use crate::phys::MapStats;
 use crate::units::{Rate, Size, UnitSystem};
@@ -67,11 +67,10 @@ impl<W: Write> HeadlessPrinter<W> {
                 size,
                 passes,
                 patterns,
-                parallel,
-                ..
+                workers,
             } => {
                 self.total_passes = *passes;
-                self.print_banner(*size, *passes, patterns.len(), *parallel);
+                self.print_banner(*size, *passes, patterns.len(), *workers);
             }
             RunEvent::MapInfo { stats } => {
                 self.print_map_info(stats);
@@ -79,33 +78,27 @@ impl<W: Write> HeadlessPrinter<W> {
             RunEvent::DimmInfo { topology } => {
                 self.print_dimm_info(topology);
             }
-            RunEvent::Region(
-                _,
-                RegionEvent::TestComplete {
-                    pattern,
-                    elapsed,
-                    bytes,
-                    failures,
-                    interrupted,
-                    ..
-                },
-            ) => {
+            RunEvent::TestComplete {
+                pattern,
+                elapsed,
+                bytes,
+                failures,
+                interrupted,
+                ..
+            } => {
                 self.print_test_result(*pattern, *elapsed, *bytes, failures, *interrupted);
             }
-            RunEvent::Region(_, RegionEvent::EccDeltas { pass, deltas }) => {
+            RunEvent::EccDeltas { pass, deltas } => {
                 self.print_ecc_deltas(*pass, deltas);
             }
-            RunEvent::Region(_, RegionEvent::PassComplete { pass, failures, .. }) => {
+            RunEvent::PassComplete { pass, failures, .. } => {
                 self.print_pass_summary(*pass, self.total_passes, *failures);
             }
             RunEvent::RunComplete
             | RunEvent::Log { .. }
-            | RunEvent::Region(
-                _,
-                RegionEvent::PassStart { .. }
-                | RegionEvent::TestStart { .. }
-                | RegionEvent::Progress { .. },
-            ) => {}
+            | RunEvent::PassStart { .. }
+            | RunEvent::TestStart { .. }
+            | RunEvent::Progress { .. } => {}
         }
     }
 
@@ -124,9 +117,9 @@ impl<W: Write> HeadlessPrinter<W> {
         }
     }
 
-    fn print_banner(&mut self, size: usize, passes: usize, pattern_count: usize, parallel: bool) {
+    fn print_banner(&mut self, size: usize, passes: usize, pattern_count: usize, workers: usize) {
         let size_display = Size::new(size as f64, self.unit_system);
-        let suffix = if parallel { "" } else { "  (sequential)" };
+        let suffix = if workers > 1 { "" } else { "  (sequential)" };
         let _ = writeln!(
             self.out,
             "{} Testing {size_display:.1} across {} pass(es) with {} pattern(s){}",
@@ -270,8 +263,7 @@ mod tests {
             size: 1024 * 1024 * 1024,
             passes: 2,
             patterns: vec![Pattern::SolidBits, Pattern::Checkerboard],
-            regions: 1,
-            parallel: true,
+            workers: 4,
         });
         let out = output(&p);
         assert!(out.contains("ferrite"));
@@ -287,8 +279,7 @@ mod tests {
             size: 1024 * 1024,
             passes: 1,
             patterns: vec![Pattern::SolidBits],
-            regions: 1,
-            parallel: false,
+            workers: 1,
         });
         let out = output(&p);
         assert!(out.contains("(sequential)"));
@@ -334,17 +325,14 @@ mod tests {
     #[test]
     fn test_result_pass() {
         let mut p = printer();
-        p.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::TestComplete {
-                pattern: Pattern::SolidBits,
-                pass: 1,
-                elapsed: Duration::from_millis(100),
-                bytes: 1024 * 1024,
-                failures: vec![],
-                interrupted: false,
-            },
-        ));
+        p.handle_event(&RunEvent::TestComplete {
+            pattern: Pattern::SolidBits,
+            pass: 1,
+            elapsed: Duration::from_millis(100),
+            bytes: 1024 * 1024,
+            failures: vec![],
+            interrupted: false,
+        });
         let out = output(&p);
         assert!(out.contains("PASS"));
         assert!(out.contains("Solid Bits"));
@@ -360,17 +348,14 @@ mod tests {
                 .actual(0xFE)
                 .build(),
         ];
-        p.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::TestComplete {
-                pattern: Pattern::WalkingOnes,
-                pass: 1,
-                elapsed: Duration::from_millis(50),
-                bytes: 512 * 1024,
-                failures,
-                interrupted: false,
-            },
-        ));
+        p.handle_event(&RunEvent::TestComplete {
+            pattern: Pattern::WalkingOnes,
+            pass: 1,
+            elapsed: Duration::from_millis(50),
+            bytes: 512 * 1024,
+            failures,
+            interrupted: false,
+        });
         let out = output(&p);
         assert!(out.contains("FAIL"));
         assert!(out.contains("1 failures"));
@@ -379,17 +364,14 @@ mod tests {
     #[test]
     fn test_result_interrupted_no_failures_is_not_pass() {
         let mut p = printer();
-        p.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::TestComplete {
-                pattern: Pattern::WalkingOnes,
-                pass: 1,
-                elapsed: Duration::from_millis(50),
-                bytes: 512 * 1024,
-                failures: vec![],
-                interrupted: true,
-            },
-        ));
+        p.handle_event(&RunEvent::TestComplete {
+            pattern: Pattern::WalkingOnes,
+            pass: 1,
+            elapsed: Duration::from_millis(50),
+            bytes: 512 * 1024,
+            failures: vec![],
+            interrupted: true,
+        });
         let out = output(&p);
         // A cut-short pattern must not masquerade as a clean PASS.
         assert!(!out.contains("PASS"));
@@ -407,17 +389,14 @@ mod tests {
                 .actual(0xFE)
                 .build(),
         ];
-        p.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::TestComplete {
-                pattern: Pattern::WalkingOnes,
-                pass: 1,
-                elapsed: Duration::from_millis(50),
-                bytes: 512 * 1024,
-                failures,
-                interrupted: true,
-            },
-        ));
+        p.handle_event(&RunEvent::TestComplete {
+            pattern: Pattern::WalkingOnes,
+            pass: 1,
+            elapsed: Duration::from_millis(50),
+            bytes: 512 * 1024,
+            failures,
+            interrupted: true,
+        });
         let out = output(&p);
         assert!(out.contains("FAIL"));
         assert!(out.contains("interrupted"));
@@ -426,28 +405,25 @@ mod tests {
     #[test]
     fn ecc_deltas() {
         let mut p = printer();
-        p.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::EccDeltas {
-                pass: 1,
-                deltas: vec![
-                    EccDelta {
-                        mc: 0,
-                        dimm_index: 0,
-                        label: Some("DIMM_A1".to_owned()),
-                        ce_delta: 3,
-                        ue_delta: 0,
-                    },
-                    EccDelta {
-                        mc: 0,
-                        dimm_index: 1,
-                        label: None,
-                        ce_delta: 0,
-                        ue_delta: 1,
-                    },
-                ],
-            },
-        ));
+        p.handle_event(&RunEvent::EccDeltas {
+            pass: 1,
+            deltas: vec![
+                EccDelta {
+                    mc: 0,
+                    dimm_index: 0,
+                    label: Some("DIMM_A1".to_owned()),
+                    ce_delta: 3,
+                    ue_delta: 0,
+                },
+                EccDelta {
+                    mc: 0,
+                    dimm_index: 1,
+                    label: None,
+                    ce_delta: 0,
+                    ue_delta: 1,
+                },
+            ],
+        });
         let out = output(&p);
         assert!(out.contains("ECC"));
         assert!(out.contains("3 correctable"));
@@ -460,14 +436,11 @@ mod tests {
     fn pass_summary_clean() {
         let mut p = printer();
         p.total_passes = 2;
-        p.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::PassComplete {
-                pass: 1,
-                failures: 0,
-                elapsed: Duration::from_secs(5),
-            },
-        ));
+        p.handle_event(&RunEvent::PassComplete {
+            pass: 1,
+            failures: 0,
+            elapsed: Duration::from_secs(5),
+        });
         let out = output(&p);
         assert!(out.contains("Pass 1/2"));
         assert!(out.contains("all patterns passed"));
@@ -477,14 +450,11 @@ mod tests {
     fn pass_summary_failures() {
         let mut p = printer();
         p.total_passes = 3;
-        p.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::PassComplete {
-                pass: 2,
-                failures: 5,
-                elapsed: Duration::from_secs(10),
-            },
-        ));
+        p.handle_event(&RunEvent::PassComplete {
+            pass: 2,
+            failures: 5,
+            elapsed: Duration::from_secs(10),
+        });
         let out = output(&p);
         assert!(out.contains("Pass 2/3"));
         assert!(out.contains("5 total failure(s)"));
@@ -513,38 +483,28 @@ mod tests {
             size: 1024,
             passes: 1,
             patterns: vec![Pattern::SolidBits],
-            regions: 1,
-            parallel: true,
+            workers: 4,
         })
         .unwrap();
-        tx.send(RunEvent::Region(
-            0,
-            RegionEvent::PassStart {
-                pass: 1,
-                total_passes: 1,
-            },
-        ))
+        tx.send(RunEvent::PassStart {
+            pass: 1,
+            total_passes: 1,
+        })
         .unwrap();
-        tx.send(RunEvent::Region(
-            0,
-            RegionEvent::TestComplete {
-                pattern: Pattern::SolidBits,
-                pass: 1,
-                elapsed: Duration::from_millis(10),
-                bytes: 2048,
-                failures: vec![],
-                interrupted: false,
-            },
-        ))
+        tx.send(RunEvent::TestComplete {
+            pattern: Pattern::SolidBits,
+            pass: 1,
+            elapsed: Duration::from_millis(10),
+            bytes: 2048,
+            failures: vec![],
+            interrupted: false,
+        })
         .unwrap();
-        tx.send(RunEvent::Region(
-            0,
-            RegionEvent::PassComplete {
-                pass: 1,
-                failures: 0,
-                elapsed: Duration::from_millis(10),
-            },
-        ))
+        tx.send(RunEvent::PassComplete {
+            pass: 1,
+            failures: 0,
+            elapsed: Duration::from_millis(10),
+        })
         .unwrap();
         tx.send(RunEvent::RunComplete).unwrap();
 
@@ -559,29 +519,20 @@ mod tests {
     #[test]
     fn ignored_events_produce_no_output() {
         let mut p = printer();
-        p.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::PassStart {
-                pass: 1,
-                total_passes: 1,
-            },
-        ));
-        p.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::TestStart {
-                pattern: Pattern::SolidBits,
-                pass: 1,
-            },
-        ));
-        p.handle_event(&RunEvent::Region(
-            0,
-            RegionEvent::Progress {
-                pattern: Pattern::SolidBits,
-                pass: 1,
-                sub_pass: 1,
-                total: 2,
-            },
-        ));
+        p.handle_event(&RunEvent::PassStart {
+            pass: 1,
+            total_passes: 1,
+        });
+        p.handle_event(&RunEvent::TestStart {
+            pattern: Pattern::SolidBits,
+            pass: 1,
+        });
+        p.handle_event(&RunEvent::Progress {
+            pattern: Pattern::SolidBits,
+            pass: 1,
+            sub_pass: 1,
+            total: 2,
+        });
         p.handle_event(&RunEvent::Log {
             level: tracing::Level::INFO,
             target: "test".to_owned(),
@@ -664,8 +615,7 @@ mod tests {
             size: 1024,
             passes: 1,
             patterns: vec![],
-            regions: 1,
-            parallel: true,
+            workers: 4,
         })
         .unwrap();
         drop(tx);
