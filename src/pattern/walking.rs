@@ -1,4 +1,5 @@
 use crate::Failure;
+use crate::shutdown;
 
 use super::fill_and_verify;
 
@@ -10,6 +11,9 @@ pub(super) fn run_ones(
 ) -> Vec<Failure> {
     let mut failures = Vec::new();
     for bit in 0..64 {
+        if shutdown::quit_requested() {
+            break;
+        }
         let pattern = 1u64 << bit;
         failures.extend(fill_and_verify(
             buf,
@@ -30,6 +34,9 @@ pub(super) fn run_zeros(
 ) -> Vec<Failure> {
     let mut failures = Vec::new();
     for bit in 0..64 {
+        if shutdown::quit_requested() {
+            break;
+        }
         let pattern = !(1u64 << bit);
         failures.extend(fill_and_verify(
             buf,

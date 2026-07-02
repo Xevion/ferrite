@@ -63,6 +63,8 @@ enum Event {
         pass: usize,
         duration_ms: f64,
         bytes_processed: u64,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        interrupted: bool,
     },
     TestFail {
         region: usize,
@@ -71,6 +73,8 @@ enum Event {
         duration_ms: f64,
         bytes_processed: u64,
         failures: Vec<FailureRecord>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        interrupted: bool,
     },
     PassComplete {
         region: usize,
@@ -262,6 +266,7 @@ impl NdjsonEventWriter {
                 elapsed,
                 bytes,
                 failures,
+                interrupted,
             } => {
                 let duration_ms = elapsed.as_secs_f64() * 1000.0;
                 if failures.is_empty() {
@@ -271,6 +276,7 @@ impl NdjsonEventWriter {
                         pass: *pass,
                         duration_ms,
                         bytes_processed: *bytes,
+                        interrupted: *interrupted,
                     });
                 } else {
                     self.write_event(&Event::TestFail {
@@ -280,6 +286,7 @@ impl NdjsonEventWriter {
                         duration_ms,
                         bytes_processed: *bytes,
                         failures: failures.iter().map(FailureRecord::from).collect(),
+                        interrupted: *interrupted,
                     });
                 }
             }
@@ -591,6 +598,7 @@ mod tests {
                 elapsed: Duration::from_millis(100),
                 bytes: 1024,
                 failures: vec![],
+                interrupted: false,
             },
         ));
         drop(w);
@@ -601,7 +609,32 @@ mod tests {
         check!(e["region"] == 1);
         check!(e["pattern"] == "Checkerboard");
         assert!(e["duration_ms"].as_f64().unwrap() > 0.0);
+        // A non-interrupted pass omits the field entirely.
+        assert!(e["interrupted"].is_null());
         assert_has_timestamp(e);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_pass_emits_interrupted_flag_when_set() {
+        let (mut w, path) = test_writer();
+        w.handle_event(&RunEvent::Region(
+            0,
+            RegionEvent::TestComplete {
+                pattern: Pattern::WalkingOnes,
+                pass: 1,
+                elapsed: Duration::from_millis(10),
+                bytes: 1024,
+                failures: vec![],
+                interrupted: true,
+            },
+        ));
+        drop(w);
+
+        let events = read_events(&path);
+        let e = &events[1];
+        check!(e["event"] == "test_pass");
+        check!(e["interrupted"] == true);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -623,6 +656,7 @@ mod tests {
                 elapsed: Duration::from_millis(50),
                 bytes: 512,
                 failures,
+                interrupted: false,
             },
         ));
         drop(w);
@@ -779,6 +813,7 @@ mod tests {
                 elapsed: Duration::from_millis(50),
                 bytes: 1024,
                 failures: vec![],
+                interrupted: false,
             },
         ));
         w.handle_event(&RunEvent::Region(

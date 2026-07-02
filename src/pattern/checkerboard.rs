@@ -1,4 +1,5 @@
 use crate::Failure;
+use crate::shutdown;
 
 use super::fill_and_verify;
 
@@ -16,6 +17,9 @@ pub(super) fn run(
         on_subpass,
         on_activity,
     ));
+    if shutdown::quit_requested() {
+        return failures;
+    }
     failures.extend(fill_and_verify(
         buf,
         0x5555_5555_5555_5555,

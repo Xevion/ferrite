@@ -86,10 +86,11 @@ impl<W: Write> HeadlessPrinter<W> {
                     elapsed,
                     bytes,
                     failures,
+                    interrupted,
                     ..
                 },
             ) => {
-                self.print_test_result(*pattern, *elapsed, *bytes, failures);
+                self.print_test_result(*pattern, *elapsed, *bytes, failures, *interrupted);
             }
             RunEvent::Region(_, RegionEvent::EccDeltas { pass, deltas }) => {
                 self.print_ecc_deltas(*pass, deltas);
@@ -163,24 +164,33 @@ impl<W: Write> HeadlessPrinter<W> {
         elapsed: Duration,
         bytes_processed: u64,
         failures: &[Failure],
+        interrupted: bool,
     ) {
         let ms = elapsed.as_secs_f64() * 1000.0;
         let throughput = Rate::new(
             bytes_processed as f64 / elapsed.as_secs_f64(),
             self.unit_system,
         );
+        // An interrupted pattern is incomplete: a clean result can't be trusted
+        // as a PASS, so flag it distinctly rather than claiming success.
+        let suffix = if interrupted { "  (interrupted)" } else { "" };
         if failures.is_empty() {
+            let label = if interrupted {
+                "INTR".yellow().bold().to_string()
+            } else {
+                "PASS".green().to_string()
+            };
             let _ = writeln!(
                 self.out,
-                "  {} {:<20} {:>8.1}ms  {throughput:>}",
-                "PASS".green(),
+                "  {} {:<20} {:>8.1}ms  {throughput:>}{suffix}",
+                label,
                 pattern.to_string(),
                 ms,
             );
         } else {
             let _ = writeln!(
                 self.out,
-                "  {} {:<20} {:>8.1}ms  {throughput:>}  ({} failures)",
+                "  {} {:<20} {:>8.1}ms  {throughput:>}  ({} failures){suffix}",
                 "FAIL".red().bold(),
                 pattern.to_string(),
                 ms,
@@ -332,6 +342,7 @@ mod tests {
                 elapsed: Duration::from_millis(100),
                 bytes: 1024 * 1024,
                 failures: vec![],
+                interrupted: false,
             },
         ));
         let out = output(&p);
@@ -357,11 +368,59 @@ mod tests {
                 elapsed: Duration::from_millis(50),
                 bytes: 512 * 1024,
                 failures,
+                interrupted: false,
             },
         ));
         let out = output(&p);
         assert!(out.contains("FAIL"));
         assert!(out.contains("1 failures"));
+    }
+
+    #[test]
+    fn test_result_interrupted_no_failures_is_not_pass() {
+        let mut p = printer();
+        p.handle_event(&RunEvent::Region(
+            0,
+            RegionEvent::TestComplete {
+                pattern: Pattern::WalkingOnes,
+                pass: 1,
+                elapsed: Duration::from_millis(50),
+                bytes: 512 * 1024,
+                failures: vec![],
+                interrupted: true,
+            },
+        ));
+        let out = output(&p);
+        // A cut-short pattern must not masquerade as a clean PASS.
+        assert!(!out.contains("PASS"));
+        assert!(out.contains("INTR"));
+        assert!(out.contains("interrupted"));
+    }
+
+    #[test]
+    fn test_result_interrupted_with_failures_notes_incompleteness() {
+        let mut p = printer();
+        let failures = vec![
+            FailureBuilder::default()
+                .addr(0x1000)
+                .expected(0xFF)
+                .actual(0xFE)
+                .build(),
+        ];
+        p.handle_event(&RunEvent::Region(
+            0,
+            RegionEvent::TestComplete {
+                pattern: Pattern::WalkingOnes,
+                pass: 1,
+                elapsed: Duration::from_millis(50),
+                bytes: 512 * 1024,
+                failures,
+                interrupted: true,
+            },
+        ));
+        let out = output(&p);
+        assert!(out.contains("FAIL"));
+        assert!(out.contains("interrupted"));
     }
 
     #[test]
@@ -474,6 +533,7 @@ mod tests {
                 elapsed: Duration::from_millis(10),
                 bytes: 2048,
                 failures: vec![],
+                interrupted: false,
             },
         ))
         .unwrap();

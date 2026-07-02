@@ -60,12 +60,16 @@ pub enum RegionEvent {
     },
 
     /// A pattern test completed (may include failures).
+    ///
+    /// `interrupted` is true when the pattern stopped early due to a quit
+    /// request; its failures (and absence of failures) are then incomplete.
     TestComplete {
         pattern: Pattern,
         pass: usize,
         elapsed: Duration,
         bytes: u64,
         failures: Vec<Failure>,
+        interrupted: bool,
     },
 
     /// All patterns in a pass finished for this region.
@@ -149,6 +153,7 @@ mod tests {
                 elapsed: Duration::from_millis(100),
                 bytes: 8192,
                 failures: vec![],
+                interrupted: false,
             },
         ))
         .unwrap();

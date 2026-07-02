@@ -42,6 +42,9 @@ pub struct PatternResult {
     pub elapsed: std::time::Duration,
     /// Total bytes touched (writes + reads across all sub-passes).
     pub bytes_processed: u64,
+    /// True if the pattern stopped early due to a quit request, so its
+    /// failures (and absence of failures) are incomplete.
+    pub interrupted: bool,
 }
 
 /// Result of a full pass (all patterns).
@@ -201,6 +204,9 @@ pub fn run(
             };
             let elapsed = start.elapsed();
             let bytes_processed = buf_bytes * 2 * pattern.sub_passes();
+            // A quit observed now means the pattern's inner loop bailed out
+            // early, so its results are partial.
+            let interrupted = shutdown::quit_requested();
 
             if let Some(resolver) = resolver {
                 for f in &mut failures {
@@ -216,6 +222,7 @@ pub fn run(
                     elapsed,
                     bytes: bytes_processed,
                     failures: failures.clone(),
+                    interrupted,
                 },
             ));
 
@@ -224,6 +231,7 @@ pub fn run(
                 failures,
                 elapsed,
                 bytes_processed,
+                interrupted,
             });
         }
 
@@ -316,6 +324,7 @@ mod tests {
                     ],
                     elapsed: std::time::Duration::ZERO,
                     bytes_processed: 0,
+                    interrupted: false,
                 },
                 PatternResult {
                     pattern: Pattern::Checkerboard,
@@ -328,6 +337,7 @@ mod tests {
                     }],
                     elapsed: std::time::Duration::ZERO,
                     bytes_processed: 0,
+                    interrupted: false,
                 },
             ],
             ecc_deltas: vec![],
@@ -473,6 +483,51 @@ mod tests {
             assert!(e.to_string().contains("unrecoverable"));
             assert!(e.to_string().contains("worker panicked"));
         }
+    }
+
+    #[test]
+    #[serial]
+    fn pattern_marked_interrupted_on_mid_pattern_quit() {
+        shutdown::reset();
+        let mut buf = vec![0u64; 1024];
+        let (tx, _rx) = make_tx();
+        // Request quit from inside the pattern via the activity callback, so the
+        // quit lands mid-pattern rather than at the between-pattern boundary.
+        let results = run(
+            &mut buf,
+            0,
+            &[Pattern::WalkingOnes],
+            1,
+            false,
+            &tx,
+            None,
+            &|_| shutdown::request_quit(shutdown::QuitReason::UserQuit),
+        )
+        .unwrap();
+        shutdown::reset();
+        check!(results.len() == 1);
+        check!(results[0].pattern_results.len() == 1);
+        check!(results[0].pattern_results[0].interrupted);
+    }
+
+    #[test]
+    #[serial]
+    fn pattern_not_interrupted_on_clean_completion() {
+        shutdown::reset();
+        let mut buf = vec![0u64; 1024];
+        let (tx, _rx) = make_tx();
+        let results = run(
+            &mut buf,
+            0,
+            &[Pattern::SolidBits],
+            1,
+            false,
+            &tx,
+            None,
+            &|_| {},
+        )
+        .unwrap();
+        check!(!results[0].pattern_results[0].interrupted);
     }
 
     #[test]

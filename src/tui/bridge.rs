@@ -273,6 +273,7 @@ mod tests {
                 elapsed: Duration::from_millis(100),
                 bytes: 8192,
                 failures: vec![],
+                interrupted: false,
             },
         ));
 
@@ -308,6 +309,7 @@ mod tests {
                 elapsed: Duration::from_millis(100),
                 bytes: 8192,
                 failures: vec![failure],
+                interrupted: false,
             },
         ));
 
@@ -338,6 +340,7 @@ mod tests {
                 elapsed: Duration::from_millis(50),
                 bytes: 4096,
                 failures: vec![],
+                interrupted: false,
             },
         ));
         // pattern_indices[0] is now 1
@@ -496,6 +499,7 @@ mod tests {
                 elapsed: Duration::from_millis(50),
                 bytes: 4096,
                 failures: vec![],
+                interrupted: false,
             },
         ));
 

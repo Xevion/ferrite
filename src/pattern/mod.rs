@@ -198,6 +198,55 @@ mod tests {
         }
     }
 
+    mod cancellation {
+        use assert2::check;
+        use serial_test::serial;
+
+        use super::*;
+        use crate::shutdown::{self, QuitReason};
+
+        /// A quit requested mid-pattern must stop the sub-pass loop early
+        /// instead of grinding through all 64 walking-ones cycles.
+        #[test]
+        #[serial]
+        fn walking_ones_stops_when_quit_requested_mid_pattern() {
+            shutdown::reset();
+            let mut buf = make_test_buf();
+            let mut sub_passes = 0u32;
+            run_pattern(
+                Pattern::WalkingOnes,
+                &mut buf,
+                false,
+                &mut || {
+                    sub_passes += 1;
+                    if sub_passes == 3 {
+                        shutdown::request_quit(QuitReason::UserQuit);
+                    }
+                },
+                &NOOP_ACTIVITY,
+            );
+            shutdown::reset();
+            check!(sub_passes == 3);
+        }
+
+        /// Without a quit, the pattern runs every sub-pass to completion.
+        #[test]
+        #[serial]
+        fn walking_ones_runs_all_sub_passes_without_quit() {
+            shutdown::reset();
+            let mut buf = make_test_buf();
+            let mut sub_passes = 0u32;
+            run_pattern(
+                Pattern::WalkingOnes,
+                &mut buf,
+                false,
+                &mut || sub_passes += 1,
+                &NOOP_ACTIVITY,
+            );
+            check!(sub_passes == 64);
+        }
+    }
+
     mod dispatch {
         use assert2::assert;
         use std::ptr;
