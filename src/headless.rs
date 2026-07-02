@@ -291,6 +291,7 @@ mod tests {
         p.handle_event(&RunEvent::MapInfo {
             stats: MapStats {
                 total_pages: 100,
+                resolved_pages: 100,
                 huge_pages: 5,
                 thp_pages: 10,
                 hwpoison_pages: 1,
@@ -310,6 +311,7 @@ mod tests {
         p.handle_event(&RunEvent::MapInfo {
             stats: MapStats {
                 total_pages: 50,
+                resolved_pages: 50,
                 huge_pages: 0,
                 thp_pages: 0,
                 hwpoison_pages: 0,

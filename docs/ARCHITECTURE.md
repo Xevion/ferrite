@@ -54,6 +54,7 @@ Code: `src/headless.rs`, `src/ndjson.rs`, `src/results.rs`, `src/tui/bridge.rs`
 | `runner.rs` | Headless multi-pass runner: `run()`, `PassResult`, `PatternResult` |
 | `ops/` | Three-layer fill/verify operations: `scalar.rs` (coverage-measured), `avx512.rs` (excluded from coverage), `mod.rs` (dispatch) |
 | `phys.rs` | Physical address resolution via `/proc/self/pagemap`; `PhysAddr`, `PagemapResolver`, `PhysResolver` trait, `MapStats` |
+| `sysmem.rs` | Installed-RAM denominator (`/proc/iomem` "System RAM", `MemTotal` fallback) and single-run physical `Coverage`; `RamSource`, `InstalledRam` |
 | `edac.rs` | ECC error counters from `/sys/devices/system/edac/`; `EdacSnapshot`, `DimmEdac`, `EccDelta` |
 | `smbios.rs` | DIMM info from `/sys/firmware/dmi/tables/` |
 | `dimm.rs` | `DimmTopology` — merges SMBIOS + EDAC into a per-DIMM view |

@@ -15,6 +15,7 @@ pub mod results;
 pub mod runner;
 pub mod shutdown;
 pub mod smbios;
+pub mod sysmem;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod units;

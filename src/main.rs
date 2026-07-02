@@ -278,15 +278,26 @@ fn run_non_tui(
         workers,
     };
     let mut results = ferrite::runner::RunResults::from_passes(pass_results, config, run_elapsed);
+    results.coverage = ferrite::sysmem::coverage_for(setup.map_stats.as_ref());
 
     ferrite::error_analysis::analyze(&mut results);
 
     // Write run_complete to whichever NDJSON writers are active
     if let Some(w) = stdout_ndjson.as_mut() {
-        w.write_run_complete(cli.passes, results.total_failures, run_elapsed);
+        w.write_run_complete(
+            cli.passes,
+            results.total_failures,
+            run_elapsed,
+            results.coverage,
+        );
     }
     if let Some(w) = events_ndjson.as_mut() {
-        w.write_run_complete(cli.passes, results.total_failures, run_elapsed);
+        w.write_run_complete(
+            cli.passes,
+            results.total_failures,
+            run_elapsed,
+            results.coverage,
+        );
     }
 
     render_results(output, &results, cli.units, false);

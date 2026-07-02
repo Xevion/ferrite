@@ -129,3 +129,13 @@ Physical address >> 12. The page-granular index used in kernel pagemap interface
 A PFN identifies a 4 KiB page, not a byte. It is not interchangeable with a physical address.
 
 **Avoid:** using PFN where a byte-granular physical address is meant.
+
+### physical coverage
+The fraction of installed physical RAM a run actually tested: tested bytes / installed RAM. Tested bytes is the numerator — pages that resolved to a real PFN × 4 KiB (`MapStats::resolved_pages`, `MapStats::tested_bytes()`). Reported as the `coverage` object (`sysmem::Coverage`, `status: measured | unavailable`) in the results document and the `run_complete` NDJSON event. Unavailable without physical resolution (`--no-phys` or missing `CAP_SYS_ADMIN`).
+
+**Avoid:** conflating single-run coverage (this measurement) with cross-run coverage tracking (persisting tested PFNs across runs — a separate, future concern).
+
+### installed RAM
+Total testable physical memory — the coverage denominator. Summed from `/proc/iomem` "System RAM" ranges when readable as root, falling back to `/proc/meminfo` `MemTotal` otherwise (a slight underestimate, since `MemTotal` excludes firmware/kernel-reserved regions). Type: `sysmem::InstalledRam`, tagged with its `RamSource`.
+
+**Avoid:** "total memory" ambiguously — distinguish installed RAM (denominator) from the run size (the allocation) and from tested bytes (the numerator).

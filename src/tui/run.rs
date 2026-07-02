@@ -111,6 +111,10 @@ pub fn run_tui_mode(
     }
 
     let parallel = workers > 1;
+
+    // Measure coverage before `setup` is moved into the worker thread.
+    let coverage = crate::sysmem::coverage_for(setup.map_stats.as_ref());
+
     let run_start = std::time::Instant::now();
 
     // Pass results produced by the worker thread, collected for post-TUI rendering.
@@ -197,11 +201,17 @@ pub fn run_tui_mode(
         patterns: patterns_for_config,
         workers,
     };
-    let results = RunResults::from_passes(pass_results, config, run_elapsed);
+    let mut results = RunResults::from_passes(pass_results, config, run_elapsed);
+    results.coverage = coverage;
 
     // Write the summary run_complete event to the NDJSON file
     if let Some(w) = events_writer.as_mut() {
-        w.write_run_complete(passes, results.total_failures, run_elapsed);
+        w.write_run_complete(
+            passes,
+            results.total_failures,
+            run_elapsed,
+            results.coverage,
+        );
     }
 
     Ok(results)

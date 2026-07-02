@@ -168,6 +168,7 @@ mod tests {
         tx.send(RunEvent::MapInfo {
             stats: MapStats {
                 total_pages: 100,
+                resolved_pages: 100,
                 huge_pages: 5,
                 thp_pages: 10,
                 hwpoison_pages: 0,

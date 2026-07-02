@@ -80,6 +80,9 @@ pub struct RunResults {
     #[serde(with = "crate::units::duration_ms")]
     pub elapsed: std::time::Duration,
     pub total_failures: usize,
+    /// Fraction of installed physical RAM this run tested. Set by the binary
+    /// before rendering; defaults to [`Coverage::Unavailable`].
+    pub coverage: crate::sysmem::Coverage,
     /// Populated by [`crate::error_analysis::analyze`] after the run completes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_analysis: Option<crate::error_analysis::ErrorAnalysis>,
@@ -87,6 +90,9 @@ pub struct RunResults {
 
 impl RunResults {
     /// Build `RunResults` from pass results.
+    ///
+    /// `coverage` defaults to [`Coverage::Unavailable`]; the binary overwrites
+    /// it once the installed-RAM denominator is known.
     #[must_use]
     pub fn from_passes(
         passes: Vec<PassResult>,
@@ -99,6 +105,7 @@ impl RunResults {
             passes,
             elapsed,
             total_failures,
+            coverage: crate::sysmem::Coverage::Unavailable,
             error_analysis: None,
         }
     }
@@ -398,6 +405,18 @@ mod tests {
             assert!(json["passes"].is_array());
             check!(json["passes"][0]["pass_number"] == 1);
             assert!(json.get("regions").is_none());
+        }
+
+        #[test]
+        fn coverage_defaults_to_unavailable() {
+            let results = RunResults::from_passes(
+                vec![pass_with_failures(1, 0)],
+                config(),
+                Duration::from_millis(10),
+            );
+            check!(results.coverage == crate::sysmem::Coverage::Unavailable);
+            let json = serde_json::to_value(&results).unwrap();
+            check!(json["coverage"]["status"] == "unavailable");
         }
     }
 

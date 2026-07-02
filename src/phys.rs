@@ -155,10 +155,23 @@ impl PageFlags {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MapStats {
     pub total_pages: usize,
+    /// Pages that resolved to a real physical frame (nonzero PFN). Equals
+    /// `total_pages` under root; lower when some PFNs are unavailable. This is
+    /// the physical footprint actually tested -- the coverage numerator.
+    pub resolved_pages: usize,
     pub huge_pages: usize,
     pub thp_pages: usize,
     pub hwpoison_pages: usize,
     pub unevictable_pages: usize,
+}
+
+impl MapStats {
+    /// Physical bytes backed by resolved page frames -- the numerator for
+    /// coverage. Pages whose PFN could not be resolved are excluded.
+    #[must_use]
+    pub fn tested_bytes(&self) -> u64 {
+        self.resolved_pages as u64 * PAGE_SIZE as u64
+    }
 }
 
 /// Resolves virtual addresses within a locked region to physical addresses.
@@ -301,9 +314,12 @@ impl PhysResolver for PagemapResolver {
         self.pfns = pfns;
         self.region_base = base;
 
+        let resolved_pages = self.pfns.iter().filter(|&&pfn| pfn != 0).count();
+
         // Compute MapStats by reading kpageflags if available
         let mut stats = MapStats {
             total_pages: page_count,
+            resolved_pages,
             huge_pages: 0,
             thp_pages: 0,
             hwpoison_pages: 0,
@@ -434,6 +450,20 @@ mod tests {
             check!(resolver_err.to_string().contains("failed to build"));
             assert!(let PhysResolverError::ReadError(_) = resolver_err);
         }
+    }
+
+    #[test]
+    fn map_stats_tested_bytes_excludes_unresolved() {
+        let stats = MapStats {
+            total_pages: 10,
+            resolved_pages: 8,
+            huge_pages: 0,
+            thp_pages: 0,
+            hwpoison_pages: 0,
+            unevictable_pages: 0,
+        };
+        // 8 resolved pages * 4096 bytes/page.
+        check!(stats.tested_bytes() == 8 * 4096);
     }
 
     #[test]
@@ -626,6 +656,7 @@ mod tests {
             self.len = len;
             Ok(MapStats {
                 total_pages: len / PAGE_SIZE,
+                resolved_pages: len / PAGE_SIZE,
                 huge_pages: 0,
                 thp_pages: 0,
                 hwpoison_pages: 0,
@@ -672,6 +703,7 @@ mod tests {
             let mut resolver = FakeResolver::new(0, 0);
             let stats = resolver.build_map(0x1000, 8192).unwrap();
             check!(stats.total_pages == 2);
+            check!(stats.resolved_pages == 2);
             check!(resolver.base == 0x1000);
             check!(resolver.len == 8192);
         }

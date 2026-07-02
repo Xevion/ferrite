@@ -90,6 +90,7 @@ enum Event {
         passes: usize,
         total_failures: usize,
         duration_ms: f64,
+        coverage: crate::sysmem::Coverage,
     },
 }
 
@@ -279,11 +280,18 @@ impl NdjsonEventWriter {
     }
 
     /// Write the run-complete summary event (emitted after all events are consumed).
-    pub fn write_run_complete(&mut self, passes: usize, total_failures: usize, elapsed: Duration) {
+    pub fn write_run_complete(
+        &mut self,
+        passes: usize,
+        total_failures: usize,
+        elapsed: Duration,
+        coverage: crate::sysmem::Coverage,
+    ) {
         self.write_event(&Event::RunComplete {
             passes,
             total_failures,
             duration_ms: elapsed.as_secs_f64() * 1000.0,
+            coverage,
         });
     }
 
@@ -418,7 +426,16 @@ mod tests {
     #[test]
     fn run_complete_event() {
         let (mut w, path) = test_writer();
-        w.write_run_complete(3, 5, Duration::from_secs(10));
+        w.write_run_complete(
+            3,
+            5,
+            Duration::from_secs(10),
+            crate::sysmem::Coverage::Measured {
+                tested_bytes: 1024,
+                total_bytes: 4096,
+                source: crate::sysmem::RamSource::ProcIomem,
+            },
+        );
         drop(w);
 
         let events = read_events(&path);
@@ -429,6 +446,9 @@ mod tests {
         check!(e["passes"] == 3);
         check!(e["total_failures"] == 5);
         assert!(e["duration_ms"].as_f64().unwrap() > 0.0);
+        check!(e["coverage"]["status"] == "measured");
+        check!(e["coverage"]["tested_bytes"] == 1024);
+        check!(e["coverage"]["source"] == "proc_iomem");
         assert_has_timestamp(e);
         let _ = std::fs::remove_file(&path);
     }
@@ -689,6 +709,7 @@ mod tests {
         w.handle_event(&RunEvent::MapInfo {
             stats: MapStats {
                 total_pages: 100,
+                resolved_pages: 100,
                 huge_pages: 5,
                 thp_pages: 10,
                 hwpoison_pages: 0,
@@ -752,7 +773,12 @@ mod tests {
             failures: 0,
             elapsed: Duration::from_millis(100),
         });
-        w.write_run_complete(1, 0, Duration::from_millis(100));
+        w.write_run_complete(
+            1,
+            0,
+            Duration::from_millis(100),
+            crate::sysmem::Coverage::Unavailable,
+        );
         drop(w);
 
         let events = read_events(&path);

@@ -77,6 +77,14 @@ impl ResultsDoc {
         ConfigDoc(&self.0["config"])
     }
 
+    /// Physical coverage, if the results carry a coverage object.
+    #[must_use]
+    pub fn coverage(&self) -> Option<CoverageDoc<'_>> {
+        self.0["coverage"]
+            .as_object()
+            .map(|_| CoverageDoc(&self.0["coverage"]))
+    }
+
     /// Access the raw inner JSON value.
     #[must_use]
     pub fn as_value(&self) -> &serde_json::Value {
@@ -155,6 +163,58 @@ impl ConfigDoc<'_> {
     #[must_use]
     pub fn workers(&self) -> u64 {
         self.0["workers"].as_u64().unwrap_or(1)
+    }
+}
+
+/// Borrowed view into physical coverage.
+pub struct CoverageDoc<'a>(&'a serde_json::Value);
+
+impl CoverageDoc<'_> {
+    #[must_use]
+    pub fn is_measured(&self) -> bool {
+        self.0["status"].as_str() == Some("measured")
+    }
+
+    #[must_use]
+    pub fn tested_bytes(&self) -> u64 {
+        self.0["tested_bytes"].as_u64().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn total_bytes(&self) -> u64 {
+        self.0["total_bytes"].as_u64().unwrap_or(0)
+    }
+
+    /// Human-readable denominator source label.
+    #[must_use]
+    pub fn source_label(&self) -> &'static str {
+        match self.0["source"].as_str() {
+            Some("proc_iomem") => "/proc/iomem",
+            _ => "MemTotal estimate",
+        }
+    }
+
+    /// Tested fraction as a percentage; 0.0 when the denominator is zero.
+    #[must_use]
+    pub fn percent(&self) -> f64 {
+        let total = self.total_bytes();
+        if total == 0 {
+            0.0
+        } else {
+            self.tested_bytes() as f64 / total as f64 * 100.0
+        }
+    }
+}
+
+/// Format a coverage percentage, scaling precision so small runs still show a
+/// nonzero figure instead of collapsing to `0.0%`.
+fn format_percent(pct: f64) -> String {
+    if pct >= 1.0 {
+        format!("{pct:.1}%")
+    } else if pct >= 0.01 {
+        format!("{pct:.2}%")
+    } else {
+        format!("{pct:.3}%")
     }
 }
 
@@ -376,6 +436,21 @@ impl ResultsRenderer for TableRenderer {
             }
         }
 
+        // Physical coverage block -- the memory-centric headline for the run.
+        if let Some(cov) = doc.coverage() {
+            writeln!(out)?;
+            writeln!(out, "Physical coverage")?;
+            if cov.is_measured() {
+                let tested = crate::units::Size::new(cov.tested_bytes() as f64, self.unit_system);
+                let total = crate::units::Size::new(cov.total_bytes() as f64, self.unit_system);
+                writeln!(out, "  Tested:    {tested}")?;
+                writeln!(out, "  Installed: {total}  ({})", cov.source_label())?;
+                writeln!(out, "  Coverage:  {}", format_percent(cov.percent()))?;
+            } else {
+                writeln!(out, "  unavailable (no physical address resolution)")?;
+            }
+        }
+
         // Final verdict
         writeln!(out)?;
         let elapsed_display = if elapsed_secs < 1.0 {
@@ -522,6 +597,30 @@ mod tests {
         )
     }
 
+    /// Clean results with measured coverage: 64 MiB tested of 32 GiB installed.
+    fn covered_results() -> RunResults {
+        let mut r = clean_results();
+        r.coverage = crate::sysmem::Coverage::Measured {
+            tested_bytes: 64 * 1024 * 1024,
+            total_bytes: 32 * 1024 * 1024 * 1024,
+            source: crate::sysmem::RamSource::ProcIomem,
+        };
+        r
+    }
+
+    mod format_percent_tests {
+        use assert2::check;
+
+        use super::*;
+
+        #[test]
+        fn scales_precision_by_magnitude() {
+            check!(format_percent(42.567) == "42.6%");
+            check!(format_percent(0.1953) == "0.20%");
+            check!(format_percent(0.004) == "0.004%");
+        }
+    }
+
     mod results_doc {
         use assert2::{assert, check};
 
@@ -574,6 +673,30 @@ mod tests {
             check!(cfg.size() == 8192);
             check!(cfg.passes() == 1);
             check!(cfg.workers() == 1);
+        }
+
+        #[test]
+        fn coverage_accessor_measured() {
+            let doc = ResultsDoc::from_results(&covered_results());
+            let cov = doc.coverage().unwrap();
+            assert!(cov.is_measured());
+            check!(cov.tested_bytes() == 64 * 1024 * 1024);
+            check!(cov.total_bytes() == 32u64 * 1024 * 1024 * 1024);
+            check!(cov.source_label() == "/proc/iomem");
+            assert!((cov.percent() - 0.195_312_5).abs() < 1e-6);
+        }
+
+        #[test]
+        fn coverage_accessor_unavailable() {
+            let doc = ResultsDoc::from_results(&clean_results());
+            let cov = doc.coverage().unwrap();
+            assert!(!cov.is_measured());
+        }
+
+        #[test]
+        fn coverage_absent_when_no_key() {
+            let doc = ResultsDoc::from_json(serde_json::json!({}));
+            assert!(doc.coverage().is_none());
         }
 
         #[test]
@@ -757,6 +880,27 @@ mod tests {
         }
 
         #[test]
+        fn renders_measured_coverage_block() {
+            let out = render_to_string(&covered_results());
+            assert!(out.contains("Physical coverage"));
+            assert!(out.contains("Tested:"));
+            assert!(out.contains("64.0 MiB"));
+            assert!(out.contains("Installed:"));
+            assert!(out.contains("32.0 GiB"));
+            assert!(out.contains("/proc/iomem"));
+            assert!(out.contains("Coverage:"));
+            assert!(out.contains("0.20%"));
+        }
+
+        #[test]
+        fn renders_unavailable_coverage_block() {
+            // clean_results() defaults coverage to Unavailable.
+            let out = render_to_string(&clean_results());
+            assert!(out.contains("Physical coverage"));
+            assert!(out.contains("unavailable"));
+        }
+
+        #[test]
         fn failing_run_shows_error_analysis() {
             let out = render_to_string(&failing_results());
             assert!(out.contains("failure(s) detected"));
@@ -842,6 +986,16 @@ mod tests {
             let mut buf = Vec::new();
             JsonRenderer.render(&doc, &mut buf).unwrap();
             assert!(buf.ends_with(b"\n"));
+        }
+
+        #[test]
+        fn includes_coverage_status() {
+            let doc = ResultsDoc::from_results(&clean_results());
+            let mut buf = Vec::new();
+            JsonRenderer.render(&doc, &mut buf).unwrap();
+            let parsed: serde_json::Value =
+                serde_json::from_str(&String::from_utf8(buf).unwrap()).unwrap();
+            check!(parsed["coverage"]["status"] == "unavailable");
         }
     }
 }
