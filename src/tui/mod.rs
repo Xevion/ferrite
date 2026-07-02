@@ -19,6 +19,7 @@ use std::{fmt, thread};
 
 use anyhow::Context;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::backend::Backend;
 use ratatui::prelude::Widget;
 use ratatui::widgets::Paragraph;
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -442,6 +443,63 @@ where
     })
 }
 
+/// Finalize the inline viewport on exit.
+///
+/// First drains any log lines still buffered in `rx` into the scrollback, in
+/// arrival order, so late diagnostics read continuously with the lines already
+/// shown during the run instead of being dumped after teardown. Then collapses
+/// the viewport: the region is cleared and the cursor is parked at its
+/// top-left, so the post-run summary begins exactly where the viewport was —
+/// with no dead whitespace. Finally restores cursor visibility for the shell.
+///
+/// Generic over the backend so tests can drive it with `TestBackend`.
+///
+/// # Errors
+///
+/// Returns an error if inserting scrollback lines, clearing, or repositioning
+/// the cursor fails.
+pub fn finish_viewport<B>(
+    terminal: &mut Terminal<B>,
+    rx: &mpsc::Receiver<TuiEvent>,
+) -> anyhow::Result<()>
+where
+    B: Backend,
+    B::Error: Send + Sync + 'static,
+{
+    // Push any log lines still queued at exit into the scrollback, in order,
+    // so they flow directly below the output already shown during the run.
+    let lines: Vec<ratatui::text::Text<'static>> = rx
+        .try_iter()
+        .filter_map(|event| match event {
+            TuiEvent::Log(msg) => ansi_to_tui::IntoText::into_text(&msg).ok(),
+            _ => None,
+        })
+        .collect();
+    if !lines.is_empty() {
+        terminal.insert_before(lines.len() as u16, |buf| {
+            for (i, text) in lines.into_iter().enumerate() {
+                let area = ratatui::layout::Rect {
+                    y: buf.area.y + i as u16,
+                    height: 1,
+                    ..buf.area
+                };
+                Paragraph::new(text).render(area, buf);
+            }
+        })?;
+    }
+
+    // Collapse the viewport: clear it, then park the cursor at its top-left so
+    // the summary printed afterwards starts exactly where the viewport was.
+    // `clear()` alone restores the pre-clear cursor (deep in the viewport),
+    // which is what left the dead whitespace; the explicit reposition fixes it.
+    let top = terminal.get_frame().area().as_position();
+    terminal.clear()?;
+    terminal.set_cursor_position(top)?;
+    terminal.show_cursor()?;
+    terminal.backend_mut().flush()?;
+    Ok(())
+}
+
 /// Run the TUI event loop with a real terminal. Blocks until the user quits
 /// or the segment completes.
 ///
@@ -503,8 +561,10 @@ pub fn run_tui(
 
     run_event_loop(&mut terminal, config, segment, rx)?;
 
-    // Clear the inline viewport while raw mode is still active (guard drops after return).
-    terminal.clear().context("failed to clear terminal")?;
+    // Drain trailing diagnostics into the scrollback and collapse the viewport
+    // (while raw mode is still active) so the summary starts cleanly where the
+    // viewport was, with no dead whitespace.
+    finish_viewport(&mut terminal, rx).context("failed to finalize viewport")?;
     // Explicitly drop the guard before println so the terminal is restored first.
     drop(guard);
     println!();
@@ -1099,6 +1159,135 @@ mod tests {
                 !text.contains("log line"),
                 "log text leaked into viewport after burst"
             );
+        }
+    }
+
+    mod teardown {
+        use std::sync::mpsc;
+
+        use assert2::{assert, check};
+        use ratatui::backend::{Backend, TestBackend};
+        use ratatui::layout::Position;
+        use ratatui::style::Style;
+        use ratatui::{Terminal, TerminalOptions, Viewport};
+
+        use super::super::*;
+
+        fn inline_terminal(
+            w: u16,
+            h: u16,
+            viewport_h: u16,
+            cursor_row: u16,
+        ) -> Terminal<TestBackend> {
+            let mut backend = TestBackend::new(w, h);
+            backend
+                .set_cursor_position(Position {
+                    x: 0,
+                    y: cursor_row,
+                })
+                .unwrap();
+            Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Inline(viewport_h),
+                },
+            )
+            .unwrap()
+        }
+
+        fn fill_viewport(term: &mut Terminal<TestBackend>, marker: &str) {
+            term.draw(|frame| {
+                let area = frame.area();
+                for y in area.top()..area.bottom() {
+                    frame
+                        .buffer_mut()
+                        .set_string(area.x, y, marker, Style::default());
+                }
+            })
+            .unwrap();
+        }
+
+        fn visible_text(term: &Terminal<TestBackend>) -> String {
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect()
+        }
+
+        /// Scrollback followed by the visible buffer, flattened to a string.
+        fn all_text(term: &Terminal<TestBackend>) -> String {
+            let scroll = term.backend().scrollback().content().iter();
+            let visible = term.backend().buffer().content().iter();
+            scroll
+                .chain(visible)
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect()
+        }
+
+        #[test]
+        fn parks_cursor_at_viewport_top() {
+            // Viewport anchored at row 3; after a draw the backend cursor sits
+            // deep inside it. Teardown must return the cursor to the top row so
+            // the summary starts exactly where the viewport was.
+            let mut term = inline_terminal(20, 15, 9, 3);
+            fill_viewport(&mut term, "HEATMAPXX");
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(8);
+            drop(tx);
+
+            finish_viewport(&mut term, &rx).unwrap();
+
+            let pos = term.get_cursor_position().unwrap();
+            check!(pos.x == 0);
+            check!(pos.y == 3);
+        }
+
+        #[test]
+        fn clears_viewport_content() {
+            let mut term = inline_terminal(20, 15, 9, 3);
+            fill_viewport(&mut term, "HEATMAPXX");
+            check!(visible_text(&term).contains("HEATMAPXX"));
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(8);
+            drop(tx);
+
+            finish_viewport(&mut term, &rx).unwrap();
+
+            check!(!visible_text(&term).contains("HEATMAPXX"));
+        }
+
+        #[test]
+        fn restores_cursor_visibility() {
+            let mut term = inline_terminal(20, 15, 9, 3);
+            fill_viewport(&mut term, "x");
+            // draw() hides the cursor; teardown must restore it for the shell.
+            check!(!term.backend().cursor_visible());
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(8);
+            drop(tx);
+
+            finish_viewport(&mut term, &rx).unwrap();
+
+            check!(term.backend().cursor_visible());
+        }
+
+        #[test]
+        fn flushes_buffered_logs_to_scrollback() {
+            // Logs still queued at exit must land in the scrollback (in order),
+            // not be dumped after the viewport is gone.
+            let mut term = inline_terminal(40, 20, 5, 2);
+            fill_viewport(&mut term, "heat");
+            let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
+            tx.send(TuiEvent::Log(" INFO ferrite: tail ALPHA".into()))
+                .unwrap();
+            tx.send(TuiEvent::Log(" INFO ferrite: tail BETA".into()))
+                .unwrap();
+            drop(tx);
+
+            finish_viewport(&mut term, &rx).unwrap();
+
+            let text = all_text(&term);
+            assert!(text.contains("ALPHA"), "tail log ALPHA missing: {text}");
+            assert!(text.contains("BETA"), "tail log BETA missing: {text}");
         }
     }
 }

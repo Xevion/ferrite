@@ -64,7 +64,7 @@ Code: `src/headless.rs`, `src/ndjson.rs`, `src/results.rs`, `src/tui/bridge.rs`
 | `results.rs` | `ResultsDoc`, `ResultsRenderer` trait, `TableRenderer`, `JsonRenderer` |
 | `units.rs` | Binary/decimal size and rate formatting |
 | `shutdown.rs` | Signal handling, panic hook, coordinated shutdown, exit codes |
-| `tui/mod.rs` | `Segment`, `TuiEvent`, `TuiConfig`, `run_tui()`, `run_event_loop<B>()` |
+| `tui/mod.rs` | `Segment`, `TuiEvent`, `TuiConfig`, `run_tui()`, `run_event_loop<B>()`, `finish_viewport<B>()` (exit teardown: drain buffered logs to scrollback, collapse the viewport cleanly) |
 | `tui/run.rs` | `run_tui_mode()`, `TuiTestSetup` |
 | `tui/render.rs` | Frame rendering: heatmaps, progress bars, status header |
 | `tui/activity.rs` | Activity tracking for heatmap data |
