@@ -9,9 +9,9 @@ alias l := lint
 check *args:
     tempo check {{args}}
 
-# Run tests
-test:
-    tempo check ferrite:test
+# Run tests (mirrors the tempo/CI test command)
+test *args:
+    cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final {{args}}
 
 # Clippy only
 lint:
