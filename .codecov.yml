@@ -15,42 +15,42 @@ coverage:
         target: 90%
         threshold: 0%
   ignore:
-    - "src/main.rs"
-    - "src/ops/avx512.rs"
-    - "src/tui/mod.rs"
-    - "src/tui/run.rs"
+    - "crates/ferrite-linux/src/main.rs"
+    - "crates/ferrite-linux/src/ops/avx512.rs"
+    - "crates/ferrite-linux/src/tui/mod.rs"
+    - "crates/ferrite-linux/src/tui/run.rs"
 
 component_management:
   individual_components:
     - component_id: patterns
       name: Test Patterns
       paths:
-        - src/pattern/**
+        - crates/ferrite-linux/src/pattern/**
     - component_id: ops
       name: Memory Operations
       paths:
-        - src/ops/**
+        - crates/ferrite-linux/src/ops/**
     - component_id: alloc
       name: Allocator
       paths:
-        - src/alloc.rs
+        - crates/ferrite-linux/src/alloc.rs
     - component_id: runner
       name: Runner
       paths:
-        - src/runner.rs
+        - crates/ferrite-linux/src/runner.rs
     - component_id: analysis
       name: Analysis
       paths:
-        - src/error_analysis.rs
-        - src/failure.rs
+        - crates/ferrite-linux/src/error_analysis.rs
+        - crates/ferrite-linux/src/failure.rs
     - component_id: hardware
       name: Hardware I/O
       paths:
-        - src/output.rs
-        - src/phys.rs
-        - src/edac.rs
-        - src/smbios.rs
-        - src/dimm.rs
+        - crates/ferrite-linux/src/output.rs
+        - crates/ferrite-linux/src/phys.rs
+        - crates/ferrite-linux/src/edac.rs
+        - crates/ferrite-linux/src/smbios.rs
+        - crates/ferrite-linux/src/dimm.rs
 
 comment:
   layout: "condensed_header, diff, components, condensed_footer"

@@ -11,7 +11,7 @@ Controls the live interactive display. In `auto` mode (default), the TUI activat
 - **TUI on:** ratatui renders an inline viewport to stdout with heatmaps, progress, and live log lines. Tracing events are captured and displayed inline via a dedicated tracing layer.
 - **TUI off:** No interactive display. Tracing goes to stderr only.
 
-Code: `src/tui/` (event loop, rendering, `TuiMakeWriter` for tracing integration)
+Code: `crates/ferrite-linux/src/tui/` (event loop, rendering, `TuiMakeWriter` for tracing integration)
 
 ### Tracing (stderr)
 
@@ -40,7 +40,7 @@ Output is split into three independent concerns:
 
 In TUI mode, the `EventBridge` translates `RunEvent`s to `TuiEvent`s for the TUI event loop, and optionally writes the NDJSON event stream to the `--events` file. No headless human printing occurs.
 
-Code: `src/headless.rs`, `src/ndjson.rs`, `src/results/`, `src/tui/bridge.rs`
+Code: `crates/ferrite-linux/src/headless.rs`, `crates/ferrite-linux/src/ndjson.rs`, `crates/ferrite-linux/src/results/`, `crates/ferrite-linux/src/tui/bridge.rs`
 
 Error handling is [snafu](https://docs.rs/snafu) exclusively (`Snafu` enums for typed library errors, `Whatever` for loose message-based errors in binary-side glue). `thiserror`/`anyhow` are not used.
 

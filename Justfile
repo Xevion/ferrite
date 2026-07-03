@@ -88,18 +88,18 @@ bench_targets := "--bench patterns --bench alloc --bench simd"
 # benchmark names by substring; alloc runs unprivileged when RLIMIT_MEMLOCK
 # covers the size, else those sizes skip individually.
 bench filter="":
-    cargo bench --features bench {{bench_targets}} -- {{bench_flags}} {{filter}}
+    cargo bench -p ferrite --features bench {{bench_targets}} -- {{bench_flags}} {{filter}}
 
 # Save current bench results as a named baseline (default: "main")
 bench-baseline name="main":
-    mkdir -p benches/baselines
-    cargo bench --features bench {{bench_targets}} -- {{bench_flags}} | tee benches/baselines/{{name}}.txt
+    mkdir -p crates/ferrite-linux/benches/baselines
+    cargo bench -p ferrite --features bench {{bench_targets}} -- {{bench_flags}} | tee crates/ferrite-linux/benches/baselines/{{name}}.txt
 
 # Compare current bench results against a saved baseline
 bench-compare name="main":
-    cargo bench --features bench {{bench_targets}} -- {{bench_flags}} | tee /tmp/ferrite-bench-current.txt
-    diff benches/baselines/{{name}}.txt /tmp/ferrite-bench-current.txt || true
+    cargo bench -p ferrite --features bench {{bench_targets}} -- {{bench_flags}} | tee /tmp/ferrite-bench-current.txt
+    diff crates/ferrite-linux/benches/baselines/{{name}}.txt /tmp/ferrite-bench-current.txt || true
 
 # Run instruction-count benchmarks via Gungraun (requires valgrind + cargo install gungraun-runner)
 bench-ci:
-    cargo bench --features bench --bench instructions
+    cargo bench -p ferrite --features bench --bench instructions
