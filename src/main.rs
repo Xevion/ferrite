@@ -11,6 +11,7 @@ use snafu::{ResultExt, Whatever};
 
 use ferrite::events::RunEvent;
 use ferrite::headless::HeadlessPrinter;
+use ferrite::log_bridge::LogForwarder;
 use ferrite::ndjson::NdjsonEventWriter;
 use ferrite::pattern::Pattern;
 use ferrite::physmem::lifecycle::{self, CoverageCtx};
@@ -49,8 +50,9 @@ fn main() -> Result<()> {
     }
 
     // Init tracing early with stderr output so privilege warnings are visible.
-    // The TUI path hot-swaps to its channel writer via the reload handle.
-    let tracing_handle = init_tracing();
+    // The TUI path hot-swaps to its channel writer via the reload handle; the
+    // forwarder streams diagnostics into NDJSON on the headless/devmem paths.
+    let (tracing_handle, log_forwarder) = init_tracing();
 
     let need_phys = !cli.no_phys;
     check_privileges(cli.requested_bytes_estimate(), need_phys);
@@ -79,7 +81,15 @@ fn main() -> Result<()> {
     // chosen physical ranges rather than anonymous memory.
     if let Some(target) = cli.devmem {
         drop(tracing_handle);
-        let result = devmem_run::run(&cli, &output, target, &patterns, workers, parallel);
+        let result = devmem_run::run(
+            &cli,
+            &output,
+            target,
+            &patterns,
+            workers,
+            parallel,
+            &log_forwarder,
+        );
         shutdown_handle.shutdown();
         return result;
     }
@@ -126,6 +136,7 @@ fn main() -> Result<()> {
                 resolver: s.resolver,
                 map_stats: s.map_stats,
                 compaction_guard: s.compaction_guard,
+                topology: s.topology,
             };
             let run_output = run_tui_mode(
                 size,
@@ -159,7 +170,15 @@ fn main() -> Result<()> {
     // Non-TUI path: handle is no longer needed (stderr layer stays).
     drop(tracing_handle);
 
-    let result = run_non_tui(&cli, &patterns, &output, workers, parallel, coverage_ctx);
+    let result = run_non_tui(
+        &cli,
+        &patterns,
+        &output,
+        workers,
+        parallel,
+        coverage_ctx,
+        &log_forwarder,
+    );
     shutdown_handle.shutdown();
     result
 }
@@ -172,6 +191,7 @@ fn run_non_tui(
     workers: usize,
     parallel: bool,
     coverage_ctx: Option<CoverageCtx>,
+    log_forwarder: &LogForwarder,
 ) -> Result<()> {
     let cull = lifecycle::cull_ranges(cli.cull, coverage_ctx.as_ref());
     let mut setup = match setup_test(cli, cull.as_deref())? {
@@ -207,6 +227,9 @@ fn run_non_tui(
             stats: stats.clone(),
         });
     }
+    if let Some(topology) = setup.topology.take() {
+        let _ = tx.send(RunEvent::DimmInfo { topology });
+    }
 
     let unit_system = cli.units;
     let format = output.format;
@@ -226,6 +249,13 @@ fn run_non_tui(
 
     // NDJSON writer for --events <file>
     let mut events_ndjson = output::open_events_writer(output)?;
+
+    // When NDJSON is active, forward diagnostic tracing into the event stream as
+    // RunEvent::Log for the duration of the run.
+    let ndjson_active = json_to_stdout || events_ndjson.is_some();
+    if ndjson_active {
+        log_forwarder.install(tx.clone());
+    }
 
     // Consumer thread drives HeadlessPrinter (human) + optional NDJSON writers.
     let consumer = std::thread::spawn(move || {
@@ -252,6 +282,7 @@ fn run_non_tui(
             .as_ref()
             .map(|r| r as &(dyn PhysResolver + Sync)),
         &|_| {},
+        None,
     )
     .whatever_context("pattern execution failed")?;
     let run_elapsed = run_start.elapsed();
@@ -261,6 +292,11 @@ fn run_non_tui(
 
     let (_printer, mut stdout_ndjson, mut events_ndjson) =
         consumer.join().expect("event consumer thread panicked");
+
+    // Stop forwarding: the consumer that drains Log events has exited.
+    if ndjson_active {
+        log_forwarder.clear();
+    }
 
     let config = ferrite::runner::RunConfig {
         size,
@@ -310,17 +346,26 @@ fn run_non_tui(
 type BoxedTracingLayer =
     Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
 
-/// Initialize the global tracing subscriber with a reloadable layer.
+type TracingReloadHandle =
+    tracing_subscriber::reload::Handle<BoxedTracingLayer, tracing_subscriber::Registry>;
+
+/// Initialize the global tracing subscriber with a reloadable stderr layer plus
+/// a dormant [`LogForwarder`].
 ///
-/// Starts with human-readable output on stderr. The returned handle can be used
-/// to hot-swap the layer (e.g. to route tracing through the TUI channel).
-fn init_tracing()
--> tracing_subscriber::reload::Handle<BoxedTracingLayer, tracing_subscriber::Registry> {
+/// Starts with human-readable output on stderr. The returned handle hot-swaps
+/// that layer (e.g. to route tracing through the TUI channel). The forwarder
+/// stays inert until a headless/`--devmem` NDJSON run installs an event sender,
+/// after which tracing events also stream as `RunEvent::Log`.
+fn init_tracing() -> (TracingReloadHandle, LogForwarder) {
     use tracing_subscriber::prelude::*;
 
     let initial: BoxedTracingLayer =
         Box::new(tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
     let (reload_layer, handle) = tracing_subscriber::reload::Layer::new(initial);
-    tracing_subscriber::registry().with(reload_layer).init();
-    handle
+    let forwarder = LogForwarder::new();
+    tracing_subscriber::registry()
+        .with(reload_layer)
+        .with(forwarder.clone())
+        .init();
+    (handle, forwarder)
 }

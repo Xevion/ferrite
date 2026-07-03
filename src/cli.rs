@@ -483,6 +483,9 @@ pub struct TestSetup {
     pub compaction_guard: Option<CompactionGuard>,
     pub resolver: Option<PagemapResolver>,
     pub map_stats: Option<MapStats>,
+    /// Installed DIMM topology (SMBIOS + EDAC), if resolvable. Emitted as
+    /// [`ferrite::events::RunEvent::DimmInfo`] by the run path.
+    pub topology: Option<DimmTopology>,
 }
 
 /// What [`setup_test`] produced: a locked buffer ready to run, or the
@@ -566,21 +569,21 @@ pub fn setup_test(
     };
     let (resolver, map_stats) = setup_phys(&buffer, need_phys);
 
-    if need_phys && let Some(topo) = DimmTopology::build() {
-        let dimm_str = topo
-            .dimms
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("; ");
-        info!("installed DIMMs: {dimm_str}");
-    }
+    // Carry the built topology out to the run path, which emits it as a
+    // RunEvent::DimmInfo (reaching human, JSON, and events surfaces) rather than
+    // logging it once here and discarding it.
+    let topology = if need_phys {
+        DimmTopology::build()
+    } else {
+        None
+    };
 
     Ok(SetupOutcome::Ready(TestSetup {
         buffer,
         compaction_guard,
         resolver,
         map_stats,
+        topology,
     }))
 }
 

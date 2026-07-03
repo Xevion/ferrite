@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::events::{EventRx, RunEvent};
 use crate::ndjson::NdjsonEventWriter;
@@ -86,6 +86,13 @@ impl EventBridge {
                     if let Err(e) = self.tui_tx.try_send(TuiEvent::Done) {
                         warn!("TUI channel full, dropped Done event: {e}");
                     }
+                }
+            }
+            RunEvent::DimmInfo { topology } => {
+                // Surface DIMM identification in the TUI log pane; the NDJSON
+                // writer (driven separately in `run`) records the structured form.
+                for entry in &topology.dimms {
+                    info!("installed DIMM: {entry}");
                 }
             }
             RunEvent::EccDeltas { deltas, .. } => {
@@ -390,6 +397,31 @@ mod tests {
             .count();
         // One from PassComplete, zero from cleanup
         check!(done_count == 1);
+    }
+
+    #[test]
+    fn dimm_info_handled_without_panic() {
+        use crate::dimm::{DimmEntry, DimmTopology};
+        use crate::edac::DimmEdac;
+
+        let segment = make_segment(&["solid"]);
+        let (mut bridge, _rx) = make_bridge(segment, 1);
+
+        let topology = DimmTopology {
+            dimms: vec![DimmEntry {
+                edac: Some(DimmEdac {
+                    mc: 0,
+                    dimm_index: 0,
+                    label: Some("DIMM_A1".to_owned()),
+                    location: None,
+                    ce_count: 0,
+                    ue_count: 0,
+                }),
+                smbios: None,
+            }],
+        };
+        let cont = bridge.handle_event(&RunEvent::DimmInfo { topology });
+        assert!(cont);
     }
 
     #[test]

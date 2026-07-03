@@ -126,10 +126,19 @@ impl RunResults {
 /// within the buffer, suitable for driving activity heatmaps. Pass `&|_| {}`
 /// if no activity tracking is needed.
 ///
+/// `pause` is a neutral pause signal checked at each work-chunk boundary (fused
+/// into the activity callback): while it is set, the worker parks instead of
+/// advancing. Pass `None` (headless) to never pause. A pending quit always
+/// breaks out of a paused wait.
+///
 /// # Errors
 ///
 /// Returns [`PatternError::Unrecoverable`] if a pattern worker panics. The
 /// test buffer should be considered corrupted after this error.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one entry point threads buffer, selection, event bus, resolver, activity, and pause; a params struct would only relocate the coupling"
+)]
 pub fn run(
     buf: &mut [u64],
     patterns: &[Pattern],
@@ -138,9 +147,18 @@ pub fn run(
     tx: &EventTx,
     resolver: Option<&(dyn PhysResolver + Sync)>,
     on_activity: &(dyn Fn(f64) + Sync),
+    pause: crate::pause::PauseSignal<'_>,
 ) -> Result<Vec<PassResult>, PatternError> {
     let buf_bytes = buf.len() as u64 * 8;
     let mut results = Vec::with_capacity(passes);
+
+    // Fuse the pause check into activity reporting: both fire at the same
+    // per-chunk granularity in every pattern (march and the ops callbacks), so
+    // parking here blocks work between chunks without any pattern/ops changes.
+    let paused_activity = move |pos: f64| {
+        on_activity(pos);
+        crate::pause::wait_while_paused(pause);
+    };
 
     for pass in 0..passes {
         if shutdown::quit_requested() {
@@ -186,7 +204,7 @@ pub fn run(
                             total: sub_passes,
                         });
                     },
-                    on_activity,
+                    &paused_activity,
                 )
             }));
             let mut failures = match pattern_result {
@@ -491,6 +509,7 @@ mod tests {
             &tx,
             None,
             &|_| {},
+            None,
         )
         .unwrap();
         drop(tx);
@@ -519,6 +538,7 @@ mod tests {
             &tx,
             None,
             &|_| {},
+            None,
         )
         .unwrap();
         check!(results.len() == 3);
@@ -532,7 +552,7 @@ mod tests {
     fn run_all_patterns_clean() {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, Pattern::ALL, 1, false, &tx, None, &|_| {}).unwrap();
+        let results = run(&mut buf, Pattern::ALL, 1, false, &tx, None, &|_| {}, None).unwrap();
         assert!(results.len() == 1);
         check!(results[0].pattern_results.len() == Pattern::ALL.len());
         check!(results[0].total_failures() == 0);
@@ -542,7 +562,7 @@ mod tests {
     fn run_empty_patterns() {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, &[], 1, false, &tx, None, &|_| {}).unwrap();
+        let results = run(&mut buf, &[], 1, false, &tx, None, &|_| {}, None).unwrap();
         check!(results.len() == 1);
         check!(results[0].pattern_results.is_empty());
         check!(results[0].total_failures() == 0);
@@ -552,7 +572,7 @@ mod tests {
     fn run_parallel_clean() {
         let mut buf = vec![0u64; 4096];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, Pattern::ALL, 1, true, &tx, None, &|_| {}).unwrap();
+        let results = run(&mut buf, Pattern::ALL, 1, true, &tx, None, &|_| {}, None).unwrap();
         assert!(results.len() == 1);
         check!(results[0].total_failures() == 0);
     }
@@ -604,6 +624,7 @@ mod tests {
             &tx,
             Some(&resolver),
             &|_| {},
+            None,
         )
         .unwrap();
         check!(results.len() == 1);
@@ -641,6 +662,7 @@ mod tests {
             &tx,
             None,
             &|_| shutdown::request_quit(shutdown::QuitReason::UserQuit),
+            None,
         )
         .unwrap();
         shutdown::reset();
@@ -663,6 +685,7 @@ mod tests {
             &tx,
             None,
             &|_| {},
+            None,
         )
         .unwrap();
         check!(!results[0].pattern_results[0].interrupted);
@@ -675,7 +698,7 @@ mod tests {
         shutdown::request_quit(shutdown::QuitReason::UserQuit);
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, Pattern::ALL, 100, false, &tx, None, &|_| {}).unwrap();
+        let results = run(&mut buf, Pattern::ALL, 100, false, &tx, None, &|_| {}, None).unwrap();
         check!(results.is_empty());
     }
 
@@ -691,6 +714,7 @@ mod tests {
             &tx,
             None,
             &|_| {},
+            None,
         )
         .unwrap();
         drop(tx);

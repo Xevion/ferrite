@@ -11,6 +11,7 @@ use snafu::{ResultExt, Whatever};
 
 use ferrite::events::RunEvent;
 use ferrite::headless::HeadlessPrinter;
+use ferrite::log_bridge::LogForwarder;
 use ferrite::ndjson::NdjsonEventWriter;
 use ferrite::pattern::Pattern;
 use ferrite::physmem::phys::PhysResolver;
@@ -32,6 +33,7 @@ pub fn run(
     patterns: &[Pattern],
     workers: usize,
     parallel: bool,
+    log_forwarder: &LogForwarder,
 ) -> Result<()> {
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let iomem = std::fs::read_to_string("/proc/iomem").unwrap_or_default();
@@ -42,7 +44,15 @@ pub fn run(
 
     let mut total_failures: usize = 0;
     for mapping in mappings {
-        total_failures += run_mapping(&mapping, cli, output, patterns, workers, parallel)?;
+        total_failures += run_mapping(
+            &mapping,
+            cli,
+            output,
+            patterns,
+            workers,
+            parallel,
+            log_forwarder,
+        )?;
     }
 
     let code = shutdown::exit_code(total_failures);
@@ -61,6 +71,7 @@ fn run_mapping(
     patterns: &[Pattern],
     workers: usize,
     parallel: bool,
+    log_forwarder: &LogForwarder,
 ) -> Result<usize> {
     use ferrite::physmem::devmem::{Safety, write_allowed};
 
@@ -85,7 +96,15 @@ fn run_mapping(
             );
         }
         tracing::info!("devmem: write-testing physical {start:#x}-{end:#x} ({label})");
-        run_write(mapping, cli, output, patterns, workers, parallel)
+        run_write(
+            mapping,
+            cli,
+            output,
+            patterns,
+            workers,
+            parallel,
+            log_forwarder,
+        )
     } else {
         tracing::info!(
             "devmem: read-only probe of physical {start:#x}-{end:#x} ({label}); \
@@ -120,6 +139,7 @@ fn run_write(
     patterns: &[Pattern],
     workers: usize,
     parallel: bool,
+    log_forwarder: &LogForwarder,
 ) -> Result<usize> {
     let mut buf = ferrite::alloc::TestBuffer::map_physical(mapping.phys_start, mapping.len, true)
         .with_whatever_context(|_| map_context(mapping))?;
@@ -141,8 +161,15 @@ fn run_write(
     let mut stdout_ndjson =
         json_to_stdout.then(|| NdjsonEventWriter::new(Box::new(std::io::stdout())));
     let mut events_ndjson = crate::output::open_events_writer(output)?;
+    let ndjson_active = json_to_stdout || events_ndjson.is_some();
 
     let (tx, rx) = ferrite::events::event_bus();
+
+    // When NDJSON is active, forward diagnostic tracing into the event stream as
+    // RunEvent::Log for the duration of this mapping's run.
+    if ndjson_active {
+        log_forwarder.install(tx.clone());
+    }
 
     let _ = tx.send(RunEvent::RunStart {
         size: mapping.len,
@@ -175,6 +202,7 @@ fn run_write(
         &tx,
         Some(&resolver as &(dyn PhysResolver + Sync)),
         &|_| {},
+        None,
     )
     .whatever_context("pattern execution failed")?;
     let elapsed = run_start.elapsed();
@@ -183,6 +211,11 @@ fn run_write(
     drop(tx);
     let (mut stdout_ndjson, mut events_ndjson) =
         consumer.join().expect("event consumer thread panicked");
+
+    // Stop forwarding: the consumer that drains Log events has exited.
+    if ndjson_active {
+        log_forwarder.clear();
+    }
 
     let config = ferrite::runner::RunConfig {
         size: mapping.len,

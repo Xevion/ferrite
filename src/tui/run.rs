@@ -9,6 +9,7 @@ use tracing::{info, warn};
 
 use crate::alloc::CompactionGuard;
 use crate::alloc::TestBuffer;
+use crate::dimm::DimmTopology;
 use crate::events::{self, RunEvent};
 use crate::ndjson::NdjsonEventWriter;
 use crate::pattern::Pattern;
@@ -37,6 +38,8 @@ pub struct TuiTestSetup {
     pub map_stats: Option<MapStats>,
     /// Keeps the compaction guard alive for the duration of the test.
     pub compaction_guard: Option<CompactionGuard>,
+    /// Installed DIMM topology, emitted as [`RunEvent::DimmInfo`] before the run.
+    pub topology: Option<DimmTopology>,
 }
 
 /// Raw products of a TUI run, for finalization via [`crate::runner::execute_run`].
@@ -126,6 +129,9 @@ pub fn run_tui_mode(
             stats: stats.clone(),
         });
     }
+    if let Some(topology) = setup.topology.take() {
+        let _ = event_tx.send(RunEvent::DimmInfo { topology });
+    }
 
     let parallel = workers > 1;
 
@@ -160,6 +166,7 @@ pub fn run_tui_mode(
                 &event_tx,
                 resolver_ref,
                 &on_activity,
+                Some(worker_segment.pause_flag()),
             ) {
                 Ok(pass_results) => {
                     *worker_collected.lock().unwrap() = Some(pass_results);
@@ -260,6 +267,7 @@ mod tests {
             &tx,
             None,
             &|_| {},
+            None,
         )
         .unwrap();
 
@@ -287,6 +295,7 @@ mod tests {
             &tx,
             None,
             &|_| {},
+            None,
         )
         .unwrap();
 
@@ -309,7 +318,8 @@ mod tests {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = events::event_bus();
 
-        let results = runner::run(&mut buf, Pattern::ALL, 100, false, &tx, None, &|_| {}).unwrap();
+        let results =
+            runner::run(&mut buf, Pattern::ALL, 100, false, &tx, None, &|_| {}, None).unwrap();
 
         check!(results.is_empty());
     }
@@ -329,6 +339,7 @@ mod tests {
             &tx,
             None,
             &|_| {},
+            None,
         )
         .unwrap();
 
@@ -345,7 +356,8 @@ mod tests {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = events::event_bus();
 
-        let results = runner::run(&mut buf, Pattern::ALL, 1, false, &tx, None, &|_| {}).unwrap();
+        let results =
+            runner::run(&mut buf, Pattern::ALL, 1, false, &tx, None, &|_| {}, None).unwrap();
 
         let total: usize = results.iter().map(runner::PassResult::total_failures).sum();
         check!(total == 0);

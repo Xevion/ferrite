@@ -99,6 +99,15 @@ impl Segment {
         self.paused.store(paused, Ordering::Relaxed);
     }
 
+    /// The pause flag as a neutral signal for the worker's pattern loop.
+    ///
+    /// The `p` key toggles this same atomic via [`Segment::set_paused`], so the
+    /// display state and the worker's pause signal are one source of truth.
+    #[must_use]
+    pub const fn pause_flag(&self) -> &AtomicBool {
+        &self.paused
+    }
+
     /// Record that a failure was found (increments count, updates timestamp).
     ///
     /// # Panics
