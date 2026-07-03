@@ -6,6 +6,8 @@ extern crate alloc;
 
 mod app;
 mod backend;
+mod mdns;
+mod net;
 
 use uefi::prelude::*;
 

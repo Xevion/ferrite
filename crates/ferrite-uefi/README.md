@@ -12,8 +12,9 @@ yet; the current milestone is a live render loop on real UEFI firmware.
 
 - [x] Boots under OVMF in QEMU and renders an animated ratatui UI
 - [x] Text-console backend with **run-coalesced** drawing (see below)
-- ⬜ Wired networking (mDNS advertisement + tiny HTTP status page)
+- [x] Wired networking: SNP -> smoltcp, DHCP, mDNS (`ferrite.local`), HTTP status page
 - ⬜ A real memory sweep wired into the UI
+- ⬜ DNS-SD service enumeration (PTR/SRV/TXT) on top of the mDNS responder
 - ⬜ GOP framebuffer backend for a truecolor UI
 - [ ] WiFi: not feasible from a bare-metal UEFI app (see [WiFi](#wifi))
 
@@ -45,8 +46,42 @@ Boot the target machine from the USB (disable Secure Boot, or sign the image).
 | File            | Role                                                              |
 | --------------- | ---------------------------------------------------------------- |
 | `src/main.rs`   | UEFI `#[entry]`; grabs stdin/stdout, runs the app                 |
-| `src/app.rs`    | The ratatui UI + render/input loop                               |
+| `src/app.rs`    | The ratatui UI + render/input/network poll loop                  |
 | `src/backend.rs`| A ratatui `Backend` over the UEFI Simple Text Output Protocol    |
+| `src/net.rs`    | smoltcp `Device` over SNP; DHCP client, HTTP server, mDNS wiring |
+| `src/mdns.rs`   | Minimal mDNS responder (parses queries, builds A answers)        |
+
+### Networking
+
+There are no UDP/TCP wrappers in `uefi` 0.38 (only `http` *client*, `ip4config2`,
+`pxe`, `snp`), so hosting anything means driving raw L2 frames. `net.rs`
+implements a smoltcp [`Device`](https://docs.rs/smoltcp/latest/smoltcp/phy/trait.Device.html)
+over the Simple Network Protocol (`transmit`/`receive`/`mode`), and smoltcp
+supplies the rest of the stack:
+
+- **DHCPv4** acquires an address; shown live in the UI as it transitions from
+  `requesting (DHCP)...` to the leased CIDR + gateway + DNS.
+- **HTTP** (TCP :80): a single-connection HTTP/1.0 status page reflecting the
+  live tester state (IP, MAC, sweep %).
+- **mDNS** (UDP :5353) answers `A` queries for `ferrite.local` so a laptop on
+  the same segment can browse to `http://ferrite.local`.
+
+`wait_for_packet_event` is documented as never firing under QEMU, so the stack
+*polls* `receive` on every render tick rather than blocking on the event.
+
+**Testing.** The QEMU recipes attach an `e1000` NIC via user-mode (SLIRP)
+networking, which includes a DHCP server (guest gets `10.0.2.15`) and forwards
+host `:8080` -> guest `:80`:
+
+```bash
+just qemu            # boot; watch the network panel acquire a lease
+curl http://127.0.0.1:8080/   # fetch the status page through the port-forward
+```
+
+SLIRP does **not** carry multicast between host and guest, so full mDNS
+*discovery* can't be exercised locally. That needs bridged networking (a wired
+box on the LAN, or the target hardware). The mDNS wire format (query parse +
+A-record build) was checked with a throwaway host-side test.
 
 ### The backend, and the performance note
 
