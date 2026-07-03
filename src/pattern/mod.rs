@@ -4,6 +4,7 @@ use crate::Failure;
 use crate::ops;
 
 mod checkerboard;
+mod march;
 mod solid;
 mod stuck_address;
 mod walking;
@@ -18,6 +19,7 @@ pub enum Pattern {
     WalkingZeros,
     Checkerboard,
     StuckAddress,
+    MarchCMinus,
 }
 
 impl Pattern {
@@ -27,6 +29,7 @@ impl Pattern {
         Pattern::WalkingZeros,
         Pattern::Checkerboard,
         Pattern::StuckAddress,
+        Pattern::MarchCMinus,
     ];
 
     /// Number of fill-and-verify sub-passes this pattern performs.
@@ -37,6 +40,8 @@ impl Pattern {
             Pattern::SolidBits | Pattern::Checkerboard => 2,
             Pattern::WalkingOnes | Pattern::WalkingZeros => 64,
             Pattern::StuckAddress => 1,
+            // M0–M5 of the March C- sequence.
+            Pattern::MarchCMinus => 6,
         }
     }
 }
@@ -49,6 +54,7 @@ impl fmt::Display for Pattern {
             Pattern::WalkingZeros => write!(f, "Walking Zeros"),
             Pattern::Checkerboard => write!(f, "Checkerboard"),
             Pattern::StuckAddress => write!(f, "Stuck Address"),
+            Pattern::MarchCMinus => write!(f, "March C-"),
         }
     }
 }
@@ -76,6 +82,7 @@ pub fn run_pattern(
         Pattern::WalkingZeros => walking::run_zeros(buf, parallel, on_subpass, on_activity),
         Pattern::Checkerboard => checkerboard::run(buf, parallel, on_subpass, on_activity),
         Pattern::StuckAddress => stuck_address::run(buf, parallel, on_subpass, on_activity),
+        Pattern::MarchCMinus => march::run(buf, parallel, on_subpass, on_activity),
     }
 }
 
@@ -120,6 +127,7 @@ mod tests {
         #[case(Pattern::WalkingZeros)]
         #[case(Pattern::Checkerboard)]
         #[case(Pattern::StuckAddress)]
+        #[case(Pattern::MarchCMinus)]
         fn serial(#[case] pattern: Pattern) {
             let mut buf = make_test_buf();
             let failures = run_pattern(pattern, &mut buf, false, &mut || {}, &NOOP_ACTIVITY);
@@ -135,6 +143,7 @@ mod tests {
         #[case(Pattern::WalkingZeros)]
         #[case(Pattern::Checkerboard)]
         #[case(Pattern::StuckAddress)]
+        #[case(Pattern::MarchCMinus)]
         fn parallel(#[case] pattern: Pattern) {
             let mut buf = make_test_buf();
             let failures = run_pattern(pattern, &mut buf, true, &mut || {}, &NOOP_ACTIVITY);
@@ -188,6 +197,7 @@ mod tests {
         #[case(Pattern::WalkingZeros, "Walking Zeros", 64)]
         #[case(Pattern::Checkerboard, "Checkerboard", 2)]
         #[case(Pattern::StuckAddress, "Stuck Address", 1)]
+        #[case(Pattern::MarchCMinus, "March C-", 6)]
         fn display_and_sub_passes(
             #[case] pattern: Pattern,
             #[case] expected_name: &str,

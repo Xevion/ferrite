@@ -50,7 +50,7 @@ Code: `src/headless.rs`, `src/ndjson.rs`, `src/results.rs`, `src/tui/bridge.rs`
 | `cli.rs` | `Cli` (clap derive), `setup_test()`, `check_privileges()`, size parsing |
 | `alloc.rs` | `LockedRegion` — mmap + mlock anonymous memory; `CompactionGuard` — disables kernel page compaction during tests |
 | `failure.rs` | `Failure` — one failing 64-bit word (virtual address, expected, actual, physical address) |
-| `pattern/` | `Pattern` enum, `run_pattern()`, per-pattern modules: `solid`, `walking`, `checkerboard`, `stuck_address` |
+| `pattern/` | `Pattern` enum, `run_pattern()`, per-pattern modules: `solid`, `walking`, `checkerboard`, `stuck_address`, `march` (March C-, sequential per-cell march executor) |
 | `runner.rs` | Headless multi-pass runner: `run()`, `PassResult`, `PatternResult` |
 | `ops/` | Three-layer fill/verify operations: `scalar.rs` (coverage-measured), `avx512.rs` (excluded from coverage), `mod.rs` (dispatch) |
 | `phys.rs` | Physical address resolution via `/proc/self/pagemap`; `PhysAddr`, `PagemapResolver`, `PhysResolver` trait, `MapStats` |
