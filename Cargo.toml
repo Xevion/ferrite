@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The UEFI app only builds for its own target; see the Justfile.
+default-members = ["crates/ferrite-linux"]
 
 [profile.release]
 codegen-units = 1
@@ -21,3 +23,6 @@ inherits = "dev"
 incremental = false
 debug = 0
 codegen-units = 256
+
+[profile.release.package.ferrite-uefi]
+opt-level = "s"

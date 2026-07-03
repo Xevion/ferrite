@@ -7,3 +7,6 @@ mutants.out
 mutants.out.old
 perf.data.old
 perf.data
+/esp
+/OVMF_VARS.fd
+*.efi

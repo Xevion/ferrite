@@ -1,3 +1,5 @@
+set shell := ["bash", "-uc"]
+
 default:
 	just --list
 
@@ -103,3 +105,59 @@ bench-compare name="main":
 # Run instruction-count benchmarks via Gungraun (requires valgrind + cargo install gungraun-runner)
 bench-ci:
     cargo bench -p ferrite --features bench --bench instructions
+
+ovmf_code := "/usr/share/OVMF/OVMF_CODE_4M.fd"
+ovmf_vars := "/usr/share/OVMF/OVMF_VARS_4M.fd"
+efi := "target/x86_64-unknown-uefi/debug/ferrite-uefi.efi"
+display := "gtk"
+
+
+# type-check without producing a binary
+uefi-check:
+    cargo check -p ferrite-uefi --target x86_64-unknown-uefi
+
+# build the .efi (debug)
+uefi-build:
+    cargo build -p ferrite-uefi --target x86_64-unknown-uefi
+
+# build the optimized .efi
+build-release:
+    cargo build -p ferrite-uefi --target x86_64-unknown-uefi --release
+
+# assemble the virtual EFI system partition under ./esp
+esp: uefi-build
+    mkdir -p esp/efi/boot
+    cp -f {{ efi }} esp/efi/boot/bootx64.efi
+    # writable copy of the NVRAM store; created once, then reused
+    test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
+
+# boot the spike in QEMU with a graphical display (headful)
+qemu: esp
+    qemu-system-x86_64 \
+        -enable-kvm \
+        -machine q35 \
+        -m 512M \
+        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
+        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
+        -drive format=raw,file=fat:rw:esp \
+        -net none \
+        -display {{ display }}
+
+# boot headless with the console mirrored to your terminal via serial
+qemu-serial: esp
+    qemu-system-x86_64 \
+        -enable-kvm \
+        -machine q35 \
+        -m 512M \
+        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
+        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
+        -drive format=raw,file=fat:rw:esp \
+        -net none \
+        -nographic
+
+# copy the built ESP tree onto a mounted FAT32 USB (pass the mount point)
+# e.g. `just stage-usb /run/media/$USER/FERRITE`
+stage-usb mount: esp
+    mkdir -p "{{ mount }}/efi/boot"
+    cp -f esp/efi/boot/bootx64.efi "{{ mount }}/efi/boot/bootx64.efi"
+    @echo "staged bootx64.efi -> {{ mount }}/efi/boot/"

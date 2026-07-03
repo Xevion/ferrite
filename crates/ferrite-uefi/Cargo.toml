@@ -1,0 +1,17 @@
+[package]
+name = "ferrite-uefi"
+version = "0.1.0"
+edition = "2024"
+description = "UEFI/bootloader spike for ferrite: ratatui UI on bare metal, skipping the OS"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+ratatui-core = "0.1"
+ratatui = { version = "0.30", default-features = false }
+uefi = { version = "0.38", features = [
+  "alloc",
+  "global_allocator",
+  "logger",
+  "panic_handler",
+] }
