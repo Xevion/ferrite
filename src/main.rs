@@ -4,8 +4,8 @@
 #[cfg(feature = "tui")]
 use std::io::IsTerminal;
 
-use anyhow::{Context, Result};
 use clap::Parser;
+use snafu::{OptionExt, ResultExt, Whatever, whatever};
 
 use ferrite::events::{EventRx, RunEvent};
 use ferrite::headless::HeadlessPrinter;
@@ -22,6 +22,11 @@ mod cli;
 #[cfg(feature = "tui")]
 use cli::TuiMode;
 use cli::{Cli, OutputConfig, OutputFormat, SetupOutcome, check_privileges, setup_test};
+
+/// Application-level result defaulting to [`snafu::Whatever`] for loose,
+/// message-based errors; the error type stays overridable for callers that
+/// need a specific one.
+type Result<T, E = Whatever> = std::result::Result<T, E>;
 
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
@@ -85,7 +90,7 @@ fn main() -> Result<()> {
 
         if use_tui {
             if output.format == OutputFormat::Json {
-                anyhow::bail!(
+                whatever!(
                     "--format json is not supported with TUI mode. \
                      Use --tui never for JSON output."
                 );
@@ -170,12 +175,12 @@ fn open_coverage_store(cli: &Cli) -> Result<Option<CoverageCtx>> {
         return Ok(None);
     };
     if cli.no_phys {
-        anyhow::bail!("--coverage-file requires physical address resolution (remove --no-phys)");
+        whatever!("--coverage-file requires physical address resolution (remove --no-phys)");
     }
     let fingerprint = ferrite::sysmem::machine_fingerprint()
-        .context("cannot fingerprint machine memory for coverage tracking")?;
+        .whatever_context("cannot fingerprint machine memory for coverage tracking")?;
     let loaded = ferrite::coverage::CoverageStore::load(&path, fingerprint)
-        .with_context(|| format!("failed to load coverage file: {}", path.display()))?;
+        .with_whatever_context(|_| format!("failed to load coverage file: {}", path.display()))?;
     let store = if let Some(store) = loaded {
         let covered = store.covered_bytes();
         let installed = ferrite::sysmem::installed_ram().map_or(0, |r| r.bytes);
@@ -345,7 +350,7 @@ fn open_events_writer(output: &OutputConfig) -> Result<Option<NdjsonEventWriter>
                 .to_str()
                 .expect("events_file path validated as UTF-8 in resolve_output");
             NdjsonEventWriter::from_path(path_str)
-                .with_context(|| format!("failed to open events file: {}", p.display()))
+                .with_whatever_context(|_| format!("failed to open events file: {}", p.display()))
         })
         .transpose()
 }
@@ -392,7 +397,7 @@ fn run_devmem(
     let system_ram = ferrite::sysmem::system_ram_ranges(&iomem);
 
     let mappings = ferrite::devmem::resolve_mappings(target, &cmdline, &system_ram)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .whatever_context("failed to resolve /dev/mem mappings")?;
 
     let mut total_failures: usize = 0;
     for mapping in mappings {
@@ -474,7 +479,7 @@ fn run_devmem_write(
     parallel: bool,
 ) -> Result<usize> {
     let mut buf = ferrite::alloc::TestBuffer::map_physical(mapping.phys_start, mapping.len, true)
-        .with_context(|| devmem_map_context(mapping))?;
+        .with_whatever_context(|_| devmem_map_context(mapping))?;
     let mut resolver =
         ferrite::devmem::DevMemResolver::new(buf.as_ptr(), mapping.phys_start, mapping.len);
     let map_stats = resolver.build_map(buf.as_ptr(), mapping.len).ok();
@@ -507,7 +512,7 @@ fn run_devmem_write(
         Some(&resolver as &(dyn PhysResolver + Sync)),
         &|_| {},
     )
-    .context("pattern execution failed")?;
+    .whatever_context("pattern execution failed")?;
     let elapsed = run_start.elapsed();
 
     let _ = tx.send(RunEvent::RunComplete);
@@ -540,7 +545,7 @@ fn run_devmem_probe(
     let file = std::fs::OpenOptions::new()
         .read(true)
         .open("/dev/mem")
-        .context("failed to open /dev/mem (run as root)")?;
+        .whatever_context("failed to open /dev/mem (run as root)")?;
 
     let end = mapping.phys_start + mapping.len as u64;
     let mut offset = mapping.phys_start;
@@ -549,7 +554,7 @@ fn run_devmem_probe(
     while offset < end {
         let n = ((end - offset) as usize).min(chunk.len());
         file.read_exact_at(&mut chunk[..n], offset)
-            .with_context(|| format!("pread /dev/mem at {offset:#x}"))?;
+            .with_whatever_context(|_| format!("pread /dev/mem at {offset:#x}"))?;
         stats = stats.merge(ferrite::devmem::probe_bytes(&chunk[..n]));
         offset += n as u64;
     }
@@ -651,7 +656,7 @@ fn run_non_tui(
             .map(|r| r as &(dyn PhysResolver + Sync)),
         &|_| {},
     )
-    .context("pattern execution failed")?;
+    .whatever_context("pattern execution failed")?;
     let run_elapsed = run_start.elapsed();
 
     let _ = tx.send(RunEvent::RunComplete);

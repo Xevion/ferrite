@@ -1,7 +1,9 @@
 use std::fmt;
 use std::fs;
+use std::io;
 
 use serde::Serialize;
+use tracing::warn;
 
 /// SMBIOS memory type codes from the Type 17 structure (offset 0x12).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +75,18 @@ pub struct DimmInfo {
 /// Returns `None` if the DMI table cannot be read.
 #[must_use]
 pub fn read_dimm_info() -> Option<Vec<DimmInfo>> {
-    let table = fs::read("/sys/firmware/dmi/tables/DMI").ok()?;
+    const DMI_PATH: &str = "/sys/firmware/dmi/tables/DMI";
+    // Absent DMI table is normal on machines/VMs without SMBIOS; any other read
+    // failure (e.g. permission denied) is worth surfacing rather than silently
+    // reporting no DIMM topology.
+    let table = match fs::read(DMI_PATH) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn!(path = DMI_PATH, error = %e, "failed to read SMBIOS DMI table");
+            return None;
+        }
+    };
     let dimms = parse_type17_entries(&table);
     if dimms.is_empty() { None } else { Some(dimms) }
 }

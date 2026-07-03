@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use snafu::{ResultExt, Whatever};
 use tracing::{info, warn};
 
 use crate::alloc::CompactionGuard;
@@ -61,7 +61,7 @@ pub fn run_tui_mode(
     patterns: Vec<Pattern>,
     tracing_handle: &TracingReloadHandle,
     events_writer: Option<NdjsonEventWriter>,
-) -> Result<RunResults> {
+) -> Result<RunResults, Whatever> {
     let (tui_tx, tui_rx) = mpsc::sync_channel::<TuiEvent>(256);
 
     // Hot-swap the tracing layer from stderr to the TUI channel.
@@ -173,7 +173,7 @@ pub fn run_tui_mode(
         .expect("failed to spawn event-bridge thread");
 
     let config = TuiConfig::default();
-    crate::tui::run_tui(&config, &segment, &tui_tx, &tui_rx).context("TUI failed")?;
+    crate::tui::run_tui(&config, &segment, &tui_tx, &tui_rx).whatever_context("TUI failed")?;
 
     // TUI exited. Reroute tracing to stderr and drain buffered log events.
     drop(TuiTraceGuard::new(trace_state, tui_rx));

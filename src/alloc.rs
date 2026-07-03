@@ -7,26 +7,31 @@ use nix::sys::mman::{
     MapFlags, MmapAdvise, ProtFlags, madvise, mlock, mmap, mmap_anonymous, mprotect, munmap,
 };
 use rayon::prelude::*;
-use thiserror::Error;
+use snafu::{ResultExt, Snafu};
 
-#[derive(Debug, Error)]
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
 pub enum AllocError {
-    #[error("requested size must be non-zero")]
+    #[snafu(display("requested size must be non-zero"))]
     ZeroSize,
-    #[error("mmap failed: {0}")]
-    Mmap(#[source] nix::Error),
-    #[error("mlock failed (are you root or do you have CAP_IPC_LOCK?): {0}")]
-    Mlock(#[source] nix::Error),
-    #[error("mprotect failed while activating chunk: {0}")]
-    Mprotect(#[source] nix::Error),
-    #[error("could not lock any memory below the headroom floor ({available} bytes available)")]
+    #[snafu(display("mmap failed: {source}"))]
+    Mmap { source: nix::Error },
+    #[snafu(display("mlock failed (are you root or do you have CAP_IPC_LOCK?): {source}"))]
+    Mlock { source: nix::Error },
+    #[snafu(display("mprotect failed while activating chunk: {source}"))]
+    Mprotect { source: nix::Error },
+    #[snafu(display(
+        "could not lock any memory below the headroom floor ({available} bytes available)"
+    ))]
     Exhausted { available: u64 },
-    #[error("/dev/mem physical range must be page-aligned (start {phys_start:#x}, len {len:#x})")]
+    #[snafu(display(
+        "/dev/mem physical range must be page-aligned (start {phys_start:#x}, len {len:#x})"
+    ))]
     DevMemAlignment { phys_start: u64, len: usize },
-    #[error("could not open /dev/mem: {0}")]
-    DevMemOpen(#[source] std::io::Error),
-    #[error("could not map physical range through /dev/mem: {0}")]
-    DevMemMap(#[source] nix::Error),
+    #[snafu(display("could not open /dev/mem: {source}"))]
+    DevMemOpen { source: std::io::Error },
+    #[snafu(display("could not map physical range through /dev/mem: {source}"))]
+    DevMemMap { source: nix::Error },
 }
 
 impl AllocError {
@@ -35,7 +40,7 @@ impl AllocError {
     #[must_use]
     pub const fn help(&self) -> Option<&'static str> {
         match self {
-            Self::Mlock(_) => Some(
+            Self::Mlock { .. } => Some(
                 "run as root, raise the mlock limit (ulimit -l unlimited), \
                 or grant the capability: sudo setcap cap_ipc_lock+ep $(which ferrite)",
             ),
@@ -43,14 +48,15 @@ impl AllocError {
                 "free memory (stop services, drop caches) or lower --headroom \
                 to allow allocation closer to the limit",
             ),
-            Self::DevMemMap(_) => Some(
+            Self::DevMemMap { .. } => Some(
                 "/dev/mem RAM access requires a kernel built with CONFIG_STRICT_DEVMEM=n \
                 (Unraid and some appliance kernels); most distros block it",
             ),
-            Self::DevMemOpen(_) => Some("run as root to open /dev/mem"),
-            Self::Mmap(_) | Self::Mprotect(_) | Self::ZeroSize | Self::DevMemAlignment { .. } => {
-                None
-            }
+            Self::DevMemOpen { .. } => Some("run as root to open /dev/mem"),
+            Self::Mmap { .. }
+            | Self::Mprotect { .. }
+            | Self::ZeroSize
+            | Self::DevMemAlignment { .. } => None,
         }
     }
 }
@@ -121,7 +127,7 @@ pub(crate) fn activate_chunk(raw: usize, offset: usize, len: usize) -> Result<()
     // SAFETY: [offset, offset+len) lies within the reservation.
     unsafe {
         mprotect(chunk, len, ProtFlags::PROT_READ | ProtFlags::PROT_WRITE)
-            .map_err(AllocError::Mprotect)?;
+            .context(MprotectSnafu)?;
     }
     // Hint 2 MiB THP backing before faulting. Ignored when THP is off.
     #[cfg(target_os = "linux")]
@@ -136,7 +142,7 @@ pub(crate) fn activate_chunk(raw: usize, offset: usize, len: usize) -> Result<()
     });
     // SAFETY: chunk range is valid and faulted; mlock pins it in RAM.
     unsafe {
-        mlock(chunk, len).map_err(AllocError::Mlock)?;
+        mlock(chunk, len).context(MlockSnafu)?;
     }
     Ok(())
 }
@@ -171,7 +177,7 @@ impl TestBuffer {
                 ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                 MapFlags::MAP_PRIVATE,
             )
-            .map_err(AllocError::Mmap)?
+            .context(MmapSnafu)?
         };
 
         let len = size.get();
@@ -197,7 +203,7 @@ impl TestBuffer {
 
         // SAFETY: ptr is valid for len bytes. mlock pins pages in physical RAM.
         unsafe {
-            mlock(ptr, len).map_err(AllocError::Mlock)?;
+            mlock(ptr, len).context(MlockSnafu)?;
         }
 
         Ok(Self { ptr, len })
@@ -234,7 +240,7 @@ impl TestBuffer {
                 ProtFlags::PROT_NONE,
                 MapFlags::MAP_PRIVATE | MapFlags::MAP_NORESERVE,
             )
-            .map_err(AllocError::Mmap)?
+            .context(MmapSnafu)?
         };
         let raw = ptr.as_ptr() as usize;
 
@@ -306,7 +312,7 @@ impl TestBuffer {
             .read(true)
             .write(writable)
             .open("/dev/mem")
-            .map_err(AllocError::DevMemOpen)?;
+            .context(DevMemOpenSnafu)?;
 
         let prot = if writable {
             ProtFlags::PROT_READ | ProtFlags::PROT_WRITE
@@ -318,8 +324,7 @@ impl TestBuffer {
         // page-aligned; MAP_SHARED routes writes to physical memory. The kernel
         // validates the physical range and fails cleanly (EPERM) if disallowed.
         let ptr = unsafe {
-            mmap(None, size, prot, MapFlags::MAP_SHARED, &file, offset)
-                .map_err(AllocError::DevMemMap)?
+            mmap(None, size, prot, MapFlags::MAP_SHARED, &file, offset).context(DevMemMapSnafu)?
         };
         Ok(Self { ptr, len })
     }
@@ -441,7 +446,9 @@ mod tests {
 
         #[test]
         fn mlock_has_help() {
-            let e = AllocError::Mlock(nix::Error::EPERM);
+            let e = AllocError::Mlock {
+                source: nix::Error::EPERM,
+            };
             check!(e.help().is_some());
             let msg = e.help().unwrap();
             check!(msg.contains("cap_ipc_lock"));
@@ -450,7 +457,9 @@ mod tests {
 
         #[test]
         fn mmap_no_help() {
-            let e = AllocError::Mmap(nix::Error::ENOMEM);
+            let e = AllocError::Mmap {
+                source: nix::Error::ENOMEM,
+            };
             check!(e.help().is_none());
         }
 
@@ -473,7 +482,9 @@ mod tests {
         ) -> impl FnMut(usize, usize) -> Result<(), AllocError> {
             move |offset, len| {
                 if fail_at == Some(offset) {
-                    return Err(AllocError::Mlock(nix::Error::ENOMEM));
+                    return Err(AllocError::Mlock {
+                        source: nix::Error::ENOMEM,
+                    });
                 }
                 calls.borrow_mut().push((offset, len));
                 Ok(())
@@ -508,7 +519,7 @@ mod tests {
             let mut activate = recording_activate(calls.clone(), Some(4));
             let (achieved, stop) = walk_chunks(12, 4, 0, &mut || None, &mut activate);
             check!(achieved == 4);
-            assert!(let StopReason::ChunkFailed(AllocError::Mlock(_)) = stop);
+            assert!(let StopReason::ChunkFailed(AllocError::Mlock { .. }) = stop);
             check!(*calls.borrow() == vec![(0, 4)]);
         }
 
@@ -558,7 +569,7 @@ mod tests {
                     check!(outcome.achieved == outcome.requested);
                     assert!(let StopReason::Completed = outcome.stop);
                 }
-                Err(AllocError::Mlock(_)) => {
+                Err(AllocError::Mlock { .. }) => {
                     eprintln!("skipping: mlock not permitted in this environment");
                 }
                 Err(e) => panic!("unexpected alloc error: {e}"),

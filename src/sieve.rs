@@ -19,17 +19,19 @@ use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
 use nix::sys::mman::{MapFlags, ProtFlags, mmap_anonymous, munmap};
-use thiserror::Error;
+use snafu::{ResultExt, Snafu};
 
-use crate::alloc::{AllocError, CHUNK_BYTES, activate_chunk, walk_chunks};
+use crate::alloc::{AllocError, CHUNK_BYTES, MmapSnafu, activate_chunk, walk_chunks};
 use crate::coverage::{PfnRange, contains_pfn};
 
-#[derive(Debug, Error)]
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
 pub enum SieveError {
-    #[error("sieve reservation failed: {0}")]
-    Alloc(#[from] AllocError),
-    #[error("sieve cannot resolve physical frames: {0}")]
-    Pagemap(#[source] std::io::Error),
+    #[snafu(display("sieve reservation failed: {source}"))]
+    #[snafu(context(false))]
+    Alloc { source: AllocError },
+    #[snafu(display("sieve cannot resolve physical frames: {source}"))]
+    Pagemap { source: std::io::Error },
 }
 
 /// Culling granularity: one transparent huge page.
@@ -152,7 +154,7 @@ impl FrameSieve {
 
         // Open pagemap before applying memory pressure so a doomed sweep
         // fails fast.
-        let pagemap = File::open("/proc/self/pagemap").map_err(SieveError::Pagemap)?;
+        let pagemap = File::open("/proc/self/pagemap").context(PagemapSnafu)?;
 
         // SAFETY: anonymous private reservation; no existing mapping replaced.
         let ptr = unsafe {
@@ -162,7 +164,7 @@ impl FrameSieve {
                 ProtFlags::PROT_NONE,
                 MapFlags::MAP_PRIVATE | MapFlags::MAP_NORESERVE,
             )
-            .map_err(AllocError::Mmap)?
+            .context(MmapSnafu)?
         };
         let raw = ptr.as_ptr() as usize;
 
@@ -199,7 +201,7 @@ impl FrameSieve {
                 unsafe {
                     let _ = munmap(ptr, achieved);
                 }
-                return Err(SieveError::Pagemap(e));
+                return Err(SieveError::Pagemap { source: e });
             }
         };
 
@@ -360,7 +362,7 @@ mod tests {
                     check!(outcome.swept <= 4 * BLOCK_BYTES);
                     drop(sieve);
                 }
-                Err(SieveError::Pagemap(_)) => {
+                Err(SieveError::Pagemap { .. }) => {
                     eprintln!("skipping: pagemap unavailable in this environment");
                 }
                 Err(e) => panic!("unexpected sieve error: {e}"),
@@ -377,7 +379,7 @@ mod tests {
                     check!(outcome.held + outcome.released == outcome.swept);
                     drop(sieve);
                 }
-                Err(SieveError::Pagemap(_)) => {
+                Err(SieveError::Pagemap { .. }) => {
                     eprintln!("skipping: pagemap unavailable in this environment");
                 }
                 Err(e) => panic!("unexpected sieve error: {e}"),

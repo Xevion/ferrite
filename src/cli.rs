@@ -2,12 +2,17 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use clap::Parser;
 use clap::ValueEnum;
 use nix::sys::resource::{Resource, getrlimit};
 use nix::unistd::geteuid;
+use snafu::{OptionExt, ResultExt, Whatever};
 use tracing::{info, warn};
+
+/// Application-level result defaulting to [`snafu::Whatever`] for loose,
+/// message-based errors; the error type stays overridable for callers that
+/// need a specific one.
+type Result<T, E = Whatever> = std::result::Result<T, E>;
 
 use ferrite::alloc::{CompactionGuard, TestBuffer};
 use ferrite::dimm::DimmTopology;
@@ -197,7 +202,7 @@ impl Cli {
 
         // Validate events file path is valid UTF-8 (from_path expects &str)
         if let Some(ref p) = self.events {
-            p.to_str().with_context(|| {
+            p.to_str().with_whatever_context(|| {
                 format!("--events path is not valid UTF-8: {}", p.to_string_lossy())
             })?;
         }
@@ -413,19 +418,19 @@ pub fn setup_phys(
             }
             (Some(r), Some(stats))
         }
-        Err(PhysResolverError::PermissionDenied(e)) => {
-            warn!("{e}");
+        Err(PhysResolverError::PermissionDenied { source }) => {
+            warn!("{source}");
             warn!(
                 "run as root or grant the capability: sudo setcap cap_sys_admin+ep $(which ferrite)"
             );
             (None, None)
         }
-        Err(PhysResolverError::Unavailable(e)) => {
-            info!("{e}");
+        Err(PhysResolverError::Unavailable { source }) => {
+            info!("{source}");
             (None, None)
         }
-        Err(PhysResolverError::ReadError(e)) => {
-            warn!("{e}");
+        Err(PhysResolverError::ReadError { source }) => {
+            warn!("{source}");
             (None, None)
         }
     }
@@ -528,7 +533,7 @@ pub fn setup_test(cli: &Cli, cull: Option<&[ferrite::coverage::PfnRange]>) -> Re
     let requested = match cli.size {
         SizeSpec::Bytes(n) => n,
         SizeSpec::Max => ferrite::sysmem::mem_total()
-            .context("cannot resolve --size max: /proc/meminfo is unreadable")?
+            .whatever_context("cannot resolve --size max: /proc/meminfo is unreadable")?
             as usize,
     };
     let sieve = cull.and_then(|covered| run_sieve(covered, cli.headroom as u64));
@@ -544,7 +549,7 @@ pub fn setup_test(cli: &Cli, cull: Option<&[ferrite::coverage::PfnRange]>) -> Re
             if let Some(hint) = e.help() {
                 tracing::warn!("hint: {hint}");
             }
-            return Err(e).context("failed to allocate and lock memory");
+            return Err(e).whatever_context("failed to allocate and lock memory");
         }
     };
     // The buffer is locked: release the hostages back to the system.

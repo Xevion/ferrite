@@ -14,7 +14,7 @@ use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
+use snafu::{ResultExt, Snafu};
 
 /// Bytes per tracked frame (4 KiB pages, matching pagemap granularity).
 pub const FRAME_BYTES: u64 = 4096;
@@ -58,20 +58,23 @@ pub struct RunDelta {
     pub runs: u64,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
 pub enum CoverageError {
-    #[error("failed to read coverage file: {0}")]
-    Read(#[source] io::Error),
-    #[error("failed to write coverage file: {0}")]
-    Write(#[source] io::Error),
-    #[error("coverage file is not valid JSON: {0}")]
-    Parse(#[source] serde_json::Error),
-    #[error("coverage file schema version {found} is not supported (expected {STORE_VERSION})")]
+    #[snafu(display("failed to read coverage file: {source}"))]
+    Read { source: io::Error },
+    #[snafu(display("failed to write coverage file: {source}"))]
+    Write { source: io::Error },
+    #[snafu(display("coverage file is not valid JSON: {source}"))]
+    Parse { source: serde_json::Error },
+    #[snafu(display(
+        "coverage file schema version {found} is not supported (expected {STORE_VERSION})"
+    ))]
     VersionMismatch { found: u32 },
-    #[error(
+    #[snafu(display(
         "coverage file belongs to a different memory configuration \
          (fingerprint mismatch) -- delete it or point --coverage-file elsewhere"
-    )]
+    ))]
     FingerprintMismatch,
 }
 
@@ -238,9 +241,9 @@ impl CoverageStore {
         let contents = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(CoverageError::Read(e)),
+            Err(e) => return Err(CoverageError::Read { source: e }),
         };
-        let store: Self = serde_json::from_str(&contents).map_err(CoverageError::Parse)?;
+        let store: Self = serde_json::from_str(&contents).context(ParseSnafu)?;
         if store.version != STORE_VERSION {
             return Err(CoverageError::VersionMismatch {
                 found: store.version,
@@ -258,11 +261,12 @@ impl CoverageStore {
     ///
     /// Returns [`CoverageError::Write`] on any I/O failure.
     pub fn save(&self, path: &Path) -> Result<(), CoverageError> {
-        let json =
-            serde_json::to_string(self).map_err(|e| CoverageError::Write(io::Error::other(e)))?;
+        let json = serde_json::to_string(self).map_err(|e| CoverageError::Write {
+            source: io::Error::other(e),
+        })?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(CoverageError::Write)?;
-        std::fs::rename(&tmp, path).map_err(CoverageError::Write)
+        std::fs::write(&tmp, json).context(WriteSnafu)?;
+        std::fs::rename(&tmp, path).context(WriteSnafu)
     }
 
     /// Merge a completed run's tested ranges into the store and append a run
@@ -599,7 +603,7 @@ mod tests {
             let Err(e) = CoverageStore::load(&path, fp()) else {
                 panic!("expected parse error");
             };
-            assert!(let CoverageError::Parse(_) = e);
+            assert!(let CoverageError::Parse { .. } = e);
         }
     }
 }

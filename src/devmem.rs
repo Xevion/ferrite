@@ -23,7 +23,7 @@
 //! appliance kernels); on a locked-down kernel the mmap fails cleanly and the
 //! backend reports itself unavailable.
 
-use thiserror::Error;
+use snafu::Snafu;
 
 use crate::phys::{MapStats, PageFlags, PhysAddr, PhysError, PhysResolver};
 
@@ -45,11 +45,12 @@ pub struct Mapping {
 }
 
 /// Failure to turn a [`DevMemTarget`] into concrete [`Mapping`]s.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Snafu, PartialEq, Eq)]
+#[snafu(visibility(pub(crate)))]
 pub enum DevMemError {
-    #[error("--devmem reserved: no memmap= reservations found on the kernel cmdline")]
+    #[snafu(display("--devmem reserved: no memmap= reservations found on the kernel cmdline"))]
     NoReservedRegions,
-    #[error("--devmem range must be page-aligned (start {start:#x}, len {len:#x})")]
+    #[snafu(display("--devmem range must be page-aligned (start {start:#x}, len {len:#x})"))]
     Unaligned { start: u64, len: usize },
 }
 
@@ -303,14 +304,14 @@ impl PhysResolver for DevMemResolver {
 
     fn resolve(&self, vaddr: usize) -> Result<PhysAddr, PhysError> {
         if vaddr < self.virt_base || vaddr >= self.virt_base + self.len {
-            return Err(PhysError::PageNotPresent(vaddr));
+            return Err(PhysError::PageNotPresent { vaddr });
         }
         Ok(PhysAddr(self.phys_base + (vaddr - self.virt_base) as u64))
     }
 
     fn page_flags(&self, _pfn: u64) -> Result<PageFlags, PhysError> {
         // kpageflags is meaningless for a direct physical mapping.
-        Err(PhysError::PfnUnavailable(0))
+        Err(PhysError::PfnUnavailable { vaddr: 0 })
     }
 
     fn verify_stability(&self, _base: usize, _len: usize) -> Result<usize, PhysError> {

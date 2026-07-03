@@ -7,8 +7,25 @@
 //! supplied by [`crate::phys::MapStats`].
 
 use serde::Serialize;
+use tracing::warn;
 
 use crate::phys::MapStats;
+
+/// Read a `/proc` file, warning when the read fails for a reason other than the
+/// file being absent. A missing `/proc` file is expected on non-Linux or
+/// stripped kernels and stays silent; a permission or I/O error on a present
+/// file is surfaced rather than collapsed into a bare `None`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn read_proc(path: &str) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            warn!(path, error = %e, "failed to read proc file");
+            None
+        }
+    }
+}
 
 /// Which source produced the installed-RAM denominator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -127,11 +144,8 @@ pub fn coverage_for(map_stats: Option<&MapStats>) -> Coverage {
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[must_use]
 pub fn installed_ram() -> Option<InstalledRam> {
-    let iomem_bytes =
-        std::fs::read_to_string("/proc/iomem").map_or(0, |s| parse_iomem_system_ram(&s));
-    let memtotal = std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|s| parse_meminfo_memtotal(&s));
+    let iomem_bytes = read_proc("/proc/iomem").map_or(0, |s| parse_iomem_system_ram(&s));
+    let memtotal = read_proc("/proc/meminfo").and_then(|s| parse_meminfo_memtotal(&s));
     select_installed_ram(iomem_bytes, memtotal)
 }
 
@@ -200,8 +214,7 @@ fn parse_iomem_ram_range(line: &str) -> Option<(u64, u64)> {
 #[must_use]
 pub fn machine_fingerprint() -> Option<crate::coverage::Fingerprint> {
     let mem_total = mem_total()?;
-    let ranges = std::fs::read_to_string("/proc/iomem")
-        .map_or_else(|_| Vec::new(), |s| system_ram_ranges(&s));
+    let ranges = read_proc("/proc/iomem").map_or_else(Vec::new, |s| system_ram_ranges(&s));
     Some(crate::coverage::fingerprint_from(mem_total, &ranges))
 }
 
@@ -225,7 +238,7 @@ fn parse_meminfo_kb(contents: &str, field: &str) -> Option<u64> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[must_use]
 pub fn mem_available() -> Option<u64> {
-    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let contents = read_proc("/proc/meminfo")?;
     parse_meminfo_kb(&contents, "MemAvailable")
 }
 
@@ -233,7 +246,7 @@ pub fn mem_available() -> Option<u64> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[must_use]
 pub fn mem_total() -> Option<u64> {
-    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let contents = read_proc("/proc/meminfo")?;
     parse_meminfo_kb(&contents, "MemTotal")
 }
 

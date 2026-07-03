@@ -2,8 +2,7 @@ use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
 use std::time::Instant;
 
-use anyhow::anyhow;
-use thiserror::Error;
+use snafu::Snafu;
 
 use crate::Failure;
 use crate::edac::{EccDelta, EdacSnapshot};
@@ -25,12 +24,13 @@ fn extract_panic_msg(val: &Box<dyn Any + Send>) -> &str {
 
 /// Unrecoverable error from the test runner -- indicates a panic in a pattern
 /// worker that could not be handled gracefully.
-#[derive(Debug, Error)]
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
 pub enum PatternError {
     /// A pattern worker panicked. The test buffer may be in a partially-modified
-    /// state and should not be trusted. The inner error carries the panic message.
-    #[error("unrecoverable error in pattern execution: {0}")]
-    Unrecoverable(#[source] anyhow::Error),
+    /// state and should not be trusted. The message carries the panic payload.
+    #[snafu(display("unrecoverable error in pattern execution: {message}"))]
+    Unrecoverable { message: String },
 }
 
 /// Result of running a single pattern.
@@ -192,10 +192,9 @@ pub fn run(
             let mut failures = match pattern_result {
                 Ok(f) => f,
                 Err(panic_val) => {
-                    return Err(PatternError::Unrecoverable(anyhow!(
-                        "{}",
-                        extract_panic_msg(&panic_val)
-                    )));
+                    return Err(PatternError::Unrecoverable {
+                        message: extract_panic_msg(&panic_val).to_owned(),
+                    });
                 }
             };
             let elapsed = start.elapsed();
@@ -551,7 +550,9 @@ mod tests {
 
         #[test]
         fn pattern_error_display() {
-            let e = PatternError::Unrecoverable(anyhow::anyhow!("worker panicked"));
+            let e = PatternError::Unrecoverable {
+                message: "worker panicked".to_owned(),
+            };
             assert!(e.to_string().contains("unrecoverable"));
             assert!(e.to_string().contains("worker panicked"));
         }

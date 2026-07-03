@@ -8,6 +8,7 @@
 //! reserved). See `docs/COVERAGE.md` ("Honest denominators") and XEV-1019.
 
 use serde::Serialize;
+use tracing::warn;
 
 use crate::coverage::{FRAME_BYTES, PfnRange};
 
@@ -157,12 +158,28 @@ pub fn classify_gaps(
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[must_use]
 pub fn classify_system_gaps(covered: &[PfnRange]) -> Option<GapReport> {
-    let iomem = std::fs::read_to_string("/proc/iomem").ok()?;
+    let iomem = match std::fs::read_to_string("/proc/iomem") {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn!(path = "/proc/iomem", error = %e, "failed to read for gap classification");
+            return None;
+        }
+    };
     let universe = ram_pfn_ranges(&crate::sysmem::system_ram_ranges(&iomem));
     if universe.is_empty() {
         return None;
     }
-    let file = std::fs::File::open("/proc/kpageflags").ok()?;
+    // Permission denied here (the common non-root case) is the interesting
+    // signal: it explains why the gap breakdown is unavailable.
+    let file = match std::fs::File::open("/proc/kpageflags") {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn!(path = "/proc/kpageflags", error = %e, "failed to open for gap classification");
+            return None;
+        }
+    };
     let gaps = crate::coverage::subtract_ranges(&universe, covered);
 
     let mut bytes = vec![0u8; READ_BATCH_FRAMES as usize * 8];

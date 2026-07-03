@@ -1,8 +1,10 @@
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::time::Instant;
 
 use serde::Serialize;
+use tracing::warn;
 
 /// Per-DIMM EDAC information from sysfs.
 #[derive(Debug, Clone, Serialize)]
@@ -177,12 +179,31 @@ fn try_read_csrow_api(mc_path: &Path, mc_index: usize, dimms: &mut Vec<DimmEdac>
 }
 
 fn read_u64_file(path: &Path) -> Option<u64> {
-    fs::read_to_string(path).ok()?.trim().parse().ok()
+    // A missing counter file is normal (feature/field absent); any other read
+    // failure -- e.g. permission denied on a present file -- is worth surfacing
+    // rather than silently reporting a zero count.
+    match fs::read_to_string(path) {
+        Ok(s) => s.trim().parse().ok(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "failed to read EDAC counter");
+            None
+        }
+    }
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {
-    let s = fs::read_to_string(path).ok()?.trim().to_owned();
-    if s.is_empty() { None } else { Some(s) }
+    match fs::read_to_string(path) {
+        Ok(s) => {
+            let s = s.trim().to_owned();
+            if s.is_empty() { None } else { Some(s) }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "failed to read EDAC label");
+            None
+        }
+    }
 }
 
 fn sorted_dir_entries(path: &Path) -> Option<Vec<fs::DirEntry>> {

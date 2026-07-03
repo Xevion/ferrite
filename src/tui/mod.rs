@@ -17,12 +17,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 
-use anyhow::Context;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
 use ratatui::prelude::Widget;
 use ratatui::widgets::Paragraph;
 use ratatui::{Terminal, TerminalOptions, Viewport};
+use snafu::{ResultExt, Whatever};
 use tracing::info;
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -332,10 +332,10 @@ pub fn run_event_loop<B>(
     config: &TuiConfig,
     segment: &Segment,
     rx: &mpsc::Receiver<TuiEvent>,
-) -> anyhow::Result<TuiLoopResult>
+) -> Result<TuiLoopResult, Whatever>
 where
     B: ratatui::backend::Backend,
-    B::Error: Send + Sync + 'static,
+    B::Error: std::error::Error + Send + Sync + 'static,
 {
     let start_time = Instant::now();
     let mut errors: Vec<TuiFailure> = Vec::new();
@@ -345,16 +345,18 @@ where
 
     // Establish the viewport before processing any events -- insert_before
     // misbehaves if called before the first draw.
-    terminal.draw(|frame| {
-        render_heatmap(
-            frame,
-            segment,
-            &errors,
-            start_time.elapsed(),
-            verbose,
-            config.symbols,
-        );
-    })?;
+    terminal
+        .draw(|frame| {
+            render_heatmap(
+                frame,
+                segment,
+                &errors,
+                start_time.elapsed(),
+                verbose,
+                config.symbols,
+            );
+        })
+        .whatever_context("failed to draw initial frame")?;
 
     let outcome = loop {
         match rx.recv_timeout(Duration::from_millis(50)) {
@@ -411,32 +413,38 @@ where
             Ok(TuiEvent::Tick) | Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !log_buf.is_empty() {
                     let lines = Vec::from(std::mem::take(&mut log_buf));
-                    terminal.insert_before(lines.len() as u16, |buf| {
-                        for (i, text) in lines.into_iter().enumerate() {
-                            let area = ratatui::layout::Rect {
-                                y: buf.area.y + i as u16,
-                                height: 1,
-                                ..buf.area
-                            };
-                            Paragraph::new(text).render(area, buf);
-                        }
-                    })?;
+                    terminal
+                        .insert_before(lines.len() as u16, |buf| {
+                            for (i, text) in lines.into_iter().enumerate() {
+                                let area = ratatui::layout::Rect {
+                                    y: buf.area.y + i as u16,
+                                    height: 1,
+                                    ..buf.area
+                                };
+                                Paragraph::new(text).render(area, buf);
+                            }
+                        })
+                        .whatever_context("failed to insert log lines")?;
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break TuiOutcome::Disconnected,
         }
 
         let elapsed = start_time.elapsed();
-        terminal.draw(|frame| {
-            render_heatmap(frame, segment, &errors, elapsed, verbose, config.symbols);
-        })?;
+        terminal
+            .draw(|frame| {
+                render_heatmap(frame, segment, &errors, elapsed, verbose, config.symbols);
+            })
+            .whatever_context("failed to draw frame")?;
     };
 
     // Final render to capture end state.
     let elapsed = start_time.elapsed();
-    terminal.draw(|frame| {
-        render_heatmap(frame, segment, &errors, elapsed, verbose, config.symbols);
-    })?;
+    terminal
+        .draw(|frame| {
+            render_heatmap(frame, segment, &errors, elapsed, verbose, config.symbols);
+        })
+        .whatever_context("failed to draw final frame")?;
 
     Ok(TuiLoopResult {
         outcome,
@@ -463,10 +471,10 @@ where
 pub fn finish_viewport<B>(
     terminal: &mut Terminal<B>,
     rx: &mpsc::Receiver<TuiEvent>,
-) -> anyhow::Result<()>
+) -> Result<(), Whatever>
 where
     B: Backend,
-    B::Error: Send + Sync + 'static,
+    B::Error: std::error::Error + Send + Sync + 'static,
 {
     // Push any log lines still queued at exit into the scrollback, in order,
     // so they flow directly below the output already shown during the run.
@@ -478,16 +486,18 @@ where
         })
         .collect();
     if !lines.is_empty() {
-        terminal.insert_before(lines.len() as u16, |buf| {
-            for (i, text) in lines.into_iter().enumerate() {
-                let area = ratatui::layout::Rect {
-                    y: buf.area.y + i as u16,
-                    height: 1,
-                    ..buf.area
-                };
-                Paragraph::new(text).render(area, buf);
-            }
-        })?;
+        terminal
+            .insert_before(lines.len() as u16, |buf| {
+                for (i, text) in lines.into_iter().enumerate() {
+                    let area = ratatui::layout::Rect {
+                        y: buf.area.y + i as u16,
+                        height: 1,
+                        ..buf.area
+                    };
+                    Paragraph::new(text).render(area, buf);
+                }
+            })
+            .whatever_context("failed to insert scrollback lines")?;
     }
 
     // Collapse the viewport: clear it, then park the cursor at its top-left so
@@ -495,10 +505,19 @@ where
     // `clear()` alone restores the pre-clear cursor (deep in the viewport),
     // which is what left the dead whitespace; the explicit reposition fixes it.
     let top = terminal.get_frame().area().as_position();
-    terminal.clear()?;
-    terminal.set_cursor_position(top)?;
-    terminal.show_cursor()?;
-    terminal.backend_mut().flush()?;
+    terminal
+        .clear()
+        .whatever_context("failed to clear viewport")?;
+    terminal
+        .set_cursor_position(top)
+        .whatever_context("failed to reposition cursor")?;
+    terminal
+        .show_cursor()
+        .whatever_context("failed to show cursor")?;
+    terminal
+        .backend_mut()
+        .flush()
+        .whatever_context("failed to flush terminal")?;
     Ok(())
 }
 
@@ -521,7 +540,7 @@ pub fn run_tui(
     segment: &Segment,
     tx: &mpsc::SyncSender<TuiEvent>,
     rx: &mpsc::Receiver<TuiEvent>,
-) -> anyhow::Result<()> {
+) -> Result<(), Whatever> {
     let guard = crate::shutdown::TerminalGuard::new()?;
 
     // Header + memory map + labels + segment row + separator + errors (min 3) + controls.
@@ -532,7 +551,7 @@ pub fn run_tui(
             viewport: Viewport::Inline(viewport_height),
         },
     )
-    .context("failed to initialize terminal")?;
+    .whatever_context("failed to initialize terminal")?;
 
     // Input reader thread
     let input_tx = tx.clone();
@@ -566,7 +585,7 @@ pub fn run_tui(
     // Drain trailing diagnostics into the scrollback and collapse the viewport
     // (while raw mode is still active) so the summary starts cleanly where the
     // viewport was, with no dead whitespace.
-    finish_viewport(&mut terminal, rx).context("failed to finalize viewport")?;
+    finish_viewport(&mut terminal, rx)?;
     // Explicitly drop the guard before println so the terminal is restored first.
     drop(guard);
     println!();

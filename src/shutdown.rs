@@ -6,6 +6,7 @@ use std::thread::{self, JoinHandle};
 
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
+use snafu::{ResultExt, Whatever};
 
 static QUIT: AtomicBool = AtomicBool::new(false);
 static SIGCOUNT: AtomicU8 = AtomicU8::new(0);
@@ -126,8 +127,9 @@ impl ShutdownHandle {
 /// # Errors
 ///
 /// Returns an error if signal registration fails.
-pub fn install_signal_handlers() -> anyhow::Result<ShutdownHandle> {
-    let mut signals = Signals::new([SIGINT, SIGTERM])?;
+pub fn install_signal_handlers() -> Result<ShutdownHandle, Whatever> {
+    let mut signals =
+        Signals::new([SIGINT, SIGTERM]).whatever_context("failed to register signal handlers")?;
     let handle = signals.handle();
 
     let thread = thread::Builder::new()
@@ -136,7 +138,8 @@ pub fn install_signal_handlers() -> anyhow::Result<ShutdownHandle> {
             for _sig in signals.forever() {
                 escalate();
             }
-        })?;
+        })
+        .whatever_context("failed to spawn signal-watcher thread")?;
 
     Ok(ShutdownHandle {
         signal_handle: handle,
@@ -175,10 +178,9 @@ impl TerminalGuard {
     /// # Errors
     ///
     /// Returns an error if raw mode cannot be enabled.
-    pub fn new() -> anyhow::Result<Self> {
-        crossterm::terminal::enable_raw_mode().map_err(|e| {
-            anyhow::anyhow!("failed to enable raw mode (is stdout a terminal?): {e}")
-        })?;
+    pub fn new() -> Result<Self, Whatever> {
+        crossterm::terminal::enable_raw_mode()
+            .whatever_context("failed to enable raw mode (is stdout a terminal?)")?;
         Ok(Self)
     }
 }

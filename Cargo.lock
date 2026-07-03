@@ -592,7 +592,6 @@ name = "ferrite"
 version = "0.1.4"
 dependencies = [
  "ansi-to-tui",
- "anyhow",
  "assert2",
  "clap",
  "crossbeam-channel",
@@ -610,10 +609,10 @@ dependencies = [
  "serde_json",
  "serial_test",
  "signal-hook 0.4.4",
+ "snafu",
  "strum",
  "supports-color 3.0.2",
  "tempfile",
- "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1972,6 +1971,27 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "snafu"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1a012328be2e3f5d5f6f3218147ca02588cea4cb865e876849ab6debcf36522"
+dependencies = [
+ "snafu-derive",
+]
+
+[[package]]
+name = "snafu-derive"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f103c50866b8743da9429b8a581d81a27c2d3a9c4ac7df8f8571c1dd7896eda"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "static_assertions"

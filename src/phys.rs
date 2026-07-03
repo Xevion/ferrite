@@ -5,7 +5,7 @@ use std::os::unix::io::AsRawFd;
 
 use nix::libc;
 use serde::Serialize;
-use thiserror::Error;
+use snafu::{ResultExt, Snafu};
 
 /// A physical address. Newtype to prevent mixing with virtual addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -50,20 +50,21 @@ impl fmt::UpperHex for PhysAddr {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
 pub enum PhysError {
-    #[error("failed to open /proc/self/pagemap: {0}")]
-    OpenPagemap(#[source] io::Error),
-    #[error("failed to read pagemap entries: {0}")]
-    ReadPagemap(#[source] io::Error),
-    #[error("page not present at virtual address 0x{0:x}")]
-    PageNotPresent(usize),
-    #[error("PFN not available (requires CAP_SYS_ADMIN) at virtual address 0x{0:x}")]
-    PfnUnavailable(usize),
-    #[error("failed to open /proc/kpageflags: {0}")]
-    OpenKpageflags(#[source] io::Error),
-    #[error("failed to read kpageflags: {0}")]
-    ReadKpageflags(#[source] io::Error),
+    #[snafu(display("failed to open /proc/self/pagemap: {source}"))]
+    OpenPagemap { source: io::Error },
+    #[snafu(display("failed to read pagemap entries: {source}"))]
+    ReadPagemap { source: io::Error },
+    #[snafu(display("page not present at virtual address 0x{vaddr:x}"))]
+    PageNotPresent { vaddr: usize },
+    #[snafu(display("PFN not available (requires CAP_SYS_ADMIN) at virtual address 0x{vaddr:x}"))]
+    PfnUnavailable { vaddr: usize },
+    #[snafu(display("failed to open /proc/kpageflags: {source}"))]
+    OpenKpageflags { source: io::Error },
+    #[snafu(display("failed to read kpageflags: {source}"))]
+    ReadKpageflags { source: io::Error },
 }
 
 /// Higher-level error type for physical address resolution setup.
@@ -72,22 +73,23 @@ pub enum PhysError {
 /// `PermissionDenied` is actionable (suggest root or `setcap`),
 /// `Unavailable` is informational (continue without physical addresses),
 /// and `ReadError` is unexpected and worth logging at a higher severity.
-#[derive(Debug, Error)]
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
 pub enum PhysResolverError {
     /// `/proc/self/pagemap` could not be opened because the process lacks
     /// `CAP_SYS_ADMIN` or is not root. Physical address resolution is not
     /// possible without elevated privileges.
-    #[error("pagemap access denied (requires CAP_SYS_ADMIN or root): {0}")]
-    PermissionDenied(#[source] PhysError),
+    #[snafu(display("pagemap access denied (requires CAP_SYS_ADMIN or root): {source}"))]
+    PermissionDenied { source: PhysError },
     /// `/proc/self/pagemap` is not available -- the kernel may not support it,
     /// or the file is missing on this system. Safe to continue without
     /// physical addresses.
-    #[error("pagemap unavailable: {0}")]
-    Unavailable(#[source] PhysError),
+    #[snafu(display("pagemap unavailable: {source}"))]
+    Unavailable { source: PhysError },
     /// An unexpected I/O error occurred while building the page map.
     /// The region is allocated and locked but physical addresses are unavailable.
-    #[error("failed to build page map: {0}")]
-    ReadError(#[source] PhysError),
+    #[snafu(display("failed to build page map: {source}"))]
+    ReadError { source: PhysError },
 }
 
 impl PhysResolverError {
@@ -96,18 +98,18 @@ impl PhysResolverError {
     /// to [`Self::Unavailable`].
     #[must_use]
     pub fn from_open(e: PhysError) -> Self {
-        if let PhysError::OpenPagemap(ref io_err) = e
+        if let PhysError::OpenPagemap { source: ref io_err } = e
             && io_err.kind() == io::ErrorKind::PermissionDenied
         {
-            return Self::PermissionDenied(e);
+            return Self::PermissionDenied { source: e };
         }
-        Self::Unavailable(e)
+        Self::Unavailable { source: e }
     }
 
     /// Classify a [`PhysError`] from building the page map (reading pagemap entries).
     #[must_use]
     pub const fn from_build(e: PhysError) -> Self {
-        Self::ReadError(e)
+        Self::ReadError { source: e }
     }
 }
 
@@ -228,7 +230,7 @@ impl PagemapResolver {
     /// (typically requires root or `CAP_SYS_ADMIN`).
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn new() -> Result<Self, PhysError> {
-        let pagemap_fd = File::open("/proc/self/pagemap").map_err(PhysError::OpenPagemap)?;
+        let pagemap_fd = File::open("/proc/self/pagemap").context(OpenPagemapSnafu)?;
         let kpageflags_fd = File::open("/proc/kpageflags").ok();
         Ok(Self {
             pagemap_fd,
@@ -326,8 +328,7 @@ impl PhysResolver for PagemapResolver {
     fn build_map(&mut self, base: usize, len: usize) -> Result<MapStats, PhysError> {
         let page_count = len / PAGE_SIZE;
 
-        self.pfns =
-            read_pfns(&self.pagemap_fd, base, page_count).map_err(PhysError::ReadPagemap)?;
+        self.pfns = read_pfns(&self.pagemap_fd, base, page_count).context(ReadPagemapSnafu)?;
         self.region_base = base;
 
         let resolved_pages = self.pfns.iter().filter(|&&pfn| pfn != 0).count();
@@ -369,30 +370,30 @@ impl PhysResolver for PagemapResolver {
 
     fn resolve(&self, vaddr: usize) -> Result<PhysAddr, PhysError> {
         if vaddr < self.region_base {
-            return Err(PhysError::PageNotPresent(vaddr));
+            return Err(PhysError::PageNotPresent { vaddr });
         }
         let page_idx = (vaddr - self.region_base) / PAGE_SIZE;
         let pfn = *self
             .pfns
             .get(page_idx)
-            .ok_or(PhysError::PageNotPresent(vaddr))?;
+            .ok_or(PhysError::PageNotPresent { vaddr })?;
         if pfn == 0 {
-            return Err(PhysError::PfnUnavailable(vaddr));
+            return Err(PhysError::PfnUnavailable { vaddr });
         }
         let offset = (vaddr as u64) & 0xFFF;
         Ok(PhysAddr((pfn << 12) | offset))
     }
 
     fn page_flags(&self, pfn: u64) -> Result<PageFlags, PhysError> {
-        let fd = self.kpageflags_fd.as_ref().ok_or_else(|| {
-            PhysError::OpenKpageflags(io::Error::new(
-                io::ErrorKind::NotFound,
-                "/proc/kpageflags not available",
-            ))
-        })?;
+        let fd = self
+            .kpageflags_fd
+            .as_ref()
+            .ok_or_else(|| PhysError::OpenKpageflags {
+                source: io::Error::new(io::ErrorKind::NotFound, "/proc/kpageflags not available"),
+            })?;
 
         let mut buf = [0u8; 8];
-        pread_exact(fd, &mut buf, (pfn * 8) as i64).map_err(PhysError::ReadKpageflags)?;
+        pread_exact(fd, &mut buf, (pfn * 8) as i64).context(ReadKpageflagsSnafu)?;
 
         Ok(PageFlags {
             raw: u64::from_le_bytes(buf),
@@ -405,7 +406,7 @@ impl PhysResolver for PagemapResolver {
         let file_offset = (start_vpn * 8) as i64;
 
         let mut buf = vec![0u8; page_count * 8];
-        pread_exact(&self.pagemap_fd, &mut buf, file_offset).map_err(PhysError::ReadPagemap)?;
+        pread_exact(&self.pagemap_fd, &mut buf, file_offset).context(ReadPagemapSnafu)?;
 
         let mut changed = 0usize;
         for i in 0..page_count {
@@ -435,36 +436,36 @@ mod tests {
         #[test]
         fn permission_denied_from_open() {
             let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "EPERM");
-            let phys_err = PhysError::OpenPagemap(io_err);
+            let phys_err = PhysError::OpenPagemap { source: io_err };
             let resolver_err = PhysResolverError::from_open(phys_err);
             check!(resolver_err.to_string().contains("CAP_SYS_ADMIN"));
-            assert!(let PhysResolverError::PermissionDenied(_) = resolver_err);
+            assert!(let PhysResolverError::PermissionDenied { .. } = resolver_err);
         }
 
         #[test]
         fn other_open_error_maps_to_unavailable() {
             let io_err = io::Error::new(io::ErrorKind::NotFound, "no file");
-            let phys_err = PhysError::OpenPagemap(io_err);
+            let phys_err = PhysError::OpenPagemap { source: io_err };
             let resolver_err = PhysResolverError::from_open(phys_err);
             check!(resolver_err.to_string().contains("unavailable"));
-            assert!(let PhysResolverError::Unavailable(_) = resolver_err);
+            assert!(let PhysResolverError::Unavailable { .. } = resolver_err);
         }
 
         #[test]
         fn non_open_error_maps_to_unavailable() {
             let io_err = io::Error::new(io::ErrorKind::BrokenPipe, "pipe");
-            let phys_err = PhysError::ReadPagemap(io_err);
+            let phys_err = PhysError::ReadPagemap { source: io_err };
             let resolver_err = PhysResolverError::from_open(phys_err);
-            assert!(let PhysResolverError::Unavailable(_) = resolver_err);
+            assert!(let PhysResolverError::Unavailable { .. } = resolver_err);
         }
 
         #[test]
         fn build_error_maps_to_read_error() {
             let io_err = io::Error::new(io::ErrorKind::UnexpectedEof, "short read");
-            let phys_err = PhysError::ReadPagemap(io_err);
+            let phys_err = PhysError::ReadPagemap { source: io_err };
             let resolver_err = PhysResolverError::from_build(phys_err);
             check!(resolver_err.to_string().contains("failed to build"));
-            assert!(let PhysResolverError::ReadError(_) = resolver_err);
+            assert!(let PhysResolverError::ReadError { .. } = resolver_err);
         }
     }
 
@@ -542,20 +543,20 @@ mod tests {
 
     #[test]
     fn phys_error_display() {
-        let e = PhysError::PageNotPresent(0x1000);
+        let e = PhysError::PageNotPresent { vaddr: 0x1000 };
         assert!(e.to_string().contains("0x1000"));
 
-        let e = PhysError::PfnUnavailable(0x2000);
+        let e = PhysError::PfnUnavailable { vaddr: 0x2000 };
         assert!(e.to_string().contains("CAP_SYS_ADMIN"));
 
-        let e = PhysError::OpenPagemap(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "denied",
-        ));
+        let e = PhysError::OpenPagemap {
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
         assert!(e.to_string().contains("pagemap"));
 
-        let e =
-            PhysError::OpenKpageflags(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"));
+        let e = PhysError::OpenKpageflags {
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        };
         assert!(e.to_string().contains("kpageflags"));
     }
 
@@ -682,7 +683,7 @@ mod tests {
 
         fn resolve(&self, vaddr: usize) -> Result<PhysAddr, PhysError> {
             if vaddr < self.base || vaddr >= self.base + self.len {
-                return Err(PhysError::PageNotPresent(vaddr));
+                return Err(PhysError::PageNotPresent { vaddr });
             }
             Ok(PhysAddr(vaddr as u64 + self.phys_offset))
         }
