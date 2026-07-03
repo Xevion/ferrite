@@ -1,6 +1,7 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod alloc;
+pub mod coverage;
 pub mod dimm;
 pub mod edac;
 pub mod error_analysis;

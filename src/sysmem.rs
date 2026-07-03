@@ -29,6 +29,18 @@ pub struct InstalledRam {
     pub source: RamSource,
 }
 
+/// Cross-run cumulative coverage stats, attached to a measured single-run
+/// coverage when a coverage store (`--coverage-file`) is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Cumulative {
+    /// Bytes this run tested that no previous run had covered.
+    pub new_bytes: u64,
+    /// Total bytes covered across all recorded runs.
+    pub cumulative_bytes: u64,
+    /// Number of recorded runs, including this one.
+    pub runs: u64,
+}
+
 /// Single-run physical coverage: how much of installed RAM this run tested.
 ///
 /// Serialized with a `status` tag so JSON consumers always see the field, even
@@ -41,6 +53,8 @@ pub enum Coverage {
         tested_bytes: u64,
         total_bytes: u64,
         source: RamSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cumulative: Option<Cumulative>,
     },
     /// Coverage could not be measured -- no physical address resolution
     /// (`--no-phys` or missing `CAP_SYS_ADMIN`), or no denominator available.
@@ -61,6 +75,13 @@ impl Coverage {
             _ => None,
         }
     }
+
+    /// Attach cross-run cumulative stats; no-op when coverage is unmeasured.
+    pub fn attach_cumulative(&mut self, stats: Cumulative) {
+        if let Self::Measured { cumulative, .. } = self {
+            *cumulative = Some(stats);
+        }
+    }
 }
 
 /// Assemble a [`Coverage`] from tested bytes and an optional denominator.
@@ -72,6 +93,7 @@ pub fn measure(tested_bytes: u64, installed: Option<InstalledRam>) -> Coverage {
             tested_bytes,
             total_bytes: ram.bytes,
             source: ram.source,
+            cumulative: None,
         },
         None => Coverage::Unavailable,
     }
@@ -135,12 +157,23 @@ fn select_installed_ram(iomem_bytes: u64, memtotal: Option<u64>) -> Option<Insta
 /// are skipped, so there is no double counting.
 #[must_use]
 fn parse_iomem_system_ram(contents: &str) -> u64 {
-    contents.lines().filter_map(parse_iomem_ram_line).sum()
+    system_ram_ranges(contents)
+        .iter()
+        .map(|(start, end)| end - start + 1)
+        .sum()
 }
 
-/// Parse one `/proc/iomem` line, returning its byte span iff it is labeled
-/// exactly "System RAM".
-fn parse_iomem_ram_line(line: &str) -> Option<u64> {
+/// Every `/proc/iomem` "System RAM" range as inclusive `(start, end)` address
+/// pairs, in file order. The physical memory layout these describe is what a
+/// coverage store fingerprints.
+#[must_use]
+pub fn system_ram_ranges(contents: &str) -> Vec<(u64, u64)> {
+    contents.lines().filter_map(parse_iomem_ram_range).collect()
+}
+
+/// Parse one `/proc/iomem` line into its inclusive `(start, end)` address pair
+/// iff it is labeled exactly "System RAM".
+fn parse_iomem_ram_range(line: &str) -> Option<(u64, u64)> {
     let (range, label) = line.split_once(':')?;
     if label.trim() != "System RAM" {
         return None;
@@ -148,7 +181,18 @@ fn parse_iomem_ram_line(line: &str) -> Option<u64> {
     let (start, end) = range.trim().split_once('-')?;
     let start = u64::from_str_radix(start.trim(), 16).ok()?;
     let end = u64::from_str_radix(end.trim(), 16).ok()?;
-    end.checked_sub(start).map(|span| span + 1)
+    (end >= start).then_some((start, end))
+}
+
+/// Fingerprint the machine's physical memory layout for coverage tracking.
+/// `None` when `MemTotal` cannot be read.
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[must_use]
+pub fn machine_fingerprint() -> Option<crate::coverage::Fingerprint> {
+    let mem_total = mem_total()?;
+    let ranges = std::fs::read_to_string("/proc/iomem")
+        .map_or_else(|_| Vec::new(), |s| system_ram_ranges(&s));
+    Some(crate::coverage::fingerprint_from(mem_total, &ranges))
 }
 
 /// Parse `MemTotal` (in kB) from `/proc/meminfo`, returning bytes.
@@ -250,6 +294,18 @@ zzzz-yyyy : System RAM
 00000000-00000fff : System RAM
 ";
             check!(parse_iomem_system_ram(contents) == 4096);
+        }
+
+        #[test]
+        fn system_ram_ranges_returns_address_pairs() {
+            let contents = "\
+00001000-00001fff : System RAM
+00002000-00002fff : Reserved
+00100000-3fffffff : System RAM
+";
+            check!(
+                system_ram_ranges(contents) == vec![(0x1000, 0x1fff), (0x0010_0000, 0x3fff_ffff)]
+            );
         }
     }
 
@@ -360,6 +416,7 @@ MemAvailable:   25512532 kB
                     tested_bytes: 64 * 1024 * 1024,
                     total_bytes: 32_000_000_000,
                     source: RamSource::ProcIomem,
+                    cumulative: None,
                 }
             );
         }
@@ -375,6 +432,7 @@ MemAvailable:   25512532 kB
                 tested_bytes: 1_000,
                 total_bytes: 4_000,
                 source: RamSource::ProcIomem,
+                cumulative: None,
             };
             // 1000 / 4000 * 100 = 25.0 exactly.
             check!(cov.percent() == Some(25.0));
@@ -386,6 +444,7 @@ MemAvailable:   25512532 kB
                 tested_bytes: 100,
                 total_bytes: 0,
                 source: RamSource::MemTotal,
+                cumulative: None,
             };
             check!(cov.percent() == None);
         }
@@ -398,6 +457,38 @@ MemAvailable:   25512532 kB
         #[test]
         fn coverage_for_none_map_stats_is_unavailable() {
             check!(coverage_for(None) == Coverage::Unavailable);
+        }
+
+        #[test]
+        fn attach_cumulative_on_measured() {
+            let mut cov = measure(
+                1024,
+                Some(InstalledRam {
+                    bytes: 4096,
+                    source: RamSource::ProcIomem,
+                }),
+            );
+            let stats = Cumulative {
+                new_bytes: 512,
+                cumulative_bytes: 2048,
+                runs: 3,
+            };
+            cov.attach_cumulative(stats);
+            assert2::assert!(
+                let Coverage::Measured { cumulative: Some(c), .. } = cov
+            );
+            check!(c == stats);
+        }
+
+        #[test]
+        fn attach_cumulative_on_unavailable_is_noop() {
+            let mut cov = Coverage::Unavailable;
+            cov.attach_cumulative(Cumulative {
+                new_bytes: 1,
+                cumulative_bytes: 1,
+                runs: 1,
+            });
+            check!(cov == Coverage::Unavailable);
         }
     }
 
@@ -412,12 +503,34 @@ MemAvailable:   25512532 kB
                 tested_bytes: 64,
                 total_bytes: 128,
                 source: RamSource::MemTotal,
+                cumulative: None,
             };
             let json = serde_json::to_value(cov).unwrap();
             check!(json["status"] == "measured");
             check!(json["tested_bytes"] == 64);
             check!(json["total_bytes"] == 128);
             check!(json["source"] == "mem_total");
+            // Absent cumulative stats are omitted entirely, not null.
+            check!(json.get("cumulative") == None);
+        }
+
+        #[test]
+        fn cumulative_serializes_nested_when_present() {
+            let mut cov = Coverage::Measured {
+                tested_bytes: 64,
+                total_bytes: 128,
+                source: RamSource::ProcIomem,
+                cumulative: None,
+            };
+            cov.attach_cumulative(Cumulative {
+                new_bytes: 32,
+                cumulative_bytes: 96,
+                runs: 2,
+            });
+            let json = serde_json::to_value(cov).unwrap();
+            check!(json["cumulative"]["new_bytes"] == 32);
+            check!(json["cumulative"]["cumulative_bytes"] == 96);
+            check!(json["cumulative"]["runs"] == 2);
         }
 
         #[test]

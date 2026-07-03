@@ -204,6 +204,45 @@ impl CoverageDoc<'_> {
             self.tested_bytes() as f64 / total as f64 * 100.0
         }
     }
+
+    /// Cross-run cumulative stats, when a coverage store was active.
+    #[must_use]
+    pub fn cumulative(&self) -> Option<CumulativeDoc<'_>> {
+        self.0["cumulative"]
+            .as_object()
+            .map(|_| CumulativeDoc(&self.0["cumulative"], self.total_bytes()))
+    }
+}
+
+/// Borrowed view into cross-run cumulative coverage stats.
+pub struct CumulativeDoc<'a>(&'a serde_json::Value, u64);
+
+impl CumulativeDoc<'_> {
+    #[must_use]
+    pub fn new_bytes(&self) -> u64 {
+        self.0["new_bytes"].as_u64().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn cumulative_bytes(&self) -> u64 {
+        self.0["cumulative_bytes"].as_u64().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn runs(&self) -> u64 {
+        self.0["runs"].as_u64().unwrap_or(0)
+    }
+
+    /// Cumulative fraction of installed RAM, against the parent coverage
+    /// denominator; 0.0 when that denominator is zero.
+    #[must_use]
+    pub fn percent(&self) -> f64 {
+        if self.1 == 0 {
+            0.0
+        } else {
+            self.cumulative_bytes() as f64 / self.1 as f64 * 100.0
+        }
+    }
 }
 
 /// Format a coverage percentage, scaling precision so small runs still show a
@@ -341,6 +380,33 @@ impl TableRenderer {
             full: true,
         }
     }
+
+    /// Render the physical coverage block, including cross-run cumulative
+    /// stats when a coverage store contributed them.
+    fn render_coverage(&self, cov: &CoverageDoc<'_>, out: &mut dyn Write) -> io::Result<()> {
+        writeln!(out)?;
+        writeln!(out, "Physical coverage")?;
+        if !cov.is_measured() {
+            return writeln!(out, "  unavailable (no physical address resolution)");
+        }
+        let tested = crate::units::Size::new(cov.tested_bytes() as f64, self.unit_system);
+        let total = crate::units::Size::new(cov.total_bytes() as f64, self.unit_system);
+        writeln!(out, "  Tested:    {tested}")?;
+        writeln!(out, "  Installed: {total}  ({})", cov.source_label())?;
+        writeln!(out, "  Coverage:  {}", format_percent(cov.percent()))?;
+        if let Some(cum) = cov.cumulative() {
+            let new = crate::units::Size::new(cum.new_bytes() as f64, self.unit_system);
+            let cum_size = crate::units::Size::new(cum.cumulative_bytes() as f64, self.unit_system);
+            writeln!(out, "  New:       {new} this run")?;
+            writeln!(
+                out,
+                "  Cumulative: {cum_size} ({}) across {} run(s)",
+                format_percent(cum.percent()),
+                cum.runs(),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 impl ResultsRenderer for TableRenderer {
@@ -438,17 +504,7 @@ impl ResultsRenderer for TableRenderer {
 
         // Physical coverage block -- the memory-centric headline for the run.
         if let Some(cov) = doc.coverage() {
-            writeln!(out)?;
-            writeln!(out, "Physical coverage")?;
-            if cov.is_measured() {
-                let tested = crate::units::Size::new(cov.tested_bytes() as f64, self.unit_system);
-                let total = crate::units::Size::new(cov.total_bytes() as f64, self.unit_system);
-                writeln!(out, "  Tested:    {tested}")?;
-                writeln!(out, "  Installed: {total}  ({})", cov.source_label())?;
-                writeln!(out, "  Coverage:  {}", format_percent(cov.percent()))?;
-            } else {
-                writeln!(out, "  unavailable (no physical address resolution)")?;
-            }
+            self.render_coverage(&cov, out)?;
         }
 
         // Final verdict
@@ -604,6 +660,7 @@ mod tests {
             tested_bytes: 64 * 1024 * 1024,
             total_bytes: 32 * 1024 * 1024 * 1024,
             source: crate::sysmem::RamSource::ProcIomem,
+            cumulative: None,
         };
         r
     }
@@ -898,6 +955,26 @@ mod tests {
             let out = render_to_string(&clean_results());
             assert!(out.contains("Physical coverage"));
             assert!(out.contains("unavailable"));
+        }
+
+        #[test]
+        fn renders_cumulative_lines_when_store_active() {
+            let mut r = covered_results();
+            r.coverage.attach_cumulative(crate::sysmem::Cumulative {
+                new_bytes: 32 * 1024 * 1024,
+                cumulative_bytes: 16 * 1024 * 1024 * 1024,
+                runs: 3,
+            });
+            let out = render_to_string(&r);
+            assert!(out.contains("New:       32.0 MiB this run"));
+            assert!(out.contains("Cumulative: 16.0 GiB (50.0%) across 3 run(s)"));
+        }
+
+        #[test]
+        fn no_cumulative_lines_without_store() {
+            let out = render_to_string(&covered_results());
+            assert!(!out.contains("Cumulative:"));
+            assert!(!out.contains("New:"));
         }
 
         #[test]

@@ -434,6 +434,7 @@ mod tests {
                 tested_bytes: 1024,
                 total_bytes: 4096,
                 source: crate::sysmem::RamSource::ProcIomem,
+                cumulative: None,
             },
         );
         drop(w);

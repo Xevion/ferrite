@@ -239,6 +239,15 @@ impl PagemapResolver {
     }
 }
 
+impl PagemapResolver {
+    /// Physical frame numbers for each page of the mapped region, in virtual
+    /// order; 0 = unresolved. Valid after [`PhysResolver::build_map`].
+    #[must_use]
+    pub fn pfns(&self) -> &[u64] {
+        &self.pfns
+    }
+}
+
 /// Parse a single 64-bit pagemap entry, returning the PFN if the page is present.
 fn parse_pagemap_entry(entry: u64) -> Option<u64> {
     if entry & PM_PRESENT == 0 {

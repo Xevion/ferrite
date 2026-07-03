@@ -46,6 +46,10 @@ fn main() -> Result<()> {
     let need_phys = !cli.no_phys;
     check_privileges(cli.requested_bytes_estimate(), need_phys);
 
+    // Load (or initialize) the cross-run coverage store before the run so
+    // cumulative coverage is reported up front.
+    let coverage_ctx = open_coverage_store(&cli)?;
+
     let patterns = if cli.patterns.is_empty() {
         Pattern::ALL.to_vec()
     } else {
@@ -82,6 +86,10 @@ fn main() -> Result<()> {
 
             let s = setup_test(&cli)?;
             let size = s.buffer.len();
+            let run_ranges = s
+                .resolver
+                .as_ref()
+                .map(|r| ferrite::coverage::compact_pfns(r.pfns()));
             let tui_setup = TuiTestSetup {
                 buffer: s.buffer,
                 resolver: s.resolver,
@@ -99,6 +107,7 @@ fn main() -> Result<()> {
             )?;
 
             ferrite::error_analysis::analyze(&mut results);
+            finalize_coverage(coverage_ctx, run_ranges, &mut results);
             render_results(&output, &results, cli.units, true);
 
             let code = shutdown::exit_code(results.total_failures);
@@ -113,9 +122,99 @@ fn main() -> Result<()> {
     // Non-TUI path: handle is no longer needed (stderr layer stays).
     drop(tracing_handle);
 
-    let result = run_non_tui(&cli, &patterns, &output, workers, parallel);
+    let result = run_non_tui(&cli, &patterns, &output, workers, parallel, coverage_ctx);
     shutdown_handle.shutdown();
     result
+}
+
+/// A loaded (or freshly initialized) coverage store plus its file path.
+struct CoverageCtx {
+    store: ferrite::coverage::CoverageStore,
+    path: std::path::PathBuf,
+}
+
+/// Open the `--coverage-file` store when configured: load and validate an
+/// existing file (reporting cumulative coverage) or initialize a new store.
+fn open_coverage_store(cli: &Cli) -> Result<Option<CoverageCtx>> {
+    let Some(path) = cli.coverage_file.clone() else {
+        return Ok(None);
+    };
+    if cli.no_phys {
+        anyhow::bail!("--coverage-file requires physical address resolution (remove --no-phys)");
+    }
+    let fingerprint = ferrite::sysmem::machine_fingerprint()
+        .context("cannot fingerprint machine memory for coverage tracking")?;
+    let loaded = ferrite::coverage::CoverageStore::load(&path, fingerprint)
+        .with_context(|| format!("failed to load coverage file: {}", path.display()))?;
+    let store = if let Some(store) = loaded {
+        let covered = store.covered_bytes();
+        let installed = ferrite::sysmem::installed_ram().map_or(0, |r| r.bytes);
+        let pct = if installed > 0 {
+            covered as f64 / installed as f64 * 100.0
+        } else {
+            0.0
+        };
+        tracing::info!(
+            "cumulative coverage: {} / {} ({pct:.1}%) across {} previous run(s)",
+            ferrite::units::format_size(covered as usize),
+            ferrite::units::format_size(installed as usize),
+            store.runs.len(),
+        );
+        store
+    } else {
+        tracing::info!("starting new coverage file: {}", path.display());
+        ferrite::coverage::CoverageStore::new(fingerprint)
+    };
+    Ok(Some(CoverageCtx { store, path }))
+}
+
+/// Merge a completed run into the coverage store, persist it, and attach
+/// cumulative stats to the results. Interrupted runs are not merged -- their
+/// frames were not tested by every selected pattern.
+fn finalize_coverage(
+    ctx: Option<CoverageCtx>,
+    run_ranges: Option<Vec<ferrite::coverage::PfnRange>>,
+    results: &mut ferrite::runner::RunResults,
+) {
+    let Some(mut ctx) = ctx else { return };
+    let Some(ranges) = run_ranges else {
+        tracing::warn!("coverage store not updated: physical address resolution unavailable");
+        return;
+    };
+    let interrupted = results
+        .passes
+        .iter()
+        .flat_map(|p| &p.pattern_results)
+        .any(|r| r.interrupted);
+    if interrupted {
+        tracing::warn!("coverage store not updated: run was interrupted");
+        return;
+    }
+
+    let patterns = results
+        .config
+        .patterns
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let delta = ctx.store.record_run(
+        &ranges,
+        jiff::Timestamp::now(),
+        patterns,
+        results.config.passes,
+        results.total_failures as u64,
+    );
+    if let Err(e) = ctx.store.save(&ctx.path) {
+        tracing::warn!("failed to save coverage file: {e}");
+        return;
+    }
+    results
+        .coverage
+        .attach_cumulative(ferrite::sysmem::Cumulative {
+            new_bytes: delta.new_bytes,
+            cumulative_bytes: delta.cumulative_bytes,
+            runs: delta.runs,
+        });
 }
 
 /// Render final results to stdout based on output configuration.
@@ -199,9 +298,14 @@ fn run_non_tui(
     output: &OutputConfig,
     workers: usize,
     parallel: bool,
+    coverage_ctx: Option<CoverageCtx>,
 ) -> Result<()> {
     let mut setup = setup_test(cli)?;
     let size = setup.buffer.len();
+    let run_ranges = setup
+        .resolver
+        .as_ref()
+        .map(|r| ferrite::coverage::compact_pfns(r.pfns()));
 
     let (tx, rx) = ferrite::events::event_bus();
 
@@ -283,6 +387,7 @@ fn run_non_tui(
     results.coverage = ferrite::sysmem::coverage_for(setup.map_stats.as_ref());
 
     ferrite::error_analysis::analyze(&mut results);
+    finalize_coverage(coverage_ctx, run_ranges, &mut results);
 
     // Write run_complete to whichever NDJSON writers are active
     if let Some(w) = stdout_ndjson.as_mut() {

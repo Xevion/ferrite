@@ -99,6 +99,11 @@ pub struct Cli {
     /// Disable physical address resolution (skip pagemap/EDAC/SMBIOS).
     #[arg(long)]
     pub no_phys: bool,
+
+    /// Track cumulative physical coverage across runs in this file (created
+    /// on first use). Requires physical address resolution (root).
+    #[arg(long, value_name = "FILE")]
+    pub coverage_file: Option<PathBuf>,
 }
 
 /// Worker-thread count for pattern execution.
@@ -809,6 +814,7 @@ CapEff:\t0000000000000000";
                 #[cfg(feature = "tui")]
                 tui: crate::cli::TuiMode::Never,
                 no_phys: true,
+                coverage_file: None,
             }
         }
 
