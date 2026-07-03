@@ -33,10 +33,6 @@ impl DimmTopology {
         edac: Option<EdacSnapshot>,
         smbios_dimms: Option<Vec<DimmInfo>>,
     ) -> Option<Self> {
-        if edac.is_none() && smbios_dimms.is_none() {
-            return None;
-        }
-
         let mut entries = Vec::new();
 
         match (edac, smbios_dimms) {
@@ -86,7 +82,7 @@ impl DimmTopology {
                     });
                 }
             }
-            (None, None) => unreachable!(),
+            (None, None) => return None,
         }
 
         if entries.is_empty() {

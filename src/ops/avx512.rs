@@ -17,9 +17,10 @@ use crate::Failure;
 /// Number of u64 words processed per Rayon task.
 /// Must be a multiple of 8 (one AVX-512 register = 8 * u64 = 64 bytes) so that
 /// every chunk boundary is 64-byte aligned and NT store / aligned load intrinsics
-/// never straddle a chunk boundary.
+/// never straddle a chunk boundary. Re-exports the shared [`crate::ops::CHUNK_WORDS`]
+/// so bench targets can keep referencing `avx512::CHUNK`.
 #[cfg(target_arch = "x86_64")]
-pub const CHUNK: usize = 64 * 1024; // 64 K u64s = 512 KiB
+pub const CHUNK: usize = crate::ops::CHUNK_WORDS;
 
 /// Returns true if AVX-512F is available. With `target-cpu=native` this is a
 /// compile-time constant and the dead branches are eliminated by LLVM.

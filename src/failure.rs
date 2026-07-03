@@ -30,7 +30,7 @@ impl Failure {
 
     /// Bit positions (0-63) that differ between expected and actual.
     #[must_use]
-    pub fn bit_positions(&self) -> Vec<u8> {
+    pub fn flipped_bit_indices(&self) -> Vec<u8> {
         let xor = self.xor();
         (0u8..64).filter(|&bit| xor & (1u64 << bit) != 0).collect()
     }
@@ -132,39 +132,39 @@ mod tests {
     }
 
     #[test]
-    fn bit_positions_single_bit() {
+    fn flipped_bit_indices_single_bit() {
         let f = FailureBuilder::default()
             .expected(0x00)
             .actual(0x08) // bit 3
             .build();
-        assert!(f.bit_positions() == vec![3]);
+        assert!(f.flipped_bit_indices() == vec![3]);
     }
 
     #[test]
-    fn bit_positions_multiple_bits() {
+    fn flipped_bit_indices_multiple_bits() {
         let f = FailureBuilder::default()
             .expected(0x00)
             .actual(0b1010_0101) // bits 0, 2, 5, 7
             .build();
-        assert!(f.bit_positions() == vec![0, 2, 5, 7]);
+        assert!(f.flipped_bit_indices() == vec![0, 2, 5, 7]);
     }
 
     #[test]
-    fn bit_positions_no_diff() {
+    fn flipped_bit_indices_no_diff() {
         let f = FailureBuilder::default()
             .expected(0xAA)
             .actual(0xAA)
             .build();
-        assert!(f.bit_positions().is_empty());
+        assert!(f.flipped_bit_indices().is_empty());
     }
 
     #[test]
-    fn bit_positions_high_bit() {
+    fn flipped_bit_indices_high_bit() {
         let f = FailureBuilder::default()
             .expected(0)
             .actual(1u64 << 63)
             .build();
-        assert!(f.bit_positions() == vec![63]);
+        assert!(f.flipped_bit_indices() == vec![63]);
     }
 
     #[test]
@@ -194,12 +194,12 @@ mod tests {
         }
 
         #[test]
-        fn bit_positions_count_matches_flipped_bits(expected: u64, actual: u64) {
+        fn flipped_bit_indices_count_matches_flipped_bits(expected: u64, actual: u64) {
             let f = FailureBuilder::default()
                 .expected(expected)
                 .actual(actual)
                 .build();
-            prop_assert!(f.bit_positions().len() as u32 == f.flipped_bits());
+            prop_assert!(f.flipped_bit_indices().len() as u32 == f.flipped_bits());
         }
     }
 }

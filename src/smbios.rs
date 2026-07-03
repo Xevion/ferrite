@@ -189,13 +189,20 @@ pub(crate) fn find_string_table_end(table: &[u8], start: usize) -> usize {
 ///
 /// - `0x0000` / `0xFFFF` -- slot not installed or size unknown, returns 0.
 /// - `0x7FFF` -- use 32-bit extended size from `ext_bytes`; returns 0 if absent.
-/// - bit 15 set -- KB granularity; value is the low 15 bits divided by 1024.
+/// - bit 15 set -- KB granularity; value is the low 15 bits, rounded up to the
+///   nearest whole MB. A real (nonzero) sub-1 MB DIMM must round up rather
+///   than truncate to 0, since `size_mb == 0` is treated as an empty slot by
+///   the caller. This slightly overstates `size_mb` for such DIMMs -- a known
+///   limitation of reporting size in whole-MB units.
 /// - otherwise -- MB granularity.
 fn parse_size_mb(size_raw: u16, ext_bytes: Option<[u8; 4]>) -> u64 {
     match size_raw {
         0 | 0xFFFF => 0,
         0x7FFF => ext_bytes.map_or(0, |b| u64::from(u32::from_le_bytes(b))),
-        other if other & 0x8000 != 0 => u64::from(other & 0x7FFF) / 1024,
+        other if other & 0x8000 != 0 => {
+            let kb = u64::from(other & 0x7FFF);
+            if kb == 0 { 0 } else { kb.div_ceil(1024) }
+        }
         other => u64::from(other),
     }
 }
@@ -360,17 +367,19 @@ mod tests {
         }
 
         #[test]
-        fn kb_granularity_sub_1mb_truncates_to_zero() {
-            // 0x8001 = bit15 set | 1 KB -> 1/1024 = 0 (truncation bug)
-            check!(parse_size_mb(0x8001, None) == 0);
-            // 0x8200 = bit15 set | 512 KB -> 512/1024 = 0
-            check!(parse_size_mb(0x8200, None) == 0);
+        fn kb_granularity_sub_1mb_rounds_up_to_one() {
+            // A real (nonzero) sub-1 MB DIMM must not truncate to 0 -- a 0 MB
+            // slot is treated as empty and dropped by the caller.
+            // 0x8001 = bit15 set | 1 KB -> rounds up to 1 MB.
+            check!(parse_size_mb(0x8001, None) == 1);
+            // 0x8200 = bit15 set | 512 KB -> rounds up to 1 MB.
+            check!(parse_size_mb(0x8200, None) == 1);
         }
 
         #[test]
-        fn kb_granularity_non_even_division() {
-            // 0x8300 = bit15 set | 768 KB -> 768/1024 = 0 (truncation)
-            check!(parse_size_mb(0x8300, None) == 0);
+        fn kb_granularity_non_even_division_rounds_up() {
+            // 0x8300 = bit15 set | 768 KB -> rounds up to 1 MB.
+            check!(parse_size_mb(0x8300, None) == 1);
         }
 
         #[test]

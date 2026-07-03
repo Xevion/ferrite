@@ -375,7 +375,7 @@ impl PhysResolver for PagemapResolver {
         let mut changed = 0usize;
         for i in 0..page_count {
             let off = i * 8;
-            let entry = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+            let entry = buf[off..off + 8].try_into().map_or(0, u64::from_le_bytes);
             let new_pfn = parse_pagemap_entry(entry).unwrap_or(0);
             if new_pfn != self.pfns[i] {
                 changed += 1;

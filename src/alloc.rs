@@ -187,6 +187,8 @@ impl TestBuffer {
         // at fault time rather than collapsing 4 KiB pages later via khugepaged.
         // Silently ignored if THP is disabled system-wide.
         #[cfg(target_os = "linux")]
+        // SAFETY: `ptr` is valid for `len` bytes from the mmap above; madvise
+        // does not require the pages to be faulted in yet.
         unsafe {
             let _ = madvise(ptr, len, MmapAdvise::MADV_HUGEPAGE);
         }

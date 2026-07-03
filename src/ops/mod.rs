@@ -7,6 +7,12 @@ use avx512::avx512_available;
 
 use crate::Failure;
 
+/// Chunk granularity (in u64 words) shared by scalar, AVX-512, and march
+/// orchestration: 64 Ki words = 512 KiB. Kept as a multiple of 8 so every
+/// chunk boundary is 64-byte aligned, which AVX-512 NT stores and aligned
+/// loads require.
+pub(crate) const CHUNK_WORDS: usize = 64 * 1024;
+
 /// Fill every word with `pattern`, then verify. Returns any mismatches.
 ///
 /// Dispatches to AVX-512 on supported hardware, scalar otherwise.

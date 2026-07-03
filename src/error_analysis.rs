@@ -15,7 +15,7 @@ pub struct BitErrorStats {
     /// OR of all XOR masks -- which bit positions have ever flipped.
     pub union_xor_mask: u64,
     /// Count of flips per bit position (index 0 = bit 0).
-    pub bit_positions: [u32; 64],
+    pub bit_flip_counts: [u32; 64],
     /// Bits that always flipped from 0->1 across all errors.
     /// Computed as: AND of (actual & ~expected) across all errors.
     stuck_high_accum: Option<u64>,
@@ -38,7 +38,7 @@ impl BitErrorStats {
             lowest_phys: None,
             highest_phys: None,
             union_xor_mask: 0,
-            bit_positions: [0; 64],
+            bit_flip_counts: [0; 64],
             stuck_high_accum: None,
             stuck_low_accum: None,
         }
@@ -59,7 +59,7 @@ impl BitErrorStats {
 
         for bit in 0..64 {
             if xor & (1u64 << bit) != 0 {
-                self.bit_positions[bit] += 1;
+                self.bit_flip_counts[bit] += 1;
             }
         }
 
@@ -173,8 +173,8 @@ pub fn analyze(results: &mut RunResults) {
     }
 
     let bit_positions: Vec<(u8, u32)> = (0u8..64)
-        .filter(|&bit| stats.bit_positions[bit as usize] > 0)
-        .map(|bit| (bit, stats.bit_positions[bit as usize]))
+        .filter(|&bit| stats.bit_flip_counts[bit as usize] > 0)
+        .map(|bit| (bit, stats.bit_flip_counts[bit as usize]))
         .collect();
 
     results.error_analysis = Some(ErrorAnalysis {
@@ -244,10 +244,10 @@ mod tests {
         stats.record(&f(0x1000, 0x7, 0x4)); // bits 0,1 flipped
         stats.record(&f(0x2000, 0x5, 0x0)); // bits 0,2 flipped
 
-        check!(stats.bit_positions[0] == 2);
-        check!(stats.bit_positions[1] == 1);
-        check!(stats.bit_positions[2] == 1);
-        check!(stats.bit_positions[3] == 0);
+        check!(stats.bit_flip_counts[0] == 2);
+        check!(stats.bit_flip_counts[1] == 1);
+        check!(stats.bit_flip_counts[2] == 1);
+        check!(stats.bit_flip_counts[3] == 0);
         assert!(stats.union_xor_mask == 0x7);
     }
 
@@ -267,7 +267,7 @@ mod tests {
             check!(stats.stuck_high_mask() == 1 << 20);
             check!(stats.stuck_low_mask() == 0);
             check!(stats.union_xor_mask == 1 << 20);
-            check!(stats.bit_positions[20] == 2);
+            check!(stats.bit_flip_counts[20] == 2);
             check!(stats.lowest_phys == Some(0x2000));
             check!(stats.highest_phys == Some(0x3000));
 
@@ -367,7 +367,7 @@ mod tests {
 
             prop_assert_eq!(fwd.total_failures, perm.total_failures);
             prop_assert_eq!(fwd.union_xor_mask, perm.union_xor_mask);
-            prop_assert_eq!(fwd.bit_positions, perm.bit_positions);
+            prop_assert_eq!(fwd.bit_flip_counts, perm.bit_flip_counts);
             prop_assert_eq!(fwd.stuck_high_mask(), perm.stuck_high_mask());
             prop_assert_eq!(fwd.stuck_low_mask(), perm.stuck_low_mask());
         }

@@ -3,11 +3,7 @@ use std::ptr;
 use rayon::prelude::*;
 
 use crate::Failure;
-
-/// Chunk size (in u64 words) for activity reporting in scalar paths.
-/// Matches `avx512::CHUNK` so activity granularity is consistent regardless
-/// of whether AVX-512 is available.
-const REPORT_CHUNK: usize = 64 * 1024; // 512 KiB
+use crate::ops::CHUNK_WORDS as REPORT_CHUNK;
 
 /// Scalar fill: write `pattern` to every word using volatile stores.
 pub fn fill_constant(buf: &mut [u64], pattern: u64) {

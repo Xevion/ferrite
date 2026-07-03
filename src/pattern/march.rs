@@ -21,6 +21,7 @@
 use std::ptr;
 
 use crate::Failure;
+use crate::ops::CHUNK_WORDS as REPORT_CHUNK;
 use crate::shutdown;
 
 /// One operation applied to each cell as a march element sweeps the buffer.
@@ -84,13 +85,12 @@ const fn word(bit: bool) -> u64 {
     if bit { u64::MAX } else { 0 }
 }
 
-/// Report activity roughly every this many cells, and check for cancellation
-/// at the same cadence so a long element bails out promptly on quit.
-const REPORT_CHUNK: usize = 64 * 1024;
-
 /// Apply one march element to `buf` in its traversal direction, pushing a
 /// [`Failure`] for every read whose observed word differs from its expected
 /// state. Returns `true` if a quit was requested mid-sweep.
+///
+/// Activity is reported and cancellation checked every [`REPORT_CHUNK`] cells
+/// so a long element bails out promptly on quit.
 fn run_element(
     buf: &mut [u64],
     element: &MarchElement,
@@ -156,22 +156,21 @@ fn run_element(
     false
 }
 
-/// Run the full March C- sequence over `buf`.
+/// Run an arbitrary march element sequence over `buf`.
 ///
 /// The march is strictly sequential: each element must complete cell-by-cell
-/// in address order for its coupling/address-decoder coverage to hold, so the
-/// `parallel` flag is accepted for signature parity but does not split the
-/// buffer. `on_subpass` fires once per completed element (6 total), matching
-/// [`Pattern::sub_passes`](crate::pattern::Pattern::sub_passes).
-pub(super) fn run(
+/// in address order for its coupling/address-decoder coverage to hold, so
+/// callers cannot split the buffer across elements. `on_subpass` fires once
+/// per completed element.
+fn run_march(
     buf: &mut [u64],
-    _parallel: bool,
+    elements: &[MarchElement],
     on_subpass: &mut impl FnMut(),
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
     let base_addr = buf.as_ptr() as usize;
     let mut failures = Vec::new();
-    for element in MARCH_C_MINUS {
+    for element in elements {
         let quit = run_element(buf, element, base_addr, &mut failures, on_activity);
         on_subpass();
         if quit || shutdown::quit_requested() {
@@ -179,6 +178,21 @@ pub(super) fn run(
         }
     }
     failures
+}
+
+/// Run the full March C- sequence over `buf`.
+///
+/// The `parallel` flag is accepted for signature parity but does not split
+/// the buffer (see [`run_march`]). `on_subpass` fires once per completed
+/// element (6 total), matching
+/// [`Pattern::sub_passes`](crate::pattern::Pattern::sub_passes).
+pub(super) fn run(
+    buf: &mut [u64],
+    _parallel: bool,
+    on_subpass: &mut impl FnMut(),
+    on_activity: &(dyn Fn(f64) + Sync),
+) -> Vec<Failure> {
+    run_march(buf, MARCH_C_MINUS, on_subpass, on_activity)
 }
 
 #[cfg(test)]
