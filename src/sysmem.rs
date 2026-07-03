@@ -154,11 +154,33 @@ fn parse_iomem_ram_line(line: &str) -> Option<u64> {
 /// Parse `MemTotal` (in kB) from `/proc/meminfo`, returning bytes.
 #[must_use]
 fn parse_meminfo_memtotal(contents: &str) -> Option<u64> {
+    parse_meminfo_kb(contents, "MemTotal")
+}
+
+/// Parse any `kB`-valued `/proc/meminfo` field, returning bytes.
+#[must_use]
+fn parse_meminfo_kb(contents: &str, field: &str) -> Option<u64> {
     contents.lines().find_map(|line| {
-        let rest = line.strip_prefix("MemTotal:")?;
+        let rest = line.strip_prefix(field)?.strip_prefix(':')?;
         let kb = rest.trim().strip_suffix("kB")?.trim().parse::<u64>().ok()?;
         Some(kb * 1024)
     })
+}
+
+/// Read `MemAvailable` from `/proc/meminfo`, in bytes.
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[must_use]
+pub fn mem_available() -> Option<u64> {
+    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_meminfo_kb(&contents, "MemAvailable")
+}
+
+/// Read `MemTotal` from `/proc/meminfo`, in bytes.
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[must_use]
+pub fn mem_total() -> Option<u64> {
+    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_meminfo_kb(&contents, "MemTotal")
 }
 
 #[cfg(test)]
@@ -249,6 +271,31 @@ MemFree:         1234567 kB
         fn missing_memtotal_is_none() {
             let contents = "MemFree: 1234567 kB\n";
             check!(parse_meminfo_memtotal(contents) == None);
+        }
+
+        #[test]
+        fn extracts_memavailable_as_bytes() {
+            let contents = "\
+MemTotal:       32781736 kB
+MemFree:         1234567 kB
+MemAvailable:   25512532 kB
+";
+            check!(parse_meminfo_kb(contents, "MemAvailable") == Some(25_512_532 * 1024));
+        }
+
+        #[test]
+        fn field_name_must_match_exactly() {
+            // "MemFree" must not match a query for "Mem".
+            let contents = "MemFree: 1234567 kB\n";
+            check!(parse_meminfo_kb(contents, "Mem") == None);
+            check!(parse_meminfo_kb(contents, "MemAvailable") == None);
+        }
+
+        #[test]
+        fn non_kb_field_is_none() {
+            // HugePages_Total has no kB suffix; the parser only handles kB fields.
+            let contents = "HugePages_Total:       0\n";
+            check!(parse_meminfo_kb(contents, "HugePages_Total") == None);
         }
 
         #[test]

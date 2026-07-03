@@ -2,7 +2,9 @@ use std::ffi::c_void;
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
-use nix::sys::mman::{MapFlags, MmapAdvise, ProtFlags, madvise, mlock, mmap_anonymous, munmap};
+use nix::sys::mman::{
+    MapFlags, MmapAdvise, ProtFlags, madvise, mlock, mmap_anonymous, mprotect, munmap,
+};
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -14,6 +16,10 @@ pub enum AllocError {
     Mmap(#[source] nix::Error),
     #[error("mlock failed (are you root or do you have CAP_IPC_LOCK?): {0}")]
     Mlock(#[source] nix::Error),
+    #[error("mprotect failed while activating chunk: {0}")]
+    Mprotect(#[source] nix::Error),
+    #[error("could not lock any memory below the headroom floor ({available} bytes available)")]
+    Exhausted { available: u64 },
 }
 
 impl AllocError {
@@ -26,9 +32,67 @@ impl AllocError {
                 "run as root, raise the mlock limit (ulimit -l unlimited), \
                 or grant the capability: sudo setcap cap_ipc_lock+ep $(which ferrite)",
             ),
-            AllocError::Mmap(_) | AllocError::ZeroSize => None,
+            AllocError::Exhausted { .. } => Some(
+                "free memory (stop services, drop caches) or lower --headroom \
+                to allow allocation closer to the limit",
+            ),
+            AllocError::Mmap(_) | AllocError::Mprotect(_) | AllocError::ZeroSize => None,
         }
     }
+}
+
+/// Why the chunked allocation walk stopped.
+#[derive(Debug)]
+pub enum StopReason {
+    /// The full requested size was activated and locked.
+    Completed,
+    /// `MemAvailable` dropped below the headroom floor before the next chunk.
+    HeadroomFloor { available: u64 },
+    /// Activating a chunk failed (mprotect, or mlock); the walk kept what it had.
+    ChunkFailed(AllocError),
+}
+
+/// Result of a budgeted, chunked allocation: how much of the request was
+/// actually activated and locked, and why the walk stopped.
+#[derive(Debug)]
+pub struct AllocOutcome {
+    pub requested: usize,
+    pub achieved: usize,
+    pub stop: StopReason,
+}
+
+/// Chunk granularity for budgeted allocation: large enough that per-chunk
+/// syscall overhead vanishes, small enough that the headroom floor check
+/// between chunks reacts before memory pressure becomes an OOM kill.
+pub const CHUNK_BYTES: usize = 512 * 1024 * 1024;
+
+/// Walk `total` bytes in `chunk`-sized steps, activating each chunk in turn.
+///
+/// Before each chunk, `available()` is consulted (None = no reading, no cap):
+/// if fewer than `headroom + chunk_len` bytes are available, the walk stops.
+/// If `activate(offset, len)` fails, the walk stops and keeps prior chunks.
+/// Returns the byte count successfully activated and the stop reason.
+fn walk_chunks(
+    total: usize,
+    chunk: usize,
+    headroom: u64,
+    available: &mut dyn FnMut() -> Option<u64>,
+    activate: &mut dyn FnMut(usize, usize) -> Result<(), AllocError>,
+) -> (usize, StopReason) {
+    let mut achieved = 0usize;
+    while achieved < total {
+        let chunk_len = chunk.min(total - achieved);
+        if let Some(avail) = available()
+            && avail < headroom.saturating_add(chunk_len as u64)
+        {
+            return (achieved, StopReason::HeadroomFloor { available: avail });
+        }
+        if let Err(e) = activate(achieved, chunk_len) {
+            return (achieved, StopReason::ChunkFailed(e));
+        }
+        achieved += chunk_len;
+    }
+    (achieved, StopReason::Completed)
 }
 
 /// The full anonymous memory allocation that ferrite mmap's and mlock's.
@@ -91,6 +155,109 @@ impl TestBuffer {
         }
 
         Ok(Self { ptr, len })
+    }
+
+    /// Allocate up to `requested` bytes, activating and locking in
+    /// [`CHUNK_BYTES`] steps so an over-sized request degrades to a smaller
+    /// locked buffer instead of an OOM kill.
+    ///
+    /// The full request is reserved as inaccessible address space up front;
+    /// each chunk is made writable, faulted in parallel, and locked. The walk
+    /// stops when `MemAvailable` drops below `headroom` plus the next chunk,
+    /// or when a chunk fails to activate. The unactivated tail is unmapped, so
+    /// the resulting buffer is virtually contiguous with `len == achieved`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError`] if the size is zero, the reservation fails, or
+    /// no chunk at all could be locked.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub fn new_budgeted(
+        requested: usize,
+        headroom: u64,
+    ) -> Result<(Self, AllocOutcome), AllocError> {
+        let size = NonZeroUsize::new(requested).ok_or(AllocError::ZeroSize)?;
+
+        // Reserve address space only: PROT_NONE pages carry no commit charge,
+        // so a 32 GiB reservation is free until chunks are activated.
+        // SAFETY: anonymous private reservation, no existing mapping is replaced.
+        let ptr = unsafe {
+            mmap_anonymous(
+                None,
+                size,
+                ProtFlags::PROT_NONE,
+                MapFlags::MAP_PRIVATE | MapFlags::MAP_NORESERVE,
+            )
+            .map_err(AllocError::Mmap)?
+        };
+        let raw = ptr.as_ptr() as usize;
+
+        let mut activate = |offset: usize, len: usize| -> Result<(), AllocError> {
+            // SAFETY: `raw` is a valid non-null mapping base and
+            // `offset < requested`, so the sum cannot wrap to zero.
+            let chunk = unsafe { NonNull::new_unchecked((raw + offset) as *mut c_void) };
+            // SAFETY: [offset, offset+len) lies within the reservation.
+            unsafe {
+                mprotect(chunk, len, ProtFlags::PROT_READ | ProtFlags::PROT_WRITE)
+                    .map_err(AllocError::Mprotect)?;
+            }
+            // Hint 2 MiB THP backing before faulting. Ignored when THP is off.
+            #[cfg(target_os = "linux")]
+            // SAFETY: chunk range is a valid mapping owned by this reservation.
+            unsafe {
+                let _ = madvise(chunk, len, MmapAdvise::MADV_HUGEPAGE);
+            }
+            let page_count = len / 4096;
+            (0..page_count).into_par_iter().for_each(|i| {
+                // SAFETY: offset is within [0, len), each page touched exactly once.
+                unsafe { ((raw + offset + i * 4096) as *mut u8).write_volatile(0u8) };
+            });
+            // SAFETY: chunk range is valid and faulted; mlock pins it in RAM.
+            unsafe {
+                mlock(chunk, len).map_err(AllocError::Mlock)?;
+            }
+            Ok(())
+        };
+
+        let (achieved, stop) = walk_chunks(
+            requested,
+            CHUNK_BYTES,
+            headroom,
+            &mut || crate::sysmem::mem_available(),
+            &mut activate,
+        );
+
+        if achieved == 0 {
+            // SAFETY: unmapping the reservation we just created.
+            unsafe {
+                let _ = munmap(ptr, requested);
+            }
+            return Err(match stop {
+                StopReason::ChunkFailed(e) => e,
+                StopReason::HeadroomFloor { available } => AllocError::Exhausted { available },
+                StopReason::Completed => unreachable!("zero-size requests are rejected above"),
+            });
+        }
+
+        if achieved < requested {
+            // SAFETY: `raw` is a valid non-null mapping base and
+            // `achieved < requested`, so the sum cannot wrap to zero.
+            let tail = unsafe { NonNull::new_unchecked((raw + achieved) as *mut c_void) };
+            // SAFETY: [achieved, requested) is the untouched remainder of the
+            // reservation; unmapping it leaves [0, achieved) intact.
+            unsafe {
+                let _ = munmap(tail, requested - achieved);
+            }
+        }
+
+        Ok((
+            Self { ptr, len: achieved },
+            AllocOutcome {
+                requested,
+                achieved,
+                stop,
+            },
+        ))
     }
 
     /// Returns the buffer as a mutable slice of u64 words.
@@ -227,6 +394,130 @@ mod tests {
         fn zero_size_no_help() {
             let e = AllocError::ZeroSize;
             check!(e.help().is_none());
+        }
+    }
+
+    mod walk_chunks {
+        use assert2::{assert, check};
+
+        use super::super::{AllocError, StopReason, walk_chunks};
+
+        /// Record every activation call; fail those whose offset is in `fail_at`.
+        fn recording_activate(
+            calls: std::rc::Rc<std::cell::RefCell<Vec<(usize, usize)>>>,
+            fail_at: Option<usize>,
+        ) -> impl FnMut(usize, usize) -> Result<(), AllocError> {
+            move |offset, len| {
+                if fail_at == Some(offset) {
+                    return Err(AllocError::Mlock(nix::Error::ENOMEM));
+                }
+                calls.borrow_mut().push((offset, len));
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn full_request_completes_with_short_tail() {
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut activate = recording_activate(calls.clone(), None);
+            let (achieved, stop) = walk_chunks(10, 4, 0, &mut || None, &mut activate);
+            check!(achieved == 10);
+            assert!(let StopReason::Completed = stop);
+            check!(*calls.borrow() == vec![(0, 4), (4, 4), (8, 2)]);
+        }
+
+        #[test]
+        fn headroom_floor_stops_walk() {
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut activate = recording_activate(calls.clone(), None);
+            // First check: plenty. Second check: 90 < headroom(100) + chunk(4).
+            let mut readings = vec![200u64, 90].into_iter();
+            let (achieved, stop) = walk_chunks(8, 4, 100, &mut || readings.next(), &mut activate);
+            check!(achieved == 4);
+            assert!(let StopReason::HeadroomFloor { available: 90 } = stop);
+            check!(*calls.borrow() == vec![(0, 4)]);
+        }
+
+        #[test]
+        fn chunk_failure_keeps_prior_chunks() {
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut activate = recording_activate(calls.clone(), Some(4));
+            let (achieved, stop) = walk_chunks(12, 4, 0, &mut || None, &mut activate);
+            check!(achieved == 4);
+            assert!(let StopReason::ChunkFailed(AllocError::Mlock(_)) = stop);
+            check!(*calls.borrow() == vec![(0, 4)]);
+        }
+
+        #[test]
+        fn unreadable_meminfo_means_no_cap() {
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut activate = recording_activate(calls.clone(), None);
+            let (achieved, stop) = walk_chunks(8, 4, u64::MAX, &mut || None, &mut activate);
+            check!(achieved == 8);
+            assert!(let StopReason::Completed = stop);
+        }
+
+        #[test]
+        fn floor_can_stop_before_first_chunk() {
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut activate = recording_activate(calls.clone(), None);
+            let (achieved, stop) = walk_chunks(8, 4, 1000, &mut || Some(500), &mut activate);
+            check!(achieved == 0);
+            assert!(let StopReason::HeadroomFloor { available: 500 } = stop);
+            check!(calls.borrow().is_empty());
+        }
+
+        #[test]
+        fn request_smaller_than_chunk_is_single_call() {
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut activate = recording_activate(calls.clone(), None);
+            let (achieved, stop) = walk_chunks(3, 4, 0, &mut || None, &mut activate);
+            check!(achieved == 3);
+            assert!(let StopReason::Completed = stop);
+            check!(*calls.borrow() == vec![(0, 3)]);
+        }
+    }
+
+    mod budgeted {
+        use assert2::{assert, check};
+
+        use super::super::{AllocError, StopReason, TestBuffer};
+
+        #[test]
+        fn small_budgeted_allocation_completes() {
+            // 4 MiB fits default RLIMIT_MEMLOCK on modern systems. If this
+            // environment forbids mlock outright, that's an env limitation,
+            // not a code failure -- the walk logic is covered by walk_chunks.
+            match TestBuffer::new_budgeted(4 * 1024 * 1024, 0) {
+                Ok((buf, outcome)) => {
+                    check!(buf.len() == 4 * 1024 * 1024);
+                    check!(outcome.achieved == outcome.requested);
+                    assert!(let StopReason::Completed = outcome.stop);
+                }
+                Err(AllocError::Mlock(_)) => {
+                    eprintln!("skipping: mlock not permitted in this environment");
+                }
+                Err(e) => panic!("unexpected alloc error: {e}"),
+            }
+        }
+
+        #[test]
+        fn zero_size_is_rejected() {
+            let Err(e) = TestBuffer::new_budgeted(0, 0) else {
+                panic!("expected ZeroSize error");
+            };
+            assert!(let AllocError::ZeroSize = e);
+        }
+
+        #[test]
+        fn impossible_headroom_is_exhausted() {
+            // A u64::MAX headroom floor can never be satisfied, so no chunk
+            // activates and the constructor reports exhaustion with help text.
+            let Err(e) = TestBuffer::new_budgeted(4 * 1024 * 1024, u64::MAX) else {
+                panic!("expected Exhausted error");
+            };
+            check!(e.help().is_some());
+            assert!(let AllocError::Exhausted { .. } = e);
         }
     }
 

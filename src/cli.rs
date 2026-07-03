@@ -50,10 +50,15 @@ pub enum ColorMode {
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Cli {
-    /// Amount of memory to test (e.g. "256M", "1G", "512K").
-    /// Defaults to 64M.
-    #[arg(short = 's', long, default_value = "64M", value_parser = parse_size)]
-    pub size: usize,
+    /// Amount of memory to test (e.g. "256M", "1G", "512K"), or "max" to use
+    /// everything available minus --headroom. Defaults to 64M.
+    #[arg(short = 's', long, default_value = "64M", value_parser = parse_size_spec)]
+    pub size: SizeSpec,
+
+    /// Memory to leave for the rest of the system when allocating. The
+    /// allocation walk stops once available memory would drop below this floor.
+    #[arg(long, default_value = "1G", value_parser = parse_size)]
+    pub headroom: usize,
 
     /// Number of test passes to run.
     #[arg(short, long, default_value_t = 1)]
@@ -145,6 +150,17 @@ pub struct OutputConfig {
 }
 
 impl Cli {
+    /// Upper-bound estimate of the requested allocation in bytes, for
+    /// privilege checks that run before allocation. `max` estimates with
+    /// `MemTotal` (the reservation size used by [`setup_test`]).
+    #[must_use]
+    pub fn requested_bytes_estimate(&self) -> usize {
+        match self.size {
+            SizeSpec::Bytes(n) => n,
+            SizeSpec::Max => ferrite::sysmem::mem_total().map_or(usize::MAX, |t| t as usize),
+        }
+    }
+
     /// Resolve and validate the output flags, returning a consistent [`OutputConfig`].
     ///
     /// # Errors
@@ -175,6 +191,26 @@ impl Cli {
             color_enabled,
         })
     }
+}
+
+/// The requested test size: an explicit byte count or "max" (everything
+/// available minus headroom, resolved at allocation time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeSpec {
+    Bytes(usize),
+    Max,
+}
+
+/// Parse the `--size` flag: a size like "256M"/"1G", or "max".
+///
+/// # Errors
+///
+/// Returns a descriptive error string for anything else.
+pub fn parse_size_spec(s: &str) -> Result<SizeSpec, String> {
+    if s.trim().eq_ignore_ascii_case("max") {
+        return Ok(SizeSpec::Max);
+    }
+    parse_size(s).map(SizeSpec::Bytes)
 }
 
 pub fn parse_size(s: &str) -> Result<usize, String> {
@@ -366,6 +402,38 @@ pub fn setup_phys(
     }
 }
 
+/// Log how the budgeted allocation walk ended, at a severity matching intent:
+/// a trimmed explicit request is a warning; a trimmed `max` request is the
+/// expected outcome and logs at info.
+fn report_alloc_outcome(outcome: &ferrite::alloc::AllocOutcome, spec: SizeSpec) {
+    use ferrite::alloc::StopReason;
+    use ferrite::units::format_size;
+
+    match &outcome.stop {
+        StopReason::Completed => {}
+        StopReason::HeadroomFloor { available } => {
+            let msg = format!(
+                "locked {} of {} requested (stopped at headroom floor, {} available)",
+                format_size(outcome.achieved),
+                format_size(outcome.requested),
+                format_size(*available as usize),
+            );
+            if matches!(spec, SizeSpec::Max) {
+                info!("{msg}");
+            } else {
+                warn!("{msg}");
+            }
+        }
+        StopReason::ChunkFailed(e) => {
+            warn!(
+                "locked {} of {} requested (chunk activation failed: {e})",
+                format_size(outcome.achieved),
+                format_size(outcome.requested),
+            );
+        }
+    }
+}
+
 pub struct TestSetup {
     pub buffer: TestBuffer,
     /// Held for its [`Drop`] side-effect -- restores the compaction sysctl on teardown.
@@ -377,8 +445,17 @@ pub struct TestSetup {
 
 pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
     let need_phys = !cli.no_phys;
-    let buffer = match TestBuffer::new(cli.size) {
-        Ok(r) => r,
+    let requested = match cli.size {
+        SizeSpec::Bytes(n) => n,
+        SizeSpec::Max => ferrite::sysmem::mem_total()
+            .context("cannot resolve --size max: /proc/meminfo is unreadable")?
+            as usize,
+    };
+    let buffer = match TestBuffer::new_budgeted(requested, cli.headroom as u64) {
+        Ok((buffer, outcome)) => {
+            report_alloc_outcome(&outcome, cli.size);
+            buffer
+        }
         Err(e) => {
             if let Some(hint) = e.help() {
                 tracing::warn!("hint: {hint}");
@@ -428,6 +505,32 @@ mod tests {
         #[test]
         fn parse_size_roundtrip(bytes: usize) {
             prop_assert_eq!(parse_size(&format_size(bytes)), Ok(bytes));
+        }
+    }
+
+    mod size_spec {
+        use assert2::check;
+
+        use crate::cli::{SizeSpec, parse_size_spec};
+
+        #[test]
+        fn max_keyword_case_insensitive() {
+            check!(parse_size_spec("max") == Ok(SizeSpec::Max));
+            check!(parse_size_spec("MAX") == Ok(SizeSpec::Max));
+            check!(parse_size_spec("Max") == Ok(SizeSpec::Max));
+        }
+
+        #[test]
+        fn explicit_sizes_parse_as_bytes() {
+            check!(parse_size_spec("512M") == Ok(SizeSpec::Bytes(512 * 1024 * 1024)));
+            check!(parse_size_spec("1G") == Ok(SizeSpec::Bytes(1024 * 1024 * 1024)));
+            check!(parse_size_spec("4096") == Ok(SizeSpec::Bytes(4096)));
+        }
+
+        #[test]
+        fn junk_is_rejected() {
+            check!(parse_size_spec("banana").is_err());
+            check!(parse_size_spec("").is_err());
         }
     }
 
@@ -694,7 +797,8 @@ CapEff:\t0000000000000000";
             color: ColorMode,
         ) -> crate::cli::Cli {
             crate::cli::Cli {
-                size: 64 * 1024 * 1024,
+                size: crate::cli::SizeSpec::Bytes(64 * 1024 * 1024),
+                headroom: 1024 * 1024 * 1024,
                 passes: 1,
                 patterns: vec![],
                 parallel: Parallelism::Auto,

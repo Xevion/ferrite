@@ -44,7 +44,7 @@ fn main() -> Result<()> {
     let tracing_handle = init_tracing();
 
     let need_phys = !cli.no_phys;
-    check_privileges(cli.size, need_phys);
+    check_privileges(cli.requested_bytes_estimate(), need_phys);
 
     let patterns = if cli.patterns.is_empty() {
         Pattern::ALL.to_vec()
@@ -81,6 +81,7 @@ fn main() -> Result<()> {
             let events_writer = open_events_writer(&output)?;
 
             let s = setup_test(&cli)?;
+            let size = s.buffer.len();
             let tui_setup = TuiTestSetup {
                 buffer: s.buffer,
                 resolver: s.resolver,
@@ -88,7 +89,7 @@ fn main() -> Result<()> {
                 compaction_guard: s.compaction_guard,
             };
             let mut results = run_tui_mode(
-                cli.size,
+                size,
                 cli.passes,
                 workers,
                 tui_setup,
@@ -200,12 +201,13 @@ fn run_non_tui(
     parallel: bool,
 ) -> Result<()> {
     let mut setup = setup_test(cli)?;
+    let size = setup.buffer.len();
 
     let (tx, rx) = ferrite::events::event_bus();
 
     // Emit global events before the run
     let _ = tx.send(RunEvent::RunStart {
-        size: cli.size,
+        size,
         passes: cli.passes,
         patterns: patterns.to_vec(),
         workers,
@@ -272,7 +274,7 @@ fn run_non_tui(
         consumer.join().expect("event consumer thread panicked");
 
     let config = ferrite::runner::RunConfig {
-        size: cli.size,
+        size,
         passes: cli.passes,
         patterns: patterns.to_vec(),
         workers,
