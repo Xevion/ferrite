@@ -12,7 +12,7 @@ use super::palette;
 use super::{Segment, TuiFailure};
 
 /// Symbol sets for fine-grained activity display.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolSet {
     Block,
     Braille,
@@ -22,13 +22,13 @@ pub enum SymbolSet {
 }
 
 impl SymbolSet {
-    fn chars(self) -> &'static [char] {
+    const fn chars(self) -> &'static [char] {
         match self {
-            SymbolSet::Block => &['░', '▒', '▓', '█'],
-            SymbolSet::Braille => &['⠂', '⠆', '⠖', '⠶', '⡶', '⣶', '⣾', '⣿'],
-            SymbolSet::Eighth => &['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'],
-            SymbolSet::Shade => &['·', '∘', '○', '●', '◉'],
-            SymbolSet::Ascii => &['.', ':', '-', '=', '+', '*', '#', '@'],
+            Self::Block => &['░', '▒', '▓', '█'],
+            Self::Braille => &['⠂', '⠆', '⠖', '⠶', '⡶', '⣶', '⣾', '⣿'],
+            Self::Eighth => &['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'],
+            Self::Shade => &['·', '∘', '○', '●', '◉'],
+            Self::Ascii => &['.', ':', '-', '=', '+', '*', '#', '@'],
         }
     }
 

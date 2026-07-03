@@ -170,7 +170,7 @@ fn find_smbios_match(edac: &DimmEdac, smbios: &[DimmInfo], used: &[bool]) -> Opt
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::smbios::MemoryType;

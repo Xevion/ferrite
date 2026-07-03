@@ -64,7 +64,7 @@ pub struct ProbeStats {
 impl ProbeStats {
     /// Combine two probe results, e.g. from consecutive `pread` chunks.
     #[must_use]
-    pub fn merge(self, other: Self) -> Self {
+    pub const fn merge(self, other: Self) -> Self {
         Self {
             words_read: self.words_read + other.words_read,
             nonzero_words: self.nonzero_words + other.nonzero_words,
@@ -185,7 +185,7 @@ pub fn classify(
 /// Whether a write to a range of the given [`Safety`] is permitted, given the
 /// `--devmem-unsafe` override.
 #[must_use]
-pub fn write_allowed(safety: Safety, unsafe_override: bool) -> bool {
+pub const fn write_allowed(safety: Safety, unsafe_override: bool) -> bool {
     match safety {
         Safety::Reserved => true,
         Safety::SystemRam => unsafe_override,
@@ -240,10 +240,11 @@ pub fn resolve_mappings(
     }
 }
 
-/// Summarize a byte chunk `pread` from `/dev/mem` as whole 64-bit words: count
-/// how many were nonzero and fold an XOR signature. Trailing bytes past the
-/// last whole word are ignored (physical ranges are page-aligned, so there are
-/// none in practice).
+/// Summarize a byte chunk `pread` from `/dev/mem` as whole 64-bit words.
+///
+/// Counts how many words were nonzero and folds an XOR signature. Trailing
+/// bytes past the last whole word are ignored (physical ranges are
+/// page-aligned, so there are none in practice).
 ///
 /// `pread` is the safe way to read live System RAM: unlike `mmap`, it is not
 /// blocked by the direct-map memtype conflict, and reading never corrupts.
@@ -263,9 +264,11 @@ pub fn probe_bytes(bytes: &[u8]) -> ProbeStats {
     stats
 }
 
-/// A trivial [`PhysResolver`] for `/dev/mem` mappings: the physical address of
-/// any virtual address is known exactly, `phys_base + (vaddr - virt_base)`,
-/// with no pagemap lookup. The mapping is fixed, so it is always stable.
+/// A trivial [`PhysResolver`] for `/dev/mem` mappings.
+///
+/// The physical address of any virtual address is known exactly,
+/// `phys_base + (vaddr - virt_base)`, with no pagemap lookup. The mapping is
+/// fixed, so it is always stable.
 pub struct DevMemResolver {
     virt_base: usize,
     phys_base: u64,
@@ -274,7 +277,7 @@ pub struct DevMemResolver {
 
 impl DevMemResolver {
     #[must_use]
-    pub fn new(virt_base: usize, phys_base: u64, len: usize) -> Self {
+    pub const fn new(virt_base: usize, phys_base: u64, len: usize) -> Self {
         Self {
             virt_base,
             phys_base,

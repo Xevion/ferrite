@@ -239,25 +239,25 @@ pub fn parse_size_spec(s: &str) -> Result<SizeSpec, String> {
     parse_size(s).map(SizeSpec::Bytes)
 }
 
+const SIZE_UNITS: [(char, usize); 3] = [('G', 1024 * 1024 * 1024), ('M', 1024 * 1024), ('K', 1024)];
+
 pub fn parse_size(s: &str) -> Result<usize, String> {
     let s = s.trim();
-    let (num_str, multiplier) = if let Some(n) = s.strip_suffix(['G', 'g']) {
-        (n, 1024 * 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix(['M', 'm']) {
-        (n, 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix(['K', 'k']) {
-        (n, 1024)
-    } else {
-        (s, 1)
-    };
+    let (num_str, multiplier) = SIZE_UNITS
+        .iter()
+        .find_map(|&(suffix, multiplier)| {
+            s.strip_suffix([suffix, suffix.to_ascii_lowercase()])
+                .map(|n| (n, multiplier))
+        })
+        .unwrap_or((s, 1));
     let num: usize = num_str.parse().map_err(|_| format!("invalid size: {s}"))?;
     num.checked_mul(multiplier)
         .ok_or_else(|| format!("size overflow: {s}"))
 }
 
 /// A privilege-related warning that the caller should display.
-#[derive(Debug, PartialEq)]
-pub(crate) enum PrivilegeWarning {
+#[derive(Debug, PartialEq, Eq)]
+pub enum PrivilegeWarning {
     /// Physical address resolution requires `CAP_SYS_ADMIN` (or root).
     NoSysAdmin,
     /// `RLIMIT_MEMLOCK` is too low for the requested allocation.
@@ -267,8 +267,11 @@ pub(crate) enum PrivilegeWarning {
 }
 
 /// Resolved privilege state used to decide whether to emit warnings.
-#[allow(clippy::struct_excessive_bools)]
-pub(crate) struct PrivilegeContext {
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent privilege facet, not a state machine encoded as flags"
+)]
+pub struct PrivilegeContext {
     pub is_root: bool,
     pub has_ipc_lock: bool,
     pub has_sys_admin: bool,
@@ -365,7 +368,7 @@ pub fn has_capability(cap_bit: u32) -> bool {
 
 /// Parse the effective capability bitmask from `/proc/self/status` content.
 /// Returns true if the given capability bit is set in the `CapEff` field.
-pub(crate) fn parse_capability_from_status(status: &str, cap_bit: u32) -> bool {
+pub fn parse_capability_from_status(status: &str, cap_bit: u32) -> bool {
     status
         .lines()
         .find_map(|line| {
@@ -463,7 +466,13 @@ fn report_alloc_outcome(outcome: &ferrite::alloc::AllocOutcome, spec: SizeSpec) 
 pub struct TestSetup {
     pub buffer: TestBuffer,
     /// Held for its [`Drop`] side-effect -- restores the compaction sysctl on teardown.
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(feature = "tui"),
+        expect(
+            dead_code,
+            reason = "only forwarded to TuiTestSetup, which requires the tui feature"
+        )
+    )]
     pub compaction_guard: Option<CompactionGuard>,
     pub resolver: Option<PagemapResolver>,
     pub map_stats: Option<MapStats>,
@@ -482,7 +491,7 @@ pub enum SetupOutcome {
 /// A `--cull` sieve that holds every previously-covered frame hostage leaves
 /// the allocator nothing below the headroom floor. That exhaustion is the
 /// coverage ceiling for this boot, not a failure.
-fn is_cull_ceiling(sieve_active: bool, err: &ferrite::alloc::AllocError) -> bool {
+const fn is_cull_ceiling(sieve_active: bool, err: &ferrite::alloc::AllocError) -> bool {
     sieve_active && matches!(err, ferrite::alloc::AllocError::Exhausted { .. })
 }
 
@@ -711,7 +720,10 @@ CapEff:\t0000000000000000";
 
         use crate::cli::{PrivilegeContext, PrivilegeWarning};
 
-        #[allow(clippy::fn_params_excessive_bools)]
+        #[expect(
+            clippy::fn_params_excessive_bools,
+            reason = "mirrors PrivilegeContext's independent flags one-for-one"
+        )]
         fn ctx(
             is_root: bool,
             has_ipc_lock: bool,

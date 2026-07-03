@@ -80,14 +80,14 @@ impl Coverage {
     }
 
     /// Attach cross-run cumulative stats; no-op when coverage is unmeasured.
-    pub fn attach_cumulative(&mut self, stats: Cumulative) {
+    pub const fn attach_cumulative(&mut self, stats: Cumulative) {
         if let Self::Measured { cumulative, .. } = self {
             *cumulative = Some(stats);
         }
     }
 
     /// Attach a gap classification; no-op when coverage is unmeasured.
-    pub fn attach_gap(&mut self, report: crate::gap::GapReport) {
+    pub const fn attach_gap(&mut self, report: crate::gap::GapReport) {
         if let Self::Measured { gap, .. } = self {
             *gap = Some(report);
         }
@@ -97,16 +97,16 @@ impl Coverage {
 /// Assemble a [`Coverage`] from tested bytes and an optional denominator.
 /// Returns [`Coverage::Unavailable`] when no denominator is available.
 #[must_use]
-pub fn measure(tested_bytes: u64, installed: Option<InstalledRam>) -> Coverage {
-    match installed {
-        Some(ram) => Coverage::Measured {
-            tested_bytes,
-            total_bytes: ram.bytes,
-            source: ram.source,
-            cumulative: None,
-            gap: None,
-        },
-        None => Coverage::Unavailable,
+pub const fn measure(tested_bytes: u64, installed: Option<InstalledRam>) -> Coverage {
+    let Some(ram) = installed else {
+        return Coverage::Unavailable;
+    };
+    Coverage::Measured {
+        tested_bytes,
+        total_bytes: ram.bytes,
+        source: ram.source,
+        cumulative: None,
+        gap: None,
     }
 }
 
@@ -117,10 +117,9 @@ pub fn measure(tested_bytes: u64, installed: Option<InstalledRam>) -> Coverage {
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[must_use]
 pub fn coverage_for(map_stats: Option<&MapStats>) -> Coverage {
-    match map_stats {
-        Some(stats) => measure(stats.tested_bytes(), installed_ram()),
-        None => Coverage::Unavailable,
-    }
+    map_stats.map_or(Coverage::Unavailable, |stats| {
+        measure(stats.tested_bytes(), installed_ram())
+    })
 }
 
 /// Read the installed-RAM denominator from `/proc/iomem` (preferred) and
@@ -143,7 +142,7 @@ pub fn installed_ram() -> Option<InstalledRam> {
 /// range to a single byte -- far below `MemTotal` -- so the comparison routes
 /// to the fallback automatically.
 #[must_use]
-fn select_installed_ram(iomem_bytes: u64, memtotal: Option<u64>) -> Option<InstalledRam> {
+const fn select_installed_ram(iomem_bytes: u64, memtotal: Option<u64>) -> Option<InstalledRam> {
     match memtotal {
         Some(mt) if iomem_bytes >= mt && iomem_bytes > 0 => Some(InstalledRam {
             bytes: iomem_bytes,

@@ -15,13 +15,13 @@ pub struct PhysAddr(pub u64);
 impl PhysAddr {
     /// The page frame number (PFN) -- physical address >> 12.
     #[must_use]
-    pub fn pfn(self) -> u64 {
+    pub const fn pfn(self) -> u64 {
         self.0 >> 12
     }
 
     /// The page offset -- lower 12 bits.
     #[must_use]
-    pub fn page_offset(self) -> u64 {
+    pub const fn page_offset(self) -> u64 {
         self.0 & 0xFFF
     }
 }
@@ -106,7 +106,7 @@ impl PhysResolverError {
 
     /// Classify a [`PhysError`] from building the page map (reading pagemap entries).
     #[must_use]
-    pub fn from_build(e: PhysError) -> Self {
+    pub const fn from_build(e: PhysError) -> Self {
         Self::ReadError(e)
     }
 }
@@ -131,22 +131,22 @@ impl PageFlags {
     const KPF_THP: u64 = 1 << 22;
 
     #[must_use]
-    pub fn is_huge(self) -> bool {
+    pub const fn is_huge(self) -> bool {
         self.raw & Self::KPF_HUGE != 0
     }
 
     #[must_use]
-    pub fn is_thp(self) -> bool {
+    pub const fn is_thp(self) -> bool {
         self.raw & Self::KPF_THP != 0
     }
 
     #[must_use]
-    pub fn is_unevictable(self) -> bool {
+    pub const fn is_unevictable(self) -> bool {
         self.raw & Self::KPF_UNEVICTABLE != 0
     }
 
     #[must_use]
-    pub fn is_hwpoison(self) -> bool {
+    pub const fn is_hwpoison(self) -> bool {
         self.raw & Self::KPF_HWPOISON != 0
     }
 }
@@ -169,7 +169,7 @@ impl MapStats {
     /// Physical bytes backed by resolved page frames -- the numerator for
     /// coverage. Pages whose PFN could not be resolved are excluded.
     #[must_use]
-    pub fn tested_bytes(&self) -> u64 {
+    pub const fn tested_bytes(&self) -> u64 {
         self.resolved_pages as u64 * PAGE_SIZE as u64
     }
 }
@@ -249,7 +249,7 @@ impl PagemapResolver {
 }
 
 /// Parse a single 64-bit pagemap entry, returning the PFN if the page is present.
-fn parse_pagemap_entry(entry: u64) -> Option<u64> {
+const fn parse_pagemap_entry(entry: u64) -> Option<u64> {
     if entry & PM_PRESENT == 0 {
         return None;
     }
@@ -650,7 +650,7 @@ mod tests {
     /// without needing `/proc/self/pagemap`.
     ///
     /// `resolve` returns `PhysAddr(vaddr as u64 + phys_offset)`.
-    pub(crate) struct FakeResolver {
+    pub struct FakeResolver {
         pub base: usize,
         pub len: usize,
         pub phys_offset: u64,

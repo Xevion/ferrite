@@ -1,5 +1,6 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 
+use assert2::assert;
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
 use ferrite::Failure;
@@ -25,7 +26,10 @@ impl AlignedBuffer {
         let layout = Layout::from_size_align(words * size_of::<u64>(), 64).expect("invalid layout");
         // SAFETY: layout has non-zero size (words > 0 for any bench size).
         // SAFETY: alloc_zeroed uses layout which guarantees 64-byte alignment — sufficient for u64 (8 bytes).
-        #[allow(clippy::cast_ptr_alignment)]
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "layout guarantees 64-byte alignment, satisfying u64's stricter alignment"
+        )]
         let ptr = unsafe { alloc_zeroed(layout).cast::<u64>() };
         assert!(!ptr.is_null(), "allocation failed");
         Self {
@@ -35,12 +39,12 @@ impl AlignedBuffer {
         }
     }
 
-    fn as_mut_slice(&mut self) -> &mut [u64] {
+    const fn as_mut_slice(&mut self) -> &mut [u64] {
         // SAFETY: ptr is valid for `len` words, exclusively owned, and 64-byte aligned.
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
-    fn as_slice(&self) -> &[u64] {
+    const fn as_slice(&self) -> &[u64] {
         // SAFETY: ptr is valid for `len` words and 64-byte aligned.
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }

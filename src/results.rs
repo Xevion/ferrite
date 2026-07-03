@@ -26,7 +26,7 @@ impl ResultsDoc {
 
     /// Build from an already-parsed JSON value.
     #[must_use]
-    pub fn from_json(value: serde_json::Value) -> Self {
+    pub const fn from_json(value: serde_json::Value) -> Self {
         Self(value)
     }
 
@@ -87,7 +87,7 @@ impl ResultsDoc {
 
     /// Access the raw inner JSON value.
     #[must_use]
-    pub fn as_value(&self) -> &serde_json::Value {
+    pub const fn as_value(&self) -> &serde_json::Value {
         &self.0
     }
 }
@@ -411,7 +411,7 @@ pub struct TableRenderer {
 impl TableRenderer {
     /// Summary-only renderer (after live headless output).
     #[must_use]
-    pub fn new(unit_system: UnitSystem) -> Self {
+    pub const fn new(unit_system: UnitSystem) -> Self {
         Self {
             unit_system,
             full: false,
@@ -420,7 +420,7 @@ impl TableRenderer {
 
     /// Full renderer including per-pattern results (after TUI exit).
     #[must_use]
-    pub fn full(unit_system: UnitSystem) -> Self {
+    pub const fn full(unit_system: UnitSystem) -> Self {
         Self {
             unit_system,
             full: true,
@@ -491,10 +491,11 @@ fn write_gap_line(
     )
 }
 
-/// Render the `--cull`-at-ceiling report: the sieve held every acquirable
-/// frame hostage, so no run happened. Shows cumulative coverage and the
-/// untested-remainder classification so the ceiling reads as *done for this
-/// boot*, not as a failure.
+/// Render the `--cull`-at-ceiling report.
+///
+/// The sieve held every acquirable frame hostage, so no run happened. Shows
+/// cumulative coverage and the untested-remainder classification so the
+/// ceiling reads as *done for this boot*, not as a failure.
 ///
 /// # Errors
 ///

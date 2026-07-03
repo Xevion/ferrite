@@ -1,7 +1,10 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
 // SIMD intrinsics require casting *mut u64 -> *mut __m512i with stricter alignment.
 // Alignment is guaranteed by the mmap allocation (page-aligned = 4096-byte aligned).
-#![allow(clippy::cast_ptr_alignment)]
+#![expect(
+    clippy::cast_ptr_alignment,
+    reason = "mmap allocations are page-aligned, satisfying __m512i's stricter alignment"
+)]
 #[cfg(target_arch = "x86_64")]
 use std::ptr;
 
@@ -16,13 +19,13 @@ use crate::Failure;
 /// every chunk boundary is 64-byte aligned and NT store / aligned load intrinsics
 /// never straddle a chunk boundary.
 #[cfg(target_arch = "x86_64")]
-pub(crate) const CHUNK: usize = 64 * 1024; // 64 K u64s = 512 KiB
+pub const CHUNK: usize = 64 * 1024; // 64 K u64s = 512 KiB
 
 /// Returns true if AVX-512F is available. With `target-cpu=native` this is a
 /// compile-time constant and the dead branches are eliminated by LLVM.
 #[cfg(target_arch = "x86_64")]
 #[inline]
-pub(crate) fn avx512_available() -> bool {
+pub fn avx512_available() -> bool {
     is_x86_feature_detected!("avx512f")
 }
 
@@ -38,7 +41,7 @@ pub(crate) fn avx512_available() -> bool {
 /// buffers are always page-aligned (>= 4096 bytes) and always take the NT path.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-pub(crate) unsafe fn fill_nt(buf: &mut [u64], pattern: u64) {
+pub unsafe fn fill_nt(buf: &mut [u64], pattern: u64) {
     use std::arch::x86_64::{__m512i, _mm_sfence, _mm512_set1_epi64, _mm512_stream_si512};
     if !(buf.as_ptr() as usize).is_multiple_of(64) {
         // Unaligned fallback: NT stores require 64-byte alignment.
@@ -69,7 +72,7 @@ pub(crate) unsafe fn fill_nt(buf: &mut [u64], pattern: u64) {
 /// Falls back to scalar writes if not 64-byte aligned (same reasoning as `fill_nt`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-pub(crate) unsafe fn fill_nt_indexed(buf: &mut [u64], start: usize) {
+pub unsafe fn fill_nt_indexed(buf: &mut [u64], start: usize) {
     use std::arch::x86_64::{
         __m512i, _mm_sfence, _mm512_add_epi64, _mm512_set_epi64, _mm512_set1_epi64,
         _mm512_stream_si512,
@@ -112,7 +115,7 @@ pub(crate) unsafe fn fill_nt_indexed(buf: &mut [u64], start: usize) {
 /// buffer, used to compute absolute word indices and addresses in failure records.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-pub(crate) unsafe fn verify_avx512(
+pub unsafe fn verify_avx512(
     buf: &[u64],
     pattern: u64,
     base_addr: usize,
@@ -171,7 +174,7 @@ pub(crate) unsafe fn verify_avx512(
 /// `fill_nt_indexed` to avoid per-iteration recomputation.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-pub(crate) unsafe fn verify_indexed_avx512(
+pub unsafe fn verify_indexed_avx512(
     buf: &[u64],
     base_addr: usize,
     word_off: usize,
@@ -231,7 +234,7 @@ pub(crate) unsafe fn verify_indexed_avx512(
 
 /// AVX-512 orchestration for constant fill-and-verify.
 #[cfg(target_arch = "x86_64")]
-pub(crate) fn fill_verify_constant(
+pub fn fill_verify_constant(
     buf: &mut [u64],
     pattern: u64,
     parallel: bool,
@@ -271,7 +274,7 @@ pub(crate) fn fill_verify_constant(
 
 /// AVX-512 orchestration for indexed fill-and-verify.
 #[cfg(target_arch = "x86_64")]
-pub(crate) fn fill_verify_indexed(
+pub fn fill_verify_indexed(
     buf: &mut [u64],
     parallel: bool,
     on_activity: &(dyn Fn(f64) + Sync),

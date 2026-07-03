@@ -49,7 +49,10 @@ pub struct TuiTestSetup {
 ///
 /// Panics if internal mutexes are poisoned (indicates a prior panic
 /// in the worker thread).
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "tightly-coupled TUI worker setup/teardown; see clippy.toml too-many-lines-threshold note"
+)]
 pub fn run_tui_mode(
     size: usize,
     passes: usize,

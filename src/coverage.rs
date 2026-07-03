@@ -40,7 +40,7 @@ pub struct Fingerprint {
 }
 
 /// One completed run merged into the store.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRecord {
     pub timestamp: jiff::Timestamp,
     pub patterns: Vec<String>,
@@ -76,7 +76,7 @@ pub enum CoverageError {
 }
 
 /// Persistent cumulative coverage: every frame any completed run has tested.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverageStore {
     pub version: u32,
     pub fingerprint: Fingerprint,
@@ -218,7 +218,7 @@ pub fn fingerprint_from(mem_total: u64, system_ram: &[(u64, u64)]) -> Fingerprin
 impl CoverageStore {
     /// An empty store bound to `fingerprint`.
     #[must_use]
-    pub fn new(fingerprint: Fingerprint) -> Self {
+    pub const fn new(fingerprint: Fingerprint) -> Self {
         Self {
             version: STORE_VERSION,
             fingerprint,

@@ -10,7 +10,7 @@ use crate::Failure;
 const REPORT_CHUNK: usize = 64 * 1024; // 512 KiB
 
 /// Scalar fill: write `pattern` to every word using volatile stores.
-pub(crate) fn fill_constant(buf: &mut [u64], pattern: u64) {
+pub fn fill_constant(buf: &mut [u64], pattern: u64) {
     for word in buf.iter_mut() {
         unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), pattern) };
     }
@@ -20,7 +20,7 @@ pub(crate) fn fill_constant(buf: &mut [u64], pattern: u64) {
 ///
 /// `word_start` is added to each failure's `word_index` so callers can pass a
 /// chunk-global offset and get back globally-correct indices without post-fixup.
-pub(crate) fn verify_constant(
+pub fn verify_constant(
     buf: &[u64],
     pattern: u64,
     base_addr: usize,
@@ -42,14 +42,14 @@ pub(crate) fn verify_constant(
 }
 
 /// Scalar fill: write each word's index as its value using volatile stores.
-pub(crate) fn fill_indexed(buf: &mut [u64], start: usize) {
+pub fn fill_indexed(buf: &mut [u64], start: usize) {
     for (i, word) in buf.iter_mut().enumerate() {
         unsafe { ptr::write_volatile(std::ptr::from_mut::<u64>(word), (start + i) as u64) };
     }
 }
 
 /// Scalar verify: read every word and report mismatches against its expected index.
-pub(crate) fn verify_indexed(buf: &[u64], base_addr: usize, start: usize) -> Vec<Failure> {
+pub fn verify_indexed(buf: &[u64], base_addr: usize, start: usize) -> Vec<Failure> {
     buf.iter()
         .enumerate()
         .filter_map(|(i, word)| {
@@ -67,7 +67,7 @@ pub(crate) fn verify_indexed(buf: &[u64], base_addr: usize, start: usize) -> Vec
 }
 
 /// Scalar orchestration for constant fill-and-verify.
-pub(crate) fn fill_verify_constant(
+pub fn fill_verify_constant(
     buf: &mut [u64],
     pattern: u64,
     parallel: bool,
@@ -100,7 +100,7 @@ pub(crate) fn fill_verify_constant(
 }
 
 /// Scalar orchestration for indexed fill-and-verify.
-pub(crate) fn fill_verify_indexed(
+pub fn fill_verify_indexed(
     buf: &mut [u64],
     parallel: bool,
     on_activity: &(dyn Fn(f64) + Sync),

@@ -67,7 +67,7 @@ impl fmt::Display for FlippedBits {
 impl FlippedBits {
     /// Construct from expected and actual values.
     #[must_use]
-    pub fn from_mismatch(expected: u64, actual: u64) -> Self {
+    pub const fn from_mismatch(expected: u64, actual: u64) -> Self {
         let xor = expected ^ actual;
         let count = xor.count_ones();
         if count == 1 {
@@ -188,7 +188,10 @@ impl Segment {
     }
 }
 
-#[allow(clippy::missing_fields_in_debug)]
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "atomics and internal buffers are omitted; Debug shows only progress-relevant fields"
+)]
 impl fmt::Debug for Segment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Segment")
@@ -210,7 +213,7 @@ pub struct TuiTraceState {
 }
 
 impl TuiTraceState {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             active: AtomicBool::new(true),
         }
@@ -233,7 +236,7 @@ pub struct TuiTraceGuard {
 
 impl TuiTraceGuard {
     #[must_use]
-    pub fn new(state: Arc<TuiTraceState>, rx: mpsc::Receiver<TuiEvent>) -> Self {
+    pub const fn new(state: Arc<TuiTraceState>, rx: mpsc::Receiver<TuiEvent>) -> Self {
         Self { state, rx }
     }
 }
@@ -261,7 +264,7 @@ pub struct TuiMakeWriter {
 
 impl TuiMakeWriter {
     #[must_use]
-    pub fn new(tx: mpsc::SyncSender<TuiEvent>, state: Arc<TuiTraceState>) -> Self {
+    pub const fn new(tx: mpsc::SyncSender<TuiEvent>, state: Arc<TuiTraceState>) -> Self {
         Self { tx, state }
     }
 }
@@ -324,7 +327,6 @@ impl Drop for TuiWriter {
 /// # Errors
 ///
 /// Returns an error if drawing to the terminal fails.
-#[allow(clippy::too_many_lines)]
 pub fn run_event_loop<B>(
     terminal: &mut Terminal<B>,
     config: &TuiConfig,
@@ -408,7 +410,7 @@ where
             }
             Ok(TuiEvent::Tick) | Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !log_buf.is_empty() {
-                    let lines: Vec<_> = log_buf.drain(..).collect();
+                    let lines = Vec::from(std::mem::take(&mut log_buf));
                     terminal.insert_before(lines.len() as u16, |buf| {
                         for (i, text) in lines.into_iter().enumerate() {
                             let area = ratatui::layout::Rect {
@@ -572,7 +574,10 @@ pub fn run_tui(
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
+#[expect(
+    clippy::float_cmp,
+    reason = "exact values are deterministic for fixed test inputs"
+)]
 mod tests {
     use assert2::{assert, check};
 

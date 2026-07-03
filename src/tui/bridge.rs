@@ -30,7 +30,11 @@ impl EventBridge {
     /// `passes` is the total number of passes configured for the run,
     /// needed to detect when the segment is fully complete.
     #[must_use]
-    pub fn new(segment: Arc<Segment>, tui_tx: mpsc::SyncSender<TuiEvent>, passes: usize) -> Self {
+    pub const fn new(
+        segment: Arc<Segment>,
+        tui_tx: mpsc::SyncSender<TuiEvent>,
+        passes: usize,
+    ) -> Self {
         Self {
             segment,
             tui_tx,

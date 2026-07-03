@@ -39,9 +39,9 @@ pub fn lerp(a: Color, b: Color, t: f64) -> Color {
     let t = t.clamp(0.0, 1.0);
     match (a, b) {
         (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
-            let r = (f64::from(r1) + (f64::from(r2) - f64::from(r1)) * t) as u8;
-            let g = (f64::from(g1) + (f64::from(g2) - f64::from(g1)) * t) as u8;
-            let b = (f64::from(b1) + (f64::from(b2) - f64::from(b1)) * t) as u8;
+            let r = (f64::from(r2) - f64::from(r1)).mul_add(t, f64::from(r1)) as u8;
+            let g = (f64::from(g2) - f64::from(g1)).mul_add(t, f64::from(g1)) as u8;
+            let b = (f64::from(b2) - f64::from(b1)).mul_add(t, f64::from(b1)) as u8;
             Color::Rgb(r, g, b)
         }
         _ => {
@@ -104,7 +104,7 @@ pub fn activity_color(brightness: f64) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 

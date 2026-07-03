@@ -23,25 +23,25 @@ pub enum Pattern {
 }
 
 impl Pattern {
-    pub const ALL: &[Pattern] = &[
-        Pattern::SolidBits,
-        Pattern::WalkingOnes,
-        Pattern::WalkingZeros,
-        Pattern::Checkerboard,
-        Pattern::StuckAddress,
-        Pattern::MarchCMinus,
+    pub const ALL: &[Self] = &[
+        Self::SolidBits,
+        Self::WalkingOnes,
+        Self::WalkingZeros,
+        Self::Checkerboard,
+        Self::StuckAddress,
+        Self::MarchCMinus,
     ];
 
     /// Number of fill-and-verify sub-passes this pattern performs.
     /// Used to size the inner progress bar.
     #[must_use]
-    pub fn sub_passes(&self) -> u64 {
+    pub const fn sub_passes(&self) -> u64 {
         match self {
-            Pattern::SolidBits | Pattern::Checkerboard => 2,
-            Pattern::WalkingOnes | Pattern::WalkingZeros => 64,
-            Pattern::StuckAddress => 1,
+            Self::SolidBits | Self::Checkerboard => 2,
+            Self::WalkingOnes | Self::WalkingZeros => 64,
+            Self::StuckAddress => 1,
             // M0–M5 of the March C- sequence.
-            Pattern::MarchCMinus => 6,
+            Self::MarchCMinus => 6,
         }
     }
 }
@@ -49,12 +49,12 @@ impl Pattern {
 impl fmt::Display for Pattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Pattern::SolidBits => write!(f, "Solid Bits"),
-            Pattern::WalkingOnes => write!(f, "Walking Ones"),
-            Pattern::WalkingZeros => write!(f, "Walking Zeros"),
-            Pattern::Checkerboard => write!(f, "Checkerboard"),
-            Pattern::StuckAddress => write!(f, "Stuck Address"),
-            Pattern::MarchCMinus => write!(f, "March C-"),
+            Self::SolidBits => write!(f, "Solid Bits"),
+            Self::WalkingOnes => write!(f, "Walking Ones"),
+            Self::WalkingZeros => write!(f, "Walking Zeros"),
+            Self::Checkerboard => write!(f, "Checkerboard"),
+            Self::StuckAddress => write!(f, "Stuck Address"),
+            Self::MarchCMinus => write!(f, "March C-"),
         }
     }
 }

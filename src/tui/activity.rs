@@ -50,9 +50,12 @@ impl ActivityBuffer {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
+#[expect(
+    clippy::float_cmp,
+    reason = "exact brightness values are deterministic for fixed test inputs"
+)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 

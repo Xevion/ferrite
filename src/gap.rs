@@ -43,7 +43,7 @@ pub enum FrameClass {
 
 /// Classify one frame's raw kpageflags word.
 #[must_use]
-pub fn classify(flags: u64) -> FrameClass {
+pub const fn classify(flags: u64) -> FrameClass {
     if flags & (KPF_NOPAGE | KPF_OFFLINE | KPF_HWPOISON | KPF_SLAB | KPF_PGTABLE) != 0 {
         FrameClass::Unreachable
     } else if flags & KPF_BUDDY != 0 {
@@ -70,15 +70,18 @@ pub struct GapReport {
     pub unknown_bytes: u64,
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_zero(v: &u64) -> bool {
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "signature fixed by serde's skip_serializing_if contract"
+)]
+const fn is_zero(v: &u64) -> bool {
     *v == 0
 }
 
 impl GapReport {
     /// Total untested bytes across all classes.
     #[must_use]
-    pub fn total_bytes(&self) -> u64 {
+    pub const fn total_bytes(&self) -> u64 {
         self.free_bytes
             + self.reclaimable_bytes
             + self.in_use_bytes
@@ -86,7 +89,7 @@ impl GapReport {
             + self.unknown_bytes
     }
 
-    fn add(&mut self, class: FrameClass) {
+    const fn add(&mut self, class: FrameClass) {
         let bucket = match class {
             FrameClass::Free => &mut self.free_bytes,
             FrameClass::Reclaimable => &mut self.reclaimable_bytes,
@@ -114,9 +117,10 @@ pub fn ram_pfn_ranges(ranges: &[(u64, u64)]) -> Vec<PfnRange> {
         .collect()
 }
 
-/// Classify every frame in `gaps`, reading raw kpageflags in batches via
-/// `read`. `read(range, out)` must fill `out` (length `range.count`) with the
-/// flags for `range` and return `true`; `false` counts the batch as unknown.
+/// Classify every frame in `gaps`, reading raw kpageflags in batches via `read`.
+///
+/// `read(range, out)` must fill `out` (length `range.count`) with the flags
+/// for `range` and return `true`; `false` counts the batch as unknown.
 pub fn classify_gaps(
     gaps: &[PfnRange],
     read: &mut dyn FnMut(PfnRange, &mut [u64]) -> bool,
@@ -132,7 +136,6 @@ pub fn classify_gaps(
                 count,
             };
             // `count` is capped at READ_BATCH_FRAMES, far below usize::MAX.
-            #[allow(clippy::cast_possible_truncation)]
             let out = &mut buf[..count as usize];
             if read(range, out) {
                 for &flags in &*out {
@@ -147,9 +150,10 @@ pub fn classify_gaps(
     report
 }
 
-/// Scan the live system: classify every System RAM frame outside `covered`
-/// (sorted/disjoint PFN ranges). Returns `None` when `/proc/iomem` reads as
-/// zeroed (non-root) or `/proc/kpageflags` cannot be opened.
+/// Scan the live system: classify every System RAM frame outside `covered`.
+///
+/// `covered` is sorted/disjoint PFN ranges. Returns `None` when `/proc/iomem`
+/// reads as zeroed (non-root) or `/proc/kpageflags` cannot be opened.
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[must_use]
 pub fn classify_system_gaps(covered: &[PfnRange]) -> Option<GapReport> {
@@ -161,7 +165,6 @@ pub fn classify_system_gaps(covered: &[PfnRange]) -> Option<GapReport> {
     let file = std::fs::File::open("/proc/kpageflags").ok()?;
     let gaps = crate::coverage::subtract_ranges(&universe, covered);
 
-    #[allow(clippy::cast_possible_truncation)]
     let mut bytes = vec![0u8; READ_BATCH_FRAMES as usize * 8];
     Some(classify_gaps(&gaps, &mut |range, out| {
         let Ok(len) = usize::try_from(range.count * 8) else {

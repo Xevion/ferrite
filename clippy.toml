@@ -5,3 +5,12 @@ single-char-binding-names-threshold = 5
 # Runner and TUI event loops are tightly-coupled state machines.
 # Default is 100; run_tui is 153 lines.
 too-many-lines-threshold = 120
+
+disallowed-macros = [
+    { path = "std::assert", reason = "use assert2::assert! instead" },
+    { path = "std::assert_eq", reason = "use assert2::assert!(a == b) instead" },
+    { path = "std::assert_ne", reason = "use assert2::assert!(a != b) instead" },
+    { path = "std::debug_assert", reason = "use assert2::debug_assert! instead" },
+    { path = "std::debug_assert_eq", reason = "use assert2::debug_assert!(a == b) instead" },
+    { path = "std::debug_assert_ne", reason = "use assert2::debug_assert!(a != b) instead" },
+]

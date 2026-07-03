@@ -80,7 +80,7 @@ const MARCH_C_MINUS: &[MarchElement] = &[
 
 /// The all-zero or all-one word a `false`/`true` cell state maps to.
 #[inline]
-fn word(bit: bool) -> u64 {
+const fn word(bit: bool) -> u64 {
     if bit { u64::MAX } else { 0 }
 }
 

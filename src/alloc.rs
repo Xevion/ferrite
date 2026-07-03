@@ -33,25 +33,24 @@ impl AllocError {
     /// Human-readable remediation hint for this error variant, if one exists.
     /// Callers may display this alongside the error message to guide the user.
     #[must_use]
-    pub fn help(&self) -> Option<&'static str> {
+    pub const fn help(&self) -> Option<&'static str> {
         match self {
-            AllocError::Mlock(_) => Some(
+            Self::Mlock(_) => Some(
                 "run as root, raise the mlock limit (ulimit -l unlimited), \
                 or grant the capability: sudo setcap cap_ipc_lock+ep $(which ferrite)",
             ),
-            AllocError::Exhausted { .. } => Some(
+            Self::Exhausted { .. } => Some(
                 "free memory (stop services, drop caches) or lower --headroom \
                 to allow allocation closer to the limit",
             ),
-            AllocError::DevMemMap(_) => Some(
+            Self::DevMemMap(_) => Some(
                 "/dev/mem RAM access requires a kernel built with CONFIG_STRICT_DEVMEM=n \
                 (Unraid and some appliance kernels); most distros block it",
             ),
-            AllocError::DevMemOpen(_) => Some("run as root to open /dev/mem"),
-            AllocError::Mmap(_)
-            | AllocError::Mprotect(_)
-            | AllocError::ZeroSize
-            | AllocError::DevMemAlignment { .. } => None,
+            Self::DevMemOpen(_) => Some("run as root to open /dev/mem"),
+            Self::Mmap(_) | Self::Mprotect(_) | Self::ZeroSize | Self::DevMemAlignment { .. } => {
+                None
+            }
         }
     }
 }
@@ -76,9 +75,11 @@ pub struct AllocOutcome {
     pub stop: StopReason,
 }
 
-/// Chunk granularity for budgeted allocation: large enough that per-chunk
-/// syscall overhead vanishes, small enough that the headroom floor check
-/// between chunks reacts before memory pressure becomes an OOM kill.
+/// Chunk granularity for budgeted allocation.
+///
+/// Large enough that per-chunk syscall overhead vanishes, small enough that
+/// the headroom floor check between chunks reacts before memory pressure
+/// becomes an OOM kill.
 pub const CHUNK_BYTES: usize = 512 * 1024 * 1024;
 
 /// Walk `total` bytes in `chunk`-sized steps, activating each chunk in turn.
@@ -326,7 +327,7 @@ impl TestBuffer {
     /// Returns the buffer as a mutable slice of u64 words.
     /// The returned length is `self.len / 8` (trailing bytes are excluded).
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub fn as_u64_slice_mut(&mut self) -> &mut [u64] {
+    pub const fn as_u64_slice_mut(&mut self) -> &mut [u64] {
         let word_count = self.len / size_of::<u64>();
         // SAFETY: The allocation is aligned to page boundaries (4096), which satisfies
         // u64 alignment (8). word_count * 8 <= self.len, so all accesses are in bounds.
@@ -336,7 +337,7 @@ impl TestBuffer {
     /// Returns the buffer as a slice of u64 words.
     #[must_use]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub fn as_u64_slice(&self) -> &[u64] {
+    pub const fn as_u64_slice(&self) -> &[u64] {
         let word_count = self.len / size_of::<u64>();
         // SAFETY: Same alignment and bounds reasoning as as_u64_slice_mut.
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr() as *const u64, word_count) }
@@ -352,14 +353,14 @@ impl TestBuffer {
     /// The size in bytes of the allocation.
     #[must_use]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.len
     }
 
     /// Always returns `false` -- the constructor rejects zero-size allocations.
     #[must_use]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         false
     }
 }
@@ -514,7 +515,7 @@ mod tests {
         #[test]
         fn unreadable_meminfo_means_no_cap() {
             let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-            let mut activate = recording_activate(calls.clone(), None);
+            let mut activate = recording_activate(calls, None);
             let (achieved, stop) = walk_chunks(8, 4, u64::MAX, &mut || None, &mut activate);
             check!(achieved == 8);
             assert!(let StopReason::Completed = stop);

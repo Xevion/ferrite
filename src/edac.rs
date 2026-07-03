@@ -77,7 +77,7 @@ impl EdacSnapshot {
     /// Compute deltas between this (before) and `after` snapshot.
     /// Only returns entries where at least one counter increased.
     #[must_use]
-    pub fn delta(&self, after: &EdacSnapshot) -> Vec<EccDelta> {
+    pub fn delta(&self, after: &Self) -> Vec<EccDelta> {
         let mut deltas = Vec::new();
         for after_dimm in &after.dimms {
             if let Some(before_dimm) = self
@@ -196,7 +196,7 @@ fn sorted_dir_entries(path: &Path) -> Option<Vec<fs::DirEntry>> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 

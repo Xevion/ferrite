@@ -32,7 +32,7 @@ impl Default for BitErrorStats {
 
 impl BitErrorStats {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             total_failures: 0,
             lowest_phys: None,
@@ -68,14 +68,8 @@ impl BitErrorStats {
         // Stuck-low: bits that went 1->0 (set in expected, clear in actual)
         let low = failure.expected & !failure.actual;
 
-        self.stuck_high_accum = Some(match self.stuck_high_accum {
-            Some(prev) => prev & high,
-            None => high,
-        });
-        self.stuck_low_accum = Some(match self.stuck_low_accum {
-            Some(prev) => prev & low,
-            None => low,
-        });
+        self.stuck_high_accum = Some(self.stuck_high_accum.map_or(high, |prev| prev & high));
+        self.stuck_low_accum = Some(self.stuck_low_accum.map_or(low, |prev| prev & low));
     }
 
     /// Bits that flipped 0->1 in every single error (consistent stuck-high).

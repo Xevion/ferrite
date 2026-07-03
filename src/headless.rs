@@ -42,7 +42,7 @@ pub struct HeadlessPrinter<W: Write> {
 
 impl<W: Write> HeadlessPrinter<W> {
     /// Create a new headless printer writing to the given output.
-    pub fn new(out: W, unit_system: UnitSystem) -> Self {
+    pub const fn new(out: W, unit_system: UnitSystem) -> Self {
         Self {
             out,
             unit_system,
