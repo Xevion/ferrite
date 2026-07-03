@@ -1,4 +1,3 @@
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use ratatui::Frame;
@@ -45,7 +44,7 @@ impl SymbolSet {
 pub fn render_heatmap(
     frame: &mut Frame,
     segment: &Segment,
-    errors: &[TuiFailure],
+    failures: &[TuiFailure],
     elapsed: Duration,
     verbose: bool,
     symbols: SymbolSet,
@@ -58,16 +57,16 @@ pub fn render_heatmap(
         Constraint::Length(1), // labels
         Constraint::Length(1), // segment bar
         Constraint::Length(1), // separator
-        Constraint::Min(3),    // errors
+        Constraint::Min(3),    // failures
         Constraint::Length(1), // controls
     ];
 
     let chunks = ratatui::layout::Layout::vertical(constraints).split(area);
 
     render_header(frame, segment, elapsed, verbose, chunks[0]);
-    render_memory_map(frame, segment, errors, chunks[1], symbols);
+    render_memory_map(frame, segment, failures, chunks[1], symbols);
     render_memory_map_labels(frame, segment, chunks[2]);
-    render_segment_bar(frame, segment, errors, chunks[3], symbols);
+    render_segment_bar(frame, segment, failures, chunks[3], symbols);
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -77,7 +76,7 @@ pub fn render_heatmap(
         chunks[4],
     );
 
-    render_error_area(frame, errors, chunks[5]);
+    render_failure_area(frame, failures, chunks[5]);
     render_controls(frame, chunks[6]);
 }
 
@@ -88,7 +87,7 @@ fn render_header(
     verbose: bool,
     area: ratatui::layout::Rect,
 ) {
-    let total_failures = segment.failure_count.load(Ordering::Relaxed);
+    let total_failures = segment.failure_count();
 
     let mut spans = vec![
         Span::styled(
@@ -112,7 +111,7 @@ fn render_header(
         spans.push(Span::styled(
             format!(" {total_failures} failures "),
             Style::default()
-                .fg(palette::error_severity(total_failures))
+                .fg(palette::failure_severity(total_failures))
                 .bold(),
         ));
     }
@@ -128,11 +127,11 @@ fn render_header(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Continuous memory map bar: bg=error severity, fg=activity brightness.
+/// Continuous memory map bar: bg=failure severity, fg=activity brightness.
 fn render_memory_map(
     frame: &mut Frame,
     segment: &Segment,
-    errors: &[TuiFailure],
+    failures: &[TuiFailure],
     area: ratatui::layout::Rect,
     symbols: SymbolSet,
 ) {
@@ -141,16 +140,16 @@ fn render_memory_map(
     }
     let usable_width = (area.width - 2) as usize;
 
-    // Build per-column error counts
-    let mut col_errors: Vec<usize> = vec![0; usable_width];
-    for err in errors {
-        let err_col = (err.progress_fraction * (usable_width as f64 - 1.0)).round() as usize;
-        if err_col < usable_width {
-            col_errors[err_col] += 1;
+    // Build per-column failure counts
+    let mut col_failures: Vec<usize> = vec![0; usable_width];
+    for failure in failures {
+        let col = (failure.progress_fraction * (usable_width as f64 - 1.0)).round() as usize;
+        if col < usable_width {
+            col_failures[col] += 1;
         }
     }
 
-    let err_age = segment.last_error_age_secs();
+    let failure_age = segment.last_failure_age_secs();
 
     let mut spans = vec![Span::raw(" ")];
     for c in 0..usable_width {
@@ -162,9 +161,9 @@ fn render_memory_map(
         let ch = symbols.char_for(brightness);
         let fg = palette::activity_color(brightness);
 
-        let local_errs = col_errors.get(c).copied().unwrap_or(0);
-        let bg = if local_errs > 0 {
-            palette::error_bg(local_errs, err_age)
+        let local_failures = col_failures.get(c).copied().unwrap_or(0);
+        let bg = if local_failures > 0 {
+            palette::failure_bg(local_failures, failure_age)
         } else {
             None
         };
@@ -205,20 +204,19 @@ fn render_memory_map_labels(frame: &mut Frame, segment: &Segment, area: ratatui:
 fn render_segment_bar(
     frame: &mut Frame,
     segment: &Segment,
-    errors: &[TuiFailure],
+    failures: &[TuiFailure],
     area: ratatui::layout::Rect,
     symbols: SymbolSet,
 ) {
     let pattern_name = segment.current_pattern();
-    let progress_bp = segment.progress_bp.load(Ordering::Relaxed);
-    let pct = progress_bp as f64 / 100.0;
-    let errs = segment.failure_count.load(Ordering::Relaxed);
-    let paused = segment.paused.load(Ordering::Relaxed);
+    let pct = segment.progress_percent();
+    let fails = segment.failure_count();
+    let paused = segment.is_paused();
 
     let bar_chars = 20;
-    let error_fractions: Vec<f64> = errors.iter().map(|e| e.progress_fraction).collect();
+    let failure_fractions: Vec<f64> = failures.iter().map(|e| e.progress_fraction).collect();
 
-    let err_age = segment.last_error_age_secs();
+    let failure_age = segment.last_failure_age_secs();
 
     let mut bar_spans: Vec<Span> = Vec::with_capacity(bar_chars);
     for c in 0..bar_chars {
@@ -228,22 +226,22 @@ fn render_segment_bar(
 
         let col_frac_start = c as f64 / bar_chars as f64;
         let col_frac_end = (c + 1) as f64 / bar_chars as f64;
-        let errors_here = error_fractions
+        let failures_here = failure_fractions
             .iter()
             .filter(|&&f| f >= col_frac_start && f < col_frac_end)
             .count();
 
         let ch = symbols.char_for(brightness);
-        let fg = if errors_here > 0 {
-            palette::error_severity(errors_here)
+        let fg = if failures_here > 0 {
+            palette::failure_severity(failures_here)
         } else if paused {
             palette::PROGRESS_PAUSED
         } else {
             palette::activity_color(brightness)
         };
 
-        let bg = if errors_here > 0 {
-            palette::error_bg(errors_here, err_age)
+        let bg = if failures_here > 0 {
+            palette::failure_bg(failures_here, failure_age)
         } else {
             None
         };
@@ -256,10 +254,10 @@ fn render_segment_bar(
     }
 
     let status = if paused { " ⏸" } else { "" };
-    let err_span = if errs > 0 {
+    let fail_span = if fails > 0 {
         Span::styled(
-            format!(" {errs}err"),
-            Style::default().fg(palette::error_severity(errs)).bold(),
+            format!(" {fails}fail"),
+            Style::default().fg(palette::failure_severity(fails)).bold(),
         )
     } else {
         Span::styled(" ok", Style::default().fg(palette::DIM))
@@ -280,17 +278,17 @@ fn render_segment_bar(
             Style::default().fg(palette::DIM),
         ),
         Span::raw(status),
-        err_span,
+        fail_span,
     ]);
 
     frame.render_widget(Paragraph::new(Line::from(line_spans)), area);
 }
 
-fn render_error_area(frame: &mut Frame, errors: &[TuiFailure], area: ratatui::layout::Rect) {
-    if errors.is_empty() {
+fn render_failure_area(frame: &mut Frame, failures: &[TuiFailure], area: ratatui::layout::Rect) {
+    if failures.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " no errors detected",
+                " no failures detected",
                 Style::default().fg(palette::DIM),
             )))
             .block(Block::default().borders(Borders::NONE)),
@@ -308,8 +306,8 @@ fn render_error_area(frame: &mut Frame, errors: &[TuiFailure], area: ratatui::la
             .add_modifier(Modifier::BOLD),
     );
 
-    let severity = palette::error_severity(errors.len());
-    let rows: Vec<Row> = errors
+    let severity = palette::failure_severity(failures.len());
+    let rows: Vec<Row> = failures
         .iter()
         .rev()
         .take(area.height.saturating_sub(1) as usize)
@@ -342,8 +340,6 @@ fn render_controls(frame: &mut Frame, area: ratatui::layout::Rect) {
     let controls = Line::from(vec![
         Span::styled(" [p]", Style::default().fg(palette::HEADER_CYAN).bold()),
         Span::styled("ause ", Style::default().fg(palette::TEXT)),
-        Span::styled("[s]", Style::default().fg(palette::HEADER_CYAN).bold()),
-        Span::styled("kip ", Style::default().fg(palette::TEXT)),
         Span::styled("[v]", Style::default().fg(palette::HEADER_CYAN).bold()),
         Span::styled("erbose ", Style::default().fg(palette::TEXT)),
         Span::styled("[q]", Style::default().fg(palette::HEADER_CYAN).bold()),
@@ -467,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn render_header_no_errors_no_verbose() {
+    fn render_header_no_failures_no_verbose() {
         let mut term = test_terminal(80, 1);
         let segment = make_segment("r0", 1024);
         let elapsed = Duration::from_secs_f64(1.5);
@@ -483,10 +479,12 @@ mod tests {
     }
 
     #[test]
-    fn render_header_with_errors() {
+    fn render_header_with_failures() {
         let mut term = test_terminal(80, 1);
         let segment = make_segment("r0", 1024);
-        segment.failure_count.store(5, Ordering::Relaxed);
+        for _ in 0..5 {
+            segment.record_failure();
+        }
         let elapsed = Duration::from_secs(10);
         term.draw(|frame| {
             render_header(frame, &segment, elapsed, false, frame.area());
@@ -516,10 +514,10 @@ mod tests {
     fn render_memory_map_narrow_width_returns_early() {
         let mut term = test_terminal(3, 1);
         let segment = make_segment("r0", 1024);
-        let errors: Vec<TuiFailure> = vec![];
+        let failures: Vec<TuiFailure> = vec![];
         // Should not panic on very narrow width
         term.draw(|frame| {
-            render_memory_map(frame, &segment, &errors, frame.area(), SymbolSet::Ascii);
+            render_memory_map(frame, &segment, &failures, frame.area(), SymbolSet::Ascii);
         })
         .unwrap();
     }
@@ -529,18 +527,18 @@ mod tests {
         let mut term = test_terminal(40, 1);
         let segment = make_segment("r0", 1024);
         segment.activity.touch(0.5);
-        let errors: Vec<TuiFailure> = vec![];
+        let failures: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
-            render_memory_map(frame, &segment, &errors, frame.area(), SymbolSet::Ascii);
+            render_memory_map(frame, &segment, &failures, frame.area(), SymbolSet::Ascii);
         })
         .unwrap();
     }
 
     #[test]
-    fn render_memory_map_with_errors() {
+    fn render_memory_map_with_failures() {
         let mut term = test_terminal(40, 1);
         let segment = make_segment("r0", 1024);
-        let errors = vec![TuiFailure {
+        let failures = vec![TuiFailure {
             segment_name: "r0".into(),
             address: 0x1000,
             expected: 0xFF,
@@ -551,7 +549,7 @@ mod tests {
         }];
         segment.record_failure();
         term.draw(|frame| {
-            render_memory_map(frame, &segment, &errors, frame.area(), SymbolSet::Braille);
+            render_memory_map(frame, &segment, &failures, frame.area(), SymbolSet::Braille);
         })
         .unwrap();
     }
@@ -585,41 +583,43 @@ mod tests {
     fn render_segment_bar_shows_pattern_and_progress() {
         let mut term = test_terminal(80, 1);
         let segment = make_segment("r0", 1024);
-        segment.progress_bp.store(5000, Ordering::Relaxed);
-        let errors: Vec<TuiFailure> = vec![];
+        segment.set_progress(1, 2);
+        let failures: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
-            render_segment_bar(frame, &segment, &errors, frame.area(), SymbolSet::Ascii);
+            render_segment_bar(frame, &segment, &failures, frame.area(), SymbolSet::Ascii);
         })
         .unwrap();
         let text = buf_text(&term);
         assert!(text.contains("r0"), "should show segment name");
         assert!(text.contains("50.0%"), "should show progress percentage");
         assert!(text.contains("solid"), "should show pattern name");
-        assert!(text.contains("ok"), "should show ok for no errors");
+        assert!(text.contains("ok"), "should show ok for no failures");
     }
 
     #[test]
-    fn render_segment_bar_shows_errors() {
+    fn render_segment_bar_shows_failures() {
         let mut term = test_terminal(80, 1);
         let segment = make_segment("r0", 1024);
-        segment.failure_count.store(3, Ordering::Relaxed);
-        let errors: Vec<TuiFailure> = vec![];
+        for _ in 0..3 {
+            segment.record_failure();
+        }
+        let failures: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
-            render_segment_bar(frame, &segment, &errors, frame.area(), SymbolSet::Ascii);
+            render_segment_bar(frame, &segment, &failures, frame.area(), SymbolSet::Ascii);
         })
         .unwrap();
         let text = buf_text(&term);
-        assert!(text.contains("3err"), "should show error count");
+        assert!(text.contains("3fail"), "should show failure count");
     }
 
     #[test]
     fn render_segment_bar_paused() {
         let mut term = test_terminal(80, 1);
         let segment = make_segment("r0", 1024);
-        segment.paused.store(true, Ordering::Relaxed);
-        let errors: Vec<TuiFailure> = vec![];
+        segment.set_paused(true);
+        let failures: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
-            render_segment_bar(frame, &segment, &errors, frame.area(), SymbolSet::Ascii);
+            render_segment_bar(frame, &segment, &failures, frame.area(), SymbolSet::Ascii);
         })
         .unwrap();
         let text = buf_text(&term);
@@ -627,21 +627,21 @@ mod tests {
     }
 
     #[test]
-    fn render_error_area_empty() {
+    fn render_failure_area_empty() {
         let mut term = test_terminal(80, 3);
-        let errors: Vec<TuiFailure> = vec![];
+        let failures: Vec<TuiFailure> = vec![];
         term.draw(|frame| {
-            render_error_area(frame, &errors, frame.area());
+            render_failure_area(frame, &failures, frame.area());
         })
         .unwrap();
         let text = buf_text(&term);
-        assert!(text.contains("no errors detected"));
+        assert!(text.contains("no failures detected"));
     }
 
     #[test]
-    fn render_error_area_with_errors() {
+    fn render_failure_area_with_failures() {
         let mut term = test_terminal(120, 5);
-        let errors = vec![
+        let failures = vec![
             TuiFailure {
                 segment_name: "r0".into(),
                 address: 0xdead,
@@ -662,14 +662,14 @@ mod tests {
             },
         ];
         term.draw(|frame| {
-            render_error_area(frame, &errors, frame.area());
+            render_failure_area(frame, &failures, frame.area());
         })
         .unwrap();
         let text = buf_text(&term);
         assert!(text.contains("Segment"), "should have table header");
         assert!(
             text.contains("r0"),
-            "should show segment name in error rows"
+            "should show segment name in failure rows"
         );
     }
 
@@ -682,7 +682,7 @@ mod tests {
         .unwrap();
         let text = buf_text(&term);
         assert!(text.contains("ause"), "should show pause control");
-        assert!(text.contains("kip"), "should show skip control");
+        assert!(text.contains("erbose"), "should show verbose control");
         assert!(text.contains("uit"), "should show quit control");
     }
 
@@ -690,23 +690,24 @@ mod tests {
     fn render_heatmap_full_layout() {
         let mut term = test_terminal(80, 15);
         let segment = make_segment("r0", 1024);
-        segment.progress_bp.store(3000, Ordering::Relaxed);
-        let errors: Vec<TuiFailure> = vec![];
+        segment.set_progress(3, 10);
+        let failures: Vec<TuiFailure> = vec![];
         let elapsed = Duration::from_secs(5);
         term.draw(|frame| {
-            render_heatmap(frame, &segment, &errors, elapsed, false, SymbolSet::Ascii);
+            render_heatmap(frame, &segment, &failures, elapsed, false, SymbolSet::Ascii);
         })
         .unwrap();
         // Should not panic -- layout fits all sections
     }
 
     #[test]
-    fn render_heatmap_with_errors_full() {
+    fn render_heatmap_with_failures_full() {
         let mut term = test_terminal(80, 15);
         let segment = make_segment("r0", 1024);
-        segment.failure_count.store(2, Ordering::Relaxed);
-        segment.record_failure();
-        let errors = vec![TuiFailure {
+        for _ in 0..3 {
+            segment.record_failure();
+        }
+        let failures = vec![TuiFailure {
             segment_name: "r0".into(),
             address: 0x1000,
             expected: 0xFF,
@@ -717,7 +718,14 @@ mod tests {
         }];
         let elapsed = Duration::from_secs(2);
         term.draw(|frame| {
-            render_heatmap(frame, &segment, &errors, elapsed, true, SymbolSet::Braille);
+            render_heatmap(
+                frame,
+                &segment,
+                &failures,
+                elapsed,
+                true,
+                SymbolSet::Braille,
+            );
         })
         .unwrap();
     }

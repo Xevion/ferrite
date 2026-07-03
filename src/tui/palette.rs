@@ -6,19 +6,19 @@ pub const ACTIVE_MID: Color = Color::Rgb(0, 180, 160);
 pub const ACTIVE_DIM: Color = Color::Rgb(0, 80, 70);
 pub const INACTIVE: Color = Color::Rgb(35, 42, 42);
 
-// Error severity gradient (foreground)
-pub const ERR_NONE: Color = Color::Rgb(60, 180, 100);
-pub const ERR_LOW: Color = Color::Rgb(220, 200, 50);
-pub const ERR_MED: Color = Color::Rgb(240, 130, 40);
-pub const ERR_HIGH: Color = Color::Rgb(255, 50, 30);
-pub const ERR_FIRE: Color = Color::Rgb(255, 0, 80);
+// Failure severity gradient (foreground)
+pub const FAIL_NONE: Color = Color::Rgb(60, 180, 100);
+pub const FAIL_LOW: Color = Color::Rgb(220, 200, 50);
+pub const FAIL_MED: Color = Color::Rgb(240, 130, 40);
+pub const FAIL_HIGH: Color = Color::Rgb(255, 50, 30);
+pub const FAIL_FIRE: Color = Color::Rgb(255, 0, 80);
 
-// Error severity gradient (background -- subtle tints for dark terminals)
-pub const ERR_BG_MIN: Color = Color::Rgb(45, 40, 20);
-pub const ERR_BG_LOW: Color = Color::Rgb(50, 38, 18);
-pub const ERR_BG_MED: Color = Color::Rgb(55, 30, 15);
-pub const ERR_BG_HIGH: Color = Color::Rgb(60, 20, 15);
-pub const ERR_BG_FIRE: Color = Color::Rgb(70, 12, 18);
+// Failure severity gradient (background -- subtle tints for dark terminals)
+pub const FAIL_BG_MIN: Color = Color::Rgb(45, 40, 20);
+pub const FAIL_BG_LOW: Color = Color::Rgb(50, 38, 18);
+pub const FAIL_BG_MED: Color = Color::Rgb(55, 30, 15);
+pub const FAIL_BG_HIGH: Color = Color::Rgb(60, 20, 15);
+pub const FAIL_BG_FIRE: Color = Color::Rgb(70, 12, 18);
 
 pub const HEADER_CYAN: Color = Color::Rgb(80, 200, 255);
 pub const DIM: Color = Color::Rgb(100, 100, 110);
@@ -55,38 +55,42 @@ pub fn lerp(a: Color, b: Color, t: f64) -> Color {
 }
 
 #[must_use]
-pub fn error_severity(failure_count: usize) -> Color {
+pub fn failure_severity(failure_count: usize) -> Color {
     match failure_count {
-        0 => ERR_NONE,
-        1 => ERR_LOW,
-        2..=5 => lerp(ERR_LOW, ERR_MED, (failure_count as f64 - 2.0) / 3.0),
-        6..=20 => lerp(ERR_MED, ERR_HIGH, (failure_count as f64 - 6.0) / 14.0),
+        0 => FAIL_NONE,
+        1 => FAIL_LOW,
+        2..=5 => lerp(FAIL_LOW, FAIL_MED, (failure_count as f64 - 2.0) / 3.0),
+        6..=20 => lerp(FAIL_MED, FAIL_HIGH, (failure_count as f64 - 6.0) / 14.0),
         _ => lerp(
-            ERR_HIGH,
-            ERR_FIRE,
+            FAIL_HIGH,
+            FAIL_FIRE,
             ((failure_count as f64 - 20.0) / 30.0).min(1.0),
         ),
     }
 }
 
-/// Background color for error cells. Fades with age but has a warm-yellow floor.
+/// Background color for failure cells. Fades with age but has a warm-yellow floor.
 #[must_use]
-pub fn error_bg(failure_count: usize, age_secs: f64) -> Option<Color> {
+pub fn failure_bg(failure_count: usize, age_secs: f64) -> Option<Color> {
     if failure_count == 0 {
         return None;
     }
     let peak = match failure_count {
-        1 => ERR_BG_LOW,
-        2..=5 => lerp(ERR_BG_LOW, ERR_BG_MED, (failure_count as f64 - 2.0) / 3.0),
-        6..=20 => lerp(ERR_BG_MED, ERR_BG_HIGH, (failure_count as f64 - 6.0) / 14.0),
+        1 => FAIL_BG_LOW,
+        2..=5 => lerp(FAIL_BG_LOW, FAIL_BG_MED, (failure_count as f64 - 2.0) / 3.0),
+        6..=20 => lerp(
+            FAIL_BG_MED,
+            FAIL_BG_HIGH,
+            (failure_count as f64 - 6.0) / 14.0,
+        ),
         _ => lerp(
-            ERR_BG_HIGH,
-            ERR_BG_FIRE,
+            FAIL_BG_HIGH,
+            FAIL_BG_FIRE,
             ((failure_count as f64 - 20.0) / 30.0).min(1.0),
         ),
     };
     let fade = (age_secs / 10.0).min(1.0);
-    Some(lerp(peak, ERR_BG_MIN, fade))
+    Some(lerp(peak, FAIL_BG_MIN, fade))
 }
 
 #[must_use]
@@ -165,76 +169,76 @@ mod tests {
     }
 
     #[test]
-    fn error_severity_zero_is_green() {
-        check!(error_severity(0) == ERR_NONE);
+    fn failure_severity_zero_is_green() {
+        check!(failure_severity(0) == FAIL_NONE);
     }
 
     #[test]
-    fn error_severity_one_is_low() {
-        check!(error_severity(1) == ERR_LOW);
+    fn failure_severity_one_is_low() {
+        check!(failure_severity(1) == FAIL_LOW);
     }
 
     #[test]
-    fn error_severity_mid_range() {
-        let c = error_severity(3);
-        // Should be between ERR_LOW and ERR_MED
+    fn failure_severity_mid_range() {
+        let c = failure_severity(3);
+        // Should be between FAIL_LOW and FAIL_MED
         let (r, _, _) = rgb(c);
-        let (r_low, _, _) = rgb(ERR_LOW);
-        let (r_med, _, _) = rgb(ERR_MED);
+        let (r_low, _, _) = rgb(FAIL_LOW);
+        let (r_med, _, _) = rgb(FAIL_MED);
         assert!(r >= r_low.min(r_med) && r <= r_low.max(r_med));
     }
 
     #[test]
-    fn error_severity_high_range() {
-        let c = error_severity(10);
+    fn failure_severity_high_range() {
+        let c = failure_severity(10);
         let (r, _, _) = rgb(c);
-        // Should be in the ERR_MED to ERR_HIGH range
+        // Should be in the FAIL_MED to FAIL_HIGH range
         assert!(
             r > 200,
-            "high error count should have red component > 200, got {r}"
+            "high failure count should have red component > 200, got {r}"
         );
     }
 
     #[test]
-    fn error_severity_extreme() {
-        let c = error_severity(100);
+    fn failure_severity_extreme() {
+        let c = failure_severity(100);
         let (r, _, _) = rgb(c);
-        // Should be near ERR_FIRE
-        assert!(r == 255, "extreme error count should have r=255, got {r}");
+        // Should be near FAIL_FIRE
+        assert!(r == 255, "extreme failure count should have r=255, got {r}");
     }
 
     #[test]
-    fn error_bg_zero_returns_none() {
-        assert!(error_bg(0, 0.0).is_none());
+    fn failure_bg_zero_returns_none() {
+        assert!(failure_bg(0, 0.0).is_none());
     }
 
     #[test]
-    fn error_bg_nonzero_returns_some() {
-        assert!(error_bg(1, 0.0).is_some());
+    fn failure_bg_nonzero_returns_some() {
+        assert!(failure_bg(1, 0.0).is_some());
     }
 
     #[test]
-    fn error_bg_fades_with_age() {
-        let fresh = error_bg(5, 0.0).unwrap();
-        let aged = error_bg(5, 10.0).unwrap();
-        // Aged should be closer to ERR_BG_MIN
+    fn failure_bg_fades_with_age() {
+        let fresh = failure_bg(5, 0.0).unwrap();
+        let aged = failure_bg(5, 10.0).unwrap();
+        // Aged should be closer to FAIL_BG_MIN
         let (r_fresh, _, _) = rgb(fresh);
         let (r_aged, _, _) = rgb(aged);
-        let (r_min, _, _) = rgb(ERR_BG_MIN);
+        let (r_min, _, _) = rgb(FAIL_BG_MIN);
         // Aged r should be closer to min than fresh r
         assert!(
             (i16::from(r_aged) - i16::from(r_min)).unsigned_abs()
                 <= (i16::from(r_fresh) - i16::from(r_min)).unsigned_abs(),
-            "aged bg should be closer to ERR_BG_MIN"
+            "aged bg should be closer to FAIL_BG_MIN"
         );
     }
 
     #[test]
-    fn error_bg_high_count() {
-        let bg = error_bg(50, 0.0).unwrap();
+    fn failure_bg_high_count() {
+        let bg = failure_bg(50, 0.0).unwrap();
         let (r, _, _) = rgb(bg);
-        // Should be near ERR_BG_FIRE range
-        assert!(r >= 60, "high error bg should have r >= 60, got {r}");
+        // Should be near FAIL_BG_FIRE range
+        assert!(r >= 60, "high failure bg should have r >= 60, got {r}");
     }
 
     #[test]

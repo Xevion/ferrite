@@ -2,109 +2,34 @@
 
 pub mod activity;
 pub mod bridge;
+pub mod event;
 pub mod palette;
 pub mod render;
 pub mod run;
+pub mod segment;
+pub mod trace;
 
 pub use activity::ActivityBuffer;
+pub use event::{FlippedBits, TuiEvent, TuiFailure, TuiLoopResult, TuiOutcome};
 pub use render::SymbolSet;
+pub use segment::Segment;
+pub use trace::{TuiMakeWriter, TuiTraceGuard, TuiTraceState, TuiWriter};
 
 use std::collections::VecDeque;
-use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::io;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
-use std::{fmt, thread};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, poll, read};
 use ratatui::backend::Backend;
 use ratatui::prelude::Widget;
 use ratatui::widgets::Paragraph;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use snafu::{ResultExt, Whatever};
 use tracing::info;
-use tracing_subscriber::fmt::MakeWriter;
 
 use render::render_heatmap;
-
-/// Outcome of the TUI event loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TuiOutcome {
-    /// User pressed 'q', Esc, or Ctrl+C.
-    Quit,
-    /// The segment finished testing.
-    AllComplete,
-    /// Event channel disconnected (all senders dropped).
-    Disconnected,
-}
-
-/// Result returned by [`run_event_loop`], capturing loop state for the caller.
-pub struct TuiLoopResult {
-    pub outcome: TuiOutcome,
-    pub errors: Vec<TuiFailure>,
-    pub verbose: bool,
-}
-
-/// Which bits flipped in a memory test failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FlippedBits {
-    /// Exactly one bit flipped.
-    Single(u8),
-    /// Multiple bits flipped — stores bit count and the full XOR mask.
-    Multi { count: u8, xor: u64 },
-}
-
-impl fmt::Display for FlippedBits {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Single(pos) => write!(f, "bit {pos}"),
-            Self::Multi { count, .. } => write!(f, "{count} bits"),
-        }
-    }
-}
-
-impl FlippedBits {
-    /// Construct from expected and actual values.
-    #[must_use]
-    pub const fn from_mismatch(expected: u64, actual: u64) -> Self {
-        let xor = expected ^ actual;
-        let count = xor.count_ones();
-        if count == 1 {
-            Self::Single(xor.trailing_zeros() as u8)
-        } else {
-            Self::Multi {
-                count: count as u8,
-                xor,
-            }
-        }
-    }
-}
-
-/// A memory test failure record for TUI display, decoupled from the
-/// main crate's `Failure` type.
-#[derive(Debug)]
-pub struct TuiFailure {
-    pub segment_name: String,
-    pub address: u64,
-    pub expected: u64,
-    pub actual: u64,
-    pub flipped_bits: FlippedBits,
-    pub pattern: String,
-    pub progress_fraction: f64,
-}
-
-/// Events flowing into the TUI event loop.
-#[derive(Debug)]
-pub enum TuiEvent {
-    Key(event::KeyEvent),
-    Tick,
-    /// A pre-formatted ANSI log line from `tracing_subscriber::fmt`.
-    Log(String),
-    Failure(TuiFailure),
-    /// The segment finished all configured passes.
-    Done,
-}
 
 /// TUI display configuration.
 pub struct TuiConfig {
@@ -119,210 +44,10 @@ impl Default for TuiConfig {
     }
 }
 
-/// Shared state for the test segment displayed by the TUI.
-///
-/// Worker threads update atomics from their threads; the TUI reads them for rendering.
-pub struct Segment {
-    pub name: String,
-    pub size_bytes: usize,
-    patterns: Vec<String>,
-    pub current_pattern_idx: AtomicUsize,
-    pub progress_bp: AtomicU64,
-    pub failure_count: AtomicUsize,
-    pub paused: AtomicBool,
-    pub activity: ActivityBuffer,
-    last_error_time: Mutex<Option<Instant>>,
-}
-
-impl Segment {
-    #[must_use]
-    pub fn new(name: String, size_bytes: usize, patterns: Vec<String>) -> Self {
-        Self {
-            name,
-            size_bytes,
-            patterns,
-            current_pattern_idx: AtomicUsize::new(0),
-            progress_bp: AtomicU64::new(0),
-            failure_count: AtomicUsize::new(0),
-            paused: AtomicBool::new(false),
-            activity: ActivityBuffer::new(),
-            last_error_time: Mutex::new(None),
-        }
-    }
-
-    /// Current pattern name, or "done" if all patterns are complete.
-    pub fn current_pattern(&self) -> &str {
-        let idx = self.current_pattern_idx.load(Ordering::Relaxed);
-        self.patterns
-            .get(idx)
-            .map_or("done", std::string::String::as_str)
-    }
-
-    /// Advance to the given pattern index and reset progress.
-    pub fn set_pattern(&self, idx: usize) {
-        self.current_pattern_idx.store(idx, Ordering::Relaxed);
-        self.progress_bp.store(0, Ordering::Relaxed);
-    }
-
-    /// Record that a failure was found (increments count, updates timestamp).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
-    pub fn record_failure(&self) {
-        self.failure_count.fetch_add(1, Ordering::Relaxed);
-        *self.last_error_time.lock().unwrap() = Some(Instant::now());
-    }
-
-    /// Seconds since the last error, or `f64::MAX` if none.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
-    pub fn last_error_age_secs(&self) -> f64 {
-        self.last_error_time
-            .lock()
-            .unwrap()
-            .map(|t| t.elapsed().as_secs_f64())
-            .unwrap_or(f64::MAX)
-    }
-}
-
-#[expect(
-    clippy::missing_fields_in_debug,
-    reason = "atomics and internal buffers are omitted; Debug shows only progress-relevant fields"
-)]
-impl fmt::Debug for Segment {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Segment")
-            .field("name", &self.name)
-            .field("size_bytes", &self.size_bytes)
-            .field("pattern", &self.current_pattern())
-            .field("progress_bp", &self.progress_bp.load(Ordering::Relaxed))
-            .field("failures", &self.failure_count.load(Ordering::Relaxed))
-            .finish()
-    }
-}
-
-/// Shared routing state between [`TuiMakeWriter`] and [`TuiTraceGuard`].
-///
-/// While `active` is true, formatted trace output is sent to the TUI channel.
-/// Once flipped to false (by dropping the guard), output routes to stderr.
-pub struct TuiTraceState {
-    active: AtomicBool,
-}
-
-impl TuiTraceState {
-    const fn new() -> Self {
-        Self {
-            active: AtomicBool::new(true),
-        }
-    }
-
-    fn is_active(&self) -> bool {
-        self.active.load(Ordering::Acquire)
-    }
-}
-
-/// RAII guard that reroutes tracing from the TUI channel to stderr on drop.
-///
-/// When dropped:
-/// 1. Flips the routing flag so future traces write to stderr.
-/// 2. Drains any buffered `TuiEvent::Log` events from the channel to stderr.
-pub struct TuiTraceGuard {
-    state: Arc<TuiTraceState>,
-    rx: mpsc::Receiver<TuiEvent>,
-}
-
-impl TuiTraceGuard {
-    #[must_use]
-    pub const fn new(state: Arc<TuiTraceState>, rx: mpsc::Receiver<TuiEvent>) -> Self {
-        Self { state, rx }
-    }
-}
-
-impl Drop for TuiTraceGuard {
-    fn drop(&mut self) {
-        self.state.active.store(false, Ordering::Release);
-
-        while let Ok(event) = self.rx.try_recv() {
-            if let TuiEvent::Log(msg) = event {
-                let _ = io::stderr().write_all(msg.as_bytes());
-                let _ = io::stderr().write_all(b"\n");
-            }
-        }
-    }
-}
-
-/// A [`MakeWriter`] that routes formatted trace lines to the TUI channel
-/// while the TUI is active, then to stderr after the [`TuiTraceGuard`] drops.
-#[derive(Clone)]
-pub struct TuiMakeWriter {
-    tx: mpsc::SyncSender<TuiEvent>,
-    state: Arc<TuiTraceState>,
-}
-
-impl TuiMakeWriter {
-    #[must_use]
-    pub const fn new(tx: mpsc::SyncSender<TuiEvent>, state: Arc<TuiTraceState>) -> Self {
-        Self { tx, state }
-    }
-}
-
-impl<'a> MakeWriter<'a> for TuiMakeWriter {
-    type Writer = TuiWriter;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        TuiWriter {
-            tx: self.tx.clone(),
-            state: Arc::clone(&self.state),
-            buf: Vec::with_capacity(256),
-        }
-    }
-}
-
-/// Per-event writer that buffers a single formatted log line.
-/// On drop, routes to the TUI channel or stderr based on [`TuiTraceState`].
-pub struct TuiWriter {
-    tx: mpsc::SyncSender<TuiEvent>,
-    state: Arc<TuiTraceState>,
-    buf: Vec<u8>,
-}
-
-impl Write for TuiWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.buf.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Drop for TuiWriter {
-    fn drop(&mut self) {
-        if self.buf.is_empty() {
-            return;
-        }
-        let msg = String::from_utf8_lossy(&self.buf);
-        let trimmed = msg.trim_end_matches('\n').to_string();
-        if trimmed.is_empty() {
-            return;
-        }
-        if self.state.is_active() {
-            let _ = self.tx.try_send(TuiEvent::Log(trimmed));
-        } else {
-            let _ = io::stderr().write_all(trimmed.as_bytes());
-            let _ = io::stderr().write_all(b"\n");
-        }
-    }
-}
-
 /// Core event loop: processes events from `rx`, renders to `terminal`.
 ///
 /// Generic over the backend so tests can use `TestBackend`. Returns a
-/// [`TuiLoopResult`] with the exit reason, collected errors, and verbose state.
+/// [`TuiLoopResult`] with the exit reason, collected failures, and verbose state.
 ///
 /// # Errors
 ///
@@ -338,7 +63,7 @@ where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     let start_time = Instant::now();
-    let mut errors: Vec<TuiFailure> = Vec::new();
+    let mut failures: Vec<TuiFailure> = Vec::new();
     // Pending log lines, drained once per tick to bound insert_before calls.
     let mut log_buf: VecDeque<ratatui::text::Text<'static>> = VecDeque::with_capacity(32);
     let mut verbose = false;
@@ -350,7 +75,7 @@ where
             render_heatmap(
                 frame,
                 segment,
-                &errors,
+                &failures,
                 start_time.elapsed(),
                 verbose,
                 config.symbols,
@@ -376,16 +101,13 @@ where
                         break TuiOutcome::Quit;
                     }
                     KeyCode::Char('p') => {
-                        let paused = segment.paused.load(Ordering::Relaxed);
-                        segment.paused.store(!paused, Ordering::Relaxed);
+                        let paused = !segment.is_paused();
+                        segment.set_paused(paused);
                         if paused {
-                            info!("resumed segment");
-                        } else {
                             info!("paused segment");
+                        } else {
+                            info!("resumed segment");
                         }
-                    }
-                    KeyCode::Char('s') => {
-                        info!("skip requested (would skip current pattern)");
                     }
                     KeyCode::Char('v') => {
                         verbose = !verbose;
@@ -403,7 +125,7 @@ where
                 }
             }
             Ok(TuiEvent::Failure(failure)) => {
-                errors.push(failure);
+                failures.push(failure);
             }
             Ok(TuiEvent::Done) => {
                 info!(segment = segment.name.as_str(), "segment complete");
@@ -433,7 +155,7 @@ where
         let elapsed = start_time.elapsed();
         terminal
             .draw(|frame| {
-                render_heatmap(frame, segment, &errors, elapsed, verbose, config.symbols);
+                render_heatmap(frame, segment, &failures, elapsed, verbose, config.symbols);
             })
             .whatever_context("failed to draw frame")?;
     };
@@ -442,13 +164,13 @@ where
     let elapsed = start_time.elapsed();
     terminal
         .draw(|frame| {
-            render_heatmap(frame, segment, &errors, elapsed, verbose, config.symbols);
+            render_heatmap(frame, segment, &failures, elapsed, verbose, config.symbols);
         })
         .whatever_context("failed to draw final frame")?;
 
     Ok(TuiLoopResult {
         outcome,
-        errors,
+        failures,
         verbose,
     })
 }
@@ -543,7 +265,7 @@ pub fn run_tui(
 ) -> Result<(), Whatever> {
     let guard = crate::shutdown::TerminalGuard::new()?;
 
-    // Header + memory map + labels + segment row + separator + errors (min 3) + controls.
+    // Header + memory map + labels + segment row + separator + failures (min 3) + controls.
     let viewport_height: u16 = 9;
     let mut terminal = Terminal::with_options(
         ratatui::backend::CrosstermBackend::new(io::stdout()),
@@ -559,8 +281,8 @@ pub fn run_tui(
         .name("tui-input".into())
         .spawn(move || {
             while !crate::shutdown::quit_requested() {
-                if event::poll(Duration::from_millis(50)).unwrap_or(false)
-                    && let Ok(Event::Key(key)) = event::read()
+                if poll(Duration::from_millis(50)).unwrap_or(false)
+                    && let Ok(Event::Key(key)) = read()
                 {
                     let _ = input_tx.try_send(TuiEvent::Key(key));
                 }
@@ -593,12 +315,8 @@ pub fn run_tui(
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::float_cmp,
-    reason = "exact values are deterministic for fixed test inputs"
-)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -608,157 +326,8 @@ mod tests {
         check!(config.symbols == SymbolSet::Braille);
     }
 
-    #[test]
-    fn segment_new_defaults() {
-        let rs = Segment::new("test".into(), 4096, vec!["solid".into(), "walk".into()]);
-        check!(rs.name == "test");
-        check!(rs.size_bytes == 4096);
-        check!(rs.current_pattern() == "solid");
-        check!(rs.progress_bp.load(Ordering::Relaxed) == 0);
-        check!(rs.failure_count.load(Ordering::Relaxed) == 0);
-        assert!(!rs.paused.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn current_pattern_returns_correct_pattern() {
-        let rs = Segment::new("r0".into(), 1024, vec!["a".into(), "b".into(), "c".into()]);
-        check!(rs.current_pattern() == "a");
-        rs.current_pattern_idx.store(1, Ordering::Relaxed);
-        check!(rs.current_pattern() == "b");
-        rs.current_pattern_idx.store(2, Ordering::Relaxed);
-        check!(rs.current_pattern() == "c");
-    }
-
-    #[test]
-    fn current_pattern_returns_done_past_end() {
-        let rs = Segment::new("r0".into(), 1024, vec!["a".into()]);
-        rs.current_pattern_idx.store(5, Ordering::Relaxed);
-        check!(rs.current_pattern() == "done");
-    }
-
-    #[test]
-    fn set_pattern_updates_index_and_resets_progress() {
-        let rs = Segment::new("r0".into(), 1024, vec!["a".into(), "b".into()]);
-        rs.progress_bp.store(5000, Ordering::Relaxed);
-        rs.set_pattern(1);
-        check!(rs.current_pattern() == "b");
-        check!(rs.progress_bp.load(Ordering::Relaxed) == 0);
-    }
-
-    #[test]
-    fn record_failure_increments_count() {
-        let rs = Segment::new("r0".into(), 1024, vec!["a".into()]);
-        check!(rs.failure_count.load(Ordering::Relaxed) == 0);
-        rs.record_failure();
-        check!(rs.failure_count.load(Ordering::Relaxed) == 1);
-        rs.record_failure();
-        check!(rs.failure_count.load(Ordering::Relaxed) == 2);
-    }
-
-    #[test]
-    fn last_error_age_max_when_no_errors() {
-        let rs = Segment::new("r0".into(), 1024, vec!["a".into()]);
-        check!(rs.last_error_age_secs() == f64::MAX);
-    }
-
-    #[test]
-    fn last_error_age_small_after_error() {
-        let rs = Segment::new("r0".into(), 1024, vec!["a".into()]);
-        rs.record_failure();
-        let age = rs.last_error_age_secs();
-        assert!(
-            age < 1.0,
-            "age should be very small immediately after error, got {age}"
-        );
-    }
-
-    #[test]
-    fn debug_format_includes_fields() {
-        let rs = Segment::new("test-segment".into(), 8192, vec!["solid".into()]);
-        rs.failure_count.store(3, Ordering::Relaxed);
-        rs.progress_bp.store(5000, Ordering::Relaxed);
-        let debug = format!("{rs:?}");
-        assert!(debug.contains("test-segment"));
-        assert!(debug.contains("8192"));
-        assert!(debug.contains("solid"));
-        assert!(debug.contains("5000"));
-        assert!(debug.contains('3'));
-    }
-
-    fn make_active_state() -> Arc<TuiTraceState> {
-        Arc::new(TuiTraceState::new())
-    }
-
-    #[test]
-    fn tui_writer_sends_through_channel() {
-        let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-        let state = make_active_state();
-        let mut writer = TuiWriter {
-            tx,
-            state,
-            buf: Vec::new(),
-        };
-        writer.write_all(b" INFO ferrite: hello world\n").unwrap();
-        drop(writer);
-        match rx.try_recv() {
-            Ok(TuiEvent::Log(msg)) => {
-                assert!(msg.contains("hello world"));
-                assert!(!msg.ends_with('\n'), "trailing newline should be trimmed");
-            }
-            other => panic!("expected TuiEvent::Log, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn tui_writer_empty_buffer_sends_nothing() {
-        let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-        let state = make_active_state();
-        let writer = TuiWriter {
-            tx,
-            state,
-            buf: Vec::new(),
-        };
-        drop(writer);
-        assert!(
-            rx.try_recv().is_err(),
-            "empty buffer should not send an event"
-        );
-    }
-
-    #[test]
-    fn tui_writer_routes_to_stderr_when_inactive() {
-        let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-        let state = make_active_state();
-        state.active.store(false, Ordering::Release);
-        let mut writer = TuiWriter {
-            tx,
-            state,
-            buf: Vec::new(),
-        };
-        writer.write_all(b"routed to stderr\n").unwrap();
-        drop(writer);
-        // Nothing sent to the TUI channel
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn tui_trace_guard_drains_and_deactivates() {
-        let state = make_active_state();
-        let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
-        let _ = tx.try_send(TuiEvent::Log("buffered msg".into()));
-        let _ = tx.try_send(TuiEvent::Tick); // non-Log events are discarded
-        let _ = tx.try_send(TuiEvent::Log("second msg".into()));
-
-        let guard = TuiTraceGuard::new(Arc::clone(&state), rx);
-        assert!(state.is_active());
-        drop(guard);
-        assert!(!state.is_active());
-        // rx is consumed by the guard — channel fully disconnected
-    }
-
     mod event_loop {
         use std::sync::Arc;
-        use std::sync::atomic::Ordering;
         use std::sync::mpsc;
 
         use assert2::{assert, check};
@@ -802,7 +371,7 @@ mod tests {
             })
         }
 
-        fn make_error() -> TuiEvent {
+        fn make_failure() -> TuiEvent {
             TuiEvent::Failure(TuiFailure {
                 segment_name: "r0".into(),
                 address: 0xdead_0000,
@@ -930,7 +499,7 @@ mod tests {
             drop(tx);
 
             let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
-            assert!(segment.paused.load(Ordering::Relaxed));
+            assert!(segment.is_paused());
         }
 
         #[test]
@@ -947,7 +516,7 @@ mod tests {
             drop(tx);
 
             let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
-            assert!(!segment.paused.load(Ordering::Relaxed));
+            assert!(!segment.is_paused());
         }
 
         #[test]
@@ -983,19 +552,19 @@ mod tests {
 
         #[test]
         #[serial]
-        fn error_events_collected() {
+        fn failure_events_collected() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
             let segment = make_segment("r0", &["solid"]);
             let mut term = make_terminal(80, 15);
 
-            tx.send(make_error()).unwrap();
-            tx.send(make_error()).unwrap();
-            tx.send(make_error()).unwrap();
+            tx.send(make_failure()).unwrap();
+            tx.send(make_failure()).unwrap();
+            tx.send(make_failure()).unwrap();
             drop(tx);
 
             let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
-            check!(result.errors.len() == 3);
+            check!(result.failures.len() == 3);
         }
 
         #[test]
@@ -1004,7 +573,7 @@ mod tests {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
             let segment = make_segment("r0", &["solid", "walk"]);
-            segment.progress_bp.store(5000, Ordering::Relaxed);
+            segment.set_progress(1, 2);
             let mut term = make_terminal(80, 15);
 
             // Single tick to trigger a render, then quit.
@@ -1037,24 +606,27 @@ mod tests {
 
         #[test]
         #[serial]
-        fn error_table_renders() {
+        fn failure_table_renders() {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
             let segment = make_segment("r0", &["solid"]);
             segment.record_failure();
             let mut term = make_terminal(120, 15);
 
-            tx.send(make_error()).unwrap();
+            tx.send(make_failure()).unwrap();
             tx.send(TuiEvent::Tick).unwrap();
             tx.send(press(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
             let _ = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
             let text = buf_text(&term);
-            assert!(text.contains("r0"), "expected segment name in error table");
+            assert!(
+                text.contains("r0"),
+                "expected segment name in failure table"
+            );
             assert!(
                 text.contains("solid"),
-                "expected pattern name in error table"
+                "expected pattern name in failure table"
             );
         }
 
@@ -1084,7 +656,9 @@ mod tests {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(16);
             let segment = make_segment("r0", &["solid"]);
-            segment.failure_count.store(7, Ordering::Relaxed);
+            for _ in 0..7 {
+                segment.record_failure();
+            }
             let mut term = make_terminal(80, 15);
 
             tx.send(TuiEvent::Tick).unwrap();
@@ -1122,7 +696,7 @@ mod tests {
             shutdown::reset();
             let (tx, rx) = mpsc::sync_channel::<TuiEvent>(64);
             let segment = make_segment("r0", &["solid", "walk"]);
-            segment.progress_bp.store(5000, Ordering::Relaxed);
+            segment.set_progress(1, 2);
             let mut term = make_terminal(100, 18);
 
             // Flood with log events interleaved with ticks.
@@ -1165,14 +739,14 @@ mod tests {
             // Burst of mixed events.
             for i in 0..10 {
                 tx.send(TuiEvent::Log(format!("log line {i}"))).unwrap();
-                tx.send(make_error()).unwrap();
+                tx.send(make_failure()).unwrap();
                 tx.send(TuiEvent::Tick).unwrap();
             }
             tx.send(press(KeyCode::Char('q'))).unwrap();
             drop(tx);
 
             let result = run_event_loop(&mut term, &config(), &segment, &rx).unwrap();
-            check!(result.errors.len() == 10);
+            check!(result.failures.len() == 10);
 
             let text = buf_text(&term);
             assert!(

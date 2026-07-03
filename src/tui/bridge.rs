@@ -1,7 +1,6 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 
 use tracing::warn;
@@ -57,17 +56,12 @@ impl EventBridge {
             RunEvent::Progress {
                 sub_pass, total, ..
             } => {
-                let bp = if *total > 0 {
-                    (u128::from(*sub_pass) * 10000 / u128::from(*total)) as u64
-                } else {
-                    0
-                };
-                self.segment.progress_bp.store(bp, Ordering::Relaxed);
+                self.segment.set_progress(*sub_pass, *total);
             }
             RunEvent::TestComplete {
                 pattern, failures, ..
             } => {
-                self.segment.progress_bp.store(10000, Ordering::Relaxed);
+                self.segment.complete_progress();
                 self.pattern_index += 1;
 
                 for f in failures {
@@ -77,7 +71,7 @@ impl EventBridge {
                         address: f.addr as u64,
                         expected: f.expected,
                         actual: f.actual,
-                        flipped_bits: FlippedBits::from_mismatch(f.expected, f.actual),
+                        flipped_bits: FlippedBits::from_xor(f.xor(), f.flipped_bits()),
                         pattern: pattern.to_string(),
                         progress_fraction: 1.0,
                     })) {
@@ -145,9 +139,12 @@ impl EventBridge {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::float_cmp,
+    reason = "exact progress percentages are deterministic for fixed test inputs"
+)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -198,7 +195,7 @@ mod tests {
             total: 100,
         });
 
-        check!(segment.progress_bp.load(Ordering::Relaxed) == 5000);
+        check!(segment.progress_percent() == 50.0);
     }
 
     #[test]
@@ -213,7 +210,7 @@ mod tests {
             total: 0,
         });
 
-        check!(segment.progress_bp.load(Ordering::Relaxed) == 0);
+        check!(segment.progress_percent() == 0.0);
     }
 
     #[test]
@@ -268,7 +265,7 @@ mod tests {
             interrupted: false,
         });
 
-        check!(segment.failure_count.load(Ordering::Relaxed) == 1);
+        check!(segment.failure_count() == 1);
 
         match rx.try_recv() {
             Ok(TuiEvent::Failure(f)) => {
