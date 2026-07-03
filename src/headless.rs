@@ -208,8 +208,6 @@ impl<W: Write> HeadlessPrinter<W> {
 mod tests {
     use std::time::Duration;
 
-    use assert2::{assert, check};
-
     use super::*;
     use crate::edac::EccDelta;
     use crate::failure::FailureBuilder;
@@ -223,375 +221,429 @@ mod tests {
         String::from_utf8_lossy(&p.out).to_string()
     }
 
-    #[test]
-    fn banner_parallel() {
-        let mut p = printer();
-        p.handle_event(&RunEvent::RunStart {
-            size: 1024 * 1024 * 1024,
-            passes: 2,
-            patterns: vec![Pattern::SolidBits, Pattern::Checkerboard],
-            workers: 4,
-        });
-        let out = output(&p);
-        assert!(out.contains("ferrite"));
-        assert!(out.contains("2 pass(es)"));
-        assert!(out.contains("2 pattern(s)"));
-        assert!(!out.contains("sequential"));
+    mod banner {
+        use assert2::assert;
+
+        use super::*;
+
+        #[test]
+        fn banner_parallel() {
+            let mut p = printer();
+            p.handle_event(&RunEvent::RunStart {
+                size: 1024 * 1024 * 1024,
+                passes: 2,
+                patterns: vec![Pattern::SolidBits, Pattern::Checkerboard],
+                workers: 4,
+            });
+            let out = output(&p);
+            assert!(out.contains("ferrite"));
+            assert!(out.contains("2 pass(es)"));
+            assert!(out.contains("2 pattern(s)"));
+            assert!(!out.contains("sequential"));
+        }
+
+        #[test]
+        fn banner_sequential() {
+            let mut p = printer();
+            p.handle_event(&RunEvent::RunStart {
+                size: 1024 * 1024,
+                passes: 1,
+                patterns: vec![Pattern::SolidBits],
+                workers: 1,
+            });
+            let out = output(&p);
+            assert!(out.contains("(sequential)"));
+        }
     }
 
-    #[test]
-    fn banner_sequential() {
-        let mut p = printer();
-        p.handle_event(&RunEvent::RunStart {
-            size: 1024 * 1024,
-            passes: 1,
-            patterns: vec![Pattern::SolidBits],
-            workers: 1,
-        });
-        let out = output(&p);
-        assert!(out.contains("(sequential)"));
-    }
+    mod map_info {
+        use assert2::assert;
 
-    #[test]
-    fn map_info_all_page_types() {
-        let mut p = printer();
-        p.handle_event(&RunEvent::MapInfo {
-            stats: MapStats {
-                total_pages: 100,
-                resolved_pages: 100,
-                huge_pages: 5,
-                thp_pages: 10,
-                hwpoison_pages: 1,
-                unevictable_pages: 90,
-            },
-        });
-        let out = output(&p);
-        assert!(out.contains("100 pages mapped"));
-        assert!(out.contains("10 THP"));
-        assert!(out.contains("5 huge"));
-        assert!(out.contains("hw-poisoned"));
-    }
+        use super::*;
 
-    #[test]
-    fn map_info_minimal() {
-        let mut p = printer();
-        p.handle_event(&RunEvent::MapInfo {
-            stats: MapStats {
-                total_pages: 50,
-                resolved_pages: 50,
-                huge_pages: 0,
-                thp_pages: 0,
-                hwpoison_pages: 0,
-                unevictable_pages: 50,
-            },
-        });
-        let out = output(&p);
-        assert!(out.contains("50 pages mapped"));
-        assert!(!out.contains("THP"));
-        assert!(!out.contains("huge"));
-    }
-
-    #[test]
-    fn test_result_pass() {
-        let mut p = printer();
-        p.handle_event(&RunEvent::TestComplete {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-            elapsed: Duration::from_millis(100),
-            bytes: 1024 * 1024,
-            failures: vec![],
-            interrupted: false,
-        });
-        let out = output(&p);
-        assert!(out.contains("PASS"));
-        assert!(out.contains("Solid Bits"));
-    }
-
-    #[test]
-    fn test_result_fail() {
-        let mut p = printer();
-        let failures = vec![
-            FailureBuilder::default()
-                .addr(0x1000)
-                .expected(0xFF)
-                .actual(0xFE)
-                .build(),
-        ];
-        p.handle_event(&RunEvent::TestComplete {
-            pattern: Pattern::WalkingOnes,
-            pass: 1,
-            elapsed: Duration::from_millis(50),
-            bytes: 512 * 1024,
-            failures,
-            interrupted: false,
-        });
-        let out = output(&p);
-        assert!(out.contains("FAIL"));
-        assert!(out.contains("1 failures"));
-    }
-
-    #[test]
-    fn test_result_interrupted_no_failures_is_not_pass() {
-        let mut p = printer();
-        p.handle_event(&RunEvent::TestComplete {
-            pattern: Pattern::WalkingOnes,
-            pass: 1,
-            elapsed: Duration::from_millis(50),
-            bytes: 512 * 1024,
-            failures: vec![],
-            interrupted: true,
-        });
-        let out = output(&p);
-        // A cut-short pattern must not masquerade as a clean PASS.
-        assert!(!out.contains("PASS"));
-        assert!(out.contains("INTR"));
-        assert!(out.contains("interrupted"));
-    }
-
-    #[test]
-    fn test_result_interrupted_with_failures_notes_incompleteness() {
-        let mut p = printer();
-        let failures = vec![
-            FailureBuilder::default()
-                .addr(0x1000)
-                .expected(0xFF)
-                .actual(0xFE)
-                .build(),
-        ];
-        p.handle_event(&RunEvent::TestComplete {
-            pattern: Pattern::WalkingOnes,
-            pass: 1,
-            elapsed: Duration::from_millis(50),
-            bytes: 512 * 1024,
-            failures,
-            interrupted: true,
-        });
-        let out = output(&p);
-        assert!(out.contains("FAIL"));
-        assert!(out.contains("interrupted"));
-    }
-
-    #[test]
-    fn ecc_deltas() {
-        let mut p = printer();
-        p.handle_event(&RunEvent::EccDeltas {
-            pass: 1,
-            deltas: vec![
-                EccDelta {
-                    mc: 0,
-                    dimm_index: 0,
-                    label: Some("DIMM_A1".to_owned()),
-                    ce_delta: 3,
-                    ue_delta: 0,
+        #[test]
+        fn map_info_all_page_types() {
+            let mut p = printer();
+            p.handle_event(&RunEvent::MapInfo {
+                stats: MapStats {
+                    total_pages: 100,
+                    resolved_pages: 100,
+                    huge_pages: 5,
+                    thp_pages: 10,
+                    hwpoison_pages: 1,
+                    unevictable_pages: 90,
                 },
-                EccDelta {
-                    mc: 0,
-                    dimm_index: 1,
-                    label: None,
-                    ce_delta: 0,
-                    ue_delta: 1,
+            });
+            let out = output(&p);
+            assert!(out.contains("100 pages mapped"));
+            assert!(out.contains("10 THP"));
+            assert!(out.contains("5 huge"));
+            assert!(out.contains("hw-poisoned"));
+        }
+
+        #[test]
+        fn map_info_minimal() {
+            let mut p = printer();
+            p.handle_event(&RunEvent::MapInfo {
+                stats: MapStats {
+                    total_pages: 50,
+                    resolved_pages: 50,
+                    huge_pages: 0,
+                    thp_pages: 0,
+                    hwpoison_pages: 0,
+                    unevictable_pages: 50,
                 },
-            ],
-        });
-        let out = output(&p);
-        assert!(out.contains("ECC"));
-        assert!(out.contains("3 correctable"));
-        assert!(out.contains("DIMM_A1"));
-        assert!(out.contains("uncorrectable"));
-        assert!(out.contains("mc0/dimm1"));
+            });
+            let out = output(&p);
+            assert!(out.contains("50 pages mapped"));
+            assert!(!out.contains("THP"));
+            assert!(!out.contains("huge"));
+        }
     }
 
-    #[test]
-    fn pass_summary_clean() {
-        let mut p = printer();
-        p.total_passes = 2;
-        p.handle_event(&RunEvent::PassComplete {
-            pass: 1,
-            failures: 0,
-            elapsed: Duration::from_secs(5),
-        });
-        let out = output(&p);
-        assert!(out.contains("Pass 1/2"));
-        assert!(out.contains("all patterns passed"));
-    }
+    mod test_result {
+        use assert2::assert;
 
-    #[test]
-    fn pass_summary_failures() {
-        let mut p = printer();
-        p.total_passes = 3;
-        p.handle_event(&RunEvent::PassComplete {
-            pass: 2,
-            failures: 5,
-            elapsed: Duration::from_secs(10),
-        });
-        let out = output(&p);
-        assert!(out.contains("Pass 2/3"));
-        assert!(out.contains("5 total failure(s)"));
-    }
+        use super::*;
 
-    #[test]
-    fn final_result_pass() {
-        let mut p = printer();
-        p.print_final_result(0);
-        let out = output(&p);
-        assert!(out.contains("All tests passed"));
-    }
+        #[test]
+        fn test_result_pass() {
+            let mut p = printer();
+            p.handle_event(&RunEvent::TestComplete {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+                elapsed: Duration::from_millis(100),
+                bytes: 1024 * 1024,
+                failures: vec![],
+                interrupted: false,
+            });
+            let out = output(&p);
+            assert!(out.contains("PASS"));
+            assert!(out.contains("Solid Bits"));
+        }
 
-    #[test]
-    fn final_result_fail() {
-        let mut p = printer();
-        p.print_final_result(7);
-        let out = output(&p);
-        assert!(out.contains("7 failure(s) detected"));
-    }
-
-    #[test]
-    fn consume_full_sequence() {
-        let (tx, rx) = crate::events::event_bus();
-        tx.send(RunEvent::RunStart {
-            size: 1024,
-            passes: 1,
-            patterns: vec![Pattern::SolidBits],
-            workers: 4,
-        })
-        .unwrap();
-        tx.send(RunEvent::PassStart {
-            pass: 1,
-            total_passes: 1,
-        })
-        .unwrap();
-        tx.send(RunEvent::TestComplete {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-            elapsed: Duration::from_millis(10),
-            bytes: 2048,
-            failures: vec![],
-            interrupted: false,
-        })
-        .unwrap();
-        tx.send(RunEvent::PassComplete {
-            pass: 1,
-            failures: 0,
-            elapsed: Duration::from_millis(10),
-        })
-        .unwrap();
-        tx.send(RunEvent::RunComplete).unwrap();
-
-        let mut p = printer();
-        p.consume(&rx);
-        let out = output(&p);
-        assert!(out.contains("ferrite"));
-        assert!(out.contains("PASS"));
-        assert!(out.contains("all patterns passed"));
-    }
-
-    #[test]
-    fn ignored_events_produce_no_output() {
-        let mut p = printer();
-        p.handle_event(&RunEvent::PassStart {
-            pass: 1,
-            total_passes: 1,
-        });
-        p.handle_event(&RunEvent::TestStart {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-        });
-        p.handle_event(&RunEvent::Progress {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-            sub_pass: 1,
-            total: 2,
-        });
-        p.handle_event(&RunEvent::Log {
-            level: tracing::Level::INFO,
-            target: "test".to_owned(),
-            message: "msg".to_owned(),
-            fields: serde_json::json!({}),
-        });
-        check!(p.out.is_empty());
-    }
-
-    #[test]
-    fn truncated_display_within_limit() {
-        let failures: Vec<Failure> = (0..3)
-            .map(|i| {
+        #[test]
+        fn test_result_fail() {
+            let mut p = printer();
+            let failures = vec![
                 FailureBuilder::default()
-                    .addr(i * 8)
+                    .addr(0x1000)
                     .expected(0xFF)
                     .actual(0xFE)
-                    .build()
-            })
-            .collect();
-        let t = Truncated(&failures, 5);
-        let s = format!("{t}");
-        assert!(!s.contains("more"));
-        check!(s.lines().count() == 3);
-    }
+                    .build(),
+            ];
+            p.handle_event(&RunEvent::TestComplete {
+                pattern: Pattern::WalkingOnes,
+                pass: 1,
+                elapsed: Duration::from_millis(50),
+                bytes: 512 * 1024,
+                failures,
+                interrupted: false,
+            });
+            let out = output(&p);
+            assert!(out.contains("FAIL"));
+            assert!(out.contains("1 failures"));
+        }
 
-    #[test]
-    fn truncated_display_exceeds_limit() {
-        let failures: Vec<Failure> = (0..10)
-            .map(|i| {
+        #[test]
+        fn test_result_interrupted_no_failures_is_not_pass() {
+            let mut p = printer();
+            p.handle_event(&RunEvent::TestComplete {
+                pattern: Pattern::WalkingOnes,
+                pass: 1,
+                elapsed: Duration::from_millis(50),
+                bytes: 512 * 1024,
+                failures: vec![],
+                interrupted: true,
+            });
+            let out = output(&p);
+            // A cut-short pattern must not masquerade as a clean PASS.
+            assert!(!out.contains("PASS"));
+            assert!(out.contains("INTR"));
+            assert!(out.contains("interrupted"));
+        }
+
+        #[test]
+        fn test_result_interrupted_with_failures_notes_incompleteness() {
+            let mut p = printer();
+            let failures = vec![
                 FailureBuilder::default()
-                    .addr(i * 8)
+                    .addr(0x1000)
                     .expected(0xFF)
                     .actual(0xFE)
-                    .build()
+                    .build(),
+            ];
+            p.handle_event(&RunEvent::TestComplete {
+                pattern: Pattern::WalkingOnes,
+                pass: 1,
+                elapsed: Duration::from_millis(50),
+                bytes: 512 * 1024,
+                failures,
+                interrupted: true,
+            });
+            let out = output(&p);
+            assert!(out.contains("FAIL"));
+            assert!(out.contains("interrupted"));
+        }
+    }
+
+    mod ecc_deltas {
+        use assert2::assert;
+
+        use super::*;
+
+        #[test]
+        fn ecc_deltas() {
+            let mut p = printer();
+            p.handle_event(&RunEvent::EccDeltas {
+                pass: 1,
+                deltas: vec![
+                    EccDelta {
+                        mc: 0,
+                        dimm_index: 0,
+                        label: Some("DIMM_A1".to_owned()),
+                        ce_delta: 3,
+                        ue_delta: 0,
+                    },
+                    EccDelta {
+                        mc: 0,
+                        dimm_index: 1,
+                        label: None,
+                        ce_delta: 0,
+                        ue_delta: 1,
+                    },
+                ],
+            });
+            let out = output(&p);
+            assert!(out.contains("ECC"));
+            assert!(out.contains("3 correctable"));
+            assert!(out.contains("DIMM_A1"));
+            assert!(out.contains("uncorrectable"));
+            assert!(out.contains("mc0/dimm1"));
+        }
+    }
+
+    mod pass_summary {
+        use assert2::assert;
+
+        use super::*;
+
+        #[test]
+        fn pass_summary_clean() {
+            let mut p = printer();
+            p.total_passes = 2;
+            p.handle_event(&RunEvent::PassComplete {
+                pass: 1,
+                failures: 0,
+                elapsed: Duration::from_secs(5),
+            });
+            let out = output(&p);
+            assert!(out.contains("Pass 1/2"));
+            assert!(out.contains("all patterns passed"));
+        }
+
+        #[test]
+        fn pass_summary_failures() {
+            let mut p = printer();
+            p.total_passes = 3;
+            p.handle_event(&RunEvent::PassComplete {
+                pass: 2,
+                failures: 5,
+                elapsed: Duration::from_secs(10),
+            });
+            let out = output(&p);
+            assert!(out.contains("Pass 2/3"));
+            assert!(out.contains("5 total failure(s)"));
+        }
+    }
+
+    mod final_result {
+        use assert2::assert;
+
+        use super::*;
+
+        #[test]
+        fn final_result_pass() {
+            let mut p = printer();
+            p.print_final_result(0);
+            let out = output(&p);
+            assert!(out.contains("All tests passed"));
+        }
+
+        #[test]
+        fn final_result_fail() {
+            let mut p = printer();
+            p.print_final_result(7);
+            let out = output(&p);
+            assert!(out.contains("7 failure(s) detected"));
+        }
+    }
+
+    mod consume {
+        use assert2::{assert, check};
+
+        use super::*;
+
+        #[test]
+        fn consume_full_sequence() {
+            let (tx, rx) = crate::events::event_bus();
+            tx.send(RunEvent::RunStart {
+                size: 1024,
+                passes: 1,
+                patterns: vec![Pattern::SolidBits],
+                workers: 4,
             })
-            .collect();
-        let t = Truncated(&failures, 3);
-        let s = format!("{t}");
-        assert!(s.contains("...+7 more"));
+            .unwrap();
+            tx.send(RunEvent::PassStart {
+                pass: 1,
+                total_passes: 1,
+            })
+            .unwrap();
+            tx.send(RunEvent::TestComplete {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+                elapsed: Duration::from_millis(10),
+                bytes: 2048,
+                failures: vec![],
+                interrupted: false,
+            })
+            .unwrap();
+            tx.send(RunEvent::PassComplete {
+                pass: 1,
+                failures: 0,
+                elapsed: Duration::from_millis(10),
+            })
+            .unwrap();
+            tx.send(RunEvent::RunComplete).unwrap();
+
+            let mut p = printer();
+            p.consume(&rx);
+            let out = output(&p);
+            assert!(out.contains("ferrite"));
+            assert!(out.contains("PASS"));
+            assert!(out.contains("all patterns passed"));
+        }
+
+        #[test]
+        fn ignored_events_produce_no_output() {
+            let mut p = printer();
+            p.handle_event(&RunEvent::PassStart {
+                pass: 1,
+                total_passes: 1,
+            });
+            p.handle_event(&RunEvent::TestStart {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+            });
+            p.handle_event(&RunEvent::Progress {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+                sub_pass: 1,
+                total: 2,
+            });
+            p.handle_event(&RunEvent::Log {
+                level: tracing::Level::INFO,
+                target: "test".to_owned(),
+                message: "msg".to_owned(),
+                fields: serde_json::json!({}),
+            });
+            check!(p.out.is_empty());
+        }
+
+        #[test]
+        fn consume_stops_on_disconnect() {
+            let (tx, rx) = crate::events::event_bus();
+            tx.send(RunEvent::RunStart {
+                size: 1024,
+                passes: 1,
+                patterns: vec![],
+                workers: 4,
+            })
+            .unwrap();
+            drop(tx);
+
+            let mut p = printer();
+            p.consume(&rx);
+            let out = output(&p);
+            assert!(out.contains("ferrite"));
+        }
     }
 
-    #[test]
-    fn truncated_display_empty() {
-        let failures: Vec<Failure> = vec![];
-        let t = Truncated(&failures, 5);
-        let s = format!("{t}");
-        assert!(s.is_empty());
+    mod truncated_display {
+        use assert2::{assert, check};
+
+        use super::*;
+
+        #[test]
+        fn truncated_display_within_limit() {
+            let failures: Vec<Failure> = (0..3)
+                .map(|i| {
+                    FailureBuilder::default()
+                        .addr(i * 8)
+                        .expected(0xFF)
+                        .actual(0xFE)
+                        .build()
+                })
+                .collect();
+            let t = Truncated(&failures, 5);
+            let s = format!("{t}");
+            assert!(!s.contains("more"));
+            check!(s.lines().count() == 3);
+        }
+
+        #[test]
+        fn truncated_display_exceeds_limit() {
+            let failures: Vec<Failure> = (0..10)
+                .map(|i| {
+                    FailureBuilder::default()
+                        .addr(i * 8)
+                        .expected(0xFF)
+                        .actual(0xFE)
+                        .build()
+                })
+                .collect();
+            let t = Truncated(&failures, 3);
+            let s = format!("{t}");
+            assert!(s.contains("...+7 more"));
+        }
+
+        #[test]
+        fn truncated_display_empty() {
+            let failures: Vec<Failure> = vec![];
+            let t = Truncated(&failures, 5);
+            let s = format!("{t}");
+            assert!(s.is_empty());
+        }
     }
 
-    #[test]
-    fn dimm_info_printed() {
-        use crate::dimm::{DimmEntry, DimmTopology};
-        use crate::edac::DimmEdac;
+    mod dimm_info {
+        use assert2::assert;
 
-        let mut p = printer();
-        let topology = DimmTopology {
-            dimms: vec![DimmEntry {
-                edac: Some(DimmEdac {
-                    mc: 0,
-                    dimm_index: 0,
-                    label: Some("DIMM_A1".to_owned()),
-                    location: None,
-                    ce_count: 0,
-                    ue_count: 0,
-                }),
-                smbios: None,
-            }],
-        };
-        p.handle_event(&RunEvent::DimmInfo { topology });
-        let out = output(&p);
-        assert!(out.contains("Installed DIMMs"));
-        assert!(out.contains("DIMM_A1"));
-    }
+        use super::*;
 
-    #[test]
-    fn consume_stops_on_disconnect() {
-        let (tx, rx) = crate::events::event_bus();
-        tx.send(RunEvent::RunStart {
-            size: 1024,
-            passes: 1,
-            patterns: vec![],
-            workers: 4,
-        })
-        .unwrap();
-        drop(tx);
+        #[test]
+        fn dimm_info_printed() {
+            use crate::dimm::{DimmEntry, DimmTopology};
+            use crate::edac::DimmEdac;
 
-        let mut p = printer();
-        p.consume(&rx);
-        let out = output(&p);
-        assert!(out.contains("ferrite"));
+            let mut p = printer();
+            let topology = DimmTopology {
+                dimms: vec![DimmEntry {
+                    edac: Some(DimmEdac {
+                        mc: 0,
+                        dimm_index: 0,
+                        label: Some("DIMM_A1".to_owned()),
+                        location: None,
+                        ce_count: 0,
+                        ue_count: 0,
+                    }),
+                    smbios: None,
+                }],
+            };
+            p.handle_event(&RunEvent::DimmInfo { topology });
+            let out = output(&p);
+            assert!(out.contains("Installed DIMMs"));
+            assert!(out.contains("DIMM_A1"));
+        }
     }
 }

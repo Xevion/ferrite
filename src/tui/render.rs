@@ -352,7 +352,7 @@ fn render_controls(frame: &mut Frame, area: ratatui::layout::Rect) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::super::FlippedBits;
     use super::*;
@@ -365,32 +365,33 @@ mod tests {
         )
     }
 
-    #[test]
-    fn symbol_set_char_for_zero_returns_first() {
-        for set in [
-            SymbolSet::Block,
-            SymbolSet::Braille,
-            SymbolSet::Eighth,
-            SymbolSet::Shade,
-            SymbolSet::Ascii,
-        ] {
+    mod symbol_set {
+        use assert2::{assert, check};
+        use rstest::rstest;
+
+        use super::*;
+
+        #[rstest]
+        #[case(SymbolSet::Block)]
+        #[case(SymbolSet::Braille)]
+        #[case(SymbolSet::Eighth)]
+        #[case(SymbolSet::Shade)]
+        #[case(SymbolSet::Ascii)]
+        fn char_for_zero_returns_first(#[case] set: SymbolSet) {
             let ch = set.char_for(0.0);
             check!(
                 ch == set.chars()[0],
                 "{set:?} char_for(0.0) should be first char"
             );
         }
-    }
 
-    #[test]
-    fn symbol_set_char_for_one_returns_last() {
-        for set in [
-            SymbolSet::Block,
-            SymbolSet::Braille,
-            SymbolSet::Eighth,
-            SymbolSet::Shade,
-            SymbolSet::Ascii,
-        ] {
+        #[rstest]
+        #[case(SymbolSet::Block)]
+        #[case(SymbolSet::Braille)]
+        #[case(SymbolSet::Eighth)]
+        #[case(SymbolSet::Shade)]
+        #[case(SymbolSet::Ascii)]
+        fn char_for_one_returns_last(#[case] set: SymbolSet) {
             let ch = set.char_for(1.0);
             let chars = set.chars();
             check!(
@@ -398,52 +399,49 @@ mod tests {
                 "{set:?} char_for(1.0) should be last char"
             );
         }
-    }
 
-    #[test]
-    fn symbol_set_char_for_clamps_above_one() {
-        let ch = SymbolSet::Ascii.char_for(5.0);
-        check!(ch == '@'); // last ASCII char
-    }
+        #[test]
+        fn char_for_clamps_above_one() {
+            let ch = SymbolSet::Ascii.char_for(5.0);
+            check!(ch == '@'); // last ASCII char
+        }
 
-    #[test]
-    fn symbol_set_char_for_clamps_below_zero() {
-        let ch = SymbolSet::Ascii.char_for(-1.0);
-        check!(ch == '.'); // first ASCII char
-    }
+        #[test]
+        fn char_for_clamps_below_zero() {
+            let ch = SymbolSet::Ascii.char_for(-1.0);
+            check!(ch == '.'); // first ASCII char
+        }
 
-    #[test]
-    fn symbol_set_char_for_midpoint() {
-        let ch = SymbolSet::Ascii.char_for(0.5);
-        let chars = SymbolSet::Ascii.chars();
-        // 0.5 * 7 = 3.5, rounds to 4 -> '+'
-        check!(ch == chars[4]);
-    }
+        #[test]
+        fn char_for_midpoint() {
+            let ch = SymbolSet::Ascii.char_for(0.5);
+            let chars = SymbolSet::Ascii.chars();
+            // 0.5 * 7 = 3.5, rounds to 4 -> '+'
+            check!(ch == chars[4]);
+        }
 
-    #[test]
-    fn symbol_set_all_have_nonempty_chars() {
-        for set in [
-            SymbolSet::Block,
-            SymbolSet::Braille,
-            SymbolSet::Eighth,
-            SymbolSet::Shade,
-            SymbolSet::Ascii,
-        ] {
+        #[rstest]
+        #[case(SymbolSet::Block)]
+        #[case(SymbolSet::Braille)]
+        #[case(SymbolSet::Eighth)]
+        #[case(SymbolSet::Shade)]
+        #[case(SymbolSet::Ascii)]
+        fn all_have_nonempty_chars(#[case] set: SymbolSet) {
             assert!(!set.chars().is_empty());
         }
-    }
 
-    #[test]
-    fn symbol_set_equality() {
-        check!(SymbolSet::Braille == SymbolSet::Braille);
-        check!(SymbolSet::Block != SymbolSet::Ascii);
-    }
+        #[test]
+        fn equality() {
+            check!(SymbolSet::Braille == SymbolSet::Braille);
+            check!(SymbolSet::Block != SymbolSet::Ascii);
+        }
 
-    #[test]
-    fn symbol_set_clone() {
-        let s = SymbolSet::Shade;
-        let s2 = s;
-        check!(s == s2);
+        #[test]
+        fn clone() {
+            let s = SymbolSet::Shade;
+            let s2 = s;
+            check!(s == s2);
+        }
     }
 
     use ratatui::Terminal;

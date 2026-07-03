@@ -349,7 +349,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
     use crate::pattern::Pattern;
@@ -386,475 +386,529 @@ mod tests {
         assert!(ts.contains('T'), "timestamp should be ISO 8601: {ts}");
     }
 
-    #[test]
-    fn header_emitted_on_construction() {
-        let (w, path) = test_writer();
-        drop(w);
+    mod writer_construction {
+        use assert2::check;
 
-        let events = read_events(&path);
-        check!(events.len() == 1);
-        check!(events[0]["event"] == "header");
-        check!(events[0]["schema_version"] == 1);
-        assert_has_timestamp(&events[0]);
-        let _ = std::fs::remove_file(&path);
+        use super::*;
+
+        #[test]
+        fn header_emitted_on_construction() {
+            let (w, path) = test_writer();
+            drop(w);
+
+            let events = read_events(&path);
+            check!(events.len() == 1);
+            check!(events[0]["event"] == "header");
+            check!(events[0]["schema_version"] == 1);
+            assert_has_timestamp(&events[0]);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn stdout_writer() {
+            let w = NdjsonEventWriter::from_path("-").unwrap();
+            check!(!w.broken_pipe);
+        }
+
+        #[test]
+        fn empty_path_is_stdout() {
+            let w = NdjsonEventWriter::from_path("").unwrap();
+            check!(!w.broken_pipe);
+        }
     }
 
-    #[test]
-    fn run_start_event() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::RunStart {
-            size: 1_073_741_824,
-            passes: 2,
-            patterns: vec![Pattern::SolidBits, Pattern::WalkingOnes],
-            workers: 4,
-        });
-        drop(w);
+    mod run_lifecycle {
+        use assert2::{assert, check};
 
-        let events = read_events(&path);
-        // header + run_start
-        check!(events.len() == 2);
-        let e = &events[1];
-        check!(e["event"] == "run_start");
-        check!(e["size"] == 1_073_741_824);
-        check!(e["passes"] == 2);
-        check!(e["workers"] == 4);
-        check!(e["patterns"].as_array().unwrap().len() == 2);
-        assert_has_timestamp(e);
-        let _ = std::fs::remove_file(&path);
-    }
+        use super::*;
 
-    #[test]
-    fn run_complete_event() {
-        let (mut w, path) = test_writer();
-        w.write_run_complete(
-            3,
-            5,
-            Duration::from_secs(10),
-            crate::physmem::sysmem::Coverage::Measured {
-                tested_bytes: 1024,
-                total_bytes: 4096,
-                source: crate::physmem::sysmem::RamSource::ProcIomem,
-                cumulative: None,
-                gap: None,
-            },
-        );
-        drop(w);
+        #[test]
+        fn run_start_event() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::RunStart {
+                size: 1_073_741_824,
+                passes: 2,
+                patterns: vec![Pattern::SolidBits, Pattern::WalkingOnes],
+                workers: 4,
+            });
+            drop(w);
 
-        let events = read_events(&path);
-        // header + run_complete
-        check!(events.len() == 2);
-        let e = &events[1];
-        check!(e["event"] == "run_complete");
-        check!(e["passes"] == 3);
-        check!(e["total_failures"] == 5);
-        assert!(e["duration_ms"].as_f64().unwrap() > 0.0);
-        check!(e["coverage"]["status"] == "measured");
-        check!(e["coverage"]["tested_bytes"] == 1024);
-        check!(e["coverage"]["source"] == "proc_iomem");
-        assert_has_timestamp(e);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn run_complete_internal_event_ignored() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::RunComplete);
-        drop(w);
-
-        let events = read_events(&path);
-        // Only header — RunComplete from event bus is a no-op;
-        // the summary is written explicitly via write_run_complete.
-        check!(events.len() == 1);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn dimm_info_event() {
-        use crate::dimm::{DimmEntry, DimmTopology};
-
-        let (mut w, path) = test_writer();
-        let topology = DimmTopology {
-            dimms: vec![
-                DimmEntry {
-                    edac: None,
-                    smbios: None,
-                },
-                DimmEntry {
-                    edac: None,
-                    smbios: None,
-                },
-            ],
-        };
-        w.handle_event(&RunEvent::DimmInfo { topology });
-        drop(w);
-
-        let events = read_events(&path);
-        check!(events.len() == 2);
-        let e = &events[1];
-        check!(e["event"] == "dimm_info");
-        check!(e["dimm_count"] == 2);
-        assert_has_timestamp(e);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn log_event() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::Log {
-            level: tracing::Level::WARN,
-            target: "ferrite::runner".to_owned(),
-            message: "something happened".to_owned(),
-            fields: serde_json::json!({"key": "value"}),
-        });
-        drop(w);
-
-        let events = read_events(&path);
-        check!(events.len() == 2);
-        let e = &events[1];
-        check!(e["event"] == "log");
-        check!(e["level"] == "WARN");
-        check!(e["target"] == "ferrite::runner");
-        check!(e["message"] == "something happened");
-        check!(e["fields"]["key"] == "value");
-        assert_has_timestamp(e);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn log_event_empty_fields_omitted() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::Log {
-            level: tracing::Level::INFO,
-            target: "ferrite".to_owned(),
-            message: "no fields".to_owned(),
-            fields: serde_json::json!({}),
-        });
-        drop(w);
-
-        let events = read_events(&path);
-        let e = &events[1];
-        check!(e["event"] == "log");
-        check!(!e.as_object().unwrap().contains_key("fields"));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn pass_start_event() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::PassStart {
-            pass: 1,
-            total_passes: 3,
-        });
-        drop(w);
-
-        let events = read_events(&path);
-        check!(events.len() == 2);
-        let e = &events[1];
-        check!(e["event"] == "pass_start");
-        check!(e["pass"] == 1);
-        check!(e["total_passes"] == 3);
-        assert_has_timestamp(e);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_start_event() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::TestStart {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-        });
-        drop(w);
-
-        let events = read_events(&path);
-        let e = &events[1];
-        check!(e["event"] == "test_start");
-        check!(e["pattern"] == "Solid Bits");
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_pass_event() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::TestComplete {
-            pattern: Pattern::Checkerboard,
-            pass: 1,
-            elapsed: Duration::from_millis(100),
-            bytes: 1024,
-            failures: vec![],
-            interrupted: false,
-        });
-        drop(w);
-
-        let events = read_events(&path);
-        let e = &events[1];
-        check!(e["event"] == "test_pass");
-        check!(e["pattern"] == "Checkerboard");
-        assert!(e["duration_ms"].as_f64().unwrap() > 0.0);
-        // A non-interrupted pass omits the field entirely.
-        assert!(e["interrupted"].is_null());
-        assert_has_timestamp(e);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_pass_emits_interrupted_flag_when_set() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::TestComplete {
-            pattern: Pattern::WalkingOnes,
-            pass: 1,
-            elapsed: Duration::from_millis(10),
-            bytes: 1024,
-            failures: vec![],
-            interrupted: true,
-        });
-        drop(w);
-
-        let events = read_events(&path);
-        let e = &events[1];
-        check!(e["event"] == "test_pass");
-        check!(e["interrupted"] == true);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_fail_includes_failures() {
-        let (mut w, path) = test_writer();
-        let failures = vec![Failure {
-            addr: 0x1000,
-            expected: 0xFF,
-            actual: 0xFE,
-            word_index: 0,
-            phys_addr: Some(PhysAddr(0xABCD)),
-        }];
-        w.handle_event(&RunEvent::TestComplete {
-            pattern: Pattern::WalkingOnes,
-            pass: 2,
-            elapsed: Duration::from_millis(50),
-            bytes: 512,
-            failures,
-            interrupted: false,
-        });
-        drop(w);
-
-        let events = read_events(&path);
-        let e = &events[1];
-        check!(e["event"] == "test_fail");
-        let f = &e["failures"][0];
-        check!(f["flipped_bits"] == 1);
-        assert!(f["phys_addr"].as_str().is_some());
-        check!(f["word_index"] == 0);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn pass_complete_event() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::PassComplete {
-            pass: 1,
-            failures: 5,
-            elapsed: Duration::from_secs(2),
-        });
-        drop(w);
-
-        let events = read_events(&path);
-        let e = &events[1];
-        check!(e["event"] == "pass_complete");
-        check!(e["failures"] == 5);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn progress_event() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::Progress {
-            pattern: Pattern::StuckAddress,
-            pass: 1,
-            sub_pass: 3,
-            total: 5,
-        });
-        drop(w);
-
-        let events = read_events(&path);
-        let e = &events[1];
-        check!(e["event"] == "progress");
-        check!(e["sub_pass"] == 3);
-        check!(e["total_sub_passes"] == 5);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn ecc_deltas_event() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::EccDeltas {
-            pass: 1,
-            deltas: vec![crate::edac::EccDelta {
-                mc: 0,
-                dimm_index: 1,
-                label: Some("DIMM_A1".to_owned()),
-                ce_delta: 2,
-                ue_delta: 0,
-            }],
-        });
-        drop(w);
-
-        let events = read_events(&path);
-        let e = &events[1];
-        check!(e["event"] == "ecc_deltas");
-        check!(e["deltas"][0]["ce_delta"] == 2);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn map_info_event() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::MapInfo {
-            stats: MapStats {
-                total_pages: 100,
-                resolved_pages: 100,
-                huge_pages: 5,
-                thp_pages: 10,
-                hwpoison_pages: 0,
-                unevictable_pages: 90,
-            },
-        });
-        drop(w);
-
-        let events = read_events(&path);
-        check!(events.len() == 2);
-        let e = &events[1];
-        check!(e["event"] == "map_info");
-        check!(e["total_pages"] == 100);
-        check!(e["huge_pages"] == 5);
-        assert_has_timestamp(e);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn failure_record_from_without_phys() {
-        let f = Failure {
-            addr: 0x2000,
-            expected: 0xAAAA,
-            actual: 0xBBBB,
-            word_index: 5,
-            phys_addr: None,
-        };
-        let r = FailureRecord::from(&f);
-        assert!(r.phys_addr.is_none());
-        check!(r.word_index == 5);
-        check!(r.flipped_bits == f.flipped_bits());
-    }
-
-    #[test]
-    fn full_event_sequence() {
-        let (mut w, path) = test_writer();
-        w.handle_event(&RunEvent::RunStart {
-            size: 1024,
-            passes: 1,
-            patterns: vec![Pattern::SolidBits],
-            workers: 1,
-        });
-        w.handle_event(&RunEvent::PassStart {
-            pass: 1,
-            total_passes: 1,
-        });
-        w.handle_event(&RunEvent::TestStart {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-        });
-        w.handle_event(&RunEvent::TestComplete {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-            elapsed: Duration::from_millis(50),
-            bytes: 1024,
-            failures: vec![],
-            interrupted: false,
-        });
-        w.handle_event(&RunEvent::PassComplete {
-            pass: 1,
-            failures: 0,
-            elapsed: Duration::from_millis(100),
-        });
-        w.write_run_complete(
-            1,
-            0,
-            Duration::from_millis(100),
-            crate::physmem::sysmem::Coverage::Unavailable,
-        );
-        drop(w);
-
-        let events = read_events(&path);
-        check!(events.len() == 7);
-        check!(events[0]["event"] == "header");
-        check!(events[1]["event"] == "run_start");
-        check!(events[2]["event"] == "pass_start");
-        check!(events[3]["event"] == "test_start");
-        check!(events[4]["event"] == "test_pass");
-        check!(events[5]["event"] == "pass_complete");
-        check!(events[6]["event"] == "run_complete");
-
-        // Every event has a timestamp
-        for e in &events {
+            let events = read_events(&path);
+            // header + run_start
+            check!(events.len() == 2);
+            let e = &events[1];
+            check!(e["event"] == "run_start");
+            check!(e["size"] == 1_073_741_824);
+            check!(e["passes"] == 2);
+            check!(e["workers"] == 4);
+            check!(e["patterns"].as_array().unwrap().len() == 2);
             assert_has_timestamp(e);
-        }
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn broken_pipe_suppresses_further_writes() {
-        use std::io::{self, Write};
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-
-        struct BrokenWriter {
-            call_count: Arc<AtomicUsize>,
+            let _ = std::fs::remove_file(&path);
         }
 
-        impl Write for BrokenWriter {
-            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-                self.call_count.fetch_add(1, AtomicOrdering::Relaxed);
-                Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"))
+        #[test]
+        fn pass_start_event() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::PassStart {
+                pass: 1,
+                total_passes: 3,
+            });
+            drop(w);
+
+            let events = read_events(&path);
+            check!(events.len() == 2);
+            let e = &events[1];
+            check!(e["event"] == "pass_start");
+            check!(e["pass"] == 1);
+            check!(e["total_passes"] == 3);
+            assert_has_timestamp(e);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn pass_complete_event() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::PassComplete {
+                pass: 1,
+                failures: 5,
+                elapsed: Duration::from_secs(2),
+            });
+            drop(w);
+
+            let events = read_events(&path);
+            let e = &events[1];
+            check!(e["event"] == "pass_complete");
+            check!(e["failures"] == 5);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn run_complete_event() {
+            let (mut w, path) = test_writer();
+            w.write_run_complete(
+                3,
+                5,
+                Duration::from_secs(10),
+                crate::physmem::sysmem::Coverage::Measured {
+                    tested_bytes: 1024,
+                    total_bytes: 4096,
+                    source: crate::physmem::sysmem::RamSource::ProcIomem,
+                    cumulative: None,
+                    gap: None,
+                },
+            );
+            drop(w);
+
+            let events = read_events(&path);
+            // header + run_complete
+            check!(events.len() == 2);
+            let e = &events[1];
+            check!(e["event"] == "run_complete");
+            check!(e["passes"] == 3);
+            check!(e["total_failures"] == 5);
+            assert!(e["duration_ms"].as_f64().unwrap() > 0.0);
+            check!(e["coverage"]["status"] == "measured");
+            check!(e["coverage"]["tested_bytes"] == 1024);
+            check!(e["coverage"]["source"] == "proc_iomem");
+            assert_has_timestamp(e);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn run_complete_internal_event_ignored() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::RunComplete);
+            drop(w);
+
+            let events = read_events(&path);
+            // Only header — RunComplete from event bus is a no-op;
+            // the summary is written explicitly via write_run_complete.
+            check!(events.len() == 1);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn full_event_sequence() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::RunStart {
+                size: 1024,
+                passes: 1,
+                patterns: vec![Pattern::SolidBits],
+                workers: 1,
+            });
+            w.handle_event(&RunEvent::PassStart {
+                pass: 1,
+                total_passes: 1,
+            });
+            w.handle_event(&RunEvent::TestStart {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+            });
+            w.handle_event(&RunEvent::TestComplete {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+                elapsed: Duration::from_millis(50),
+                bytes: 1024,
+                failures: vec![],
+                interrupted: false,
+            });
+            w.handle_event(&RunEvent::PassComplete {
+                pass: 1,
+                failures: 0,
+                elapsed: Duration::from_millis(100),
+            });
+            w.write_run_complete(
+                1,
+                0,
+                Duration::from_millis(100),
+                crate::physmem::sysmem::Coverage::Unavailable,
+            );
+            drop(w);
+
+            let events = read_events(&path);
+            check!(events.len() == 7);
+            check!(events[0]["event"] == "header");
+            check!(events[1]["event"] == "run_start");
+            check!(events[2]["event"] == "pass_start");
+            check!(events[3]["event"] == "test_start");
+            check!(events[4]["event"] == "test_pass");
+            check!(events[5]["event"] == "pass_complete");
+            check!(events[6]["event"] == "run_complete");
+
+            // Every event has a timestamp
+            for e in &events {
+                assert_has_timestamp(e);
             }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    mod test_events {
+        use assert2::{assert, check};
+
+        use super::*;
+
+        #[test]
+        fn test_start_event() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::TestStart {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+            });
+            drop(w);
+
+            let events = read_events(&path);
+            let e = &events[1];
+            check!(e["event"] == "test_start");
+            check!(e["pattern"] == "Solid Bits");
+            let _ = std::fs::remove_file(&path);
         }
 
-        let count = Arc::new(AtomicUsize::new(0));
-        let writer: Box<dyn Write + Send> = Box::new(BrokenWriter {
-            call_count: Arc::clone(&count),
-        });
-        // Construct directly to bypass header write (which would break on BrokenWriter)
-        let mut w = NdjsonEventWriter {
-            writer: std::io::BufWriter::with_capacity(0, writer),
-            broken_pipe: false,
-        };
+        #[test]
+        fn test_pass_event() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::TestComplete {
+                pattern: Pattern::Checkerboard,
+                pass: 1,
+                elapsed: Duration::from_millis(100),
+                bytes: 1024,
+                failures: vec![],
+                interrupted: false,
+            });
+            drop(w);
 
-        w.handle_event(&RunEvent::PassStart {
-            pass: 1,
-            total_passes: 1,
-        });
-        assert!(w.broken_pipe);
-        let count_after_break = count.load(AtomicOrdering::Relaxed);
-        check!(count_after_break > 0);
+            let events = read_events(&path);
+            let e = &events[1];
+            check!(e["event"] == "test_pass");
+            check!(e["pattern"] == "Checkerboard");
+            assert!(e["duration_ms"].as_f64().unwrap() > 0.0);
+            // A non-interrupted pass omits the field entirely.
+            assert!(e["interrupted"].is_null());
+            assert_has_timestamp(e);
+            let _ = std::fs::remove_file(&path);
+        }
 
-        // Second event should be suppressed — no additional write calls
-        w.handle_event(&RunEvent::PassStart {
-            pass: 2,
-            total_passes: 2,
-        });
-        check!(count.load(AtomicOrdering::Relaxed) == count_after_break);
+        #[test]
+        fn test_pass_emits_interrupted_flag_when_set() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::TestComplete {
+                pattern: Pattern::WalkingOnes,
+                pass: 1,
+                elapsed: Duration::from_millis(10),
+                bytes: 1024,
+                failures: vec![],
+                interrupted: true,
+            });
+            drop(w);
+
+            let events = read_events(&path);
+            let e = &events[1];
+            check!(e["event"] == "test_pass");
+            check!(e["interrupted"] == true);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn test_fail_includes_failures() {
+            let (mut w, path) = test_writer();
+            let failures = vec![Failure {
+                addr: 0x1000,
+                expected: 0xFF,
+                actual: 0xFE,
+                word_index: 0,
+                phys_addr: Some(PhysAddr(0xABCD)),
+            }];
+            w.handle_event(&RunEvent::TestComplete {
+                pattern: Pattern::WalkingOnes,
+                pass: 2,
+                elapsed: Duration::from_millis(50),
+                bytes: 512,
+                failures,
+                interrupted: false,
+            });
+            drop(w);
+
+            let events = read_events(&path);
+            let e = &events[1];
+            check!(e["event"] == "test_fail");
+            let f = &e["failures"][0];
+            check!(f["flipped_bits"] == 1);
+            assert!(f["phys_addr"].as_str().is_some());
+            check!(f["word_index"] == 0);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn progress_event() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::Progress {
+                pattern: Pattern::StuckAddress,
+                pass: 1,
+                sub_pass: 3,
+                total: 5,
+            });
+            drop(w);
+
+            let events = read_events(&path);
+            let e = &events[1];
+            check!(e["event"] == "progress");
+            check!(e["sub_pass"] == 3);
+            check!(e["total_sub_passes"] == 5);
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
-    #[test]
-    fn stdout_writer() {
-        let w = NdjsonEventWriter::from_path("-").unwrap();
-        check!(!w.broken_pipe);
+    mod map_info {
+        use assert2::check;
+
+        use super::*;
+
+        #[test]
+        fn map_info_event() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::MapInfo {
+                stats: MapStats {
+                    total_pages: 100,
+                    resolved_pages: 100,
+                    huge_pages: 5,
+                    thp_pages: 10,
+                    hwpoison_pages: 0,
+                    unevictable_pages: 90,
+                },
+            });
+            drop(w);
+
+            let events = read_events(&path);
+            check!(events.len() == 2);
+            let e = &events[1];
+            check!(e["event"] == "map_info");
+            check!(e["total_pages"] == 100);
+            check!(e["huge_pages"] == 5);
+            assert_has_timestamp(e);
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
-    #[test]
-    fn empty_path_is_stdout() {
-        let w = NdjsonEventWriter::from_path("").unwrap();
-        check!(!w.broken_pipe);
+    mod dimm_info {
+        use assert2::check;
+
+        use super::*;
+
+        #[test]
+        fn dimm_info_event() {
+            use crate::dimm::{DimmEntry, DimmTopology};
+
+            let (mut w, path) = test_writer();
+            let topology = DimmTopology {
+                dimms: vec![
+                    DimmEntry {
+                        edac: None,
+                        smbios: None,
+                    },
+                    DimmEntry {
+                        edac: None,
+                        smbios: None,
+                    },
+                ],
+            };
+            w.handle_event(&RunEvent::DimmInfo { topology });
+            drop(w);
+
+            let events = read_events(&path);
+            check!(events.len() == 2);
+            let e = &events[1];
+            check!(e["event"] == "dimm_info");
+            check!(e["dimm_count"] == 2);
+            assert_has_timestamp(e);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    mod ecc_deltas {
+        use assert2::check;
+
+        use super::*;
+
+        #[test]
+        fn ecc_deltas_event() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::EccDeltas {
+                pass: 1,
+                deltas: vec![crate::edac::EccDelta {
+                    mc: 0,
+                    dimm_index: 1,
+                    label: Some("DIMM_A1".to_owned()),
+                    ce_delta: 2,
+                    ue_delta: 0,
+                }],
+            });
+            drop(w);
+
+            let events = read_events(&path);
+            let e = &events[1];
+            check!(e["event"] == "ecc_deltas");
+            check!(e["deltas"][0]["ce_delta"] == 2);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    mod log_events {
+        use assert2::check;
+
+        use super::*;
+
+        #[test]
+        fn log_event() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::Log {
+                level: tracing::Level::WARN,
+                target: "ferrite::runner".to_owned(),
+                message: "something happened".to_owned(),
+                fields: serde_json::json!({"key": "value"}),
+            });
+            drop(w);
+
+            let events = read_events(&path);
+            check!(events.len() == 2);
+            let e = &events[1];
+            check!(e["event"] == "log");
+            check!(e["level"] == "WARN");
+            check!(e["target"] == "ferrite::runner");
+            check!(e["message"] == "something happened");
+            check!(e["fields"]["key"] == "value");
+            assert_has_timestamp(e);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn log_event_empty_fields_omitted() {
+            let (mut w, path) = test_writer();
+            w.handle_event(&RunEvent::Log {
+                level: tracing::Level::INFO,
+                target: "ferrite".to_owned(),
+                message: "no fields".to_owned(),
+                fields: serde_json::json!({}),
+            });
+            drop(w);
+
+            let events = read_events(&path);
+            let e = &events[1];
+            check!(e["event"] == "log");
+            check!(!e.as_object().unwrap().contains_key("fields"));
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    mod broken_pipe {
+        use assert2::{assert, check};
+
+        use super::*;
+
+        #[test]
+        fn broken_pipe_suppresses_further_writes() {
+            use std::io::{self, Write};
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+            struct BrokenWriter {
+                call_count: Arc<AtomicUsize>,
+            }
+
+            impl Write for BrokenWriter {
+                fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                    self.call_count.fetch_add(1, AtomicOrdering::Relaxed);
+                    Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"))
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+
+            let count = Arc::new(AtomicUsize::new(0));
+            let writer: Box<dyn Write + Send> = Box::new(BrokenWriter {
+                call_count: Arc::clone(&count),
+            });
+            // Construct directly to bypass header write (which would break on BrokenWriter)
+            let mut w = NdjsonEventWriter {
+                writer: std::io::BufWriter::with_capacity(0, writer),
+                broken_pipe: false,
+            };
+
+            w.handle_event(&RunEvent::PassStart {
+                pass: 1,
+                total_passes: 1,
+            });
+            assert!(w.broken_pipe);
+            let count_after_break = count.load(AtomicOrdering::Relaxed);
+            check!(count_after_break > 0);
+
+            // Second event should be suppressed — no additional write calls
+            w.handle_event(&RunEvent::PassStart {
+                pass: 2,
+                total_passes: 2,
+            });
+            check!(count.load(AtomicOrdering::Relaxed) == count_after_break);
+        }
+    }
+
+    mod failure_record {
+        use assert2::{assert, check};
+
+        use super::*;
+
+        #[test]
+        fn failure_record_from_without_phys() {
+            let f = Failure {
+                addr: 0x2000,
+                expected: 0xAAAA,
+                actual: 0xBBBB,
+                word_index: 5,
+                phys_addr: None,
+            };
+            let r = FailureRecord::from(&f);
+            assert!(r.phys_addr.is_none());
+            check!(r.word_index == 5);
+            check!(r.flipped_bits == f.flipped_bits());
+        }
     }
 }

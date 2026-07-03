@@ -146,19 +146,11 @@ impl EventBridge {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::float_cmp,
-    reason = "exact progress percentages are deterministic for fixed test inputs"
-)]
 mod tests {
     use std::sync::Arc;
     use std::sync::mpsc;
-    use std::time::Duration;
-
-    use assert2::{assert, check};
 
     use crate::events::RunEvent;
-    use crate::pattern::Pattern;
     use crate::tui::{Segment, TuiEvent};
 
     use super::EventBridge;
@@ -177,285 +169,345 @@ mod tests {
         (bridge, tui_rx)
     }
 
-    #[test]
-    fn test_start_sets_pattern() {
-        let segment = make_segment(&["solid", "walk"]);
-        let (mut bridge, _rx) = make_bridge(Arc::clone(&segment), 1);
+    mod pattern_tracking {
+        use std::time::Duration;
 
-        bridge.handle_event(&RunEvent::TestStart {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-        });
+        use assert2::check;
 
-        check!(segment.current_pattern() == "solid");
+        use crate::pattern::Pattern;
+
+        use super::*;
+
+        #[test]
+        fn test_start_sets_pattern() {
+            let segment = make_segment(&["solid", "walk"]);
+            let (mut bridge, _rx) = make_bridge(Arc::clone(&segment), 1);
+
+            bridge.handle_event(&RunEvent::TestStart {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+            });
+
+            check!(segment.current_pattern() == "solid");
+        }
+
+        #[test]
+        fn test_complete_advances_pattern_index() {
+            let segment = make_segment(&["solid", "walk"]);
+            let (mut bridge, _rx) = make_bridge(Arc::clone(&segment), 1);
+
+            // Start first pattern
+            bridge.handle_event(&RunEvent::TestStart {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+            });
+            check!(segment.current_pattern() == "solid");
+
+            // Complete it
+            bridge.handle_event(&RunEvent::TestComplete {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+                elapsed: Duration::from_millis(100),
+                bytes: 8192,
+                failures: vec![],
+                interrupted: false,
+            });
+
+            // Next test start should set pattern index 1
+            bridge.handle_event(&RunEvent::TestStart {
+                pattern: Pattern::WalkingOnes,
+                pass: 1,
+            });
+            check!(segment.current_pattern() == "walk");
+        }
     }
 
-    #[test]
-    fn progress_updates_segment() {
-        let segment = make_segment(&["solid"]);
-        let (mut bridge, _rx) = make_bridge(Arc::clone(&segment), 1);
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact progress percentages are deterministic for fixed test inputs"
+    )]
+    mod progress {
+        use assert2::check;
 
-        bridge.handle_event(&RunEvent::Progress {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-            sub_pass: 50,
-            total: 100,
-        });
+        use crate::pattern::Pattern;
 
-        check!(segment.progress_percent() == 50.0);
+        use super::*;
+
+        #[test]
+        fn progress_updates_segment() {
+            let segment = make_segment(&["solid"]);
+            let (mut bridge, _rx) = make_bridge(Arc::clone(&segment), 1);
+
+            bridge.handle_event(&RunEvent::Progress {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+                sub_pass: 50,
+                total: 100,
+            });
+
+            check!(segment.progress_percent() == 50.0);
+        }
+
+        #[test]
+        fn progress_zero_total_stores_zero() {
+            let segment = make_segment(&["solid"]);
+            let (mut bridge, _rx) = make_bridge(Arc::clone(&segment), 1);
+
+            bridge.handle_event(&RunEvent::Progress {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+                sub_pass: 50,
+                total: 0,
+            });
+
+            check!(segment.progress_percent() == 0.0);
+        }
     }
 
-    #[test]
-    fn progress_zero_total_stores_zero() {
-        let segment = make_segment(&["solid"]);
-        let (mut bridge, _rx) = make_bridge(Arc::clone(&segment), 1);
+    mod failures {
+        use std::time::Duration;
 
-        bridge.handle_event(&RunEvent::Progress {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-            sub_pass: 50,
-            total: 0,
-        });
+        use assert2::check;
 
-        check!(segment.progress_percent() == 0.0);
-    }
+        use crate::pattern::Pattern;
 
-    #[test]
-    fn test_complete_advances_pattern_index() {
-        let segment = make_segment(&["solid", "walk"]);
-        let (mut bridge, _rx) = make_bridge(Arc::clone(&segment), 1);
+        use super::*;
 
-        // Start first pattern
-        bridge.handle_event(&RunEvent::TestStart {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-        });
-        check!(segment.current_pattern() == "solid");
+        #[test]
+        fn test_complete_with_failures_sends_errors() {
+            use crate::failure::FailureBuilder;
 
-        // Complete it
-        bridge.handle_event(&RunEvent::TestComplete {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-            elapsed: Duration::from_millis(100),
-            bytes: 8192,
-            failures: vec![],
-            interrupted: false,
-        });
+            let segment = make_segment(&["solid"]);
+            let (mut bridge, rx) = make_bridge(Arc::clone(&segment), 1);
 
-        // Next test start should set pattern index 1
-        bridge.handle_event(&RunEvent::TestStart {
-            pattern: Pattern::WalkingOnes,
-            pass: 1,
-        });
-        check!(segment.current_pattern() == "walk");
-    }
+            let failure = FailureBuilder::default()
+                .addr(0xdead_0000_usize)
+                .expected(0xFF_u64)
+                .actual(0xFE_u64)
+                .build();
 
-    #[test]
-    fn test_complete_with_failures_sends_errors() {
-        use crate::failure::FailureBuilder;
+            bridge.handle_event(&RunEvent::TestComplete {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+                elapsed: Duration::from_millis(100),
+                bytes: 8192,
+                failures: vec![failure],
+                interrupted: false,
+            });
 
-        let segment = make_segment(&["solid"]);
-        let (mut bridge, rx) = make_bridge(Arc::clone(&segment), 1);
+            check!(segment.failure_count() == 1);
 
-        let failure = FailureBuilder::default()
-            .addr(0xdead_0000_usize)
-            .expected(0xFF_u64)
-            .actual(0xFE_u64)
-            .build();
-
-        bridge.handle_event(&RunEvent::TestComplete {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-            elapsed: Duration::from_millis(100),
-            bytes: 8192,
-            failures: vec![failure],
-            interrupted: false,
-        });
-
-        check!(segment.failure_count() == 1);
-
-        match rx.try_recv() {
-            Ok(TuiEvent::Failure(f)) => {
-                check!(f.segment_name == "r0");
-                check!(f.expected == 0xFF);
-                check!(f.actual == 0xFE);
-                check!(f.flipped_bits == crate::tui::FlippedBits::Single(0));
+            match rx.try_recv() {
+                Ok(TuiEvent::Failure(f)) => {
+                    check!(f.segment_name == "r0");
+                    check!(f.expected == 0xFF);
+                    check!(f.actual == 0xFE);
+                    check!(f.flipped_bits == crate::tui::FlippedBits::Single(0));
+                }
+                other => panic!("expected TuiEvent::Failure, got {other:?}"),
             }
-            other => panic!("expected TuiEvent::Failure, got {other:?}"),
         }
     }
 
-    #[test]
-    fn pass_complete_resets_pattern_index() {
-        let segment = make_segment(&["solid", "walk"]);
-        let (mut bridge, _rx) = make_bridge(Arc::clone(&segment), 2);
+    mod pass_complete {
+        use std::time::Duration;
 
-        // Simulate completing first pass
-        bridge.handle_event(&RunEvent::TestComplete {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-            elapsed: Duration::from_millis(50),
-            bytes: 4096,
-            failures: vec![],
-            interrupted: false,
-        });
-        // pattern_index is now 1
+        use assert2::check;
 
-        bridge.handle_event(&RunEvent::PassComplete {
-            pass: 1,
-            failures: 0,
-            elapsed: Duration::from_millis(100),
-        });
+        use crate::pattern::Pattern;
 
-        // After pass complete, next TestStart should use index 0 again
-        bridge.handle_event(&RunEvent::TestStart {
-            pattern: Pattern::SolidBits,
-            pass: 2,
-        });
-        check!(segment.current_pattern() == "solid");
-    }
+        use super::*;
 
-    #[test]
-    fn pass_complete_final_pass_sends_done() {
-        let segment = make_segment(&["solid"]);
-        let (mut bridge, rx) = make_bridge(segment, 1);
+        #[test]
+        fn pass_complete_resets_pattern_index() {
+            let segment = make_segment(&["solid", "walk"]);
+            let (mut bridge, _rx) = make_bridge(Arc::clone(&segment), 2);
 
-        bridge.handle_event(&RunEvent::PassComplete {
-            pass: 1,
-            failures: 0,
-            elapsed: Duration::from_millis(100),
-        });
+            // Simulate completing first pass
+            bridge.handle_event(&RunEvent::TestComplete {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+                elapsed: Duration::from_millis(50),
+                bytes: 4096,
+                failures: vec![],
+                interrupted: false,
+            });
+            // pattern_index is now 1
 
-        match rx.try_recv() {
-            Ok(TuiEvent::Done) => {}
-            other => panic!("expected TuiEvent::Done, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pass_complete_non_final_no_done() {
-        let segment = make_segment(&["solid"]);
-        let (mut bridge, rx) = make_bridge(segment, 3);
-
-        bridge.handle_event(&RunEvent::PassComplete {
-            pass: 1,
-            failures: 0,
-            elapsed: Duration::from_millis(100),
-        });
-
-        check!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn run_complete_returns_false() {
-        let segment = make_segment(&["solid"]);
-        let (mut bridge, _rx) = make_bridge(segment, 1);
-
-        let cont = bridge.handle_event(&RunEvent::RunComplete);
-        assert!(!cont);
-    }
-
-    #[test]
-    fn run_sends_done_for_incomplete_segment() {
-        let segment = make_segment(&["solid"]);
-        let (bridge, rx) = make_bridge(segment, 1);
-
-        let (event_tx, event_rx) = crate::events::event_bus();
-        // Send RunComplete without any PassComplete -- the segment never completed.
-        event_tx.send(RunEvent::RunComplete).unwrap();
-        drop(event_tx);
-
-        bridge.run(&event_rx, None);
-
-        let done_count = std::iter::from_fn(|| rx.try_recv().ok())
-            .filter(|e| matches!(e, TuiEvent::Done))
-            .count();
-        check!(done_count == 1);
-    }
-
-    #[test]
-    fn run_no_duplicate_done_for_completed_segment() {
-        let segment = make_segment(&["solid"]);
-        let (bridge, rx) = make_bridge(segment, 1);
-
-        let (event_tx, event_rx) = crate::events::event_bus();
-        // Segment completes naturally, then RunComplete
-        event_tx
-            .send(RunEvent::PassComplete {
+            bridge.handle_event(&RunEvent::PassComplete {
                 pass: 1,
                 failures: 0,
                 elapsed: Duration::from_millis(100),
-            })
-            .unwrap();
-        event_tx.send(RunEvent::RunComplete).unwrap();
-        drop(event_tx);
+            });
 
-        bridge.run(&event_rx, None);
+            // After pass complete, next TestStart should use index 0 again
+            bridge.handle_event(&RunEvent::TestStart {
+                pattern: Pattern::SolidBits,
+                pass: 2,
+            });
+            check!(segment.current_pattern() == "solid");
+        }
 
-        let done_count = std::iter::from_fn(|| rx.try_recv().ok())
-            .filter(|e| matches!(e, TuiEvent::Done))
-            .count();
-        // One from PassComplete, zero from cleanup
-        check!(done_count == 1);
+        #[test]
+        fn pass_complete_final_pass_sends_done() {
+            let segment = make_segment(&["solid"]);
+            let (mut bridge, rx) = make_bridge(segment, 1);
+
+            bridge.handle_event(&RunEvent::PassComplete {
+                pass: 1,
+                failures: 0,
+                elapsed: Duration::from_millis(100),
+            });
+
+            match rx.try_recv() {
+                Ok(TuiEvent::Done) => {}
+                other => panic!("expected TuiEvent::Done, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn pass_complete_non_final_no_done() {
+            let segment = make_segment(&["solid"]);
+            let (mut bridge, rx) = make_bridge(segment, 3);
+
+            bridge.handle_event(&RunEvent::PassComplete {
+                pass: 1,
+                failures: 0,
+                elapsed: Duration::from_millis(100),
+            });
+
+            check!(rx.try_recv().is_err());
+        }
     }
 
-    #[test]
-    fn dimm_info_handled_without_panic() {
-        use crate::dimm::{DimmEntry, DimmTopology};
-        use crate::edac::DimmEdac;
+    mod run_complete {
+        use assert2::assert;
 
-        let segment = make_segment(&["solid"]);
-        let (mut bridge, _rx) = make_bridge(segment, 1);
+        use super::*;
 
-        let topology = DimmTopology {
-            dimms: vec![DimmEntry {
-                edac: Some(DimmEdac {
+        #[test]
+        fn run_complete_returns_false() {
+            let segment = make_segment(&["solid"]);
+            let (mut bridge, _rx) = make_bridge(segment, 1);
+
+            let cont = bridge.handle_event(&RunEvent::RunComplete);
+            assert!(!cont);
+        }
+    }
+
+    mod run_loop {
+        use assert2::check;
+
+        use super::*;
+
+        #[test]
+        fn run_sends_done_for_incomplete_segment() {
+            let segment = make_segment(&["solid"]);
+            let (bridge, rx) = make_bridge(segment, 1);
+
+            let (event_tx, event_rx) = crate::events::event_bus();
+            // Send RunComplete without any PassComplete -- the segment never completed.
+            event_tx.send(RunEvent::RunComplete).unwrap();
+            drop(event_tx);
+
+            bridge.run(&event_rx, None);
+
+            let done_count = std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|e| matches!(e, TuiEvent::Done))
+                .count();
+            check!(done_count == 1);
+        }
+
+        #[test]
+        fn run_no_duplicate_done_for_completed_segment() {
+            let segment = make_segment(&["solid"]);
+            let (bridge, rx) = make_bridge(segment, 1);
+
+            let (event_tx, event_rx) = crate::events::event_bus();
+            // Segment completes naturally, then RunComplete
+            event_tx
+                .send(RunEvent::PassComplete {
+                    pass: 1,
+                    failures: 0,
+                    elapsed: std::time::Duration::from_millis(100),
+                })
+                .unwrap();
+            event_tx.send(RunEvent::RunComplete).unwrap();
+            drop(event_tx);
+
+            bridge.run(&event_rx, None);
+
+            let done_count = std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|e| matches!(e, TuiEvent::Done))
+                .count();
+            // One from PassComplete, zero from cleanup
+            check!(done_count == 1);
+        }
+
+        #[test]
+        fn run_on_disconnect_sends_done_for_incomplete() {
+            let segment = make_segment(&["solid"]);
+            let (bridge, rx) = make_bridge(segment, 1);
+
+            let (event_tx, event_rx) = crate::events::event_bus();
+            // Drop sender without sending RunComplete -- simulates disconnect
+            drop(event_tx);
+
+            bridge.run(&event_rx, None);
+
+            let done_count = std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|e| matches!(e, TuiEvent::Done))
+                .count();
+            check!(done_count == 1);
+        }
+    }
+
+    mod dimm_and_ecc {
+        use assert2::assert;
+
+        use super::*;
+
+        #[test]
+        fn dimm_info_handled_without_panic() {
+            use crate::dimm::{DimmEntry, DimmTopology};
+            use crate::edac::DimmEdac;
+
+            let segment = make_segment(&["solid"]);
+            let (mut bridge, _rx) = make_bridge(segment, 1);
+
+            let topology = DimmTopology {
+                dimms: vec![DimmEntry {
+                    edac: Some(DimmEdac {
+                        mc: 0,
+                        dimm_index: 0,
+                        label: Some("DIMM_A1".to_owned()),
+                        location: None,
+                        ce_count: 0,
+                        ue_count: 0,
+                    }),
+                    smbios: None,
+                }],
+            };
+            let cont = bridge.handle_event(&RunEvent::DimmInfo { topology });
+            assert!(cont);
+        }
+
+        #[test]
+        fn ecc_deltas_handled_without_panic() {
+            let segment = make_segment(&["solid"]);
+            let (mut bridge, _rx) = make_bridge(segment, 1);
+
+            let cont = bridge.handle_event(&RunEvent::EccDeltas {
+                pass: 1,
+                deltas: vec![crate::edac::EccDelta {
                     mc: 0,
-                    dimm_index: 0,
+                    dimm_index: 1,
                     label: Some("DIMM_A1".to_owned()),
-                    location: None,
-                    ce_count: 0,
-                    ue_count: 0,
-                }),
-                smbios: None,
-            }],
-        };
-        let cont = bridge.handle_event(&RunEvent::DimmInfo { topology });
-        assert!(cont);
-    }
-
-    #[test]
-    fn ecc_deltas_handled_without_panic() {
-        let segment = make_segment(&["solid"]);
-        let (mut bridge, _rx) = make_bridge(segment, 1);
-
-        let cont = bridge.handle_event(&RunEvent::EccDeltas {
-            pass: 1,
-            deltas: vec![crate::edac::EccDelta {
-                mc: 0,
-                dimm_index: 1,
-                label: Some("DIMM_A1".to_owned()),
-                ce_delta: 2,
-                ue_delta: 0,
-            }],
-        });
-        assert!(cont);
-    }
-
-    #[test]
-    fn run_on_disconnect_sends_done_for_incomplete() {
-        let segment = make_segment(&["solid"]);
-        let (bridge, rx) = make_bridge(segment, 1);
-
-        let (event_tx, event_rx) = crate::events::event_bus();
-        // Drop sender without sending RunComplete -- simulates disconnect
-        drop(event_tx);
-
-        bridge.run(&event_rx, None);
-
-        let done_count = std::iter::from_fn(|| rx.try_recv().ok())
-            .filter(|e| matches!(e, TuiEvent::Done))
-            .count();
-        check!(done_count == 1);
+                    ce_delta: 2,
+                    ue_delta: 0,
+                }],
+            });
+            assert!(cont);
+        }
     }
 }

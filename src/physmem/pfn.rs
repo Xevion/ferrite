@@ -433,4 +433,112 @@ mod tests {
             check!(!contains_pfn(&[], Pfn(0)));
         }
     }
+
+    /// Property-based tests over the range algebra, using a bounded PFN
+    /// universe (`0..1000`) so a [`BTreeSet<u64>`] reference model stays
+    /// cheap to compute per test case.
+    mod properties {
+        use std::collections::BTreeSet;
+
+        use proptest::prelude::*;
+
+        use super::*;
+
+        const UNIVERSE: std::ops::Range<u64> = 0..1000;
+
+        fn dedup_nonzero(raw: &[u64]) -> BTreeSet<u64> {
+            raw.iter().copied().filter(|&p| p != 0).collect()
+        }
+
+        proptest! {
+            #[test]
+            fn compact_pfns_ranges_sorted_disjoint_nonadjacent(
+                raw in prop::collection::vec(UNIVERSE, 0..200)
+            ) {
+                let ranges = compact_pfns(&raw);
+                for w in ranges.windows(2) {
+                    // A gap of zero would have been merged by `compact_pfns`,
+                    // so a real bug would show up as `<=` here.
+                    prop_assert!(w[0].end() < w[1].start);
+                }
+            }
+
+            #[test]
+            fn compact_pfns_membership_matches_input_exactly(
+                raw in prop::collection::vec(UNIVERSE, 0..200)
+            ) {
+                let ranges = compact_pfns(&raw);
+                let expected = dedup_nonzero(&raw);
+
+                let flattened: BTreeSet<u64> = ranges
+                    .iter()
+                    .flat_map(|r| r.start.get()..r.end().get())
+                    .collect();
+                prop_assert_eq!(&flattened, &expected);
+
+                for &p in &expected {
+                    prop_assert!(contains_pfn(&ranges, Pfn(p)));
+                }
+            }
+
+            #[test]
+            fn total_frames_matches_dedup_count(
+                raw in prop::collection::vec(UNIVERSE, 0..200)
+            ) {
+                let ranges = compact_pfns(&raw);
+                let expected = dedup_nonzero(&raw);
+                prop_assert_eq!(total_frames(&ranges), expected.len() as u64);
+            }
+
+            #[test]
+            fn merge_ranges_is_idempotent(
+                raw in prop::collection::vec(UNIVERSE, 0..200)
+            ) {
+                let ranges = compact_pfns(&raw);
+                let (merged, new) = merge_ranges(&ranges, &ranges);
+                prop_assert_eq!(&merged, &ranges);
+                prop_assert_eq!(new, 0);
+            }
+
+            #[test]
+            fn merge_ranges_contains_every_input_frame(
+                base_raw in prop::collection::vec(UNIVERSE, 0..100),
+                add_raw in prop::collection::vec(UNIVERSE, 0..100),
+            ) {
+                let base = compact_pfns(&base_raw);
+                let add = compact_pfns(&add_raw);
+                let (merged, _) = merge_ranges(&base, &add);
+
+                let expected: BTreeSet<u64> = base_raw
+                    .iter()
+                    .chain(add_raw.iter())
+                    .copied()
+                    .filter(|&p| p != 0)
+                    .collect();
+                for &p in &expected {
+                    prop_assert!(contains_pfn(&merged, Pfn(p)));
+                }
+                // No extras: the merged frame count matches the deduplicated union.
+                prop_assert_eq!(total_frames(&merged), expected.len() as u64);
+            }
+
+            #[test]
+            fn subtract_ranges_matches_set_difference(
+                a_raw in prop::collection::vec(UNIVERSE, 0..100),
+                b_raw in prop::collection::vec(UNIVERSE, 0..100),
+            ) {
+                let a = compact_pfns(&a_raw);
+                let b = compact_pfns(&b_raw);
+                let result = subtract_ranges(&a, &b);
+
+                let a_set = dedup_nonzero(&a_raw);
+                let b_set = dedup_nonzero(&b_raw);
+                let expected: BTreeSet<u64> = a_set.difference(&b_set).copied().collect();
+
+                for p in UNIVERSE {
+                    prop_assert_eq!(contains_pfn(&result, Pfn(p)), expected.contains(&p));
+                }
+            }
+        }
+    }
 }

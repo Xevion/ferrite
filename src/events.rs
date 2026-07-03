@@ -95,166 +95,176 @@ pub fn event_bus() -> (EventTx, EventRx) {
 mod tests {
     use std::time::Duration;
 
-    use assert2::{assert, check};
-
     use crate::pattern::Pattern;
     use crate::physmem::phys::MapStats;
 
     use super::*;
 
-    #[test]
-    fn event_bus_send_recv() {
-        let (tx, rx) = event_bus();
-        tx.send(RunEvent::RunStart {
-            size: 1024,
-            passes: 1,
-            patterns: vec![Pattern::SolidBits],
-            workers: 1,
-        })
-        .unwrap();
+    mod event_bus {
+        use assert2::{assert, check};
 
-        let event = rx.recv().unwrap();
-        assert!(let RunEvent::RunStart { size: 1024, .. } = event);
-    }
+        use super::*;
 
-    #[test]
-    fn event_bus_multiple_events() {
-        let (tx, rx) = event_bus();
+        #[test]
+        fn event_bus_send_recv() {
+            let (tx, rx) = super::event_bus();
+            tx.send(RunEvent::RunStart {
+                size: 1024,
+                passes: 1,
+                patterns: vec![Pattern::SolidBits],
+                workers: 1,
+            })
+            .unwrap();
 
-        tx.send(RunEvent::PassStart {
-            pass: 1,
-            total_passes: 2,
-        })
-        .unwrap();
-        tx.send(RunEvent::TestStart {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-        })
-        .unwrap();
-        tx.send(RunEvent::TestComplete {
-            pattern: Pattern::SolidBits,
-            pass: 1,
-            elapsed: Duration::from_millis(100),
-            bytes: 8192,
-            failures: vec![],
-            interrupted: false,
-        })
-        .unwrap();
-        tx.send(RunEvent::RunComplete).unwrap();
-
-        let mut count = 0;
-        while let Ok(_event) = rx.try_recv() {
-            count += 1;
+            let event = rx.recv().unwrap();
+            assert!(let RunEvent::RunStart { size: 1024, .. } = event);
         }
-        check!(count == 4);
+
+        #[test]
+        fn event_bus_multiple_events() {
+            let (tx, rx) = super::event_bus();
+
+            tx.send(RunEvent::PassStart {
+                pass: 1,
+                total_passes: 2,
+            })
+            .unwrap();
+            tx.send(RunEvent::TestStart {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+            })
+            .unwrap();
+            tx.send(RunEvent::TestComplete {
+                pattern: Pattern::SolidBits,
+                pass: 1,
+                elapsed: Duration::from_millis(100),
+                bytes: 8192,
+                failures: vec![],
+                interrupted: false,
+            })
+            .unwrap();
+            tx.send(RunEvent::RunComplete).unwrap();
+
+            let mut count = 0;
+            while let Ok(_event) = rx.try_recv() {
+                count += 1;
+            }
+            check!(count == 4);
+        }
+
+        #[test]
+        fn cloned_sender_works() {
+            let (tx, rx) = super::event_bus();
+            let tx2 = tx.clone();
+
+            tx.send(RunEvent::RunComplete).unwrap();
+            tx2.send(RunEvent::RunComplete).unwrap();
+
+            check!(rx.try_recv().is_ok());
+            check!(rx.try_recv().is_ok());
+            check!(rx.try_recv().is_err());
+        }
+
+        #[test]
+        fn disconnected_receiver() {
+            let (tx, rx) = super::event_bus();
+            drop(rx);
+            check!(tx.send(RunEvent::RunComplete).is_err());
+        }
+
+        #[test]
+        fn disconnected_sender() {
+            let (tx, rx) = super::event_bus();
+            drop(tx);
+            check!(rx.try_recv().is_err());
+        }
     }
 
-    #[test]
-    fn cloned_sender_works() {
-        let (tx, rx) = event_bus();
-        let tx2 = tx.clone();
+    mod event_variants {
+        use assert2::assert;
 
-        tx.send(RunEvent::RunComplete).unwrap();
-        tx2.send(RunEvent::RunComplete).unwrap();
+        use super::*;
 
-        check!(rx.try_recv().is_ok());
-        check!(rx.try_recv().is_ok());
-        check!(rx.try_recv().is_err());
-    }
+        #[test]
+        fn map_info_event() {
+            let (tx, rx) = event_bus();
+            tx.send(RunEvent::MapInfo {
+                stats: MapStats {
+                    total_pages: 100,
+                    resolved_pages: 100,
+                    huge_pages: 5,
+                    thp_pages: 10,
+                    hwpoison_pages: 0,
+                    unevictable_pages: 90,
+                },
+            })
+            .unwrap();
 
-    #[test]
-    fn map_info_event() {
-        let (tx, rx) = event_bus();
-        tx.send(RunEvent::MapInfo {
-            stats: MapStats {
-                total_pages: 100,
-                resolved_pages: 100,
-                huge_pages: 5,
-                thp_pages: 10,
-                hwpoison_pages: 0,
-                unevictable_pages: 90,
-            },
-        })
-        .unwrap();
+            let event = rx.recv().unwrap();
+            assert!(let RunEvent::MapInfo { .. } = event);
+        }
 
-        let event = rx.recv().unwrap();
-        assert!(let RunEvent::MapInfo { .. } = event);
-    }
+        #[test]
+        fn progress_event() {
+            let (tx, rx) = event_bus();
+            tx.send(RunEvent::Progress {
+                pattern: Pattern::WalkingOnes,
+                pass: 1,
+                sub_pass: 32,
+                total: 64,
+            })
+            .unwrap();
 
-    #[test]
-    fn progress_event() {
-        let (tx, rx) = event_bus();
-        tx.send(RunEvent::Progress {
-            pattern: Pattern::WalkingOnes,
-            pass: 1,
-            sub_pass: 32,
-            total: 64,
-        })
-        .unwrap();
+            let event = rx.recv().unwrap();
+            assert!(let RunEvent::Progress { .. } = event);
+        }
 
-        let event = rx.recv().unwrap();
-        assert!(let RunEvent::Progress { .. } = event);
-    }
+        #[test]
+        fn ecc_deltas_event() {
+            let (tx, rx) = event_bus();
+            tx.send(RunEvent::EccDeltas {
+                pass: 1,
+                deltas: vec![crate::edac::EccDelta {
+                    mc: 0,
+                    dimm_index: 1,
+                    label: Some("DIMM_A1".to_owned()),
+                    ce_delta: 2,
+                    ue_delta: 0,
+                }],
+            })
+            .unwrap();
 
-    #[test]
-    fn ecc_deltas_event() {
-        let (tx, rx) = event_bus();
-        tx.send(RunEvent::EccDeltas {
-            pass: 1,
-            deltas: vec![crate::edac::EccDelta {
-                mc: 0,
-                dimm_index: 1,
-                label: Some("DIMM_A1".to_owned()),
-                ce_delta: 2,
-                ue_delta: 0,
-            }],
-        })
-        .unwrap();
+            let event = rx.recv().unwrap();
+            assert!(let RunEvent::EccDeltas { .. } = event);
+        }
 
-        let event = rx.recv().unwrap();
-        assert!(let RunEvent::EccDeltas { .. } = event);
-    }
+        #[test]
+        fn pass_complete_event() {
+            let (tx, rx) = event_bus();
+            tx.send(RunEvent::PassComplete {
+                pass: 1,
+                failures: 3,
+                elapsed: Duration::from_secs(5),
+            })
+            .unwrap();
 
-    #[test]
-    fn pass_complete_event() {
-        let (tx, rx) = event_bus();
-        tx.send(RunEvent::PassComplete {
-            pass: 1,
-            failures: 3,
-            elapsed: Duration::from_secs(5),
-        })
-        .unwrap();
+            let event = rx.recv().unwrap();
+            assert!(let RunEvent::PassComplete { .. } = event);
+        }
 
-        let event = rx.recv().unwrap();
-        assert!(let RunEvent::PassComplete { .. } = event);
-    }
+        #[test]
+        fn log_event() {
+            let (tx, rx) = event_bus();
+            tx.send(RunEvent::Log {
+                level: tracing::Level::INFO,
+                target: "ferrite::runner".to_owned(),
+                message: "test message".to_owned(),
+                fields: serde_json::json!({}),
+            })
+            .unwrap();
 
-    #[test]
-    fn log_event() {
-        let (tx, rx) = event_bus();
-        tx.send(RunEvent::Log {
-            level: tracing::Level::INFO,
-            target: "ferrite::runner".to_owned(),
-            message: "test message".to_owned(),
-            fields: serde_json::json!({}),
-        })
-        .unwrap();
-
-        let event = rx.recv().unwrap();
-        assert!(let RunEvent::Log { .. } = event);
-    }
-
-    #[test]
-    fn disconnected_receiver() {
-        let (tx, rx) = event_bus();
-        drop(rx);
-        check!(tx.send(RunEvent::RunComplete).is_err());
-    }
-
-    #[test]
-    fn disconnected_sender() {
-        let (tx, rx) = event_bus();
-        drop(tx);
-        check!(rx.try_recv().is_err());
+            let event = rx.recv().unwrap();
+            assert!(let RunEvent::Log { .. } = event);
+        }
     }
 }
