@@ -10,6 +10,9 @@ use crate::edac::EccDelta;
 use crate::events::{EventRx, RunEvent};
 use crate::pattern::Pattern;
 use crate::physmem::phys::MapStats;
+use crate::results::render::{
+    write_pass_summary_line, write_pattern_result_line, write_verdict_line,
+};
 use crate::units::{Rate, Size, UnitSystem};
 
 /// Display wrapper that shows the first `N` failures then a count of the remainder.
@@ -104,17 +107,7 @@ impl<W: Write> HeadlessPrinter<W> {
 
     /// Print the final result line after all events have been consumed.
     pub fn print_final_result(&mut self, total_failures: usize) {
-        if total_failures == 0 {
-            let _ = writeln!(self.out, "{}", "All tests passed.".green().bold());
-        } else {
-            let _ = writeln!(
-                self.out,
-                "{}",
-                format!("{total_failures} failure(s) detected.")
-                    .red()
-                    .bold(),
-            );
-        }
+        let _ = write_verdict_line(&mut self.out, total_failures as u64, None);
     }
 
     fn print_banner(&mut self, size: usize, passes: usize, pattern_count: usize, workers: usize) {
@@ -166,29 +159,15 @@ impl<W: Write> HeadlessPrinter<W> {
         );
         // An interrupted pattern is incomplete: a clean result can't be trusted
         // as a PASS, so flag it distinctly rather than claiming success.
-        let suffix = if interrupted { "  (interrupted)" } else { "" };
-        if failures.is_empty() {
-            let label = if interrupted {
-                "INTR".yellow().bold().to_string()
-            } else {
-                "PASS".green().to_string()
-            };
-            let _ = writeln!(
-                self.out,
-                "  {} {:<20} {:>8.1}ms  {throughput:>}{suffix}",
-                label,
-                pattern.to_string(),
-                ms,
-            );
-        } else {
-            let _ = writeln!(
-                self.out,
-                "  {} {:<20} {:>8.1}ms  {throughput:>}  ({} failures){suffix}",
-                "FAIL".red().bold(),
-                pattern.to_string(),
-                ms,
-                failures.len(),
-            );
+        let _ = write_pattern_result_line(
+            &mut self.out,
+            &pattern.to_string(),
+            ms,
+            throughput,
+            failures.len() as u64,
+            interrupted,
+        );
+        if !failures.is_empty() {
             let _ = write!(self.out, "{}", Truncated(failures, 5));
         }
     }
@@ -216,24 +195,12 @@ impl<W: Write> HeadlessPrinter<W> {
     }
 
     fn print_pass_summary(&mut self, pass: usize, total_passes: usize, failures: usize) {
-        if failures == 0 {
-            let _ = writeln!(
-                self.out,
-                "  Pass {}/{}: {}",
-                pass,
-                total_passes,
-                "all patterns passed".green(),
-            );
-        } else {
-            let _ = writeln!(
-                self.out,
-                "  Pass {}/{}: {}",
-                pass,
-                total_passes,
-                format!("{failures} total failure(s)").red().bold(),
-            );
-        }
-        let _ = writeln!(self.out);
+        let _ = write_pass_summary_line(
+            &mut self.out,
+            pass as u64,
+            total_passes as u64,
+            failures as u64,
+        );
     }
 }
 
