@@ -21,7 +21,7 @@ use ferrite::tui::run::{TuiTestSetup, run_tui_mode};
 mod cli;
 #[cfg(feature = "tui")]
 use cli::TuiMode;
-use cli::{Cli, OutputConfig, OutputFormat, check_privileges, setup_test};
+use cli::{Cli, OutputConfig, OutputFormat, SetupOutcome, check_privileges, setup_test};
 
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
@@ -85,7 +85,19 @@ fn main() -> Result<()> {
             let events_writer = open_events_writer(&output)?;
 
             let cull = cull_ranges(&cli, coverage_ctx.as_ref());
-            let s = setup_test(&cli, cull.as_deref())?;
+            let s = match setup_test(&cli, cull.as_deref())? {
+                SetupOutcome::Ready(s) => s,
+                SetupOutcome::CullCeiling => {
+                    report_cull_ceiling(
+                        coverage_ctx.as_ref(),
+                        cull.as_deref().unwrap_or(&[]),
+                        &output,
+                        cli.units,
+                    );
+                    shutdown_handle.shutdown();
+                    return Ok(());
+                }
+            };
             let size = s.buffer.len();
             let run_ranges = s
                 .resolver
@@ -236,6 +248,38 @@ fn finalize_coverage(
     Some(std::mem::take(&mut ctx.store.ranges))
 }
 
+/// Report the `--cull`-at-ceiling outcome: every acquirable frame is already
+/// covered, so no run happened and the process exits successfully. Renders
+/// cumulative coverage plus the gap classification for table output; JSON
+/// output stays empty (no run events occurred) with the detail on stderr.
+fn report_cull_ceiling(
+    ctx: Option<&CoverageCtx>,
+    covered: &[ferrite::coverage::PfnRange],
+    output: &OutputConfig,
+    unit_system: ferrite::units::UnitSystem,
+) {
+    tracing::info!(
+        "--cull: nothing new to test; every acquirable frame is already covered on this boot"
+    );
+    if output.format != OutputFormat::Table {
+        return;
+    }
+    let gap = ferrite::gap::classify_system_gaps(covered);
+    let installed = ferrite::sysmem::installed_ram().map_or(0, |r| r.bytes);
+    let (cumulative, runs) = ctx.map_or((0, 0), |c| {
+        (c.store.covered_bytes(), c.store.runs.len() as u64)
+    });
+    ferrite::results::render_ceiling_report(
+        &mut std::io::stdout(),
+        cumulative,
+        installed,
+        runs,
+        gap,
+        unit_system,
+    )
+    .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
+}
+
 /// Classify what the untested remainder of installed RAM is doing and attach
 /// the breakdown to the results. Requires root (`/proc/kpageflags`); silently
 /// skipped otherwise.
@@ -334,7 +378,18 @@ fn run_non_tui(
     coverage_ctx: Option<CoverageCtx>,
 ) -> Result<()> {
     let cull = cull_ranges(cli, coverage_ctx.as_ref());
-    let mut setup = setup_test(cli, cull.as_deref())?;
+    let mut setup = match setup_test(cli, cull.as_deref())? {
+        SetupOutcome::Ready(s) => s,
+        SetupOutcome::CullCeiling => {
+            report_cull_ceiling(
+                coverage_ctx.as_ref(),
+                cull.as_deref().unwrap_or(&[]),
+                output,
+                cli.units,
+            );
+            return Ok(());
+        }
+    };
     let size = setup.buffer.len();
     let run_ranges = setup
         .resolver

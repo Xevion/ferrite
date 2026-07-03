@@ -452,26 +452,88 @@ impl TableRenderer {
             )?;
         }
         if let Some(gap) = cov.gap() {
-            let size = |b: u64| crate::units::Size::new(b as f64, self.unit_system);
-            let mut breakdown = format!(
-                "{} free + {} reclaimable + {} in-use + {} unreachable",
-                size(gap.free_bytes()),
-                size(gap.reclaimable_bytes()),
-                size(gap.in_use_bytes()),
-                size(gap.unreachable_bytes()),
-            );
-            if gap.unknown_bytes() > 0 {
-                use std::fmt::Write as _;
-                let _ = write!(breakdown, " + {} unknown", size(gap.unknown_bytes()));
-            }
-            writeln!(
-                out,
-                "  Untested:  {} = {breakdown}",
-                size(gap.total_bytes())
-            )?;
+            let report = crate::gap::GapReport {
+                free_bytes: gap.free_bytes(),
+                reclaimable_bytes: gap.reclaimable_bytes(),
+                in_use_bytes: gap.in_use_bytes(),
+                unreachable_bytes: gap.unreachable_bytes(),
+                unknown_bytes: gap.unknown_bytes(),
+            };
+            write_gap_line(out, &report, self.unit_system)?;
         }
         Ok(())
     }
+}
+
+/// Write the `Untested:` line breaking the gap down by frame class.
+fn write_gap_line(
+    out: &mut dyn Write,
+    gap: &crate::gap::GapReport,
+    unit_system: crate::units::UnitSystem,
+) -> io::Result<()> {
+    use std::fmt::Write as _;
+
+    let size = |b: u64| crate::units::Size::new(b as f64, unit_system);
+    let mut breakdown = format!(
+        "{} free + {} reclaimable + {} in-use + {} unreachable",
+        size(gap.free_bytes),
+        size(gap.reclaimable_bytes),
+        size(gap.in_use_bytes),
+        size(gap.unreachable_bytes),
+    );
+    if gap.unknown_bytes > 0 {
+        let _ = write!(breakdown, " + {} unknown", size(gap.unknown_bytes));
+    }
+    writeln!(
+        out,
+        "  Untested:  {} = {breakdown}",
+        size(gap.total_bytes())
+    )
+}
+
+/// Render the `--cull`-at-ceiling report: the sieve held every acquirable
+/// frame hostage, so no run happened. Shows cumulative coverage and the
+/// untested-remainder classification so the ceiling reads as *done for this
+/// boot*, not as a failure.
+///
+/// # Errors
+///
+/// Propagates I/O errors from the writer.
+pub fn render_ceiling_report(
+    out: &mut dyn Write,
+    cumulative_bytes: u64,
+    installed_bytes: u64,
+    runs: u64,
+    gap: Option<crate::gap::GapReport>,
+    unit_system: crate::units::UnitSystem,
+) -> io::Result<()> {
+    let size = |b: u64| crate::units::Size::new(b as f64, unit_system);
+    let pct = if installed_bytes == 0 {
+        0.0
+    } else {
+        cumulative_bytes as f64 / installed_bytes as f64 * 100.0
+    };
+    writeln!(
+        out,
+        "Nothing new to test: every acquirable frame is already covered."
+    )?;
+    writeln!(out)?;
+    writeln!(out, "Physical coverage")?;
+    writeln!(
+        out,
+        "  Cumulative: {} ({}) across {runs} run(s)",
+        size(cumulative_bytes),
+        format_percent(pct),
+    )?;
+    if let Some(gap) = gap {
+        write_gap_line(out, &gap, unit_system)?;
+    }
+    writeln!(out)?;
+    writeln!(
+        out,
+        "Coverage is at its ceiling for this boot; reboot to reshuffle occupancy \
+         and reach untested frames."
+    )
 }
 
 impl ResultsRenderer for TableRenderer {
@@ -1130,6 +1192,68 @@ mod tests {
             renderer.render(&doc, &mut buf).unwrap();
             let out = String::from_utf8(buf).unwrap();
             assert!(out.contains("5.0s"));
+        }
+    }
+
+    mod ceiling_report {
+        use assert2::assert;
+
+        use crate::gap::GapReport;
+        use crate::results::render_ceiling_report;
+        use crate::units::UnitSystem;
+
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        fn render(cumulative: u64, installed: u64, runs: u64, gap: Option<GapReport>) -> String {
+            let mut buf = Vec::new();
+            render_ceiling_report(
+                &mut buf,
+                cumulative,
+                installed,
+                runs,
+                gap,
+                UnitSystem::Binary,
+            )
+            .unwrap();
+            String::from_utf8(buf).unwrap()
+        }
+
+        #[test]
+        fn reports_cumulative_and_reboot_hint() {
+            let out = render(16 * GIB, 32 * GIB, 8, None);
+            assert!(out.contains("Nothing new to test"));
+            assert!(out.contains("Cumulative: 16.0 GiB (50.0%) across 8 run(s)"));
+            assert!(out.contains("reboot"));
+        }
+
+        #[test]
+        fn includes_gap_breakdown_when_classified() {
+            let gap = GapReport {
+                free_bytes: GIB,
+                reclaimable_bytes: GIB / 2,
+                in_use_bytes: GIB / 4,
+                unreachable_bytes: GIB / 4,
+                unknown_bytes: 0,
+            };
+            let out = render(30 * GIB, 32 * GIB, 8, Some(gap));
+            assert!(out.contains("Untested:  2.00 GiB ="));
+            assert!(out.contains("1.00 GiB free"));
+            assert!(out.contains("512 MiB reclaimable"));
+            assert!(out.contains("256 MiB in-use"));
+            assert!(out.contains("256 MiB unreachable"));
+            assert!(!out.contains("unknown"));
+        }
+
+        #[test]
+        fn omits_gap_line_without_classification() {
+            let out = render(16 * GIB, 32 * GIB, 1, None);
+            assert!(!out.contains("Untested:"));
+        }
+
+        #[test]
+        fn zero_installed_reports_zero_percent() {
+            let out = render(16 * GIB, 0, 1, None);
+            assert!(out.contains("(0.000%)"));
         }
     }
 

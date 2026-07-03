@@ -456,6 +456,23 @@ pub struct TestSetup {
     pub map_stats: Option<MapStats>,
 }
 
+/// What [`setup_test`] produced: a locked buffer ready to run, or the
+/// discovery that there is nothing left to test.
+pub enum SetupOutcome {
+    Ready(TestSetup),
+    /// The `--cull` sieve held every acquirable frame hostage, leaving the
+    /// allocator nothing below the headroom floor: cumulative coverage is at
+    /// its ceiling for this boot.
+    CullCeiling,
+}
+
+/// A `--cull` sieve that holds every previously-covered frame hostage leaves
+/// the allocator nothing below the headroom floor. That exhaustion is the
+/// coverage ceiling for this boot, not a failure.
+fn is_cull_ceiling(sieve_active: bool, err: &ferrite::alloc::AllocError) -> bool {
+    sieve_active && matches!(err, ferrite::alloc::AllocError::Exhausted { .. })
+}
+
 /// Run the `--cull` frame sieve against the cumulative covered set. Returns
 /// the sieve holding hostage blocks, to be dropped once the test buffer is
 /// locked. Best-effort: failures degrade to an ordinary allocation.
@@ -484,7 +501,7 @@ fn run_sieve(covered: &[ferrite::coverage::PfnRange], headroom: u64) -> Option<F
     }
 }
 
-pub fn setup_test(cli: &Cli, cull: Option<&[ferrite::coverage::PfnRange]>) -> Result<TestSetup> {
+pub fn setup_test(cli: &Cli, cull: Option<&[ferrite::coverage::PfnRange]>) -> Result<SetupOutcome> {
     let need_phys = !cli.no_phys;
     let requested = match cli.size {
         SizeSpec::Bytes(n) => n,
@@ -497,6 +514,9 @@ pub fn setup_test(cli: &Cli, cull: Option<&[ferrite::coverage::PfnRange]>) -> Re
         Ok((buffer, outcome)) => {
             report_alloc_outcome(&outcome, cli.size);
             buffer
+        }
+        Err(e) if is_cull_ceiling(sieve.is_some(), &e) => {
+            return Ok(SetupOutcome::CullCeiling);
         }
         Err(e) => {
             if let Some(hint) = e.help() {
@@ -524,12 +544,12 @@ pub fn setup_test(cli: &Cli, cull: Option<&[ferrite::coverage::PfnRange]>) -> Re
         info!("installed DIMMs: {dimm_str}");
     }
 
-    Ok(TestSetup {
+    Ok(SetupOutcome::Ready(TestSetup {
         buffer,
         compaction_guard,
         resolver,
         map_stats,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -549,6 +569,35 @@ mod tests {
         #[test]
         fn parse_size_roundtrip(bytes: usize) {
             prop_assert_eq!(parse_size(&format_size(bytes)), Ok(bytes));
+        }
+    }
+
+    mod cull_ceiling {
+        use assert2::check;
+
+        use ferrite::alloc::AllocError;
+
+        use crate::cli::is_cull_ceiling;
+
+        #[test]
+        fn exhausted_with_sieve_active_is_ceiling() {
+            check!(is_cull_ceiling(
+                true,
+                &AllocError::Exhausted { available: 1024 }
+            ));
+        }
+
+        #[test]
+        fn exhausted_without_sieve_is_an_error() {
+            check!(!is_cull_ceiling(
+                false,
+                &AllocError::Exhausted { available: 1024 }
+            ));
+        }
+
+        #[test]
+        fn non_exhaustion_failures_are_errors_even_with_sieve() {
+            check!(!is_cull_ceiling(true, &AllocError::ZeroSize));
         }
     }
 
