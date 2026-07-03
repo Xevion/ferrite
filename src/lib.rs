@@ -7,6 +7,7 @@ pub mod edac;
 pub mod error_analysis;
 pub mod events;
 pub mod failure;
+pub mod gap;
 pub mod headless;
 pub mod ndjson;
 pub mod ops;
@@ -15,6 +16,7 @@ pub mod phys;
 pub mod results;
 pub mod runner;
 pub mod shutdown;
+pub mod sieve;
 pub mod smbios;
 pub mod sysmem;
 #[cfg(feature = "tui")]

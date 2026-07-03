@@ -135,6 +135,61 @@ pub fn total_frames(ranges: &[PfnRange]) -> u64 {
     ranges.iter().map(|r| r.count).sum()
 }
 
+/// The frames of `universe` not present in `covered` (both sorted/disjoint).
+#[must_use]
+pub fn subtract_ranges(universe: &[PfnRange], covered: &[PfnRange]) -> Vec<PfnRange> {
+    let mut out = Vec::new();
+    let mut cov = covered.iter().copied().peekable();
+    for u in universe {
+        let mut start = u.start;
+        let end = u.start + u.count;
+        while start < end {
+            // Discard covered ranges that end at or before the cursor.
+            while cov.peek().is_some_and(|c| c.start + c.count <= start) {
+                cov.next();
+            }
+            match cov.peek() {
+                Some(c) if c.start < end => {
+                    if c.start > start {
+                        out.push(PfnRange {
+                            start,
+                            count: c.start - start,
+                        });
+                    }
+                    // Do not consume: a covered range may span several
+                    // universe ranges.
+                    start = c.start + c.count;
+                }
+                _ => {
+                    out.push(PfnRange {
+                        start,
+                        count: end - start,
+                    });
+                    start = end;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether `pfn` falls inside any of the sorted/disjoint `ranges`.
+#[inline]
+#[must_use]
+pub fn contains_pfn(ranges: &[PfnRange], pfn: u64) -> bool {
+    ranges
+        .binary_search_by(|r| {
+            if pfn < r.start {
+                std::cmp::Ordering::Greater
+            } else if pfn >= r.start + r.count {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
 /// FNV-1a over the System RAM `(start, end)` pairs, mixing `mem_total` in.
 #[must_use]
 pub fn fingerprint_from(mem_total: u64, system_ram: &[(u64, u64)]) -> Fingerprint {
@@ -336,6 +391,96 @@ mod tests {
             let (merged, new) = merge_ranges(&[r(1, 2), r(6, 2)], &[r(3, 3)]);
             check!(merged == vec![r(1, 7)]);
             check!(new == 3);
+        }
+    }
+
+    mod subtract {
+        use assert2::check;
+
+        use super::*;
+
+        #[test]
+        fn empty_covered_returns_universe() {
+            check!(subtract_ranges(&[r(5, 10)], &[]) == vec![r(5, 10)]);
+        }
+
+        #[test]
+        fn empty_universe_is_empty() {
+            check!(subtract_ranges(&[], &[r(5, 10)]) == vec![]);
+        }
+
+        #[test]
+        fn full_cover_is_empty() {
+            check!(subtract_ranges(&[r(5, 10)], &[r(5, 10)]) == vec![]);
+        }
+
+        #[test]
+        fn cover_exceeding_universe_is_empty() {
+            check!(subtract_ranges(&[r(5, 10)], &[r(0, 100)]) == vec![]);
+        }
+
+        #[test]
+        fn middle_cover_splits_universe() {
+            // universe [0,10), covered [3,6) -> [0,3) and [6,10)
+            check!(subtract_ranges(&[r(0, 10)], &[r(3, 3)]) == vec![r(0, 3), r(6, 4)]);
+        }
+
+        #[test]
+        fn front_cover_trims_start() {
+            check!(subtract_ranges(&[r(0, 10)], &[r(0, 4)]) == vec![r(4, 6)]);
+        }
+
+        #[test]
+        fn back_cover_trims_end() {
+            check!(subtract_ranges(&[r(0, 10)], &[r(7, 3)]) == vec![r(0, 7)]);
+        }
+
+        #[test]
+        fn covered_outside_universe_is_ignored() {
+            check!(subtract_ranges(&[r(10, 5)], &[r(0, 5), r(20, 5)]) == vec![r(10, 5)]);
+        }
+
+        #[test]
+        fn one_cover_spans_multiple_universe_ranges() {
+            // covered [3,25) blankets the tail of [0,10) and all of [12,20),
+            // and trims the head of [22,30).
+            let universe = [r(0, 10), r(12, 8), r(22, 8)];
+            check!(subtract_ranges(&universe, &[r(3, 22)]) == vec![r(0, 3), r(25, 5)]);
+        }
+
+        #[test]
+        fn multiple_covers_within_one_universe_range() {
+            let covered = [r(2, 2), r(6, 2)];
+            check!(subtract_ranges(&[r(0, 10)], &covered) == vec![r(0, 2), r(4, 2), r(8, 2)]);
+        }
+    }
+
+    mod contains {
+        use assert2::check;
+
+        use super::*;
+
+        #[test]
+        fn hits_within_ranges() {
+            let ranges = [r(5, 3), r(20, 2)];
+            check!(contains_pfn(&ranges, 5));
+            check!(contains_pfn(&ranges, 7));
+            check!(contains_pfn(&ranges, 20));
+            check!(contains_pfn(&ranges, 21));
+        }
+
+        #[test]
+        fn misses_boundaries_and_gaps() {
+            let ranges = [r(5, 3), r(20, 2)];
+            check!(!contains_pfn(&ranges, 4));
+            check!(!contains_pfn(&ranges, 8));
+            check!(!contains_pfn(&ranges, 19));
+            check!(!contains_pfn(&ranges, 22));
+        }
+
+        #[test]
+        fn empty_ranges_contain_nothing() {
+            check!(!contains_pfn(&[], 0));
         }
     }
 

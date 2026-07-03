@@ -55,6 +55,9 @@ pub enum Coverage {
         source: RamSource,
         #[serde(skip_serializing_if = "Option::is_none")]
         cumulative: Option<Cumulative>,
+        /// Classification of the untested remainder, when scannable (root).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gap: Option<crate::gap::GapReport>,
     },
     /// Coverage could not be measured -- no physical address resolution
     /// (`--no-phys` or missing `CAP_SYS_ADMIN`), or no denominator available.
@@ -82,6 +85,13 @@ impl Coverage {
             *cumulative = Some(stats);
         }
     }
+
+    /// Attach a gap classification; no-op when coverage is unmeasured.
+    pub fn attach_gap(&mut self, report: crate::gap::GapReport) {
+        if let Self::Measured { gap, .. } = self {
+            *gap = Some(report);
+        }
+    }
 }
 
 /// Assemble a [`Coverage`] from tested bytes and an optional denominator.
@@ -94,6 +104,7 @@ pub fn measure(tested_bytes: u64, installed: Option<InstalledRam>) -> Coverage {
             total_bytes: ram.bytes,
             source: ram.source,
             cumulative: None,
+            gap: None,
         },
         None => Coverage::Unavailable,
     }
@@ -417,6 +428,7 @@ MemAvailable:   25512532 kB
                     total_bytes: 32_000_000_000,
                     source: RamSource::ProcIomem,
                     cumulative: None,
+                    gap: None,
                 }
             );
         }
@@ -433,6 +445,7 @@ MemAvailable:   25512532 kB
                 total_bytes: 4_000,
                 source: RamSource::ProcIomem,
                 cumulative: None,
+                gap: None,
             };
             // 1000 / 4000 * 100 = 25.0 exactly.
             check!(cov.percent() == Some(25.0));
@@ -445,6 +458,7 @@ MemAvailable:   25512532 kB
                 total_bytes: 0,
                 source: RamSource::MemTotal,
                 cumulative: None,
+                gap: None,
             };
             check!(cov.percent() == None);
         }
@@ -490,6 +504,31 @@ MemAvailable:   25512532 kB
             });
             check!(cov == Coverage::Unavailable);
         }
+
+        #[test]
+        fn attach_gap_on_measured() {
+            let mut cov = measure(
+                1024,
+                Some(InstalledRam {
+                    bytes: 4096,
+                    source: RamSource::ProcIomem,
+                }),
+            );
+            let report = crate::gap::GapReport {
+                free_bytes: 4096,
+                ..crate::gap::GapReport::default()
+            };
+            cov.attach_gap(report);
+            assert2::assert!(let Coverage::Measured { gap: Some(g), .. } = cov);
+            check!(g == report);
+        }
+
+        #[test]
+        fn attach_gap_on_unavailable_is_noop() {
+            let mut cov = Coverage::Unavailable;
+            cov.attach_gap(crate::gap::GapReport::default());
+            check!(cov == Coverage::Unavailable);
+        }
     }
 
     mod serialization {
@@ -504,6 +543,7 @@ MemAvailable:   25512532 kB
                 total_bytes: 128,
                 source: RamSource::MemTotal,
                 cumulative: None,
+                gap: None,
             };
             let json = serde_json::to_value(cov).unwrap();
             check!(json["status"] == "measured");
@@ -521,6 +561,7 @@ MemAvailable:   25512532 kB
                 total_bytes: 128,
                 source: RamSource::ProcIomem,
                 cumulative: None,
+                gap: None,
             };
             cov.attach_cumulative(Cumulative {
                 new_bytes: 32,
@@ -537,6 +578,37 @@ MemAvailable:   25512532 kB
         fn unavailable_carries_status_tag() {
             let json = serde_json::to_value(Coverage::Unavailable).unwrap();
             check!(json["status"] == "unavailable");
+        }
+
+        #[test]
+        fn gap_serializes_nested_when_present() {
+            let mut cov = Coverage::Measured {
+                tested_bytes: 64,
+                total_bytes: 128,
+                source: RamSource::ProcIomem,
+                cumulative: None,
+                gap: None,
+            };
+            cov.attach_gap(crate::gap::GapReport {
+                free_bytes: 4096,
+                reclaimable_bytes: 8192,
+                in_use_bytes: 0,
+                unreachable_bytes: 4096,
+                unknown_bytes: 0,
+            });
+            let json = serde_json::to_value(cov).unwrap();
+            check!(json["gap"]["free_bytes"] == 4096);
+            check!(json["gap"]["reclaimable_bytes"] == 8192);
+            // Absent gap is omitted entirely.
+            let bare = serde_json::to_value(measure(
+                64,
+                Some(InstalledRam {
+                    bytes: 128,
+                    source: RamSource::MemTotal,
+                }),
+            ))
+            .unwrap();
+            check!(bare.get("gap") == None);
         }
     }
 

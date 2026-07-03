@@ -55,7 +55,9 @@ Code: `src/headless.rs`, `src/ndjson.rs`, `src/results.rs`, `src/tui/bridge.rs`
 | `ops/` | Three-layer fill/verify operations: `scalar.rs` (coverage-measured), `avx512.rs` (excluded from coverage), `mod.rs` (dispatch) |
 | `phys.rs` | Physical address resolution via `/proc/self/pagemap`; `PhysAddr`, `PagemapResolver`, `PhysResolver` trait, `MapStats` |
 | `sysmem.rs` | Installed-RAM denominator (`/proc/iomem` "System RAM", `MemTotal` fallback) and single-run physical `Coverage`; `RamSource`, `InstalledRam`, `Cumulative` |
-| `coverage.rs` | Cross-run coverage persistence (`--coverage-file`): `CoverageStore`, PFN range compaction/merge, machine fingerprint guard |
+| `coverage.rs` | Cross-run coverage persistence (`--coverage-file`): `CoverageStore`, PFN range compaction/merge/subtraction, machine fingerprint guard |
+| `gap.rs` | Untested-remainder classification via `/proc/kpageflags`: `FrameClass`, `GapReport`, system gap scan |
+| `sieve.rs` | Frame-hostage culling (`--cull`): `FrameSieve` sweeps available RAM, holds covered 2 MiB blocks hostage, releases fresh frames for the test buffer |
 | `edac.rs` | ECC error counters from `/sys/devices/system/edac/`; `EdacSnapshot`, `DimmEdac`, `EccDelta` |
 | `smbios.rs` | DIMM info from `/sys/firmware/dmi/tables/` |
 | `dimm.rs` | `DimmTopology` — merges SMBIOS + EDAC into a per-DIMM view |

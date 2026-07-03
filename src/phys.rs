@@ -270,7 +270,7 @@ fn parse_pagemap_entry(entry: u64) -> Option<u64> {
 /// The caller must ensure `offset + buf.len()` fits in `i64`. In practice
 /// this holds: the largest pagemap offset is ~2^50 (128 TiB virtual address
 /// space x 8 bytes per entry), well within i64 range.
-fn pread_exact(fd: &File, buf: &mut [u8], offset: i64) -> io::Result<()> {
+pub(crate) fn pread_exact(fd: &File, buf: &mut [u8], offset: i64) -> io::Result<()> {
     let raw_fd = fd.as_raw_fd();
     let mut total = 0usize;
     while total < buf.len() {
@@ -301,26 +301,33 @@ fn pread_exact(fd: &File, buf: &mut [u8], offset: i64) -> io::Result<()> {
     Ok(())
 }
 
+/// Read and parse pagemap entries for `page_count` pages starting at virtual
+/// address `base`: one PFN per page in virtual order, 0 = unresolved.
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn read_pfns(pagemap: &File, base: usize, page_count: usize) -> io::Result<Vec<u64>> {
+    let start_vpn = base / PAGE_SIZE;
+    let file_offset = (start_vpn * 8) as i64;
+
+    // Batch read: single pread for the entire region's pagemap entries.
+    let mut buf = vec![0u8; page_count * 8];
+    pread_exact(pagemap, &mut buf, file_offset)?;
+
+    Ok(buf
+        .chunks_exact(8)
+        .map(|chunk| {
+            let entry = chunk.try_into().map_or(0, u64::from_le_bytes);
+            parse_pagemap_entry(entry).unwrap_or(0)
+        })
+        .collect())
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl PhysResolver for PagemapResolver {
     fn build_map(&mut self, base: usize, len: usize) -> Result<MapStats, PhysError> {
         let page_count = len / PAGE_SIZE;
-        let start_vpn = base / PAGE_SIZE;
-        let file_offset = (start_vpn * 8) as i64;
 
-        // Batch read: single pread for the entire region's pagemap entries
-        let mut buf = vec![0u8; page_count * 8];
-        pread_exact(&self.pagemap_fd, &mut buf, file_offset).map_err(PhysError::ReadPagemap)?;
-
-        // Parse entries and extract PFNs
-        let mut pfns = Vec::with_capacity(page_count);
-        for i in 0..page_count {
-            let off = i * 8;
-            let entry = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
-            pfns.push(parse_pagemap_entry(entry).unwrap_or(0));
-        }
-
-        self.pfns = pfns;
+        self.pfns =
+            read_pfns(&self.pagemap_fd, base, page_count).map_err(PhysError::ReadPagemap)?;
         self.region_base = base;
 
         let resolved_pages = self.pfns.iter().filter(|&&pfn| pfn != 0).count();

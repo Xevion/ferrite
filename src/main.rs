@@ -84,7 +84,8 @@ fn main() -> Result<()> {
 
             let events_writer = open_events_writer(&output)?;
 
-            let s = setup_test(&cli)?;
+            let cull = cull_ranges(&cli, coverage_ctx.as_ref());
+            let s = setup_test(&cli, cull.as_deref())?;
             let size = s.buffer.len();
             let run_ranges = s
                 .resolver
@@ -107,7 +108,8 @@ fn main() -> Result<()> {
             )?;
 
             ferrite::error_analysis::analyze(&mut results);
-            finalize_coverage(coverage_ctx, run_ranges, &mut results);
+            let covered = finalize_coverage(coverage_ctx, run_ranges, &mut results);
+            attach_gap_classification(covered, &mut results);
             render_results(&output, &results, cli.units, true);
 
             let code = shutdown::exit_code(results.total_failures);
@@ -131,6 +133,13 @@ fn main() -> Result<()> {
 struct CoverageCtx {
     store: ferrite::coverage::CoverageStore,
     path: std::path::PathBuf,
+}
+
+/// The covered set the `--cull` sieve should hold hostage, when culling is
+/// requested. clap guarantees `--cull` implies `--coverage-file`.
+fn cull_ranges(cli: &Cli, ctx: Option<&CoverageCtx>) -> Option<Vec<ferrite::coverage::PfnRange>> {
+    cli.cull
+        .then(|| ctx.map(|c| c.store.ranges.clone()).unwrap_or_default())
 }
 
 /// Open the `--coverage-file` store when configured: load and validate an
@@ -171,15 +180,20 @@ fn open_coverage_store(cli: &Cli) -> Result<Option<CoverageCtx>> {
 /// Merge a completed run into the coverage store, persist it, and attach
 /// cumulative stats to the results. Interrupted runs are not merged -- their
 /// frames were not tested by every selected pattern.
+///
+/// Returns the covered set for gap classification: the store's cumulative
+/// ranges when one is active, this run's frames otherwise. `None` when the
+/// run cannot count toward coverage (unresolved or interrupted).
 fn finalize_coverage(
     ctx: Option<CoverageCtx>,
     run_ranges: Option<Vec<ferrite::coverage::PfnRange>>,
     results: &mut ferrite::runner::RunResults,
-) {
-    let Some(mut ctx) = ctx else { return };
+) -> Option<Vec<ferrite::coverage::PfnRange>> {
     let Some(ranges) = run_ranges else {
-        tracing::warn!("coverage store not updated: physical address resolution unavailable");
-        return;
+        if ctx.is_some() {
+            tracing::warn!("coverage store not updated: physical address resolution unavailable");
+        }
+        return None;
     };
     let interrupted = results
         .passes
@@ -187,9 +201,14 @@ fn finalize_coverage(
         .flat_map(|p| &p.pattern_results)
         .any(|r| r.interrupted);
     if interrupted {
-        tracing::warn!("coverage store not updated: run was interrupted");
-        return;
+        if ctx.is_some() {
+            tracing::warn!("coverage store not updated: run was interrupted");
+        }
+        return None;
     }
+    let Some(mut ctx) = ctx else {
+        return Some(ranges);
+    };
 
     let patterns = results
         .config
@@ -206,7 +225,6 @@ fn finalize_coverage(
     );
     if let Err(e) = ctx.store.save(&ctx.path) {
         tracing::warn!("failed to save coverage file: {e}");
-        return;
     }
     results
         .coverage
@@ -215,6 +233,21 @@ fn finalize_coverage(
             cumulative_bytes: delta.cumulative_bytes,
             runs: delta.runs,
         });
+    Some(std::mem::take(&mut ctx.store.ranges))
+}
+
+/// Classify what the untested remainder of installed RAM is doing and attach
+/// the breakdown to the results. Requires root (`/proc/kpageflags`); silently
+/// skipped otherwise.
+fn attach_gap_classification(
+    covered: Option<Vec<ferrite::coverage::PfnRange>>,
+    results: &mut ferrite::runner::RunResults,
+) {
+    if let Some(covered) = covered
+        && let Some(report) = ferrite::gap::classify_system_gaps(&covered)
+    {
+        results.coverage.attach_gap(report);
+    }
 }
 
 /// Render final results to stdout based on output configuration.
@@ -300,7 +333,8 @@ fn run_non_tui(
     parallel: bool,
     coverage_ctx: Option<CoverageCtx>,
 ) -> Result<()> {
-    let mut setup = setup_test(cli)?;
+    let cull = cull_ranges(cli, coverage_ctx.as_ref());
+    let mut setup = setup_test(cli, cull.as_deref())?;
     let size = setup.buffer.len();
     let run_ranges = setup
         .resolver
@@ -387,7 +421,8 @@ fn run_non_tui(
     results.coverage = ferrite::sysmem::coverage_for(setup.map_stats.as_ref());
 
     ferrite::error_analysis::analyze(&mut results);
-    finalize_coverage(coverage_ctx, run_ranges, &mut results);
+    let covered = finalize_coverage(coverage_ctx, run_ranges, &mut results);
+    attach_gap_classification(covered, &mut results);
 
     // Write run_complete to whichever NDJSON writers are active
     if let Some(w) = stdout_ndjson.as_mut() {

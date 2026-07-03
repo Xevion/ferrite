@@ -12,6 +12,7 @@ use tracing::{info, warn};
 use ferrite::alloc::{CompactionGuard, TestBuffer};
 use ferrite::dimm::DimmTopology;
 use ferrite::phys::{MapStats, PagemapResolver, PhysResolver, PhysResolverError};
+use ferrite::sieve::FrameSieve;
 use ferrite::units::UnitSystem;
 
 #[cfg(feature = "tui")]
@@ -104,6 +105,13 @@ pub struct Cli {
     /// on first use). Requires physical address resolution (root).
     #[arg(long, value_name = "FILE")]
     pub coverage_file: Option<PathBuf>,
+
+    /// Steer allocation toward untested memory: sweep available RAM before
+    /// allocating and hold previously-covered frames hostage so the test
+    /// buffer is served fresh frames. Sweeps all available memory regardless
+    /// of --size.
+    #[arg(long, requires = "coverage_file")]
+    pub cull: bool,
 }
 
 /// Worker-thread count for pattern execution.
@@ -448,7 +456,35 @@ pub struct TestSetup {
     pub map_stats: Option<MapStats>,
 }
 
-pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
+/// Run the `--cull` frame sieve against the cumulative covered set. Returns
+/// the sieve holding hostage blocks, to be dropped once the test buffer is
+/// locked. Best-effort: failures degrade to an ordinary allocation.
+fn run_sieve(covered: &[ferrite::coverage::PfnRange], headroom: u64) -> Option<FrameSieve> {
+    use ferrite::units::format_size;
+
+    if covered.is_empty() {
+        info!("--cull: no prior coverage to cull against; skipping sieve");
+        return None;
+    }
+    match FrameSieve::hold(covered, headroom, None) {
+        Ok((sieve, outcome)) => {
+            info!(
+                "sieve: swept {}, holding {} previously-covered memory hostage, \
+                 released {} for the test buffer",
+                format_size(outcome.swept),
+                format_size(outcome.held),
+                format_size(outcome.released),
+            );
+            Some(sieve)
+        }
+        Err(e) => {
+            warn!("--cull sieve failed ({e}); continuing without culling");
+            None
+        }
+    }
+}
+
+pub fn setup_test(cli: &Cli, cull: Option<&[ferrite::coverage::PfnRange]>) -> Result<TestSetup> {
     let need_phys = !cli.no_phys;
     let requested = match cli.size {
         SizeSpec::Bytes(n) => n,
@@ -456,6 +492,7 @@ pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
             .context("cannot resolve --size max: /proc/meminfo is unreadable")?
             as usize,
     };
+    let sieve = cull.and_then(|covered| run_sieve(covered, cli.headroom as u64));
     let buffer = match TestBuffer::new_budgeted(requested, cli.headroom as u64) {
         Ok((buffer, outcome)) => {
             report_alloc_outcome(&outcome, cli.size);
@@ -468,6 +505,8 @@ pub fn setup_test(cli: &Cli) -> Result<TestSetup> {
             return Err(e).context("failed to allocate and lock memory");
         }
     };
+    // The buffer is locked: release the hostages back to the system.
+    drop(sieve);
     let compaction_guard = if need_phys {
         CompactionGuard::new()
     } else {
@@ -815,6 +854,7 @@ CapEff:\t0000000000000000";
                 tui: crate::cli::TuiMode::Never,
                 no_phys: true,
                 coverage_file: None,
+                cull: false,
             }
         }
 

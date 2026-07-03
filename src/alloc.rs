@@ -72,7 +72,7 @@ pub const CHUNK_BYTES: usize = 512 * 1024 * 1024;
 /// if fewer than `headroom + chunk_len` bytes are available, the walk stops.
 /// If `activate(offset, len)` fails, the walk stops and keeps prior chunks.
 /// Returns the byte count successfully activated and the stop reason.
-fn walk_chunks(
+pub(crate) fn walk_chunks(
     total: usize,
     chunk: usize,
     headroom: u64,
@@ -93,6 +93,36 @@ fn walk_chunks(
         achieved += chunk_len;
     }
     (achieved, StopReason::Completed)
+}
+
+/// Activate one chunk of a `PROT_NONE` reservation based at `raw`: make it
+/// writable, hint THP backing, fault every page in parallel, and lock it.
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn activate_chunk(raw: usize, offset: usize, len: usize) -> Result<(), AllocError> {
+    // SAFETY: `raw` is a valid non-null mapping base and `offset` is within
+    // the reservation, so the sum cannot wrap to zero.
+    let chunk = unsafe { NonNull::new_unchecked((raw + offset) as *mut c_void) };
+    // SAFETY: [offset, offset+len) lies within the reservation.
+    unsafe {
+        mprotect(chunk, len, ProtFlags::PROT_READ | ProtFlags::PROT_WRITE)
+            .map_err(AllocError::Mprotect)?;
+    }
+    // Hint 2 MiB THP backing before faulting. Ignored when THP is off.
+    #[cfg(target_os = "linux")]
+    // SAFETY: chunk range is a valid mapping owned by this reservation.
+    unsafe {
+        let _ = madvise(chunk, len, MmapAdvise::MADV_HUGEPAGE);
+    }
+    let page_count = len / 4096;
+    (0..page_count).into_par_iter().for_each(|i| {
+        // SAFETY: offset is within [0, len), each page touched exactly once.
+        unsafe { ((raw + offset + i * 4096) as *mut u8).write_volatile(0u8) };
+    });
+    // SAFETY: chunk range is valid and faulted; mlock pins it in RAM.
+    unsafe {
+        mlock(chunk, len).map_err(AllocError::Mlock)?;
+    }
+    Ok(())
 }
 
 /// The full anonymous memory allocation that ferrite mmap's and mlock's.
@@ -192,39 +222,12 @@ impl TestBuffer {
         };
         let raw = ptr.as_ptr() as usize;
 
-        let mut activate = |offset: usize, len: usize| -> Result<(), AllocError> {
-            // SAFETY: `raw` is a valid non-null mapping base and
-            // `offset < requested`, so the sum cannot wrap to zero.
-            let chunk = unsafe { NonNull::new_unchecked((raw + offset) as *mut c_void) };
-            // SAFETY: [offset, offset+len) lies within the reservation.
-            unsafe {
-                mprotect(chunk, len, ProtFlags::PROT_READ | ProtFlags::PROT_WRITE)
-                    .map_err(AllocError::Mprotect)?;
-            }
-            // Hint 2 MiB THP backing before faulting. Ignored when THP is off.
-            #[cfg(target_os = "linux")]
-            // SAFETY: chunk range is a valid mapping owned by this reservation.
-            unsafe {
-                let _ = madvise(chunk, len, MmapAdvise::MADV_HUGEPAGE);
-            }
-            let page_count = len / 4096;
-            (0..page_count).into_par_iter().for_each(|i| {
-                // SAFETY: offset is within [0, len), each page touched exactly once.
-                unsafe { ((raw + offset + i * 4096) as *mut u8).write_volatile(0u8) };
-            });
-            // SAFETY: chunk range is valid and faulted; mlock pins it in RAM.
-            unsafe {
-                mlock(chunk, len).map_err(AllocError::Mlock)?;
-            }
-            Ok(())
-        };
-
         let (achieved, stop) = walk_chunks(
             requested,
             CHUNK_BYTES,
             headroom,
             &mut || crate::sysmem::mem_available(),
-            &mut activate,
+            &mut |offset, len| activate_chunk(raw, offset, len),
         );
 
         if achieved == 0 {

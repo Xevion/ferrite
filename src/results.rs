@@ -212,6 +212,52 @@ impl CoverageDoc<'_> {
             .as_object()
             .map(|_| CumulativeDoc(&self.0["cumulative"], self.total_bytes()))
     }
+
+    /// Classification of the untested remainder, when the kpageflags scan ran.
+    #[must_use]
+    pub fn gap(&self) -> Option<GapDoc<'_>> {
+        self.0["gap"].as_object().map(|_| GapDoc(&self.0["gap"]))
+    }
+}
+
+/// Borrowed view into the untested-remainder classification.
+pub struct GapDoc<'a>(&'a serde_json::Value);
+
+impl GapDoc<'_> {
+    #[must_use]
+    pub fn free_bytes(&self) -> u64 {
+        self.0["free_bytes"].as_u64().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn reclaimable_bytes(&self) -> u64 {
+        self.0["reclaimable_bytes"].as_u64().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn in_use_bytes(&self) -> u64 {
+        self.0["in_use_bytes"].as_u64().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn unreachable_bytes(&self) -> u64 {
+        self.0["unreachable_bytes"].as_u64().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn unknown_bytes(&self) -> u64 {
+        self.0["unknown_bytes"].as_u64().unwrap_or(0)
+    }
+
+    /// Total untested bytes across all classes.
+    #[must_use]
+    pub fn total_bytes(&self) -> u64 {
+        self.free_bytes()
+            + self.reclaimable_bytes()
+            + self.in_use_bytes()
+            + self.unreachable_bytes()
+            + self.unknown_bytes()
+    }
 }
 
 /// Borrowed view into cross-run cumulative coverage stats.
@@ -403,6 +449,25 @@ impl TableRenderer {
                 "  Cumulative: {cum_size} ({}) across {} run(s)",
                 format_percent(cum.percent()),
                 cum.runs(),
+            )?;
+        }
+        if let Some(gap) = cov.gap() {
+            let size = |b: u64| crate::units::Size::new(b as f64, self.unit_system);
+            let mut breakdown = format!(
+                "{} free + {} reclaimable + {} in-use + {} unreachable",
+                size(gap.free_bytes()),
+                size(gap.reclaimable_bytes()),
+                size(gap.in_use_bytes()),
+                size(gap.unreachable_bytes()),
+            );
+            if gap.unknown_bytes() > 0 {
+                use std::fmt::Write as _;
+                let _ = write!(breakdown, " + {} unknown", size(gap.unknown_bytes()));
+            }
+            writeln!(
+                out,
+                "  Untested:  {} = {breakdown}",
+                size(gap.total_bytes())
             )?;
         }
         Ok(())
@@ -661,6 +726,7 @@ mod tests {
             total_bytes: 32 * 1024 * 1024 * 1024,
             source: crate::sysmem::RamSource::ProcIomem,
             cumulative: None,
+            gap: None,
         };
         r
     }
@@ -975,6 +1041,43 @@ mod tests {
             let out = render_to_string(&covered_results());
             assert!(!out.contains("Cumulative:"));
             assert!(!out.contains("New:"));
+        }
+
+        #[test]
+        fn renders_gap_breakdown_when_classified() {
+            let mut r = covered_results();
+            r.coverage.attach_gap(crate::gap::GapReport {
+                free_bytes: 2 * 1024 * 1024 * 1024,
+                reclaimable_bytes: 1024 * 1024 * 1024,
+                in_use_bytes: 512 * 1024 * 1024,
+                unreachable_bytes: 256 * 1024 * 1024,
+                unknown_bytes: 0,
+            });
+            let out = render_to_string(&r);
+            assert!(out.contains("Untested:"));
+            assert!(out.contains("3.75 GiB ="));
+            assert!(out.contains("2.00 GiB free"));
+            assert!(out.contains("1.00 GiB reclaimable"));
+            assert!(out.contains("512 MiB in-use"));
+            assert!(out.contains("256 MiB unreachable"));
+            assert!(!out.contains("unknown"));
+        }
+
+        #[test]
+        fn gap_breakdown_includes_unknown_when_nonzero() {
+            let mut r = covered_results();
+            r.coverage.attach_gap(crate::gap::GapReport {
+                unknown_bytes: 4096,
+                ..crate::gap::GapReport::default()
+            });
+            let out = render_to_string(&r);
+            assert!(out.contains("4.00 KiB unknown"));
+        }
+
+        #[test]
+        fn no_gap_breakdown_without_classification() {
+            let out = render_to_string(&covered_results());
+            assert!(!out.contains("Untested:"));
         }
 
         #[test]
