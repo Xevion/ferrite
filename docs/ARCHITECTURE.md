@@ -58,6 +58,7 @@ Code: `src/headless.rs`, `src/ndjson.rs`, `src/results.rs`, `src/tui/bridge.rs`
 | `coverage.rs` | Cross-run coverage persistence (`--coverage-file`): `CoverageStore`, PFN range compaction/merge/subtraction, machine fingerprint guard |
 | `gap.rs` | Untested-remainder classification via `/proc/kpageflags`: `FrameClass`, `GapReport`, system gap scan |
 | `sieve.rs` | Frame-hostage culling (`--cull`): `FrameSieve` sweeps available RAM, holds covered 2 MiB blocks hostage, releases fresh frames for the test buffer |
+| `devmem.rs` | `/dev/mem` targeted testing (`--devmem`): target parsing, `memmap=`/iomem write-safety classification, `pread` read-only probe, trivial `DevMemResolver` (phys known exactly) |
 | `edac.rs` | ECC error counters from `/sys/devices/system/edac/`; `EdacSnapshot`, `DimmEdac`, `EccDelta` |
 | `smbios.rs` | DIMM info from `/sys/firmware/dmi/tables/` |
 | `dimm.rs` | `DimmTopology` — merges SMBIOS + EDAC into a per-DIMM view |

@@ -112,6 +112,19 @@ pub struct Cli {
     /// of --size.
     #[arg(long, requires = "coverage_file")]
     pub cull: bool,
+
+    /// Test a specific physical range through /dev/mem instead of anonymous
+    /// memory: `START-END` (hex, e.g. 0x39400000-0x395fffff) or `reserved`
+    /// (all memmap=-reserved regions). Requires root and `CONFIG_STRICT_DEVMEM=n`.
+    /// System RAM is read-only unless --devmem-unsafe is given.
+    #[arg(long, value_name = "RANGE", value_parser = ferrite::devmem::parse_target, conflicts_with = "coverage_file")]
+    pub devmem: Option<ferrite::devmem::DevMemTarget>,
+
+    /// Allow destructive write testing of live System RAM through /dev/mem.
+    /// DANGEROUS: writing to memory the kernel is using will corrupt it and
+    /// crash the machine. Never enables writes to ACPI/PCI/firmware regions.
+    #[arg(long, requires = "devmem")]
+    pub devmem_unsafe: bool,
 }
 
 /// Worker-thread count for pattern execution.
@@ -904,6 +917,8 @@ CapEff:\t0000000000000000";
                 no_phys: true,
                 coverage_file: None,
                 cull: false,
+                devmem: None,
+                devmem_unsafe: false,
             }
         }
 

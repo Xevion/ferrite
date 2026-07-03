@@ -2,6 +2,7 @@
 
 pub mod alloc;
 pub mod coverage;
+pub mod devmem;
 pub mod dimm;
 pub mod edac;
 pub mod error_analysis;

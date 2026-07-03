@@ -1,9 +1,10 @@
 use std::ffi::c_void;
+use std::fs::OpenOptions;
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
 use nix::sys::mman::{
-    MapFlags, MmapAdvise, ProtFlags, madvise, mlock, mmap_anonymous, mprotect, munmap,
+    MapFlags, MmapAdvise, ProtFlags, madvise, mlock, mmap, mmap_anonymous, mprotect, munmap,
 };
 use rayon::prelude::*;
 use thiserror::Error;
@@ -20,6 +21,12 @@ pub enum AllocError {
     Mprotect(#[source] nix::Error),
     #[error("could not lock any memory below the headroom floor ({available} bytes available)")]
     Exhausted { available: u64 },
+    #[error("/dev/mem physical range must be page-aligned (start {phys_start:#x}, len {len:#x})")]
+    DevMemAlignment { phys_start: u64, len: usize },
+    #[error("could not open /dev/mem: {0}")]
+    DevMemOpen(#[source] std::io::Error),
+    #[error("could not map physical range through /dev/mem: {0}")]
+    DevMemMap(#[source] nix::Error),
 }
 
 impl AllocError {
@@ -36,7 +43,15 @@ impl AllocError {
                 "free memory (stop services, drop caches) or lower --headroom \
                 to allow allocation closer to the limit",
             ),
-            AllocError::Mmap(_) | AllocError::Mprotect(_) | AllocError::ZeroSize => None,
+            AllocError::DevMemMap(_) => Some(
+                "/dev/mem RAM access requires a kernel built with CONFIG_STRICT_DEVMEM=n \
+                (Unraid and some appliance kernels); most distros block it",
+            ),
+            AllocError::DevMemOpen(_) => Some("run as root to open /dev/mem"),
+            AllocError::Mmap(_)
+            | AllocError::Mprotect(_)
+            | AllocError::ZeroSize
+            | AllocError::DevMemAlignment { .. } => None,
         }
     }
 }
@@ -261,6 +276,51 @@ impl TestBuffer {
                 stop,
             },
         ))
+    }
+
+    /// Map a physical address range directly through `/dev/mem`.
+    ///
+    /// `phys_start` and `len` must both be page-aligned. `writable` selects
+    /// `PROT_READ|PROT_WRITE` (for destructive pattern testing) versus a
+    /// read-only probe. The mapping is `MAP_SHARED` so writes reach physical
+    /// memory. No `mlock` is needed — a `/dev/mem` mapping already points at
+    /// fixed physical frames.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::DevMemAlignment`] if unaligned,
+    /// [`AllocError::DevMemOpen`] if `/dev/mem` cannot be opened (not root),
+    /// or [`AllocError::DevMemMap`] if the mapping fails (e.g.
+    /// `CONFIG_STRICT_DEVMEM=y` blocks RAM access).
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub fn map_physical(phys_start: u64, len: usize, writable: bool) -> Result<Self, AllocError> {
+        let size = NonZeroUsize::new(len).ok_or(AllocError::ZeroSize)?;
+        if !phys_start.is_multiple_of(4096) || !len.is_multiple_of(4096) {
+            return Err(AllocError::DevMemAlignment { phys_start, len });
+        }
+        let offset = i64::try_from(phys_start)
+            .map_err(|_| AllocError::DevMemAlignment { phys_start, len })?;
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(writable)
+            .open("/dev/mem")
+            .map_err(AllocError::DevMemOpen)?;
+
+        let prot = if writable {
+            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE
+        } else {
+            ProtFlags::PROT_READ
+        };
+
+        // SAFETY: /dev/mem is opened for the requested access; the range is
+        // page-aligned; MAP_SHARED routes writes to physical memory. The kernel
+        // validates the physical range and fails cleanly (EPERM) if disallowed.
+        let ptr = unsafe {
+            mmap(None, size, prot, MapFlags::MAP_SHARED, &file, offset)
+                .map_err(AllocError::DevMemMap)?
+        };
+        Ok(Self { ptr, len })
     }
 
     /// Returns the buffer as a mutable slice of u64 words.
