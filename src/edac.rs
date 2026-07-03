@@ -1,3 +1,9 @@
+//! ECC error counters from `/sys/devices/system/edac/`.
+//!
+//! Reads correctable/uncorrectable error counts per DIMM before and after a
+//! run and diffs them into an [`EccDelta`], covering both the modern
+//! dimm-based sysfs API and the legacy csrow-based one.
+
 use std::fs;
 use std::io;
 use std::path::Path;

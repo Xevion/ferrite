@@ -1,3 +1,10 @@
+//! SMBIOS Type 17 (Memory Device) parsing from `/sys/firmware/dmi/tables/`.
+//!
+//! Reads the raw DMI table and decodes Type 17 entries into [`DimmInfo`] --
+//! per-slot manufacturer, part number, speed, and capacity. Merged with EDAC
+//! data in [`crate::dimm::DimmTopology`] to identify DIMMs by more than a bare
+//! `mc0/dimm1` index.
+
 use std::fmt;
 use std::fs;
 use std::io;

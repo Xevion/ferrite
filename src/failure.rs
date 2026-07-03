@@ -1,3 +1,11 @@
+//! The [`Failure`] record: one mismatched word, the fundamental unit of a
+//! memory fault in ferrite.
+//!
+//! Carries the virtual address, expected/actual values, and (when physical
+//! resolution is available) the [`crate::physmem::phys::PhysAddr`] -- enough
+//! to report and later classify ([`crate::error_analysis`]) every fault a
+//! pattern finds.
+
 use std::fmt;
 
 use crate::physmem::phys::PhysAddr;

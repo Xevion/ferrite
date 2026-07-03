@@ -1,3 +1,10 @@
+//! Post-test bit-error classification.
+//!
+//! Aggregates a run's [`crate::Failure`]s into [`BitErrorStats`] and
+//! classifies the pattern as [`ErrorClassification::StuckBit`], `Coupling`,
+//! or `Mixed` -- distinguishing a cell permanently stuck at one value from an
+//! address-aliasing fault where writes bleed between cells.
+
 use serde::Serialize;
 
 use crate::Failure;

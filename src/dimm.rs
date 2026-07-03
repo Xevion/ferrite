@@ -1,3 +1,10 @@
+//! Unified per-DIMM view: SMBIOS identity merged with EDAC error counters.
+//!
+//! [`DimmTopology`] pairs each physical slot's [`crate::smbios::DimmInfo`]
+//! (manufacturer, part number, capacity) with its [`crate::edac::DimmEdac`]
+//! (correctable/uncorrectable counts), so failure reports can name the module
+//! rather than just its EDAC label.
+
 use std::fmt;
 
 use crate::edac::{DimmEdac, EdacSnapshot};

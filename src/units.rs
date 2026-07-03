@@ -1,3 +1,7 @@
+//! Binary (KiB/MiB/GiB) and decimal (KB/MB/GB) size and throughput
+//! formatting, plus the reverse: parsing user-supplied size strings
+//! (`--size`, `--headroom`) back into byte counts.
+
 use std::fmt;
 
 /// Format a byte count as a size string reversible by `parse_size`.
