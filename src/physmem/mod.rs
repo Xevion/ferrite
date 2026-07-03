@@ -11,6 +11,7 @@ pub mod coverage;
 pub mod devmem;
 pub mod gap;
 pub mod kpageflags;
+pub mod lifecycle;
 pub mod pfn;
 pub mod phys;
 pub mod sieve;

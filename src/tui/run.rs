@@ -13,7 +13,8 @@ use crate::events::{self, RunEvent};
 use crate::ndjson::NdjsonEventWriter;
 use crate::pattern::Pattern;
 use crate::physmem::phys::{MapStats, PagemapResolver, PhysResolver};
-use crate::runner::{self, PassResult, RunConfig, RunResults};
+use crate::physmem::sysmem::Coverage;
+use crate::runner::{self, PassResult, RunConfig};
 use crate::shutdown;
 use crate::units::{Size, UnitSystem};
 
@@ -36,6 +37,19 @@ pub struct TuiTestSetup {
     pub map_stats: Option<MapStats>,
     /// Keeps the compaction guard alive for the duration of the test.
     pub compaction_guard: Option<CompactionGuard>,
+}
+
+/// Raw products of a TUI run, for finalization via [`crate::runner::execute_run`].
+///
+/// The interactive session (event loop, tracing hot-swap, and the events-file
+/// NDJSON summary) is fully drained by the time this is returned; only the
+/// shared results tail remains.
+pub struct TuiRunOutput {
+    pub pass_results: Vec<PassResult>,
+    pub config: RunConfig,
+    pub elapsed: std::time::Duration,
+    /// Single-run coverage measured before `setup` moved into the worker.
+    pub coverage: Coverage,
 }
 
 /// TUI mode: the default interactive experience.
@@ -61,7 +75,7 @@ pub fn run_tui_mode(
     patterns: Vec<Pattern>,
     tracing_handle: &TracingReloadHandle,
     events_writer: Option<NdjsonEventWriter>,
-) -> Result<RunResults, Whatever> {
+) -> Result<TuiRunOutput, Whatever> {
     let (tui_tx, tui_rx) = mpsc::sync_channel::<TuiEvent>(256);
 
     // Hot-swap the tracing layer from stderr to the TUI channel.
@@ -204,20 +218,21 @@ pub fn run_tui_mode(
         patterns: patterns_for_config,
         workers,
     };
-    let mut results = RunResults::from_passes(pass_results, config, run_elapsed);
-    results.coverage = coverage;
 
-    // Write the summary run_complete event to the NDJSON file
+    // The events-file NDJSON summary is written here, before the caller runs the
+    // shared results tail. Its coverage therefore reflects only this run (no
+    // cumulative merge yet) -- matching the pre-refactor behavior.
+    let total_failures: usize = pass_results.iter().map(PassResult::total_failures).sum();
     if let Some(w) = events_writer.as_mut() {
-        w.write_run_complete(
-            passes,
-            results.total_failures,
-            run_elapsed,
-            results.coverage,
-        );
+        w.write_run_complete(passes, total_failures, run_elapsed, coverage);
     }
 
-    Ok(results)
+    Ok(TuiRunOutput {
+        pass_results,
+        config,
+        elapsed: run_elapsed,
+        coverage,
+    })
 }
 
 #[cfg(test)]

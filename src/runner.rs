@@ -261,6 +261,36 @@ pub fn run(
     Ok(results)
 }
 
+/// Turn a run's raw pass results into finalized [`RunResults`].
+///
+/// This is the shared tail of every run path: assemble results from the pass
+/// list, record the measured single-run coverage, classify bit errors, merge
+/// the run into the cross-run coverage store (attaching cumulative stats), and
+/// classify the untested remainder.
+///
+/// Callers own the parts that genuinely differ between run modes: driving
+/// [`run`] itself (which thread it executes on), the event-consumer wiring, the
+/// `RunComplete` emission, and any NDJSON summary emission. Those are passed in
+/// here only as their already-computed products (`pass_results`, `elapsed`,
+/// `coverage`).
+#[must_use]
+pub fn execute_run(
+    pass_results: Vec<PassResult>,
+    config: RunConfig,
+    elapsed: std::time::Duration,
+    coverage: crate::physmem::sysmem::Coverage,
+    coverage_ctx: Option<crate::physmem::lifecycle::CoverageCtx>,
+    run_ranges: Option<Vec<crate::physmem::pfn::PfnRange>>,
+) -> RunResults {
+    let mut results = RunResults::from_passes(pass_results, config, elapsed);
+    results.coverage = coverage;
+    crate::error_analysis::analyze(&mut results);
+    let covered =
+        crate::physmem::lifecycle::finalize_coverage(coverage_ctx, run_ranges, &mut results);
+    crate::physmem::lifecycle::attach_gap_classification(covered, &mut results);
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
@@ -416,6 +446,36 @@ mod tests {
             check!(results.coverage == crate::physmem::sysmem::Coverage::Unavailable);
             let json = serde_json::to_value(&results).unwrap();
             check!(json["coverage"]["status"] == "unavailable");
+        }
+    }
+
+    mod execute_run {
+        use assert2::check;
+
+        use super::*;
+        use crate::physmem::sysmem::Coverage;
+
+        fn config() -> RunConfig {
+            RunConfig {
+                size: 4096,
+                passes: 1,
+                patterns: vec![Pattern::SolidBits],
+                workers: 1,
+            }
+        }
+
+        #[test]
+        fn assembles_results_and_sets_coverage() {
+            let results = super::super::execute_run(
+                vec![],
+                config(),
+                std::time::Duration::ZERO,
+                Coverage::Unavailable,
+                None,
+                None,
+            );
+            check!(results.total_failures == 0);
+            check!(results.coverage == Coverage::Unavailable);
         }
     }
 
