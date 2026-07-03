@@ -2,20 +2,23 @@
 //!
 //! A distinct, always-headless execution path: it maps chosen physical ranges
 //! (rather than anonymous memory), classifies each for write safety, and either
-//! write-tests or read-only probes it. This backend does not honor `--format`
-//! or `--events` and skips error analysis; converging it onto the shared run
-//! orchestration is tracked separately (XEV-1024).
+//! write-tests or read-only probes it. Output flags (`--format`, `--events`)
+//! are honored identically to the anonymous-memory headless path via the shared
+//! wiring in [`crate::output`]; coverage-store/cull/gap machinery does not
+//! apply (a fixed physical target is tested, not acquired frames).
 
 use snafu::{ResultExt, Whatever};
 
 use ferrite::events::RunEvent;
 use ferrite::headless::HeadlessPrinter;
+use ferrite::ndjson::NdjsonEventWriter;
 use ferrite::pattern::Pattern;
 use ferrite::physmem::phys::PhysResolver;
+use ferrite::physmem::sysmem::Coverage;
 use ferrite::runner;
 use ferrite::shutdown;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, OutputConfig, OutputFormat};
 
 type Result<T, E = Whatever> = std::result::Result<T, E>;
 
@@ -24,6 +27,7 @@ type Result<T, E = Whatever> = std::result::Result<T, E>;
 /// headless. Exits with a non-zero code if any mapping's write test fails.
 pub fn run(
     cli: &Cli,
+    output: &OutputConfig,
     target: ferrite::physmem::devmem::DevMemTarget,
     patterns: &[Pattern],
     workers: usize,
@@ -38,7 +42,7 @@ pub fn run(
 
     let mut total_failures: usize = 0;
     for mapping in mappings {
-        total_failures += run_mapping(&mapping, cli, patterns, workers, parallel)?;
+        total_failures += run_mapping(&mapping, cli, output, patterns, workers, parallel)?;
     }
 
     let code = shutdown::exit_code(total_failures);
@@ -53,6 +57,7 @@ pub fn run(
 fn run_mapping(
     mapping: &ferrite::physmem::devmem::Mapping,
     cli: &Cli,
+    output: &OutputConfig,
     patterns: &[Pattern],
     workers: usize,
     parallel: bool,
@@ -80,13 +85,13 @@ fn run_mapping(
             );
         }
         tracing::info!("devmem: write-testing physical {start:#x}-{end:#x} ({label})");
-        run_write(mapping, cli, patterns, workers, parallel)
+        run_write(mapping, cli, output, patterns, workers, parallel)
     } else {
         tracing::info!(
             "devmem: read-only probe of physical {start:#x}-{end:#x} ({label}); \
              pass --devmem-unsafe to write-test (DANGEROUS)"
         );
-        run_probe(mapping, cli.units)?;
+        run_probe(mapping, output, cli.units)?;
         Ok(0)
     }
 }
@@ -111,6 +116,7 @@ fn map_context(mapping: &ferrite::physmem::devmem::Mapping) -> String {
 fn run_write(
     mapping: &ferrite::physmem::devmem::Mapping,
     cli: &Cli,
+    output: &OutputConfig,
     patterns: &[Pattern],
     workers: usize,
     parallel: bool,
@@ -125,12 +131,18 @@ fn run_write(
     let map_stats = resolver.build_map(buf.as_ptr(), mapping.len).ok();
 
     let unit_system = cli.units;
+    let format = output.format;
+
+    // --format json without --events <file>: NDJSON events stream to stdout.
+    let json_to_stdout = format == OutputFormat::Json && output.events_file.is_none();
+    // Suppress human output when format is JSON -- stdout is a JSON-only surface.
+    let suppress_human = format == OutputFormat::Json;
+
+    let mut stdout_ndjson =
+        json_to_stdout.then(|| NdjsonEventWriter::new(Box::new(std::io::stdout())));
+    let mut events_ndjson = crate::output::open_events_writer(output)?;
+
     let (tx, rx) = ferrite::events::event_bus();
-    let consumer = std::thread::spawn(move || {
-        let mut printer = HeadlessPrinter::new(std::io::stdout(), unit_system);
-        printer.consume(&rx);
-        printer
-    });
 
     let _ = tx.send(RunEvent::RunStart {
         size: mapping.len,
@@ -141,6 +153,18 @@ fn run_write(
     if let Some(stats) = map_stats {
         let _ = tx.send(RunEvent::MapInfo { stats });
     }
+
+    let consumer = std::thread::spawn(move || {
+        let mut printer = HeadlessPrinter::new(std::io::stdout(), unit_system);
+        crate::output::consume_headless_events(
+            &rx,
+            &mut printer,
+            &mut stdout_ndjson,
+            &mut events_ndjson,
+            suppress_human,
+        );
+        (stdout_ndjson, events_ndjson)
+    });
 
     let run_start = std::time::Instant::now();
     let pass_results = runner::run(
@@ -157,7 +181,8 @@ fn run_write(
 
     let _ = tx.send(RunEvent::RunComplete);
     drop(tx);
-    let mut printer = consumer.join().expect("event consumer thread panicked");
+    let (mut stdout_ndjson, mut events_ndjson) =
+        consumer.join().expect("event consumer thread panicked");
 
     let config = ferrite::runner::RunConfig {
         size: mapping.len,
@@ -165,8 +190,35 @@ fn run_write(
         patterns: patterns.to_vec(),
         workers,
     };
-    let results = ferrite::runner::RunResults::from_passes(pass_results, config, elapsed);
-    printer.print_final_result(results.total_failures);
+    // devmem tests a fixed physical target, not acquired frames: no coverage
+    // denominator and no cross-run store/gap machinery apply.
+    let results = runner::execute_run(
+        pass_results,
+        config,
+        elapsed,
+        Coverage::Unavailable,
+        None,
+        None,
+    );
+
+    if let Some(w) = stdout_ndjson.as_mut() {
+        w.write_run_complete(
+            cli.passes,
+            results.total_failures,
+            elapsed,
+            results.coverage,
+        );
+    }
+    if let Some(w) = events_ndjson.as_mut() {
+        w.write_run_complete(
+            cli.passes,
+            results.total_failures,
+            elapsed,
+            results.coverage,
+        );
+    }
+
+    crate::output::render_results(output, &results, unit_system, false, &mut std::io::stdout());
     Ok(results.total_failures)
 }
 
@@ -178,6 +230,7 @@ fn run_write(
 /// checksum a reachability signal rather than a stable value.
 fn run_probe(
     mapping: &ferrite::physmem::devmem::Mapping,
+    output: &OutputConfig,
     unit_system: ferrite::units::UnitSystem,
 ) -> Result<()> {
     use std::os::unix::fs::FileExt;
@@ -200,10 +253,22 @@ fn run_probe(
     }
 
     let size = ferrite::units::Size::new(mapping.len as f64, unit_system);
-    println!(
-        "  probe: {size} readable ({} words, {} nonzero, checksum {:#018x})",
-        stats.words_read, stats.nonzero_words, stats.xor_checksum,
-    );
+    // A read-only probe yields no RunResults, so there is nothing to route
+    // through the renderers. Under `--format json` the stdout surface is
+    // JSON-only, so the summary goes to tracing (stderr) instead.
+    if output.format == OutputFormat::Json {
+        tracing::info!(
+            "probe: {size} readable ({} words, {} nonzero, checksum {:#018x})",
+            stats.words_read,
+            stats.nonzero_words,
+            stats.xor_checksum,
+        );
+    } else {
+        println!(
+            "  probe: {size} readable ({} words, {} nonzero, checksum {:#018x})",
+            stats.words_read, stats.nonzero_words, stats.xor_checksum,
+        );
+    }
     Ok(())
 }
 

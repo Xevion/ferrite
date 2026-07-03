@@ -9,13 +9,12 @@ use clap::Parser;
 use snafu::whatever;
 use snafu::{ResultExt, Whatever};
 
-use ferrite::events::{EventRx, RunEvent};
+use ferrite::events::RunEvent;
 use ferrite::headless::HeadlessPrinter;
 use ferrite::ndjson::NdjsonEventWriter;
 use ferrite::pattern::Pattern;
 use ferrite::physmem::lifecycle::{self, CoverageCtx};
 use ferrite::physmem::phys::PhysResolver;
-use ferrite::results::{ResultsDoc, ResultsRenderer, TableRenderer};
 use ferrite::runner;
 use ferrite::shutdown;
 #[cfg(feature = "tui")]
@@ -23,6 +22,7 @@ use ferrite::tui::run::{TuiTestSetup, run_tui_mode};
 
 mod cli;
 mod devmem_run;
+mod output;
 #[cfg(feature = "tui")]
 use cli::TuiMode;
 use cli::{Cli, OutputConfig, OutputFormat, SetupOutcome, check_privileges, setup_test};
@@ -79,7 +79,7 @@ fn main() -> Result<()> {
     // chosen physical ranges rather than anonymous memory.
     if let Some(target) = cli.devmem {
         drop(tracing_handle);
-        let result = devmem_run::run(&cli, target, &patterns, workers, parallel);
+        let result = devmem_run::run(&cli, &output, target, &patterns, workers, parallel);
         shutdown_handle.shutdown();
         return result;
     }
@@ -100,7 +100,7 @@ fn main() -> Result<()> {
                 );
             }
 
-            let events_writer = open_events_writer(&output)?;
+            let events_writer = output::open_events_writer(&output)?;
 
             let cull = lifecycle::cull_ranges(cli.cull, coverage_ctx.as_ref());
             let s = match setup_test(&cli, cull.as_deref())? {
@@ -145,7 +145,7 @@ fn main() -> Result<()> {
                 coverage_ctx,
                 run_ranges,
             );
-            render_results(&output, &results, cli.units, true);
+            output::render_results(&output, &results, cli.units, true, &mut std::io::stdout());
 
             let code = shutdown::exit_code(results.total_failures);
             shutdown_handle.shutdown();
@@ -162,80 +162,6 @@ fn main() -> Result<()> {
     let result = run_non_tui(&cli, &patterns, &output, workers, parallel, coverage_ctx);
     shutdown_handle.shutdown();
     result
-}
-
-/// Render final results to stdout based on output configuration.
-///
-/// When `full_table` is true, the table renderer includes per-pattern detail
-/// (used after TUI exit, where no live output was shown). When false, only
-/// the summary and error analysis are rendered (after `HeadlessPrinter`
-/// already streamed live results).
-fn render_results(
-    output: &OutputConfig,
-    results: &ferrite::runner::RunResults,
-    unit_system: ferrite::units::UnitSystem,
-    full_table: bool,
-) {
-    let doc = ResultsDoc::from_results(results);
-    match output.format {
-        OutputFormat::Json => {
-            ferrite::results::JsonRenderer
-                .render(&doc, &mut std::io::stdout())
-                .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
-        }
-        OutputFormat::Table => {
-            let renderer = if full_table {
-                TableRenderer::full(unit_system)
-            } else {
-                TableRenderer::new(unit_system)
-            };
-            renderer
-                .render(&doc, &mut std::io::stdout())
-                .unwrap_or_else(|e| eprintln!("warning: failed to render results: {e}"));
-        }
-    }
-}
-
-/// Open the NDJSON event writer for `--events <file>`, if configured.
-fn open_events_writer(output: &OutputConfig) -> Result<Option<NdjsonEventWriter>> {
-    output
-        .events_file
-        .as_deref()
-        .map(|p| {
-            let path_str = p
-                .to_str()
-                .expect("events_file path validated as UTF-8 in resolve_output");
-            NdjsonEventWriter::from_path(path_str)
-                .with_whatever_context(|_| format!("failed to open events file: {}", p.display()))
-        })
-        .transpose()
-}
-
-/// Consume events from the runner and drive human-readable output + JSON emission.
-///
-/// Runs on a dedicated thread. The [`HeadlessPrinter`] handles human-readable
-/// text while [`NdjsonEventWriter`] handles JSON emission (when present).
-fn consume_headless_events(
-    rx: &EventRx,
-    printer: &mut HeadlessPrinter<std::io::Stdout>,
-    stdout_ndjson: &mut Option<NdjsonEventWriter>,
-    events_ndjson: &mut Option<NdjsonEventWriter>,
-    suppress_human: bool,
-) {
-    while let Ok(event) = rx.recv() {
-        if !suppress_human {
-            printer.handle_event(&event);
-        }
-        if let Some(w) = stdout_ndjson.as_mut() {
-            w.handle_event(&event);
-        }
-        if let Some(w) = events_ndjson.as_mut() {
-            w.handle_event(&event);
-        }
-        if matches!(event, RunEvent::RunComplete) {
-            break;
-        }
-    }
 }
 
 /// Non-TUI mode: headless output with tracing to stderr.
@@ -299,12 +225,12 @@ fn run_non_tui(
     };
 
     // NDJSON writer for --events <file>
-    let mut events_ndjson = open_events_writer(output)?;
+    let mut events_ndjson = output::open_events_writer(output)?;
 
     // Consumer thread drives HeadlessPrinter (human) + optional NDJSON writers.
     let consumer = std::thread::spawn(move || {
         let mut printer = HeadlessPrinter::new(std::io::stdout(), unit_system);
-        consume_headless_events(
+        output::consume_headless_events(
             &rx,
             &mut printer,
             &mut stdout_ndjson,
@@ -371,7 +297,7 @@ fn run_non_tui(
         );
     }
 
-    render_results(output, &results, cli.units, false);
+    output::render_results(output, &results, cli.units, false, &mut std::io::stdout());
 
     let code = shutdown::exit_code(results.total_failures);
     if code != 0 {
