@@ -9,7 +9,7 @@ use crate::dimm::DimmTopology;
 use crate::edac::EccDelta;
 use crate::events::{EventRx, RunEvent};
 use crate::pattern::Pattern;
-use crate::phys::MapStats;
+use crate::physmem::phys::MapStats;
 use crate::units::{Rate, Size, UnitSystem};
 
 /// Display wrapper that shows the first `N` failures then a count of the remainder.
@@ -246,7 +246,7 @@ mod tests {
     use super::*;
     use crate::edac::EccDelta;
     use crate::failure::FailureBuilder;
-    use crate::phys::MapStats;
+    use crate::physmem::phys::MapStats;
 
     fn printer() -> HeadlessPrinter<Vec<u8>> {
         HeadlessPrinter::new(Vec::new(), UnitSystem::Binary)

@@ -248,7 +248,7 @@ impl TestBuffer {
             requested,
             CHUNK_BYTES,
             headroom,
-            &mut || crate::sysmem::mem_available(),
+            &mut || crate::physmem::sysmem::mem_available(),
             &mut |offset, len| activate_chunk(raw, offset, len),
         );
 

@@ -4,7 +4,7 @@ use crate::Failure;
 use crate::dimm::DimmTopology;
 use crate::edac::EccDelta;
 use crate::pattern::Pattern;
-use crate::phys::MapStats;
+use crate::physmem::phys::MapStats;
 
 /// Top-level event emitted by the unified runner via `crossbeam_channel`.
 ///
@@ -98,7 +98,7 @@ mod tests {
     use assert2::{assert, check};
 
     use crate::pattern::Pattern;
-    use crate::phys::MapStats;
+    use crate::physmem::phys::MapStats;
 
     use super::*;
 

@@ -8,7 +8,7 @@ use crate::Failure;
 use crate::edac::{EccDelta, EdacSnapshot};
 use crate::events::{EventTx, RunEvent};
 use crate::pattern::{Pattern, run_pattern};
-use crate::phys::PhysResolver;
+use crate::physmem::phys::PhysResolver;
 use crate::shutdown;
 
 /// Extract a human-readable message from a panic payload.
@@ -82,7 +82,7 @@ pub struct RunResults {
     pub total_failures: usize,
     /// Fraction of installed physical RAM this run tested. Set by the binary
     /// before rendering; defaults to [`Coverage::Unavailable`].
-    pub coverage: crate::sysmem::Coverage,
+    pub coverage: crate::physmem::sysmem::Coverage,
     /// Populated by [`crate::error_analysis::analyze`] after the run completes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_analysis: Option<crate::error_analysis::ErrorAnalysis>,
@@ -105,7 +105,7 @@ impl RunResults {
             passes,
             elapsed,
             total_failures,
-            coverage: crate::sysmem::Coverage::Unavailable,
+            coverage: crate::physmem::sysmem::Coverage::Unavailable,
             error_analysis: None,
         }
     }
@@ -413,7 +413,7 @@ mod tests {
                 config(),
                 Duration::from_millis(10),
             );
-            check!(results.coverage == crate::sysmem::Coverage::Unavailable);
+            check!(results.coverage == crate::physmem::sysmem::Coverage::Unavailable);
             let json = serde_json::to_value(&results).unwrap();
             check!(json["coverage"]["status"] == "unavailable");
         }
@@ -501,25 +501,32 @@ mod tests {
     struct StubResolver;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    impl crate::phys::PhysResolver for StubResolver {
+    impl crate::physmem::phys::PhysResolver for StubResolver {
         fn build_map(
             &mut self,
             _base: usize,
             _len: usize,
-        ) -> Result<crate::phys::MapStats, crate::phys::PhysError> {
+        ) -> Result<crate::physmem::phys::MapStats, crate::physmem::phys::PhysError> {
             unreachable!()
         }
-        fn resolve(&self, vaddr: usize) -> Result<crate::phys::PhysAddr, crate::phys::PhysError> {
-            Ok(crate::phys::PhysAddr(vaddr as u64 + 0x1_0000_0000))
+        fn resolve(
+            &self,
+            vaddr: usize,
+        ) -> Result<crate::physmem::phys::PhysAddr, crate::physmem::phys::PhysError> {
+            Ok(crate::physmem::phys::PhysAddr(vaddr as u64 + 0x1_0000_0000))
         }
-        fn page_flags(&self, _pfn: u64) -> Result<crate::phys::PageFlags, crate::phys::PhysError> {
-            Ok(crate::phys::PageFlags::default())
+        fn page_flags(
+            &self,
+            _pfn: u64,
+        ) -> Result<crate::physmem::kpageflags::KPageFlags, crate::physmem::phys::PhysError>
+        {
+            Ok(crate::physmem::kpageflags::KPageFlags::default())
         }
         fn verify_stability(
             &self,
             _base: usize,
             _len: usize,
-        ) -> Result<usize, crate::phys::PhysError> {
+        ) -> Result<usize, crate::physmem::phys::PhysError> {
             Ok(0)
         }
     }

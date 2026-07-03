@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::phys::PhysAddr;
+use crate::physmem::phys::PhysAddr;
 
 /// A single test failure record.
 #[derive(Debug, Clone, serde::Serialize)]

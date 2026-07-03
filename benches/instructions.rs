@@ -85,7 +85,7 @@ fn setup_pagemap_buf() -> Vec<u64> {
 #[library_benchmark]
 #[bench::single(setup = setup_pagemap_buf)]
 fn phys_build_map(buf: Vec<u64>) -> Vec<u64> {
-    use ferrite::phys::{PagemapResolver, PhysResolver};
+    use ferrite::physmem::phys::{PagemapResolver, PhysResolver};
     let base = buf.as_ptr() as usize;
     let len = buf.len() * size_of::<u64>();
     if let Ok(mut resolver) = PagemapResolver::new() {

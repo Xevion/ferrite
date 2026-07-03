@@ -10,21 +10,9 @@
 use serde::Serialize;
 use tracing::warn;
 
-use crate::coverage::{FRAME_BYTES, PfnRange};
-
-// Public /proc/kpageflags bits (Documentation/admin-guide/mm/pagemap.rst).
-const KPF_LRU: u64 = 1 << 5;
-const KPF_SLAB: u64 = 1 << 7;
-const KPF_BUDDY: u64 = 1 << 10;
-const KPF_ANON: u64 = 1 << 12;
-const KPF_SWAPBACKED: u64 = 1 << 14;
-const KPF_HWPOISON: u64 = 1 << 19;
-const KPF_NOPAGE: u64 = 1 << 20;
-const KPF_OFFLINE: u64 = 1 << 23;
-const KPF_PGTABLE: u64 = 1 << 26;
-
-/// Frames per batched `/proc/kpageflags` read (512 KiB of flag data).
-const READ_BATCH_FRAMES: u64 = 65536;
+use crate::physmem::PAGE_BYTES;
+use crate::physmem::kpageflags::{self, KPageFlags, READ_BATCH_FRAMES};
+use crate::physmem::pfn::{Pfn, PfnRange, subtract_ranges};
 
 /// What an untested physical frame is doing, and therefore whether another
 /// run could reach it.
@@ -42,16 +30,22 @@ pub enum FrameClass {
     Unreachable,
 }
 
-/// Classify one frame's raw kpageflags word.
+/// Classify one frame's kpageflags.
 #[must_use]
-pub const fn classify(flags: u64) -> FrameClass {
-    if flags & (KPF_NOPAGE | KPF_OFFLINE | KPF_HWPOISON | KPF_SLAB | KPF_PGTABLE) != 0 {
+pub const fn classify(flags: KPageFlags) -> FrameClass {
+    if flags.intersects(
+        KPageFlags::NOPAGE
+            .union(KPageFlags::OFFLINE)
+            .union(KPageFlags::HWPOISON)
+            .union(KPageFlags::SLAB)
+            .union(KPageFlags::PGTABLE),
+    ) {
         FrameClass::Unreachable
-    } else if flags & KPF_BUDDY != 0 {
+    } else if flags.contains(KPageFlags::BUDDY) {
         FrameClass::Free
-    } else if flags & (KPF_ANON | KPF_SWAPBACKED) != 0 {
+    } else if flags.intersects(KPageFlags::ANON.union(KPageFlags::SWAPBACKED)) {
         FrameClass::InUse
-    } else if flags & KPF_LRU != 0 {
+    } else if flags.contains(KPageFlags::LRU) {
         FrameClass::Reclaimable
     } else {
         // Kernel text/data, reserved, driver pages: no public flags.
@@ -97,7 +91,7 @@ impl GapReport {
             FrameClass::InUse => &mut self.in_use_bytes,
             FrameClass::Unreachable => &mut self.unreachable_bytes,
         };
-        *bucket += FRAME_BYTES;
+        *bucket += PAGE_BYTES;
     }
 }
 
@@ -108,10 +102,10 @@ pub fn ram_pfn_ranges(ranges: &[(u64, u64)]) -> Vec<PfnRange> {
     ranges
         .iter()
         .filter_map(|&(start, end)| {
-            let first = start.div_ceil(FRAME_BYTES);
-            let last = (end + 1) / FRAME_BYTES;
+            let first = start.div_ceil(PAGE_BYTES);
+            let last = (end + 1) / PAGE_BYTES;
             (last > first).then(|| PfnRange {
-                start: first,
+                start: Pfn::new(first),
                 count: last - first,
             })
         })
@@ -139,11 +133,11 @@ pub fn classify_gaps(
             // `count` is capped at READ_BATCH_FRAMES, far below usize::MAX.
             let out = &mut buf[..count as usize];
             if read(range, out) {
-                for &flags in &*out {
-                    report.add(classify(flags));
+                for &word in &*out {
+                    report.add(classify(KPageFlags::from_bits_retain(word)));
                 }
             } else {
-                report.unknown_bytes += count * FRAME_BYTES;
+                report.unknown_bytes += count * PAGE_BYTES;
             }
             offset += count;
         }
@@ -166,7 +160,7 @@ pub fn classify_system_gaps(covered: &[PfnRange]) -> Option<GapReport> {
             return None;
         }
     };
-    let universe = ram_pfn_ranges(&crate::sysmem::system_ram_ranges(&iomem));
+    let universe = ram_pfn_ranges(&crate::physmem::sysmem::system_ram_ranges(&iomem));
     if universe.is_empty() {
         return None;
     }
@@ -180,24 +174,11 @@ pub fn classify_system_gaps(covered: &[PfnRange]) -> Option<GapReport> {
             return None;
         }
     };
-    let gaps = crate::coverage::subtract_ranges(&universe, covered);
+    let gaps = subtract_ranges(&universe, covered);
 
-    let mut bytes = vec![0u8; READ_BATCH_FRAMES as usize * 8];
+    let mut scratch = vec![0u8; READ_BATCH_FRAMES as usize * 8];
     Some(classify_gaps(&gaps, &mut |range, out| {
-        let Ok(len) = usize::try_from(range.count * 8) else {
-            return false;
-        };
-        let Ok(offset) = i64::try_from(range.start * 8) else {
-            return false;
-        };
-        if crate::phys::pread_exact(&file, &mut bytes[..len], offset).is_err() {
-            return false;
-        }
-        for (slot, chunk) in out.iter_mut().zip(bytes[..len].chunks_exact(8)) {
-            // chunks_exact(8) guarantees the conversion; 0 is unreachable.
-            *slot = chunk.try_into().map_or(0, u64::from_le_bytes);
-        }
-        true
+        kpageflags::read_batch(&file, range, &mut scratch, out)
     }))
 }
 
@@ -206,7 +187,10 @@ mod tests {
     use super::*;
 
     fn r(start: u64, count: u64) -> PfnRange {
-        PfnRange { start, count }
+        PfnRange {
+            start: Pfn::new(start),
+            count,
+        }
     }
 
     mod classify_flags {
@@ -216,50 +200,60 @@ mod tests {
 
         #[test]
         fn buddy_is_free() {
-            check!(classify(KPF_BUDDY) == FrameClass::Free);
+            check!(classify(KPageFlags::BUDDY) == FrameClass::Free);
         }
 
         #[test]
         fn file_cache_is_reclaimable() {
             // Typical page-cache frame: LRU (+ uptodate/referenced noise).
-            check!(classify(KPF_LRU) == FrameClass::Reclaimable);
-            check!(classify(KPF_LRU | (1 << 3) | (1 << 2)) == FrameClass::Reclaimable);
+            check!(classify(KPageFlags::LRU) == FrameClass::Reclaimable);
+            check!(
+                classify(KPageFlags::from_bits_retain(
+                    KPageFlags::LRU.bits() | (1 << 3) | (1 << 2)
+                )) == FrameClass::Reclaimable
+            );
         }
 
         #[test]
         fn anon_is_in_use() {
-            check!(classify(KPF_ANON | KPF_LRU | KPF_SWAPBACKED) == FrameClass::InUse);
+            check!(
+                classify(KPageFlags::ANON | KPageFlags::LRU | KPageFlags::SWAPBACKED)
+                    == FrameClass::InUse
+            );
         }
 
         #[test]
         fn shmem_without_anon_is_in_use() {
             // tmpfs/shmem: swap-backed but not anonymous.
-            check!(classify(KPF_SWAPBACKED | KPF_LRU) == FrameClass::InUse);
+            check!(classify(KPageFlags::SWAPBACKED | KPageFlags::LRU) == FrameClass::InUse);
         }
 
         #[test]
         fn slab_and_pgtable_are_unreachable() {
-            check!(classify(KPF_SLAB) == FrameClass::Unreachable);
-            check!(classify(KPF_PGTABLE) == FrameClass::Unreachable);
+            check!(classify(KPageFlags::SLAB) == FrameClass::Unreachable);
+            check!(classify(KPageFlags::PGTABLE) == FrameClass::Unreachable);
         }
 
         #[test]
         fn nopage_offline_hwpoison_are_unreachable() {
-            check!(classify(KPF_NOPAGE) == FrameClass::Unreachable);
-            check!(classify(KPF_OFFLINE) == FrameClass::Unreachable);
-            check!(classify(KPF_HWPOISON) == FrameClass::Unreachable);
+            check!(classify(KPageFlags::NOPAGE) == FrameClass::Unreachable);
+            check!(classify(KPageFlags::OFFLINE) == FrameClass::Unreachable);
+            check!(classify(KPageFlags::HWPOISON) == FrameClass::Unreachable);
         }
 
         #[test]
         fn hwpoison_trumps_everything() {
-            check!(classify(KPF_HWPOISON | KPF_BUDDY) == FrameClass::Unreachable);
-            check!(classify(KPF_HWPOISON | KPF_ANON | KPF_LRU) == FrameClass::Unreachable);
+            check!(classify(KPageFlags::HWPOISON | KPageFlags::BUDDY) == FrameClass::Unreachable);
+            check!(
+                classify(KPageFlags::HWPOISON | KPageFlags::ANON | KPageFlags::LRU)
+                    == FrameClass::Unreachable
+            );
         }
 
         #[test]
         fn no_flags_is_unreachable() {
             // Kernel text/data and reserved frames expose no public flags.
-            check!(classify(0) == FrameClass::Unreachable);
+            check!(classify(KPageFlags::empty()) == FrameClass::Unreachable);
         }
     }
 
@@ -356,7 +350,7 @@ mod tests {
         use super::*;
 
         /// Reader that serves `flags[pfn - base]` for any requested range.
-        fn table_reader(base: u64, flags: Vec<u64>) -> impl FnMut(PfnRange, &mut [u64]) -> bool {
+        fn table_reader(base: Pfn, flags: Vec<u64>) -> impl FnMut(PfnRange, &mut [u64]) -> bool {
             move |range, out| {
                 for (i, slot) in out.iter_mut().enumerate() {
                     *slot = flags[(range.start - base) as usize + i];
@@ -373,28 +367,37 @@ mod tests {
 
         #[test]
         fn one_frame_per_class() {
-            let mut read = table_reader(0, vec![KPF_BUDDY, KPF_LRU, KPF_ANON, KPF_SLAB]);
+            let mut read = table_reader(
+                Pfn::new(0),
+                vec![
+                    KPageFlags::BUDDY.bits(),
+                    KPageFlags::LRU.bits(),
+                    KPageFlags::ANON.bits(),
+                    KPageFlags::SLAB.bits(),
+                ],
+            );
             let report = classify_gaps(&[r(0, 4)], &mut read);
-            check!(report.free_bytes == FRAME_BYTES);
-            check!(report.reclaimable_bytes == FRAME_BYTES);
-            check!(report.in_use_bytes == FRAME_BYTES);
-            check!(report.unreachable_bytes == FRAME_BYTES);
+            check!(report.free_bytes == PAGE_BYTES);
+            check!(report.reclaimable_bytes == PAGE_BYTES);
+            check!(report.in_use_bytes == PAGE_BYTES);
+            check!(report.unreachable_bytes == PAGE_BYTES);
             check!(report.unknown_bytes == 0);
         }
 
         #[test]
         fn disjoint_gaps_accumulate() {
-            let mut read = table_reader(0, vec![KPF_BUDDY, 0, KPF_BUDDY, 0, KPF_BUDDY]);
+            let buddy = KPageFlags::BUDDY.bits();
+            let mut read = table_reader(Pfn::new(0), vec![buddy, 0, buddy, 0, buddy]);
             let report = classify_gaps(&[r(0, 1), r(2, 1), r(4, 1)], &mut read);
-            check!(report.free_bytes == 3 * FRAME_BYTES);
-            check!(report.total_bytes() == 3 * FRAME_BYTES);
+            check!(report.free_bytes == 3 * PAGE_BYTES);
+            check!(report.total_bytes() == 3 * PAGE_BYTES);
         }
 
         #[test]
         fn unreadable_batch_counts_as_unknown() {
             let report = classify_gaps(&[r(0, 5)], &mut |_, _| false);
-            check!(report.unknown_bytes == 5 * FRAME_BYTES);
-            check!(report.total_bytes() == 5 * FRAME_BYTES);
+            check!(report.unknown_bytes == 5 * PAGE_BYTES);
+            check!(report.total_bytes() == 5 * PAGE_BYTES);
         }
 
         #[test]
@@ -403,10 +406,10 @@ mod tests {
             let mut calls = Vec::new();
             let report = classify_gaps(&[r(0, total)], &mut |range, out| {
                 calls.push(range);
-                out.fill(KPF_BUDDY);
+                out.fill(KPageFlags::BUDDY.bits());
                 true
             });
-            check!(report.free_bytes == total * FRAME_BYTES);
+            check!(report.free_bytes == total * PAGE_BYTES);
             check!(calls == vec![r(0, READ_BATCH_FRAMES), r(READ_BATCH_FRAMES, 10)]);
         }
     }

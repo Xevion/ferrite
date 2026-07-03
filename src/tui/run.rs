@@ -12,7 +12,7 @@ use crate::alloc::TestBuffer;
 use crate::events::{self, RunEvent};
 use crate::ndjson::NdjsonEventWriter;
 use crate::pattern::Pattern;
-use crate::phys::{MapStats, PagemapResolver, PhysResolver};
+use crate::physmem::phys::{MapStats, PagemapResolver, PhysResolver};
 use crate::runner::{self, PassResult, RunConfig, RunResults};
 use crate::shutdown;
 use crate::units::{Size, UnitSystem};
@@ -116,7 +116,7 @@ pub fn run_tui_mode(
     let parallel = workers > 1;
 
     // Measure coverage before `setup` is moved into the worker thread.
-    let coverage = crate::sysmem::coverage_for(setup.map_stats.as_ref());
+    let coverage = crate::physmem::sysmem::coverage_for(setup.map_stats.as_ref());
 
     let run_start = std::time::Instant::now();
 

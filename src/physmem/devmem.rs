@@ -25,7 +25,9 @@
 
 use snafu::Snafu;
 
-use crate::phys::{MapStats, PageFlags, PhysAddr, PhysError, PhysResolver};
+use crate::physmem::kpageflags::KPageFlags;
+use crate::physmem::phys::{MapStats, PhysAddr, PhysError, PhysResolver};
+use crate::physmem::{PAGE_BYTES, PAGE_BYTES_USIZE};
 
 /// What the user asked `--devmem` to test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,11 +98,9 @@ pub fn parse_target(s: &str) -> Result<DevMemTarget, String> {
     if s.eq_ignore_ascii_case("reserved") {
         return Ok(DevMemTarget::Reserved);
     }
-    let (start, end) = s.split_once('-').ok_or_else(|| {
+    let (start, end) = crate::physmem::parse_hex_range(s, true).ok_or_else(|| {
         format!("invalid --devmem value: {s} (expected \"reserved\" or START-END, e.g. 0x39400000-0x395fffff)")
     })?;
-    let start = parse_addr(start.trim())?;
-    let end = parse_addr(end.trim())?;
     if end < start {
         return Err(format!(
             "invalid --devmem range: end {end:#x} is below start {start:#x}"
@@ -113,11 +113,7 @@ pub fn parse_target(s: &str) -> Result<DevMemTarget, String> {
 /// Bare hex matches the format `/proc/iomem` prints, so a range can be pasted
 /// straight from it.
 fn parse_addr(s: &str) -> Result<u64, String> {
-    let hex = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    u64::from_str_radix(hex, 16).map_err(|_| format!("invalid physical address: {s}"))
+    crate::physmem::parse_hex(s, true).ok_or_else(|| format!("invalid physical address: {s}"))
 }
 
 /// Extract the inclusive `[start, end]` byte ranges of every `memmap=`
@@ -161,7 +157,7 @@ fn parse_memmap_size(s: &str) -> Option<u64> {
 ///
 /// `reserved` and `system_ram` are inclusive `[start, end]` byte ranges (as
 /// produced by [`parse_memmap_reserved`] and
-/// [`crate::sysmem::system_ram_ranges`]). Precedence: fully inside a reserved
+/// [`crate::physmem::sysmem::system_ram_ranges`]). Precedence: fully inside a reserved
 /// region wins; otherwise any overlap with System RAM is [`Safety::SystemRam`];
 /// anything else is [`Safety::FirmwareOrMmio`].
 #[must_use]
@@ -198,7 +194,7 @@ pub const fn write_allowed(safety: Safety, unsafe_override: bool) -> bool {
 /// each carrying its write-safety verdict.
 ///
 /// `cmdline` is `/proc/cmdline`; `system_ram` is the inclusive `[start, end]`
-/// System RAM ranges from [`crate::sysmem::system_ram_ranges`]. An explicit
+/// System RAM ranges from [`crate::physmem::sysmem::system_ram_ranges`]. An explicit
 /// range yields one mapping (safety classified); `reserved` yields one per
 /// `memmap=` reservation (all [`Safety::Reserved`]).
 ///
@@ -215,7 +211,7 @@ pub fn resolve_mappings(
     match target {
         DevMemTarget::Range { start, end } => {
             let len = (end - start + 1) as usize;
-            if !start.is_multiple_of(4096) || !len.is_multiple_of(4096) {
+            if !start.is_multiple_of(PAGE_BYTES) || !len.is_multiple_of(PAGE_BYTES_USIZE) {
                 return Err(DevMemError::Unaligned { start, len });
             }
             let safety = classify(start, end, &reserved, system_ram);
@@ -291,7 +287,7 @@ impl PhysResolver for DevMemResolver {
     fn build_map(&mut self, base: usize, len: usize) -> Result<MapStats, PhysError> {
         self.virt_base = base;
         self.len = len;
-        let pages = len / 4096;
+        let pages = len / PAGE_BYTES_USIZE;
         Ok(MapStats {
             total_pages: pages,
             resolved_pages: pages,
@@ -309,7 +305,7 @@ impl PhysResolver for DevMemResolver {
         Ok(PhysAddr(self.phys_base + (vaddr - self.virt_base) as u64))
     }
 
-    fn page_flags(&self, _pfn: u64) -> Result<PageFlags, PhysError> {
+    fn page_flags(&self, _pfn: u64) -> Result<KPageFlags, PhysError> {
         // kpageflags is meaningless for a direct physical mapping.
         Err(PhysError::PfnUnavailable { vaddr: 0 })
     }

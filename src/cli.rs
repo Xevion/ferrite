@@ -16,8 +16,8 @@ type Result<T, E = Whatever> = std::result::Result<T, E>;
 
 use ferrite::alloc::{CompactionGuard, TestBuffer};
 use ferrite::dimm::DimmTopology;
-use ferrite::phys::{MapStats, PagemapResolver, PhysResolver, PhysResolverError};
-use ferrite::sieve::FrameSieve;
+use ferrite::physmem::phys::{MapStats, PagemapResolver, PhysResolver, PhysResolverError};
+use ferrite::physmem::sieve::FrameSieve;
 use ferrite::units::UnitSystem;
 
 #[cfg(feature = "tui")]
@@ -122,8 +122,8 @@ pub struct Cli {
     /// memory: `START-END` (hex, e.g. 0x39400000-0x395fffff) or `reserved`
     /// (all memmap=-reserved regions). Requires root and `CONFIG_STRICT_DEVMEM=n`.
     /// System RAM is read-only unless --devmem-unsafe is given.
-    #[arg(long, value_name = "RANGE", value_parser = ferrite::devmem::parse_target, conflicts_with = "coverage_file")]
-    pub devmem: Option<ferrite::devmem::DevMemTarget>,
+    #[arg(long, value_name = "RANGE", value_parser = ferrite::physmem::devmem::parse_target, conflicts_with = "coverage_file")]
+    pub devmem: Option<ferrite::physmem::devmem::DevMemTarget>,
 
     /// Allow destructive write testing of live System RAM through /dev/mem.
     /// DANGEROUS: writing to memory the kernel is using will corrupt it and
@@ -188,7 +188,9 @@ impl Cli {
     pub fn requested_bytes_estimate(&self) -> usize {
         match self.size {
             SizeSpec::Bytes(n) => n,
-            SizeSpec::Max => ferrite::sysmem::mem_total().map_or(usize::MAX, |t| t as usize),
+            SizeSpec::Max => {
+                ferrite::physmem::sysmem::mem_total().map_or(usize::MAX, |t| t as usize)
+            }
         }
     }
 
@@ -503,7 +505,7 @@ const fn is_cull_ceiling(sieve_active: bool, err: &ferrite::alloc::AllocError) -
 /// Run the `--cull` frame sieve against the cumulative covered set. Returns
 /// the sieve holding hostage blocks, to be dropped once the test buffer is
 /// locked. Best-effort: failures degrade to an ordinary allocation.
-fn run_sieve(covered: &[ferrite::coverage::PfnRange], headroom: u64) -> Option<FrameSieve> {
+fn run_sieve(covered: &[ferrite::physmem::pfn::PfnRange], headroom: u64) -> Option<FrameSieve> {
     use ferrite::units::format_size;
 
     if covered.is_empty() {
@@ -528,11 +530,14 @@ fn run_sieve(covered: &[ferrite::coverage::PfnRange], headroom: u64) -> Option<F
     }
 }
 
-pub fn setup_test(cli: &Cli, cull: Option<&[ferrite::coverage::PfnRange]>) -> Result<SetupOutcome> {
+pub fn setup_test(
+    cli: &Cli,
+    cull: Option<&[ferrite::physmem::pfn::PfnRange]>,
+) -> Result<SetupOutcome> {
     let need_phys = !cli.no_phys;
     let requested = match cli.size {
         SizeSpec::Bytes(n) => n,
-        SizeSpec::Max => ferrite::sysmem::mem_total()
+        SizeSpec::Max => ferrite::physmem::sysmem::mem_total()
             .whatever_context("cannot resolve --size max: /proc/meminfo is unreadable")?
             as usize,
     };

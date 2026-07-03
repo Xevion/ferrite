@@ -452,7 +452,7 @@ impl TableRenderer {
             )?;
         }
         if let Some(gap) = cov.gap() {
-            let report = crate::gap::GapReport {
+            let report = crate::physmem::gap::GapReport {
                 free_bytes: gap.free_bytes(),
                 reclaimable_bytes: gap.reclaimable_bytes(),
                 in_use_bytes: gap.in_use_bytes(),
@@ -468,7 +468,7 @@ impl TableRenderer {
 /// Write the `Untested:` line breaking the gap down by frame class.
 fn write_gap_line(
     out: &mut dyn Write,
-    gap: &crate::gap::GapReport,
+    gap: &crate::physmem::gap::GapReport,
     unit_system: crate::units::UnitSystem,
 ) -> io::Result<()> {
     use std::fmt::Write as _;
@@ -505,7 +505,7 @@ pub fn render_ceiling_report(
     cumulative_bytes: u64,
     installed_bytes: u64,
     runs: u64,
-    gap: Option<crate::gap::GapReport>,
+    gap: Option<crate::physmem::gap::GapReport>,
     unit_system: crate::units::UnitSystem,
 ) -> io::Result<()> {
     let size = |b: u64| crate::units::Size::new(b as f64, unit_system);
@@ -784,10 +784,10 @@ mod tests {
     /// Clean results with measured coverage: 64 MiB tested of 32 GiB installed.
     fn covered_results() -> RunResults {
         let mut r = clean_results();
-        r.coverage = crate::sysmem::Coverage::Measured {
+        r.coverage = crate::physmem::sysmem::Coverage::Measured {
             tested_bytes: 64 * 1024 * 1024,
             total_bytes: 32 * 1024 * 1024 * 1024,
-            source: crate::sysmem::RamSource::ProcIomem,
+            source: crate::physmem::sysmem::RamSource::ProcIomem,
             cumulative: None,
             gap: None,
         };
@@ -1089,11 +1089,12 @@ mod tests {
         #[test]
         fn renders_cumulative_lines_when_store_active() {
             let mut r = covered_results();
-            r.coverage.attach_cumulative(crate::sysmem::Cumulative {
-                new_bytes: 32 * 1024 * 1024,
-                cumulative_bytes: 16 * 1024 * 1024 * 1024,
-                runs: 3,
-            });
+            r.coverage
+                .attach_cumulative(crate::physmem::sysmem::Cumulative {
+                    new_bytes: 32 * 1024 * 1024,
+                    cumulative_bytes: 16 * 1024 * 1024 * 1024,
+                    runs: 3,
+                });
             let out = render_to_string(&r);
             assert!(out.contains("New:       32.0 MiB this run"));
             assert!(out.contains("Cumulative: 16.0 GiB (50.0%) across 3 run(s)"));
@@ -1109,7 +1110,7 @@ mod tests {
         #[test]
         fn renders_gap_breakdown_when_classified() {
             let mut r = covered_results();
-            r.coverage.attach_gap(crate::gap::GapReport {
+            r.coverage.attach_gap(crate::physmem::gap::GapReport {
                 free_bytes: 2 * 1024 * 1024 * 1024,
                 reclaimable_bytes: 1024 * 1024 * 1024,
                 in_use_bytes: 512 * 1024 * 1024,
@@ -1129,9 +1130,9 @@ mod tests {
         #[test]
         fn gap_breakdown_includes_unknown_when_nonzero() {
             let mut r = covered_results();
-            r.coverage.attach_gap(crate::gap::GapReport {
+            r.coverage.attach_gap(crate::physmem::gap::GapReport {
                 unknown_bytes: 4096,
-                ..crate::gap::GapReport::default()
+                ..crate::physmem::gap::GapReport::default()
             });
             let out = render_to_string(&r);
             assert!(out.contains("4.00 KiB unknown"));
@@ -1199,7 +1200,7 @@ mod tests {
     mod ceiling_report {
         use assert2::assert;
 
-        use crate::gap::GapReport;
+        use crate::physmem::gap::GapReport;
         use crate::results::render_ceiling_report;
         use crate::units::UnitSystem;
 

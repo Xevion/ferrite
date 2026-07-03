@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::Failure;
 use crate::edac::EccDelta;
 use crate::events::RunEvent;
-use crate::phys::MapStats;
+use crate::physmem::phys::MapStats;
 
 /// Current schema version for the NDJSON event stream.
 const SCHEMA_VERSION: u32 = 1;
@@ -90,7 +90,7 @@ enum Event {
         passes: usize,
         total_failures: usize,
         duration_ms: f64,
-        coverage: crate::sysmem::Coverage,
+        coverage: crate::physmem::sysmem::Coverage,
     },
 }
 
@@ -285,7 +285,7 @@ impl NdjsonEventWriter {
         passes: usize,
         total_failures: usize,
         elapsed: Duration,
-        coverage: crate::sysmem::Coverage,
+        coverage: crate::physmem::sysmem::Coverage,
     ) {
         self.write_event(&Event::RunComplete {
             passes,
@@ -353,7 +353,7 @@ mod tests {
 
     use super::*;
     use crate::pattern::Pattern;
-    use crate::phys::{MapStats, PhysAddr};
+    use crate::physmem::phys::{MapStats, PhysAddr};
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -430,10 +430,10 @@ mod tests {
             3,
             5,
             Duration::from_secs(10),
-            crate::sysmem::Coverage::Measured {
+            crate::physmem::sysmem::Coverage::Measured {
                 tested_bytes: 1024,
                 total_bytes: 4096,
-                source: crate::sysmem::RamSource::ProcIomem,
+                source: crate::physmem::sysmem::RamSource::ProcIomem,
                 cumulative: None,
                 gap: None,
             },
@@ -779,7 +779,7 @@ mod tests {
             1,
             0,
             Duration::from_millis(100),
-            crate::sysmem::Coverage::Unavailable,
+            crate::physmem::sysmem::Coverage::Unavailable,
         );
         drop(w);
 

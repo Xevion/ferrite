@@ -7,6 +7,10 @@ use nix::libc;
 use serde::Serialize;
 use snafu::{ResultExt, Snafu};
 
+use super::kpageflags::{self, KPageFlags};
+use super::pfn::Pfn;
+use super::{PAGE_BYTES, PAGE_BYTES_USIZE};
+
 /// A physical address. Newtype to prevent mixing with virtual addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(into = "String")]
@@ -118,41 +122,6 @@ const PM_PFN_MASK: u64 = (1 << 55) - 1; // bits 0-54
 const PM_PRESENT: u64 = 1 << 63; // bit 63
 const PM_SWAP: u64 = 1 << 62; // bit 62
 
-const PAGE_SIZE: usize = 4096;
-
-/// Page flags from /proc/kpageflags, indexed by PFN.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PageFlags {
-    pub raw: u64,
-}
-
-impl PageFlags {
-    const KPF_HUGE: u64 = 1 << 17;
-    const KPF_UNEVICTABLE: u64 = 1 << 18;
-    const KPF_HWPOISON: u64 = 1 << 19;
-    const KPF_THP: u64 = 1 << 22;
-
-    #[must_use]
-    pub const fn is_huge(self) -> bool {
-        self.raw & Self::KPF_HUGE != 0
-    }
-
-    #[must_use]
-    pub const fn is_thp(self) -> bool {
-        self.raw & Self::KPF_THP != 0
-    }
-
-    #[must_use]
-    pub const fn is_unevictable(self) -> bool {
-        self.raw & Self::KPF_UNEVICTABLE != 0
-    }
-
-    #[must_use]
-    pub const fn is_hwpoison(self) -> bool {
-        self.raw & Self::KPF_HWPOISON != 0
-    }
-}
-
 /// Statistics from building the page map.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MapStats {
@@ -172,7 +141,7 @@ impl MapStats {
     /// coverage. Pages whose PFN could not be resolved are excluded.
     #[must_use]
     pub const fn tested_bytes(&self) -> u64 {
-        self.resolved_pages as u64 * PAGE_SIZE as u64
+        self.resolved_pages as u64 * PAGE_BYTES
     }
 }
 
@@ -199,7 +168,7 @@ pub trait PhysResolver {
     /// # Errors
     ///
     /// Returns [`PhysError`] if `/proc/kpageflags` cannot be read.
-    fn page_flags(&self, pfn: u64) -> Result<PageFlags, PhysError>;
+    fn page_flags(&self, pfn: u64) -> Result<KPageFlags, PhysError>;
 
     /// Verify that PFN mappings haven't changed since `build_map`.
     /// Returns the number of pages whose PFN changed (0 = stable).
@@ -307,7 +276,7 @@ pub(crate) fn pread_exact(fd: &File, buf: &mut [u8], offset: i64) -> io::Result<
 /// address `base`: one PFN per page in virtual order, 0 = unresolved.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn read_pfns(pagemap: &File, base: usize, page_count: usize) -> io::Result<Vec<u64>> {
-    let start_vpn = base / PAGE_SIZE;
+    let start_vpn = base / PAGE_BYTES_USIZE;
     let file_offset = (start_vpn * 8) as i64;
 
     // Batch read: single pread for the entire region's pagemap entries.
@@ -326,7 +295,7 @@ pub(crate) fn read_pfns(pagemap: &File, base: usize, page_count: usize) -> io::R
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl PhysResolver for PagemapResolver {
     fn build_map(&mut self, base: usize, len: usize) -> Result<MapStats, PhysError> {
-        let page_count = len / PAGE_SIZE;
+        let page_count = len / PAGE_BYTES_USIZE;
 
         self.pfns = read_pfns(&self.pagemap_fd, base, page_count).context(ReadPagemapSnafu)?;
         self.region_base = base;
@@ -372,7 +341,7 @@ impl PhysResolver for PagemapResolver {
         if vaddr < self.region_base {
             return Err(PhysError::PageNotPresent { vaddr });
         }
-        let page_idx = (vaddr - self.region_base) / PAGE_SIZE;
+        let page_idx = (vaddr - self.region_base) / PAGE_BYTES_USIZE;
         let pfn = *self
             .pfns
             .get(page_idx)
@@ -384,7 +353,7 @@ impl PhysResolver for PagemapResolver {
         Ok(PhysAddr((pfn << 12) | offset))
     }
 
-    fn page_flags(&self, pfn: u64) -> Result<PageFlags, PhysError> {
+    fn page_flags(&self, pfn: u64) -> Result<KPageFlags, PhysError> {
         let fd = self
             .kpageflags_fd
             .as_ref()
@@ -392,17 +361,12 @@ impl PhysResolver for PagemapResolver {
                 source: io::Error::new(io::ErrorKind::NotFound, "/proc/kpageflags not available"),
             })?;
 
-        let mut buf = [0u8; 8];
-        pread_exact(fd, &mut buf, (pfn * 8) as i64).context(ReadKpageflagsSnafu)?;
-
-        Ok(PageFlags {
-            raw: u64::from_le_bytes(buf),
-        })
+        kpageflags::read_one(fd, Pfn::new(pfn))
     }
 
     fn verify_stability(&self, base: usize, len: usize) -> Result<usize, PhysError> {
-        let page_count = len / PAGE_SIZE;
-        let start_vpn = base / PAGE_SIZE;
+        let page_count = len / PAGE_BYTES_USIZE;
+        let start_vpn = base / PAGE_BYTES_USIZE;
         let file_offset = (start_vpn * 8) as i64;
 
         let mut buf = vec![0u8; page_count * 8];
@@ -560,24 +524,6 @@ mod tests {
         assert!(e.to_string().contains("kpageflags"));
     }
 
-    #[test]
-    fn page_flags_methods() {
-        let flags = PageFlags {
-            raw: (1 << 17) | (1 << 22),
-        };
-        assert!(flags.is_huge());
-        assert!(flags.is_thp());
-        assert!(!flags.is_unevictable());
-        assert!(!flags.is_hwpoison());
-
-        let flags2 = PageFlags {
-            raw: (1 << 18) | (1 << 19),
-        };
-        assert!(flags2.is_unevictable());
-        assert!(flags2.is_hwpoison());
-        assert!(!flags2.is_huge());
-    }
-
     mod pread_exact_tests {
         use std::io::Write;
 
@@ -672,8 +618,8 @@ mod tests {
             self.base = base;
             self.len = len;
             Ok(MapStats {
-                total_pages: len / PAGE_SIZE,
-                resolved_pages: len / PAGE_SIZE,
+                total_pages: len / PAGE_BYTES_USIZE,
+                resolved_pages: len / PAGE_BYTES_USIZE,
                 huge_pages: 0,
                 thp_pages: 0,
                 hwpoison_pages: 0,
@@ -688,8 +634,8 @@ mod tests {
             Ok(PhysAddr(vaddr as u64 + self.phys_offset))
         }
 
-        fn page_flags(&self, _pfn: u64) -> Result<PageFlags, PhysError> {
-            Ok(PageFlags::default())
+        fn page_flags(&self, _pfn: u64) -> Result<KPageFlags, PhysError> {
+            Ok(KPageFlags::default())
         }
 
         fn verify_stability(&self, _base: usize, _len: usize) -> Result<usize, PhysError> {
@@ -729,7 +675,7 @@ mod tests {
         fn page_flags_returns_default() {
             let resolver = FakeResolver::new(0x1000, 0x2000);
             let flags = resolver.page_flags(42).unwrap();
-            check!(flags.raw == 0);
+            check!(flags.is_empty());
             check!(!flags.is_huge());
             check!(!flags.is_thp());
         }

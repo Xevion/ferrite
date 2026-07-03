@@ -593,6 +593,7 @@ version = "0.1.4"
 dependencies = [
  "ansi-to-tui",
  "assert2",
+ "bitflags 2.13.0",
  "clap",
  "crossbeam-channel",
  "crossterm",

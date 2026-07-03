@@ -16,18 +16,11 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 
-/// Bytes per tracked frame (4 KiB pages, matching pagemap granularity).
-pub const FRAME_BYTES: u64 = 4096;
+use super::PAGE_BYTES;
+use super::pfn::{PfnRange, merge_ranges, total_frames};
 
 /// Current on-disk schema version.
 pub const STORE_VERSION: u32 = 1;
-
-/// A contiguous run of physical page frames: `[start, start + count)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PfnRange {
-    pub start: u64,
-    pub count: u64,
-}
 
 /// Identity of the machine's physical memory layout. A coverage store only
 /// merges runs taken under an identical fingerprint.
@@ -86,111 +79,6 @@ pub struct CoverageStore {
     pub runs: Vec<RunRecord>,
     /// Sorted, disjoint, non-adjacent ranges -- the canonical covered set.
     pub ranges: Vec<PfnRange>,
-}
-
-/// Compact a raw PFN list (as produced by pagemap resolution, zero =
-/// unresolved) into sorted, disjoint, merged ranges.
-#[must_use]
-pub fn compact_pfns(pfns: &[u64]) -> Vec<PfnRange> {
-    let mut sorted: Vec<u64> = pfns.iter().copied().filter(|&p| p != 0).collect();
-    sorted.sort_unstable();
-    sorted.dedup();
-
-    let mut ranges: Vec<PfnRange> = Vec::new();
-    for pfn in sorted {
-        match ranges.last_mut() {
-            Some(last) if last.start + last.count == pfn => last.count += 1,
-            _ => ranges.push(PfnRange {
-                start: pfn,
-                count: 1,
-            }),
-        }
-    }
-    ranges
-}
-
-/// Union `add` into `base` (both sorted/disjoint), returning the merged
-/// ranges and how many frames of `add` were not already present.
-#[must_use]
-pub fn merge_ranges(base: &[PfnRange], add: &[PfnRange]) -> (Vec<PfnRange>, u64) {
-    // Sweep both sorted lists together, coalescing overlap and adjacency.
-    let mut all: Vec<PfnRange> = base.iter().chain(add.iter()).copied().collect();
-    all.sort_unstable_by_key(|r| r.start);
-
-    let mut merged: Vec<PfnRange> = Vec::with_capacity(all.len());
-    for range in all {
-        match merged.last_mut() {
-            Some(last) if range.start <= last.start + last.count => {
-                let end = (range.start + range.count).max(last.start + last.count);
-                last.count = end - last.start;
-            }
-            _ => merged.push(range),
-        }
-    }
-
-    let new_frames = total_frames(&merged) - total_frames(base);
-    (merged, new_frames)
-}
-
-/// Total frames covered by a compacted range list.
-#[must_use]
-pub fn total_frames(ranges: &[PfnRange]) -> u64 {
-    ranges.iter().map(|r| r.count).sum()
-}
-
-/// The frames of `universe` not present in `covered` (both sorted/disjoint).
-#[must_use]
-pub fn subtract_ranges(universe: &[PfnRange], covered: &[PfnRange]) -> Vec<PfnRange> {
-    let mut out = Vec::new();
-    let mut cov = covered.iter().copied().peekable();
-    for u in universe {
-        let mut start = u.start;
-        let end = u.start + u.count;
-        while start < end {
-            // Discard covered ranges that end at or before the cursor.
-            while cov.peek().is_some_and(|c| c.start + c.count <= start) {
-                cov.next();
-            }
-            match cov.peek() {
-                Some(c) if c.start < end => {
-                    if c.start > start {
-                        out.push(PfnRange {
-                            start,
-                            count: c.start - start,
-                        });
-                    }
-                    // Do not consume: a covered range may span several
-                    // universe ranges.
-                    start = c.start + c.count;
-                }
-                _ => {
-                    out.push(PfnRange {
-                        start,
-                        count: end - start,
-                    });
-                    start = end;
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Whether `pfn` falls inside any of the sorted/disjoint `ranges`.
-#[inline]
-#[must_use]
-pub fn contains_pfn(ranges: &[PfnRange], pfn: u64) -> bool {
-    ranges
-        .binary_search_by(|r| {
-            if pfn < r.start {
-                std::cmp::Ordering::Greater
-            } else if pfn >= r.start + r.count {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-        .is_ok()
 }
 
 /// FNV-1a over the System RAM `(start, end)` pairs, mixing `mem_total` in.
@@ -281,12 +169,12 @@ impl CoverageStore {
     ) -> RunDelta {
         let (merged, new_frames) = merge_ranges(&self.ranges, tested);
         self.ranges = merged;
-        let new_bytes = new_frames * FRAME_BYTES;
+        let new_bytes = new_frames * PAGE_BYTES;
         self.runs.push(RunRecord {
             timestamp,
             patterns,
             passes,
-            tested_bytes: total_frames(tested) * FRAME_BYTES,
+            tested_bytes: total_frames(tested) * PAGE_BYTES,
             new_bytes,
             failures,
         });
@@ -300,191 +188,19 @@ impl CoverageStore {
     /// Cumulative covered bytes.
     #[must_use]
     pub fn covered_bytes(&self) -> u64 {
-        total_frames(&self.ranges) * FRAME_BYTES
+        total_frames(&self.ranges) * PAGE_BYTES
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physmem::pfn::Pfn;
 
     fn r(start: u64, count: u64) -> PfnRange {
-        PfnRange { start, count }
-    }
-
-    mod compact {
-        use assert2::check;
-
-        use super::*;
-
-        #[test]
-        fn empty_input_is_empty() {
-            check!(compact_pfns(&[]) == vec![]);
-        }
-
-        #[test]
-        fn zero_pfns_are_dropped() {
-            check!(compact_pfns(&[0, 0, 0]) == vec![]);
-        }
-
-        #[test]
-        fn contiguous_pfns_merge_into_one_range() {
-            check!(compact_pfns(&[5, 6, 7]) == vec![r(5, 3)]);
-        }
-
-        #[test]
-        fn unsorted_input_is_sorted_first() {
-            check!(compact_pfns(&[7, 5, 6]) == vec![r(5, 3)]);
-        }
-
-        #[test]
-        fn duplicates_collapse() {
-            check!(compact_pfns(&[5, 5, 6, 6]) == vec![r(5, 2)]);
-        }
-
-        #[test]
-        fn gaps_split_ranges() {
-            check!(compact_pfns(&[1, 2, 10, 11, 20]) == vec![r(1, 2), r(10, 2), r(20, 1)]);
-        }
-    }
-
-    mod merge {
-        use assert2::check;
-
-        use super::*;
-
-        #[test]
-        fn merge_into_empty_base_is_identity() {
-            let (merged, new) = merge_ranges(&[], &[r(5, 3)]);
-            check!(merged == vec![r(5, 3)]);
-            check!(new == 3);
-        }
-
-        #[test]
-        fn disjoint_ranges_interleave_sorted() {
-            let (merged, new) = merge_ranges(&[r(10, 2)], &[r(1, 2), r(20, 1)]);
-            check!(merged == vec![r(1, 2), r(10, 2), r(20, 1)]);
-            check!(new == 3);
-        }
-
-        #[test]
-        fn full_overlap_adds_nothing() {
-            let (merged, new) = merge_ranges(&[r(5, 10)], &[r(6, 3)]);
-            check!(merged == vec![r(5, 10)]);
-            check!(new == 0);
-        }
-
-        #[test]
-        fn partial_overlap_counts_only_new_frames() {
-            // base [5,10), add [8,13) -> merged [5,13), 3 new frames (10,11,12)
-            let (merged, new) = merge_ranges(&[r(5, 5)], &[r(8, 5)]);
-            check!(merged == vec![r(5, 8)]);
-            check!(new == 3);
-        }
-
-        #[test]
-        fn adjacent_ranges_coalesce() {
-            let (merged, new) = merge_ranges(&[r(5, 3)], &[r(8, 2)]);
-            check!(merged == vec![r(5, 5)]);
-            check!(new == 2);
-        }
-
-        #[test]
-        fn add_bridging_two_base_ranges_coalesces_all() {
-            // base [1,3) and [6,8); add [3,6) bridges them.
-            let (merged, new) = merge_ranges(&[r(1, 2), r(6, 2)], &[r(3, 3)]);
-            check!(merged == vec![r(1, 7)]);
-            check!(new == 3);
-        }
-    }
-
-    mod subtract {
-        use assert2::check;
-
-        use super::*;
-
-        #[test]
-        fn empty_covered_returns_universe() {
-            check!(subtract_ranges(&[r(5, 10)], &[]) == vec![r(5, 10)]);
-        }
-
-        #[test]
-        fn empty_universe_is_empty() {
-            check!(subtract_ranges(&[], &[r(5, 10)]) == vec![]);
-        }
-
-        #[test]
-        fn full_cover_is_empty() {
-            check!(subtract_ranges(&[r(5, 10)], &[r(5, 10)]) == vec![]);
-        }
-
-        #[test]
-        fn cover_exceeding_universe_is_empty() {
-            check!(subtract_ranges(&[r(5, 10)], &[r(0, 100)]) == vec![]);
-        }
-
-        #[test]
-        fn middle_cover_splits_universe() {
-            // universe [0,10), covered [3,6) -> [0,3) and [6,10)
-            check!(subtract_ranges(&[r(0, 10)], &[r(3, 3)]) == vec![r(0, 3), r(6, 4)]);
-        }
-
-        #[test]
-        fn front_cover_trims_start() {
-            check!(subtract_ranges(&[r(0, 10)], &[r(0, 4)]) == vec![r(4, 6)]);
-        }
-
-        #[test]
-        fn back_cover_trims_end() {
-            check!(subtract_ranges(&[r(0, 10)], &[r(7, 3)]) == vec![r(0, 7)]);
-        }
-
-        #[test]
-        fn covered_outside_universe_is_ignored() {
-            check!(subtract_ranges(&[r(10, 5)], &[r(0, 5), r(20, 5)]) == vec![r(10, 5)]);
-        }
-
-        #[test]
-        fn one_cover_spans_multiple_universe_ranges() {
-            // covered [3,25) blankets the tail of [0,10) and all of [12,20),
-            // and trims the head of [22,30).
-            let universe = [r(0, 10), r(12, 8), r(22, 8)];
-            check!(subtract_ranges(&universe, &[r(3, 22)]) == vec![r(0, 3), r(25, 5)]);
-        }
-
-        #[test]
-        fn multiple_covers_within_one_universe_range() {
-            let covered = [r(2, 2), r(6, 2)];
-            check!(subtract_ranges(&[r(0, 10)], &covered) == vec![r(0, 2), r(4, 2), r(8, 2)]);
-        }
-    }
-
-    mod contains {
-        use assert2::check;
-
-        use super::*;
-
-        #[test]
-        fn hits_within_ranges() {
-            let ranges = [r(5, 3), r(20, 2)];
-            check!(contains_pfn(&ranges, 5));
-            check!(contains_pfn(&ranges, 7));
-            check!(contains_pfn(&ranges, 20));
-            check!(contains_pfn(&ranges, 21));
-        }
-
-        #[test]
-        fn misses_boundaries_and_gaps() {
-            let ranges = [r(5, 3), r(20, 2)];
-            check!(!contains_pfn(&ranges, 4));
-            check!(!contains_pfn(&ranges, 8));
-            check!(!contains_pfn(&ranges, 19));
-            check!(!contains_pfn(&ranges, 22));
-        }
-
-        #[test]
-        fn empty_ranges_contain_nothing() {
-            check!(!contains_pfn(&[], 0));
+        PfnRange {
+            start: Pfn(start),
+            count,
         }
     }
 
@@ -531,19 +247,19 @@ mod tests {
         fn record_run_merges_and_logs() {
             let mut store = CoverageStore::new(fp());
             let delta = store.record_run(&[r(5, 5)], ts(), vec!["solid-bits".into()], 1, 0);
-            check!(delta.new_bytes == 5 * FRAME_BYTES);
-            check!(delta.cumulative_bytes == 5 * FRAME_BYTES);
+            check!(delta.new_bytes == 5 * PAGE_BYTES);
+            check!(delta.cumulative_bytes == 5 * PAGE_BYTES);
             check!(delta.runs == 1);
 
             let delta2 = store.record_run(&[r(8, 5)], ts(), vec!["solid-bits".into()], 1, 3);
-            check!(delta2.new_bytes == 3 * FRAME_BYTES);
-            check!(delta2.cumulative_bytes == 8 * FRAME_BYTES);
+            check!(delta2.new_bytes == 3 * PAGE_BYTES);
+            check!(delta2.cumulative_bytes == 8 * PAGE_BYTES);
             check!(delta2.runs == 2);
 
             check!(store.runs.len() == 2);
             check!(store.runs[1].failures == 3);
-            check!(store.runs[1].new_bytes == 3 * FRAME_BYTES);
-            check!(store.runs[1].tested_bytes == 5 * FRAME_BYTES);
+            check!(store.runs[1].new_bytes == 3 * PAGE_BYTES);
+            check!(store.runs[1].tested_bytes == 5 * PAGE_BYTES);
         }
 
         #[test]

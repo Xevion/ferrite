@@ -4,12 +4,12 @@
 //! The denominator comes from `/proc/iomem` "System RAM" ranges when readable
 //! (requires root), falling back to `/proc/meminfo` `MemTotal` otherwise. The
 //! numerator is the physical footprint actually resolved and tested this run,
-//! supplied by [`crate::phys::MapStats`].
+//! supplied by [`crate::physmem::phys::MapStats`].
 
 use serde::Serialize;
 use tracing::warn;
 
-use crate::phys::MapStats;
+use crate::physmem::phys::MapStats;
 
 /// Read a `/proc` file, warning when the read fails for a reason other than the
 /// file being absent. A missing `/proc` file is expected on non-Linux or
@@ -74,7 +74,7 @@ pub enum Coverage {
         cumulative: Option<Cumulative>,
         /// Classification of the untested remainder, when scannable (root).
         #[serde(skip_serializing_if = "Option::is_none")]
-        gap: Option<crate::gap::GapReport>,
+        gap: Option<crate::physmem::gap::GapReport>,
     },
     /// Coverage could not be measured -- no physical address resolution
     /// (`--no-phys` or missing `CAP_SYS_ADMIN`), or no denominator available.
@@ -104,7 +104,7 @@ impl Coverage {
     }
 
     /// Attach a gap classification; no-op when coverage is unmeasured.
-    pub const fn attach_gap(&mut self, report: crate::gap::GapReport) {
+    pub const fn attach_gap(&mut self, report: crate::physmem::gap::GapReport) {
         if let Self::Measured { gap, .. } = self {
             *gap = Some(report);
         }
@@ -202,9 +202,7 @@ fn parse_iomem_ram_range(line: &str) -> Option<(u64, u64)> {
     if label.trim() != "System RAM" {
         return None;
     }
-    let (start, end) = range.trim().split_once('-')?;
-    let start = u64::from_str_radix(start.trim(), 16).ok()?;
-    let end = u64::from_str_radix(end.trim(), 16).ok()?;
+    let (start, end) = crate::physmem::parse_hex_range(range.trim(), false)?;
     (end >= start).then_some((start, end))
 }
 
@@ -212,10 +210,12 @@ fn parse_iomem_ram_range(line: &str) -> Option<(u64, u64)> {
 /// `None` when `MemTotal` cannot be read.
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[must_use]
-pub fn machine_fingerprint() -> Option<crate::coverage::Fingerprint> {
+pub fn machine_fingerprint() -> Option<crate::physmem::coverage::Fingerprint> {
     let mem_total = mem_total()?;
     let ranges = read_proc("/proc/iomem").map_or_else(Vec::new, |s| system_ram_ranges(&s));
-    Some(crate::coverage::fingerprint_from(mem_total, &ranges))
+    Some(crate::physmem::coverage::fingerprint_from(
+        mem_total, &ranges,
+    ))
 }
 
 /// Parse `MemTotal` (in kB) from `/proc/meminfo`, returning bytes.
@@ -526,9 +526,9 @@ MemAvailable:   25512532 kB
                     source: RamSource::ProcIomem,
                 }),
             );
-            let report = crate::gap::GapReport {
+            let report = crate::physmem::gap::GapReport {
                 free_bytes: 4096,
-                ..crate::gap::GapReport::default()
+                ..crate::physmem::gap::GapReport::default()
             };
             cov.attach_gap(report);
             assert2::assert!(let Coverage::Measured { gap: Some(g), .. } = cov);
@@ -538,7 +538,7 @@ MemAvailable:   25512532 kB
         #[test]
         fn attach_gap_on_unavailable_is_noop() {
             let mut cov = Coverage::Unavailable;
-            cov.attach_gap(crate::gap::GapReport::default());
+            cov.attach_gap(crate::physmem::gap::GapReport::default());
             check!(cov == Coverage::Unavailable);
         }
     }
@@ -601,7 +601,7 @@ MemAvailable:   25512532 kB
                 cumulative: None,
                 gap: None,
             };
-            cov.attach_gap(crate::gap::GapReport {
+            cov.attach_gap(crate::physmem::gap::GapReport {
                 free_bytes: 4096,
                 reclaimable_bytes: 8192,
                 in_use_bytes: 0,

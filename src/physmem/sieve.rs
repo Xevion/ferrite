@@ -22,7 +22,8 @@ use nix::sys::mman::{MapFlags, ProtFlags, mmap_anonymous, munmap};
 use snafu::{ResultExt, Snafu};
 
 use crate::alloc::{AllocError, CHUNK_BYTES, MmapSnafu, activate_chunk, walk_chunks};
-use crate::coverage::{PfnRange, contains_pfn};
+use crate::physmem::PAGE_BYTES_USIZE;
+use crate::physmem::pfn::{Pfn, PfnRange, contains_pfn};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -38,7 +39,7 @@ pub enum SieveError {
 pub const BLOCK_BYTES: usize = 2 * 1024 * 1024;
 
 /// Frames per culling block.
-pub const BLOCK_FRAMES: usize = BLOCK_BYTES / 4096;
+pub const BLOCK_FRAMES: usize = BLOCK_BYTES / PAGE_BYTES_USIZE;
 
 /// How a swept region splits into hostage and fresh block runs.
 ///
@@ -73,9 +74,9 @@ pub(crate) fn partition_region(
     for (block, frames) in pfns.chunks(frames_per_block).enumerate() {
         let hostage = frames
             .iter()
-            .all(|&pfn| pfn != 0 && contains_pfn(covered, pfn));
-        let offset = block * frames_per_block * 4096;
-        let len = frames.len() * 4096;
+            .all(|&pfn| pfn != 0 && contains_pfn(covered, Pfn::new(pfn)));
+        let offset = block * frames_per_block * PAGE_BYTES_USIZE;
+        let len = frames.len() * PAGE_BYTES_USIZE;
         let runs = if hostage {
             &mut partition.hostages
         } else {
@@ -142,7 +143,7 @@ impl FrameSieve {
             )
         };
 
-        let available = crate::sysmem::mem_available().unwrap_or(0);
+        let available = crate::physmem::sysmem::mem_available().unwrap_or(0);
         let mut target = usize::try_from(available.saturating_sub(headroom)).unwrap_or(usize::MAX);
         if let Some(max) = max_sweep {
             target = target.min(max);
@@ -172,7 +173,7 @@ impl FrameSieve {
             target,
             CHUNK_BYTES,
             headroom,
-            &mut || crate::sysmem::mem_available(),
+            &mut || crate::physmem::sysmem::mem_available(),
             &mut |offset, len| activate_chunk(raw, offset, len),
         );
 
@@ -193,7 +194,8 @@ impl FrameSieve {
             }
         }
 
-        let pfns = match crate::phys::read_pfns(&pagemap, raw, achieved / 4096) {
+        let pfns = match crate::physmem::phys::read_pfns(&pagemap, raw, achieved / PAGE_BYTES_USIZE)
+        {
             Ok(pfns) => pfns,
             Err(e) => {
                 // Culling without resolution is useless: release everything.
@@ -267,12 +269,15 @@ mod tests {
     use super::*;
 
     fn r(start: u64, count: u64) -> PfnRange {
-        PfnRange { start, count }
+        PfnRange {
+            start: Pfn::new(start),
+            count,
+        }
     }
 
     /// 4 KiB frames per test block: 2 frames = 8192-byte blocks.
     const FPB: usize = 2;
-    const BLOCK: usize = FPB * 4096;
+    const BLOCK: usize = FPB * PAGE_BYTES_USIZE;
 
     #[test]
     fn empty_pfns_partition_to_nothing() {
@@ -334,7 +339,7 @@ mod tests {
     fn partial_last_block_has_short_length() {
         // 3 frames with 2-frame blocks: block 1 holds one 4096-byte frame.
         let p = partition_region(&[10, 11, 12], &[r(10, 3)], FPB);
-        check!(p.hostages == vec![(0, BLOCK + 4096)]);
+        check!(p.hostages == vec![(0, BLOCK + PAGE_BYTES_USIZE)]);
         check!(p.fresh == vec![]);
     }
 
@@ -342,7 +347,7 @@ mod tests {
     fn partial_fresh_tail_after_hostage_run() {
         let p = partition_region(&[10, 11, 99], &[r(10, 2)], FPB);
         check!(p.hostages == vec![(0, BLOCK)]);
-        check!(p.fresh == vec![(BLOCK, 4096)]);
+        check!(p.fresh == vec![(BLOCK, PAGE_BYTES_USIZE)]);
     }
 
     mod hold {
