@@ -39,6 +39,10 @@ pub struct NetStatus {
     pub address: Option<Ipv4Cidr>,
     pub gateway: Option<Ipv4Address>,
     pub dns: Option<Ipv4Address>,
+    /// Inbound mDNS queries seen -- nonzero proves multicast delivery works.
+    pub mdns_queries: u32,
+    /// HTTP requests fully served -- nonzero proves TCP inbound works.
+    pub http_requests: u32,
 }
 
 /// TCP port the status server listens on.
@@ -149,6 +153,11 @@ impl Net {
         self.millis = self.millis.wrapping_add(elapsed_ms);
         let now = Instant::from_millis(self.millis as i64);
 
+        // Re-sample link state; on real NICs the media can come up after init.
+        let mode = self.snp.mode();
+        self.status.link_up =
+            bool::from(mode.media_present) || !bool::from(mode.media_present_supported);
+
         let mut device = SnpDevice {
             snp: &self.snp,
             mtu: self.mtu,
@@ -182,7 +191,9 @@ impl Net {
         let endpoint = IpEndpoint::new(IpAddress::Ipv4(MDNS_ADDR), MDNS_PORT);
         let sock = self.sockets.get_mut::<udp::Socket>(self.mdns);
 
+        let mut seen: u32 = 0;
         while let Ok((data, _meta)) = sock.recv() {
+            seen = seen.wrapping_add(1);
             let response = ip.and_then(|ip| {
                 let mut out = Vec::new();
                 mdns::handle_query(data, ip, &mut out).then_some(out)
@@ -191,6 +202,7 @@ impl Net {
                 let _ = sock.send_slice(&out, endpoint);
             }
         }
+        self.status.mdns_queries = self.status.mdns_queries.wrapping_add(seen);
     }
 
     /// Single-connection HTTP/1.0 status server. We reply on the first bytes of
@@ -220,6 +232,7 @@ impl Net {
             let _ = sock.send_slice(body);
             sock.close();
             self.http_pending = false;
+            self.status.http_requests = self.status.http_requests.wrapping_add(1);
         }
     }
 

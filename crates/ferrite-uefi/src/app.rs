@@ -8,6 +8,7 @@ use uefi::boot;
 use uefi::proto::console::text::{Input, Key, Output, ScanCode};
 
 use crate::backend::UefiBackend;
+use crate::diag::Diag;
 use crate::net::{Net, NetStatus};
 use crate::sweep::{Sweep, SweepStatus};
 
@@ -25,14 +26,27 @@ pub struct App<'a> {
     net: Option<Net>,
     net_err: Option<&'static str>,
     sweep: Sweep,
+    diag: &'a mut Diag,
+    uptime_ms: u64,
 }
 
 impl<'a> App<'a> {
-    pub fn new(input: &'a mut Input, output: &'a mut Output) -> Self {
+    pub fn new(input: &'a mut Input, output: &'a mut Output, diag: &'a mut Diag) -> Self {
         let terminal = Terminal::new(UefiBackend::new(output)).unwrap();
         let (net, net_err) = match Net::setup() {
-            Ok(net) => (Some(net), None),
-            Err(e) => (None, Some(status_reason(e.status()))),
+            Ok(net) => {
+                let s = net.status();
+                diag.event(0, &format!("net: SNP up, {}", net_summary(&s)));
+                (Some(net), None)
+            }
+            Err(e) => {
+                let reason = status_reason(e.status());
+                diag.event(
+                    0,
+                    &format!("net: SNP setup failed: {reason} [{:?}]", e.status()),
+                );
+                (None, Some(reason))
+            }
         };
         Self {
             quit: false,
@@ -41,17 +55,26 @@ impl<'a> App<'a> {
             net,
             net_err,
             sweep: Sweep::new(SWEEP_BYTES),
+            diag,
+            uptime_ms: 0,
         }
     }
 
     pub fn run(&mut self) {
         while !self.quit {
+            self.uptime_ms = self.uptime_ms.wrapping_add(TICK_MS);
             self.sweep.step(CHUNK_BYTES);
             let sweep = self.sweep.status();
             if let Some(net) = self.net.as_mut() {
                 net.set_page(http_page(net.status(), &sweep));
                 net.poll(TICK_MS);
             }
+            let net_line = self
+                .net
+                .as_ref()
+                .map_or_else(|| String::from("net: no NIC"), |n| net_summary(&n.status()));
+            self.diag
+                .tick(self.uptime_ms, &net_line, &sweep_line(&sweep));
             self.draw(&sweep);
             self.poll_input();
             boot::stall(Duration::from_millis(TICK_MS));
@@ -215,6 +238,34 @@ fn opt_addr(addr: Option<smoltcp::wire::Ipv4Address>) -> String {
     addr.map_or_else(|| String::from("-"), |a| format!("{a}"))
 }
 
+/// One-line network summary for the diagnostic log.
+fn net_summary(s: &NetStatus) -> String {
+    let ip = s
+        .address
+        .map_or_else(|| String::from("none"), |c| format!("{c}"));
+    format!(
+        "link={} ip={} gw={} dns={} mdns={} http={}",
+        if s.link_up { "up" } else { "down" },
+        ip,
+        opt_addr(s.gateway),
+        opt_addr(s.dns),
+        s.mdns_queries,
+        s.http_requests
+    )
+}
+
+/// One-line sweep summary for the diagnostic log.
+fn sweep_line(s: &SweepStatus) -> String {
+    format!(
+        "{:#04x} {} {}% pass{} faults{}",
+        s.pattern,
+        if s.verifying { "verify" } else { "write" },
+        s.percent,
+        s.passes,
+        s.faults
+    )
+}
+
 fn http_page(status: NetStatus, sweep: &SweepStatus) -> String {
     let ip = status
         .address
@@ -237,9 +288,10 @@ fn http_page(status: NetStatus, sweep: &SweepStatus) -> String {
          <p>bare-metal memory tester &mdash; spike, no OS underneath</p>\
          <ul><li>ip: {ip}</li><li>mac: {mac}</li>\
          <li>sweep: {mib} MiB, pattern {:#04x} {phase}, {}%</li>\
-         <li>pass {}, {verdict}</li></ul>\
+         <li>pass {}, {verdict}</li>\
+         <li>mdns queries: {}, http requests: {}</li></ul>\
          </body></html>",
-        sweep.pattern, sweep.percent, sweep.passes
+        sweep.pattern, sweep.percent, sweep.passes, status.mdns_queries, status.http_requests
     )
 }
 

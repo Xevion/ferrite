@@ -158,6 +158,61 @@ qemu-serial: esp
         {{ netdev }} \
         -nographic
 
+# stage an arbitrary bin (e.g. pciscan) as the ESP bootloader
+stage bin:
+    cargo build -p ferrite-uefi --target x86_64-unknown-uefi --bin {{ bin }}
+    mkdir -p esp/efi/boot
+    cp -f target/x86_64-unknown-uefi/debug/{{ bin }}.efi esp/efi/boot/bootx64.efi
+    test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
+
+# boot the PCI "touch the chip" scanner in a graphical window
+pciscan: (stage "pciscan")
+    qemu-system-x86_64 \
+        -enable-kvm \
+        -machine q35 \
+        -m 512M \
+        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
+        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
+        -drive format=raw,file=fat:rw:esp \
+        {{ netdev }} \
+        -display {{ display }}
+
+# boot the PCI scanner headless, console over serial
+pciscan-serial: (stage "pciscan")
+    qemu-system-x86_64 \
+        -enable-kvm \
+        -machine q35 \
+        -m 512M \
+        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
+        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
+        -drive format=raw,file=fat:rw:esp \
+        {{ netdev }} \
+        -nographic
+
+# boot the xHCI USB-controller recon tool in a graphical window
+xhciscan: (stage "xhciscan")
+    qemu-system-x86_64 \
+        -enable-kvm \
+        -machine q35 \
+        -m 512M \
+        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
+        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
+        -drive format=raw,file=fat:rw:esp \
+        -device qemu-xhci \
+        -display {{ display }}
+
+# boot the xHCI recon tool headless, console over serial
+xhciscan-serial: (stage "xhciscan")
+    qemu-system-x86_64 \
+        -enable-kvm \
+        -machine q35 \
+        -m 512M \
+        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
+        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
+        -drive format=raw,file=fat:rw:esp \
+        -device qemu-xhci \
+        -nographic
+
 # copy the built ESP tree onto a mounted FAT32 USB (pass the mount point)
 # e.g. `just stage-usb /run/media/$USER/FERRITE`
 stage-usb mount: esp
