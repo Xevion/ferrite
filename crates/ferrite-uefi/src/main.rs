@@ -8,6 +8,7 @@ mod app;
 mod backend;
 mod mdns;
 mod net;
+mod sweep;
 
 use uefi::prelude::*;
 
