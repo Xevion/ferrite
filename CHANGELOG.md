@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.2.0](https://github.com/Xevion/ferrite/compare/v0.1.4...v0.2.0) (2026-07-04)
+
+
+### Features
+
+* Add --format, --log, and --color flags with OutputConfig resolver ([3dc197e](https://github.com/Xevion/ferrite/commit/3dc197e2cbebc11648c819c4e4ad4419a054641c))
+* Add event bus, RunResults type, and post-run error analysis ([65d0286](https://github.com/Xevion/ferrite/commit/65d0286e99493d89d3b967c96624815a1006b1c5))
+* Add HeadlessPrinter and ResultsDoc/ResultsRenderer abstractions ([c58befc](https://github.com/Xevion/ferrite/commit/c58befc11c4b803c72a17309279cc365a7bc0dde))
+* **alloc:** Chunked budgeted allocation, --headroom, -s max ([2377067](https://github.com/Xevion/ferrite/commit/237706722748e453c4c04ad1012ce5248790db1d))
+* **coverage:** Cross-run physical coverage tracking via --coverage-file ([0d3a091](https://github.com/Xevion/ferrite/commit/0d3a0913319cc8bf74c182cd46505e7c5a7084dd))
+* **coverage:** Exit gracefully when --cull finds nothing new to test ([78e88dc](https://github.com/Xevion/ferrite/commit/78e88dce8e36d1435f8298ed856b4d74fa0b6cbb))
+* **coverage:** Kpageflags gap classification and --cull frame-hostage sieve ([c13d7eb](https://github.com/Xevion/ferrite/commit/c13d7eb189fdc0120c8e52f89c97c35fdc231f68))
+* **devmem:** /dev/mem targeted physical testing ([9a40f57](https://github.com/Xevion/ferrite/commit/9a40f577dd0861f998e59c4d69d381f92a27c87e))
+* **pattern:** March C- test via a generalized march executor ([0f16c95](https://github.com/Xevion/ferrite/commit/0f16c957afa190baa59db356fd3d79117fff11c3))
+* Restructure results around regions and aggregate passes for display ([5bca2df](https://github.com/Xevion/ferrite/commit/5bca2dfd7abdfe04a0c9690ce4b41b1e13d173d6))
+* Return RunResults from TUI mode and render post-exit summary ([c3917e1](https://github.com/Xevion/ferrite/commit/c3917e164a4b232bcb96213a7b3667fecbd9e5f8))
+* Surface interrupted state when quit stops a pattern mid-run ([73091fa](https://github.com/Xevion/ferrite/commit/73091fa67974e969174d3a61fef64bde694aef2b))
+* **sysmem:** Add physical coverage to results, NDJSON, and table output ([a71e2a9](https://github.com/Xevion/ferrite/commit/a71e2a942eb311733946f665d7e7e24836d4e830))
+* Versioned NDJSON schema, reloadable tracing, and Log event ([d5b3eac](https://github.com/Xevion/ferrite/commit/d5b3eac74733d8f7e4dac200b2740f1bdd15e3a8))
+* Wire TUI pause, DimmInfo emission, and NDJSON log bridge ([3a21515](https://github.com/Xevion/ferrite/commit/3a21515ccf31e65de863d89e9d16dadb0aa63fe0))
+
+
+### Bug Fixes
+
+* **deps:** Bump anyhow to 1.0.103, patching RUSTSEC-2026-0190 ([efb1d0a](https://github.com/Xevion/ferrite/commit/efb1d0aab9f79ec28ad2ba7948ce9bcdbc3a5de5))
+* **devmem:** Honor --format json and --events, run error analysis ([1ca5376](https://github.com/Xevion/ferrite/commit/1ca5376858f15deb122f1362c07aec84dae6a967))
+* Eliminate 5s exit delay and restore post-TUI tracing ([a81a8ab](https://github.com/Xevion/ferrite/commit/a81a8ab9224fad4cfcf59cb18ada1a41e6bc2859))
+* Hygiene batch of small bugs and duplication ([1087415](https://github.com/Xevion/ferrite/commit/108741529dde745873c17e9464147430aaeaf8b1))
+* **just:** Run tests directly instead of via unsupported tempo target ([ccf3740](https://github.com/Xevion/ferrite/commit/ccf37409bdfedd337b42c0111d8640f82842f2b0))
+* **tempo:** Update tempo config to latest format ([1fc81ef](https://github.com/Xevion/ferrite/commit/1fc81efbb8a9ff2cbe053ddea31a0cf8d8ce0f14))
+* **tui:** Eliminate dead whitespace after TUI exit by collapsing viewport cleanly ([5f6608c](https://github.com/Xevion/ferrite/commit/5f6608cff10bf3e8b47459622e883e84d9bd82af))
+
+
+### Code Refactoring
+
+* **error:** Migrate thiserror + anyhow to snafu ([aa53e8a](https://github.com/Xevion/ferrite/commit/aa53e8ab224dc72dda0b462072901a15383bba89))
+* Extract EventBridge and rename TuiError to TuiFailure ([47eaff0](https://github.com/Xevion/ferrite/commit/47eaff03a3ea8ba1a275ac8b43fa43e6db6cca3d))
+* **physmem:** Consolidate physical-memory modules, add Pfn newtype ([705df0a](https://github.com/Xevion/ferrite/commit/705df0a64bc48c9b47e128a30b11915cea8f3baf))
+* Replace --json/--log flags with --format and --events ([1118f40](https://github.com/Xevion/ferrite/commit/1118f40236f70129084370211b7234626d112022))
+* Replace OutputSink in runner with EventTx; add bridge threads ([38fa60e](https://github.com/Xevion/ferrite/commit/38fa60e556718ccad65d13e5e34829fc4994b54d))
+* Replace OutputSink with NdjsonEventWriter + HeadlessPrinter ([38ce935](https://github.com/Xevion/ferrite/commit/38ce935bf7ba46bbd79c046693d25301d11e37a8))
+* Replace per-region worker model with single-allocation rayon parallelism ([694f58d](https://github.com/Xevion/ferrite/commit/694f58d5255c485f4316ec8d25b54e5a8c70295c))
+* **results:** Split results.rs into query + render layers ([ac8fd4f](https://github.com/Xevion/ferrite/commit/ac8fd4fe08edfbc34bdf7d809b7922ff56496a18))
+* **runner:** Slim main.rs, unify run tail into execute_run() ([a6d78ce](https://github.com/Xevion/ferrite/commit/a6d78ce5582745e62d021d4e841d4a57e2084f0e))
+* **tui:** Split tui/mod.rs, sweep error-&gt;failure vocabulary ([d8bf6e2](https://github.com/Xevion/ferrite/commit/d8bf6e2f4b90a347f1dc25a467e3fb40f845e49f))
+
+
+### Documentation
+
+* Refresh README, ARCHITECTURE, VOCABULARY; add module headers ([9cdfba0](https://github.com/Xevion/ferrite/commit/9cdfba036da653263cc9a1c4f542c775281c1173))
+
+
+### Miscellaneous
+
+* **deny:** Drop stale RUSTSEC-2025-0141 ignore ([92c0dcc](https://github.com/Xevion/ferrite/commit/92c0dcc2e57de1c79b5c6f6c0b8cab2cdc576219))
+* **deps:** Bump actions/checkout from 6 to 7 ([#26](https://github.com/Xevion/ferrite/issues/26)) ([1dca9b3](https://github.com/Xevion/ferrite/commit/1dca9b385863f42a78047965b4c7046b2dbb6757))
+* **deps:** Bump codecov/codecov-action from 6 to 7 ([2993873](https://github.com/Xevion/ferrite/commit/2993873570fc1ff724d1171e50c43336dc06000d))
+* **deps:** Bump googleapis/release-please-action from 4 to 5 ([#11](https://github.com/Xevion/ferrite/issues/11)) ([89595d9](https://github.com/Xevion/ferrite/commit/89595d96e5fe901000106b0ffbb457c602647543))
+* **deps:** Bump jiff from 0.2.23 to 0.2.28 ([1f56e43](https://github.com/Xevion/ferrite/commit/1f56e43f20f354d233a79321b12cc8f4e9ddc8b3))
+* **deps:** Bump nix from 0.31.2 to 0.31.3 ([c7e095e](https://github.com/Xevion/ferrite/commit/c7e095e58f92b8b0db8d8b46b0dac2c7dbdd1d12))
+* **deps:** Bump ratatui from 0.30.0 to 0.30.1 ([#25](https://github.com/Xevion/ferrite/issues/25)) ([c598a4b](https://github.com/Xevion/ferrite/commit/c598a4b71e87e8d5744dd0c367705aad36eac044))
+* **deps:** Bump serde_json from 1.0.149 to 1.0.150 ([#19](https://github.com/Xevion/ferrite/issues/19)) ([d1318a8](https://github.com/Xevion/ferrite/commit/d1318a8eb8f34c017cd9a159d6a2f7f026a10a05))
+* **deps:** Bump serial_test from 3.4.0 to 3.5.0 ([#23](https://github.com/Xevion/ferrite/issues/23)) ([ed16fe5](https://github.com/Xevion/ferrite/commit/ed16fe5b0f04324c7767218061688c639e5a620c))
+* **lint:** Adopt clippy::nursery, ban std asserts and bare #[allow] ([0f5c823](https://github.com/Xevion/ferrite/commit/0f5c823d3696656ba016550417421c18f204f61c))
+
 ## [0.1.4](https://github.com/Xevion/ferrite/compare/v0.1.3...v0.1.4) (2026-04-06)
 
 
