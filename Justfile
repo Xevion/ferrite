@@ -80,18 +80,24 @@ coverage:
     RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov report --lcov --output-path coverage/lcov.info
     RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov report --json --output-path coverage/coverage.json
 
-# Run wall-clock benchmarks (patterns, alloc, SIMD) — alloc requires root for mlock
-bench:
-    cargo bench --features bench --bench patterns --bench alloc --bench simd
+# --max-time caps slow cells; --sort location keeps sizes in ascending order.
+bench_flags := "--max-time 2 --sort location"
+bench_targets := "--bench patterns --bench alloc --bench simd"
+
+# Run wall-clock benchmarks (patterns, alloc, SIMD). FILTER (optional) matches
+# benchmark names by substring; alloc runs unprivileged when RLIMIT_MEMLOCK
+# covers the size, else those sizes skip individually.
+bench filter="":
+    cargo bench --features bench {{bench_targets}} -- {{bench_flags}} {{filter}}
 
 # Save current bench results as a named baseline (default: "main")
 bench-baseline name="main":
     mkdir -p benches/baselines
-    cargo bench --features bench --bench patterns --bench alloc --bench simd | tee benches/baselines/{{name}}.txt
+    cargo bench --features bench {{bench_targets}} -- {{bench_flags}} | tee benches/baselines/{{name}}.txt
 
 # Compare current bench results against a saved baseline
 bench-compare name="main":
-    cargo bench --features bench --bench patterns --bench alloc --bench simd | tee /tmp/ferrite-bench-current.txt
+    cargo bench --features bench {{bench_targets}} -- {{bench_flags}} | tee /tmp/ferrite-bench-current.txt
     diff benches/baselines/{{name}}.txt /tmp/ferrite-bench-current.txt || true
 
 # Run instruction-count benchmarks via Gungraun (requires valgrind + cargo install gungraun-runner)

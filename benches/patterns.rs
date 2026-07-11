@@ -2,10 +2,14 @@ use divan::Bencher;
 use divan::counter::BytesCount;
 use ferrite::pattern::{Pattern, PatternConfig, run_pattern};
 
-const SIZES: [usize; 3] = [4 << 20, 64 << 20, 256 << 20]; // 4 / 64 / 256 MiB
+mod common;
+use common::Size;
+
+const SIZES: [Size; 3] = [Size(4 << 20), Size(64 << 20), Size(256 << 20)];
 
 #[divan::bench(args = SIZES)]
-fn solid_bits(bencher: Bencher, bytes: usize) {
+fn solid_bits(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     let mut buf = vec![0u64; bytes / 8];
     bencher
         .counter(BytesCount::new(bytes as u64))
@@ -23,7 +27,8 @@ fn solid_bits(bencher: Bencher, bytes: usize) {
 }
 
 #[divan::bench(args = SIZES)]
-fn walking_ones(bencher: Bencher, bytes: usize) {
+fn walking_ones(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     let mut buf = vec![0u64; bytes / 8];
     bencher
         .counter(BytesCount::new(bytes as u64))
@@ -41,7 +46,8 @@ fn walking_ones(bencher: Bencher, bytes: usize) {
 }
 
 #[divan::bench(args = SIZES)]
-fn walking_zeros(bencher: Bencher, bytes: usize) {
+fn walking_zeros(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     let mut buf = vec![0u64; bytes / 8];
     bencher
         .counter(BytesCount::new(bytes as u64))
@@ -59,7 +65,8 @@ fn walking_zeros(bencher: Bencher, bytes: usize) {
 }
 
 #[divan::bench(args = SIZES)]
-fn checkerboard(bencher: Bencher, bytes: usize) {
+fn checkerboard(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     let mut buf = vec![0u64; bytes / 8];
     bencher
         .counter(BytesCount::new(bytes as u64))
@@ -77,7 +84,8 @@ fn checkerboard(bencher: Bencher, bytes: usize) {
 }
 
 #[divan::bench(args = SIZES)]
-fn stuck_address(bencher: Bencher, bytes: usize) {
+fn stuck_address(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     let mut buf = vec![0u64; bytes / 8];
     bencher
         .counter(BytesCount::new(bytes as u64))

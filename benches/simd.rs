@@ -5,8 +5,17 @@ use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
 use ferrite::Failure;
 
-// 4 MiB / 64 MiB / 256 MiB / 512 MiB / 1 GiB / 2 GiB
-const SIZES: [usize; 6] = [4 << 20, 64 << 20, 256 << 20, 512 << 20, 1 << 30, 2 << 30];
+mod common;
+use common::Size;
+
+const SIZES: [Size; 6] = [
+    Size(4 << 20),
+    Size(64 << 20),
+    Size(256 << 20),
+    Size(512 << 20),
+    Size(1 << 30),
+    Size(2 << 30),
+];
 
 const PATTERN: u64 = 0xDEAD_BEEF_CAFE_BABEu64;
 
@@ -137,7 +146,8 @@ impl VerifyBench for SimdAvx512 {
 
 #[cfg(target_arch = "x86_64")]
 #[divan::bench(types = [Scalar, SimdAvx512], args = SIZES)]
-fn constant_fill<W: FillBench>(bencher: Bencher, bytes: usize) {
+fn constant_fill<W: FillBench>(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     if !W::is_available() {
         return;
     }
@@ -152,7 +162,8 @@ fn constant_fill<W: FillBench>(bencher: Bencher, bytes: usize) {
 
 #[cfg(not(target_arch = "x86_64"))]
 #[divan::bench(args = SIZES)]
-fn constant_fill_scalar(bencher: Bencher, bytes: usize) {
+fn constant_fill_scalar(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     let mut buf = AlignedBuffer::new(bytes / size_of::<u64>());
     bencher
         .counter(BytesCount::new(bytes as u64))
@@ -161,7 +172,8 @@ fn constant_fill_scalar(bencher: Bencher, bytes: usize) {
 
 #[cfg(target_arch = "x86_64")]
 #[divan::bench(types = [Scalar, SimdAvx512], args = SIZES)]
-fn indexed_fill<W: FillBench>(bencher: Bencher, bytes: usize) {
+fn indexed_fill<W: FillBench>(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     if !W::is_available() {
         return;
     }
@@ -176,7 +188,8 @@ fn indexed_fill<W: FillBench>(bencher: Bencher, bytes: usize) {
 
 #[cfg(not(target_arch = "x86_64"))]
 #[divan::bench(args = SIZES)]
-fn indexed_fill_scalar(bencher: Bencher, bytes: usize) {
+fn indexed_fill_scalar(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     let mut buf = AlignedBuffer::new(bytes / size_of::<u64>());
     bencher
         .counter(BytesCount::new(bytes as u64))
@@ -185,7 +198,8 @@ fn indexed_fill_scalar(bencher: Bencher, bytes: usize) {
 
 #[cfg(target_arch = "x86_64")]
 #[divan::bench(types = [Scalar, SimdAvx512], args = SIZES)]
-fn constant_verify<W: VerifyBench + FillBench>(bencher: Bencher, bytes: usize) {
+fn constant_verify<W: VerifyBench + FillBench>(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     if !<W as VerifyBench>::is_available() {
         return;
     }
@@ -203,7 +217,8 @@ fn constant_verify<W: VerifyBench + FillBench>(bencher: Bencher, bytes: usize) {
 
 #[cfg(not(target_arch = "x86_64"))]
 #[divan::bench(args = SIZES)]
-fn constant_verify_scalar(bencher: Bencher, bytes: usize) {
+fn constant_verify_scalar(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     let mut buf = AlignedBuffer::new(bytes / size_of::<u64>());
     unsafe { Scalar::fill_constant(buf.as_mut_slice(), PATTERN) };
     let base_addr = buf.ptr as usize;
@@ -216,7 +231,8 @@ fn constant_verify_scalar(bencher: Bencher, bytes: usize) {
 
 #[cfg(target_arch = "x86_64")]
 #[divan::bench(types = [Scalar, SimdAvx512], args = SIZES)]
-fn indexed_verify<W: VerifyBench + FillBench>(bencher: Bencher, bytes: usize) {
+fn indexed_verify<W: VerifyBench + FillBench>(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     if !<W as VerifyBench>::is_available() {
         return;
     }
@@ -233,7 +249,8 @@ fn indexed_verify<W: VerifyBench + FillBench>(bencher: Bencher, bytes: usize) {
 
 #[cfg(not(target_arch = "x86_64"))]
 #[divan::bench(args = SIZES)]
-fn indexed_verify_scalar(bencher: Bencher, bytes: usize) {
+fn indexed_verify_scalar(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
     let mut buf = AlignedBuffer::new(bytes / size_of::<u64>());
     unsafe { Scalar::fill_indexed(buf.as_mut_slice(), 0) };
     let base_addr = buf.ptr as usize;

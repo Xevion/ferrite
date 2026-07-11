@@ -2,19 +2,23 @@ use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
 use ferrite::alloc::TestBuffer;
 
-const SIZES: [usize; 3] = [4 << 20, 64 << 20, 256 << 20]; // 4 / 64 / 256 MiB
+mod common;
+use common::Size;
 
-fn is_root() -> bool {
-    nix::unistd::getuid().is_root()
-}
+const SIZES: [Size; 3] = [Size(4 << 20), Size(64 << 20), Size(256 << 20)];
 
-/// Full mmap → page-fault → mlock → munmap cycle at each size.
-/// Skipped silently when not running as root (mlock requires `CAP_IPC_LOCK`).
+/// Full mmap → page-fault → mlock → munmap cycle at each size. Only `mlock` is
+/// privileged (`CAP_IPC_LOCK` or a large enough `RLIMIT_MEMLOCK`), so probe by
+/// attempting one alloc and skip only the sizes that actually fail to lock.
 #[divan::bench(args = SIZES)]
-fn alloc_lock_free(bencher: Bencher, bytes: usize) {
-    if !is_root() {
-        eprintln!("[alloc bench] skipped (requires root for mlock)");
-        return;
+fn alloc_lock_free(bencher: Bencher, size: Size) {
+    let bytes = size.bytes();
+    match TestBuffer::new(bytes) {
+        Ok(region) => drop(region),
+        Err(e) => {
+            eprintln!("[alloc bench] skipped {size}: {e}");
+            return;
+        }
     }
     bencher
         .counter(BytesCount::new(bytes as u64))
