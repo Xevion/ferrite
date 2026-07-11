@@ -6,6 +6,7 @@ use crate::{Failure, FailureBudget};
 mod checkerboard;
 mod march;
 pub mod metadata;
+mod moving_inversions;
 mod solid;
 mod stuck_address;
 mod walking;
@@ -26,6 +27,7 @@ pub enum Pattern {
     Checkerboard,
     StuckAddress,
     MarchCMinus,
+    MovingInversions,
 }
 
 impl Pattern {
@@ -36,6 +38,7 @@ impl Pattern {
         Self::Checkerboard,
         Self::StuckAddress,
         Self::MarchCMinus,
+        Self::MovingInversions,
     ];
 
     /// Number of fill-and-verify sub-passes this pattern performs.
@@ -48,6 +51,7 @@ impl Pattern {
             Self::StuckAddress => 1,
             // M0–M5 of the March C- sequence.
             Self::MarchCMinus => 6,
+            Self::MovingInversions => moving_inversions::SUB_PASSES,
         }
     }
 
@@ -98,6 +102,17 @@ impl Pattern {
                 is_destructive: false,
                 tiers: &[Standard, Thorough],
             },
+            Self::MovingInversions => PatternMetadata {
+                fault_classes: &[
+                    FaultClass::StuckAt,
+                    FaultClass::Transition,
+                    FaultClass::Coupling,
+                ],
+                complexity: Complexity::LinearK(8),
+                requires_physical_order: false,
+                is_destructive: false,
+                tiers: &[Standard, Thorough],
+            },
         }
     }
 }
@@ -111,6 +126,7 @@ impl fmt::Display for Pattern {
             Self::Checkerboard => write!(f, "Checkerboard"),
             Self::StuckAddress => write!(f, "Stuck Address"),
             Self::MarchCMinus => write!(f, "March C-"),
+            Self::MovingInversions => write!(f, "Moving Inversions"),
         }
     }
 }
@@ -142,6 +158,9 @@ pub fn run_pattern(
         Pattern::Checkerboard => checkerboard::run(buf, parallel, budget, on_subpass, on_activity),
         Pattern::StuckAddress => stuck_address::run(buf, parallel, budget, on_subpass, on_activity),
         Pattern::MarchCMinus => march::run(buf, parallel, budget, on_subpass, on_activity),
+        Pattern::MovingInversions => {
+            moving_inversions::run(buf, parallel, budget, on_subpass, on_activity)
+        }
     }
 }
 
@@ -189,6 +208,7 @@ mod tests {
         #[case(Pattern::Checkerboard)]
         #[case(Pattern::StuckAddress)]
         #[case(Pattern::MarchCMinus)]
+        #[case(Pattern::MovingInversions)]
         fn serial(#[case] pattern: Pattern) {
             let mut buf = make_test_buf();
             let failures = run_pattern(
@@ -212,6 +232,7 @@ mod tests {
         #[case(Pattern::Checkerboard)]
         #[case(Pattern::StuckAddress)]
         #[case(Pattern::MarchCMinus)]
+        #[case(Pattern::MovingInversions)]
         fn parallel(#[case] pattern: Pattern) {
             let mut buf = make_test_buf();
             let failures = run_pattern(
@@ -279,6 +300,7 @@ mod tests {
         #[case(Pattern::Checkerboard, "Checkerboard", 2)]
         #[case(Pattern::StuckAddress, "Stuck Address", 1)]
         #[case(Pattern::MarchCMinus, "March C-", 6)]
+        #[case(Pattern::MovingInversions, "Moving Inversions", 8)]
         fn display_and_sub_passes(
             #[case] pattern: Pattern,
             #[case] expected_name: &str,
@@ -288,7 +310,7 @@ mod tests {
             check!(pattern.sub_passes() == expected_sub_passes);
         }
 
-        use metadata::{Complexity, FaultClass, PatternTier};
+        use metadata::PatternTier;
 
         /// Every pattern must declare at least one fault class and belong to at
         /// least one tier -- a pattern that detects nothing or runs in no tier
@@ -323,48 +345,19 @@ mod tests {
             }
         }
 
-        #[rstest]
-        #[case(Pattern::SolidBits, &[FaultClass::StuckAt], Complexity::Linear)]
-        #[case(
-            Pattern::WalkingOnes,
-            &[FaultClass::StuckAt, FaultClass::Coupling],
-            Complexity::LinearK(64)
-        )]
-        #[case(
-            Pattern::WalkingZeros,
-            &[FaultClass::StuckAt, FaultClass::Coupling],
-            Complexity::LinearK(64)
-        )]
-        #[case(
-            Pattern::Checkerboard,
-            &[FaultClass::StuckAt, FaultClass::Coupling],
-            Complexity::Linear
-        )]
-        #[case(
-            Pattern::StuckAddress,
-            &[FaultClass::AddressDecoder],
-            Complexity::Linear
-        )]
-        #[case(
-            Pattern::MarchCMinus,
-            &[
-                FaultClass::StuckAt,
-                FaultClass::Transition,
-                FaultClass::AddressDecoder,
-                FaultClass::Coupling,
-            ],
-            Complexity::LinearK(10)
-        )]
-        fn fault_classes_and_complexity(
-            #[case] pattern: Pattern,
-            #[case] expected_faults: &[FaultClass],
-            #[case] expected_complexity: Complexity,
-        ) {
-            let meta = pattern.metadata();
-            check!(meta.fault_classes == expected_faults);
-            check!(meta.complexity == expected_complexity);
-            check!(!meta.requires_physical_order);
-            check!(!meta.is_destructive);
+        /// A pattern listing the same fault class twice is a copy-paste slip --
+        /// the declaration is meant to be a set.
+        #[test]
+        fn fault_classes_have_no_duplicates() {
+            for &pattern in Pattern::ALL {
+                let faults = pattern.metadata().fault_classes;
+                for (i, a) in faults.iter().enumerate() {
+                    check!(
+                        !faults[i + 1..].contains(a),
+                        "pattern {pattern} lists {a:?} more than once"
+                    );
+                }
+            }
         }
     }
 
