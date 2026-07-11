@@ -13,6 +13,8 @@ use rayon::prelude::*;
 
 #[cfg(target_arch = "x86_64")]
 use crate::Failure;
+#[cfg(target_arch = "x86_64")]
+use crate::ops::scalar;
 
 /// Number of u64 words processed per Rayon task.
 /// Must be a multiple of 8 (one AVX-512 register = 8 * u64 = 64 bytes) so that
@@ -172,8 +174,10 @@ pub unsafe fn verify_avx512(
 /// Verify that `buf[i] == (word_off + i) as u64` for all `i`, using AVX-512.
 ///
 /// Maintains an incrementing expected-value vector in the same style as
-/// `fill_nt_indexed` to avoid per-iteration recomputation.
-#[cfg(target_arch = "x86_64")]
+/// `fill_nt_indexed` to avoid per-iteration recomputation. Retained only for the
+/// comparative SIMD benchmarks: the production indexed-verify path uses the faster
+/// scalar `verify_indexed` (XEV-599), so this is gated to test/bench builds.
+#[cfg(all(target_arch = "x86_64", any(test, feature = "bench")))]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn verify_indexed_avx512(
     buf: &[u64],
@@ -274,6 +278,13 @@ pub fn fill_verify_constant(
 }
 
 /// AVX-512 orchestration for indexed fill-and-verify.
+///
+/// The fill phase uses NT-store `fill_nt_indexed`, but verification delegates to
+/// the scalar `verify_indexed` path: the SIMD indexed-verify loop must maintain an
+/// incrementing expected-value vector (`_mm512_add_epi64` per 64 bytes) whose
+/// per-iteration cost makes it ~33% slower than the scalar volatile-read + branch
+/// at every buffer size (XEV-599). The scalar verify keeps `verify_indexed_avx512`
+/// alive only for the comparative SIMD benchmarks.
 #[cfg(target_arch = "x86_64")]
 pub fn fill_verify_indexed(
     buf: &mut [u64],
@@ -292,8 +303,9 @@ pub fn fill_verify_indexed(
         buf.par_chunks(CHUNK)
             .enumerate()
             .flat_map_iter(|(ci, chunk)| {
-                on_activity((ci * CHUNK) as f64 / total as f64);
-                unsafe { verify_indexed_avx512(chunk, base_addr, ci * CHUNK) }
+                let chunk_start = ci * CHUNK;
+                on_activity(chunk_start as f64 / total as f64);
+                scalar::verify_indexed(chunk, base_addr + chunk_start * 8, chunk_start)
             })
             .collect()
     } else {
@@ -302,7 +314,7 @@ pub fn fill_verify_indexed(
             fill_nt_indexed(buf, 0);
         }
         on_activity(0.5);
-        let result = unsafe { verify_indexed_avx512(buf, base_addr, 0) };
+        let result = scalar::verify_indexed(buf, base_addr, 0);
         on_activity(1.0);
         result
     }
