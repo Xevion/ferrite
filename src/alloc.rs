@@ -472,6 +472,24 @@ mod tests {
             let e = AllocError::ZeroSize;
             check!(e.help().is_none());
         }
+
+        #[test]
+        fn devmem_map_has_help() {
+            let e = AllocError::DevMemMap {
+                source: nix::Error::EACCES,
+            };
+            let msg = e.help().unwrap();
+            check!(msg.contains("CONFIG_STRICT_DEVMEM"));
+        }
+
+        #[test]
+        fn devmem_open_has_help() {
+            let e = AllocError::DevMemOpen {
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            };
+            let msg = e.help().unwrap();
+            check!(msg.contains("root"));
+        }
     }
 
     mod walk_chunks {

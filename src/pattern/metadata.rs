@@ -88,3 +88,22 @@ pub struct PatternMetadata {
     /// Preset tiers that include this pattern.
     pub tiers: &'static [PatternTier],
 }
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::stuck_at(FaultClass::StuckAt)]
+    #[case::transition(FaultClass::Transition)]
+    #[case::coupling(FaultClass::Coupling)]
+    #[case::address_decoder(FaultClass::AddressDecoder)]
+    #[case::retention(FaultClass::Retention)]
+    #[case::row_disturbance(FaultClass::RowDisturbance)]
+    fn label_returns_nonempty(#[case] fc: FaultClass) {
+        assert!(!fc.label().is_empty());
+    }
+}

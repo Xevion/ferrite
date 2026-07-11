@@ -290,6 +290,12 @@ mod tests {
     }
 
     #[test]
+    fn read_u64_file_dir_logs_and_returns_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        check!(read_u64_file(tmp.path()) == None);
+    }
+
+    #[test]
     fn read_trimmed_non_empty() {
         let dir = std::env::temp_dir().join("ferrite_test_edac_trim");
         let _ = std::fs::create_dir_all(&dir);
@@ -307,6 +313,29 @@ mod tests {
         std::fs::write(&path, "  \n").unwrap();
         check!(read_trimmed(&path) == None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_trimmed_dir_logs_and_returns_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        check!(read_trimmed(tmp.path()) == None);
+    }
+
+    #[test]
+    fn try_read_dimm_api_missing_dir_returns_false() {
+        let mut dimms = Vec::new();
+        check!(!try_read_dimm_api(
+            Path::new("/nonexistent/mc0"),
+            0,
+            &mut dimms
+        ));
+    }
+
+    #[test]
+    fn try_read_csrow_api_missing_dir_returns_early() {
+        let mut dimms = Vec::new();
+        try_read_csrow_api(Path::new("/nonexistent/mc0"), 0, &mut dimms);
+        check!(dimms.is_empty());
     }
 
     #[test]
@@ -387,6 +416,19 @@ mod tests {
             setup_dimm_dir(&mc, 0, 0, 0, None, None);
             // Create a non-dimm directory
             fs::create_dir_all(mc.join("some_other_dir")).unwrap();
+
+            let mut dimms = Vec::new();
+            try_read_dimm_api(&mc, 0, &mut dimms);
+            check!(dimms.len() == 1);
+        }
+
+        #[test]
+        fn skips_unparseable_dimm_suffix() {
+            let tmp = TempDir::new().unwrap();
+            let mc = tmp.path().join("mc0");
+            fs::create_dir_all(&mc).unwrap();
+            setup_dimm_dir(&mc, 0, 0, 0, None, None);
+            fs::create_dir_all(mc.join("dimmFOO")).unwrap();
 
             let mut dimms = Vec::new();
             try_read_dimm_api(&mc, 0, &mut dimms);

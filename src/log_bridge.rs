@@ -93,9 +93,10 @@ impl<S: tracing::Subscriber> Layer<S> for LogForwarder {
 
 /// Collects an event's `message` and remaining fields into strings.
 ///
-/// Only `record_debug` is implemented; the typed `record_*` methods default to
-/// forwarding here, so every field is captured as its `Debug` rendering. This
-/// is a deliberately minimal projection -- structured typing is not preserved.
+/// `record_debug` and `record_str` are implemented; every other typed
+/// `record_*` method defaults to `record_debug`, so most fields are captured
+/// as their `Debug` rendering. This is a deliberately minimal projection --
+/// structured typing is not preserved.
 #[derive(Default)]
 struct LogVisitor {
     message: String,
@@ -221,5 +222,25 @@ mod tests {
         check!(message == "hello");
         check!(target == "ferrite::demo");
         check!(level == tracing::Level::INFO);
+    }
+
+    #[test]
+    fn str_valued_field_is_captured() {
+        let (tx, rx) = crate::events::event_bus();
+        let fwd = LogForwarder::new();
+        fwd.install(tx);
+        let subscriber = tracing_subscriber::registry().with(fwd);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(host = "roman", "connected");
+        });
+        let events: Vec<_> = rx.try_iter().collect();
+        let fields = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::Log { fields, .. } => Some(fields.clone()),
+                _ => None,
+            })
+            .expect("expected a Log event");
+        check!(fields["host"] == "roman");
     }
 }

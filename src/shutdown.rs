@@ -93,6 +93,7 @@ pub fn exit_code(total_failures: usize) -> i32 {
 /// Attempts to restore the terminal (disable raw mode) before calling
 /// [`process::exit`]. This is the "nuclear option" for when graceful shutdown
 /// has been requested but the program isn't responding.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn force_exit(code: i32) -> ! {
     #[cfg(feature = "tui")]
     {
@@ -155,6 +156,7 @@ pub fn install_signal_handlers() -> Result<ShutdownHandle, Whatever> {
 ///
 /// Safe to call even when the TUI isn't active -- `disable_raw_mode` is
 /// idempotent.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -178,6 +180,7 @@ impl TerminalGuard {
     /// # Errors
     ///
     /// Returns an error if raw mode cannot be enabled.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn new() -> Result<Self, Whatever> {
         crossterm::terminal::enable_raw_mode()
             .whatever_context("failed to enable raw mode (is stdout a terminal?)")?;
@@ -187,6 +190,7 @@ impl TerminalGuard {
 
 #[cfg(feature = "tui")]
 impl Drop for TerminalGuard {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn drop(&mut self) {
         let _ = crossterm::terminal::disable_raw_mode();
     }

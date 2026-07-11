@@ -364,6 +364,7 @@ mod tests {
 
     mod memmap {
         use assert2::check;
+        use rstest::rstest;
 
         use super::*;
 
@@ -402,6 +403,18 @@ mod tests {
         fn decimal_size_and_addr() {
             // 2097152 bytes = 2 MiB, addr 0 -> [0, 0x1fffff].
             check!(parse_memmap_reserved("memmap=2097152$0") == vec![(0, 0x1f_ffff)]);
+        }
+
+        #[rstest]
+        #[case::kilobytes("512K", 512 * 1024)]
+        #[case::gigabytes("4G", 4 * 1024 * 1024 * 1024)]
+        fn parses_binary_suffixes(#[case] input: &str, #[case] expected: u64) {
+            check!(parse_memmap_size(input) == Some(expected));
+        }
+
+        #[test]
+        fn zero_size_reservation_is_rejected() {
+            check!(parse_memmap_reservation("0$0x1000") == None);
         }
     }
 
@@ -606,6 +619,20 @@ mod tests {
             let r = DevMemResolver::new(0x1000, 0x3940_0000, 0x2000);
             assert!(let Ok(changed) = r.verify_stability(0x1000, 0x2000));
             check!(changed == 0);
+        }
+
+        #[test]
+        fn build_map_reports_all_pages_resolved() {
+            let mut r = DevMemResolver::new(0x1000, 0x3940_0000, 0x2000);
+            let stats = r.build_map(0x1000, 0x2000).unwrap();
+            check!(stats.total_pages == stats.resolved_pages);
+            check!(stats.huge_pages == 0);
+        }
+
+        #[test]
+        fn page_flags_always_unavailable() {
+            let r = DevMemResolver::new(0x1000, 0x3940_0000, 0x2000);
+            assert!(let Err(PhysError::PfnUnavailable { .. }) = r.page_flags(0));
         }
     }
 }

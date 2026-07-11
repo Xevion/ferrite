@@ -284,6 +284,16 @@ mod tests {
         }
 
         #[test]
+        fn load_dir_path_returns_read_error() {
+            let dir = tempfile::tempdir().unwrap();
+
+            let Err(e) = CoverageStore::load(dir.path(), fp()) else {
+                panic!("expected read error");
+            };
+            assert!(let CoverageError::Read { .. } = e);
+        }
+
+        #[test]
         fn fingerprint_mismatch_is_rejected() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("coverage.json");
