@@ -17,30 +17,53 @@ use crate::physmem::phys::MapStats;
 pub enum RunEvent {
     /// Emitted once at the start of a test run.
     RunStart {
+        /// Size of the test buffer in bytes.
         size: usize,
+        /// Number of passes to run.
         passes: usize,
+        /// Patterns selected for this run.
         patterns: Vec<Pattern>,
         /// Resolved worker-thread count for pattern execution; 1 means serial.
         workers: usize,
     },
 
     /// Physical address map statistics, emitted after pagemap resolution.
-    MapInfo { stats: MapStats },
+    MapInfo {
+        /// Resolved physical-address map statistics.
+        stats: MapStats,
+    },
 
     /// Installed DIMM topology, emitted when SMBIOS/EDAC data is available.
-    DimmInfo { topology: DimmTopology },
+    DimmInfo {
+        /// Installed DIMM topology derived from SMBIOS and EDAC data.
+        topology: DimmTopology,
+    },
 
     /// A new pass is starting.
-    PassStart { pass: usize, total_passes: usize },
+    PassStart {
+        /// 1-indexed pass number.
+        pass: usize,
+        /// Total number of passes in this run.
+        total_passes: usize,
+    },
 
     /// A pattern test is starting within a pass.
-    TestStart { pattern: Pattern, pass: usize },
+    TestStart {
+        /// Pattern being tested.
+        pattern: Pattern,
+        /// 1-indexed pass number.
+        pass: usize,
+    },
 
     /// Sub-pass progress update for the current pattern.
     Progress {
+        /// Pattern currently executing.
         pattern: Pattern,
+        /// 1-indexed pass number.
         pass: usize,
+        /// Current sub-pass index.
         sub_pass: u64,
+        /// Total number of sub-passes for this pattern.
         total: u64,
     },
 
@@ -51,30 +74,49 @@ pub enum RunEvent {
     /// `capped` is true when the pattern hit `--max-errors` and its failure
     /// list was truncated (more failures existed than were collected).
     TestComplete {
+        /// Pattern that completed.
         pattern: Pattern,
+        /// 1-indexed pass number.
         pass: usize,
+        /// Wall-clock time spent testing this pattern.
         elapsed: Duration,
+        /// Total bytes touched (writes + reads across all sub-passes).
         bytes: u64,
+        /// Failures collected during this pattern's execution.
         failures: Vec<Failure>,
+        /// Whether the pattern stopped early due to a quit request.
         interrupted: bool,
+        /// Whether `--max-errors` truncated the failure list.
         capped: bool,
     },
 
     /// All patterns in a pass finished.
     PassComplete {
+        /// 1-indexed pass number.
         pass: usize,
+        /// Total failures collected across all patterns in this pass.
         failures: usize,
+        /// Wall-clock time spent on this pass.
         elapsed: Duration,
     },
 
     /// ECC counter deltas detected after a pass.
-    EccDeltas { pass: usize, deltas: Vec<EccDelta> },
+    EccDeltas {
+        /// 1-indexed pass number the deltas were measured over.
+        pass: usize,
+        /// Non-zero counter deltas since the previous snapshot.
+        deltas: Vec<EccDelta>,
+    },
 
     /// Tracing log event injected by a custom subscriber layer.
     Log {
+        /// Severity of the tracing event.
         level: tracing::Level,
+        /// Tracing target (typically the emitting module path).
         target: String,
+        /// Rendered `message` field of the event.
         message: String,
+        /// Remaining event fields, Debug-rendered into a JSON object.
         fields: serde_json::Value,
     },
 

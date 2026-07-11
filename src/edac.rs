@@ -32,18 +32,25 @@ pub struct DimmEdac {
 /// Snapshot of all EDAC error counters at a point in time.
 #[derive(Debug, Clone)]
 pub struct EdacSnapshot {
+    /// Per-DIMM counters at capture time.
     pub dimms: Vec<DimmEdac>,
+    /// When this snapshot was captured, for computing elapsed time between snapshots.
     pub timestamp: Instant,
 }
 
 /// Change in error counts between two snapshots.
 #[derive(Debug, Clone, Serialize)]
 pub struct EccDelta {
+    /// Memory controller index (e.g., 0 for mc0).
     pub mc: usize,
+    /// DIMM index within the controller.
     pub dimm_index: usize,
+    /// User-assigned or driver-populated label (often empty).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Increase in correctable error count since the earlier snapshot.
     pub ce_delta: u64,
+    /// Increase in uncorrectable error count since the earlier snapshot.
     pub ue_delta: u64,
 }
 

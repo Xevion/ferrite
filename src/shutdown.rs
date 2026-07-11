@@ -196,6 +196,7 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Resets the global quit/signal state between tests that share this module's statics.
 #[cfg(test)]
 pub fn reset() {
     QUIT.store(false, Ordering::Relaxed);

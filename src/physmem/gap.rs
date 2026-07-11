@@ -56,9 +56,13 @@ pub const fn classify(flags: KPageFlags) -> FrameClass {
 /// Byte totals per [`FrameClass`] over the untested remainder.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct GapReport {
+    /// In the buddy allocator -- acquirable right now.
     pub free_bytes: u64,
+    /// File-backed page cache -- acquirable under allocation pressure.
     pub reclaimable_bytes: u64,
+    /// In use by other processes (anonymous or shmem/tmpfs).
     pub in_use_bytes: u64,
+    /// Unreachable from userspace by design (kernel text/data, slab, reserved, etc.).
     pub unreachable_bytes: u64,
     /// Frames whose flags could not be read.
     #[serde(skip_serializing_if = "is_zero")]

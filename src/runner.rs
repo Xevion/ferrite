@@ -33,15 +33,21 @@ pub enum PatternError {
     /// A pattern worker panicked. The test buffer may be in a partially-modified
     /// state and should not be trusted. The message carries the panic payload.
     #[snafu(display("unrecoverable error in pattern execution: {message}"))]
-    Unrecoverable { message: String },
+    Unrecoverable {
+        /// Panic payload rendered as text.
+        message: String,
+    },
 }
 
 /// Result of running a single pattern.
 #[derive(Debug, serde::Serialize)]
 pub struct PatternResult {
+    /// Pattern this result belongs to.
     pub pattern: Pattern,
+    /// Failures collected while testing this pattern.
     pub failures: Vec<Failure>,
     #[serde(with = "crate::units::duration_ms")]
+    /// Wall-clock time spent on this pattern.
     pub elapsed: std::time::Duration,
     /// Total bytes touched (writes + reads across all sub-passes).
     pub bytes_processed: u64,
@@ -56,12 +62,16 @@ pub struct PatternResult {
 /// Result of a full pass (all patterns).
 #[derive(Debug, serde::Serialize)]
 pub struct PassResult {
+    /// 1-indexed pass number.
     pub pass_number: usize,
+    /// Per-pattern results for this pass.
     pub pattern_results: Vec<PatternResult>,
+    /// ECC counter deltas observed during this pass.
     pub ecc_deltas: Vec<EccDelta>,
 }
 
 impl PassResult {
+    /// Sum of failures across all patterns in this pass.
     #[must_use]
     pub fn total_failures(&self) -> usize {
         self.pattern_results.iter().map(|r| r.failures.len()).sum()
@@ -71,8 +81,11 @@ impl PassResult {
 /// Configuration snapshot captured at the start of a run.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunConfig {
+    /// Size of the test buffer in bytes.
     pub size: usize,
+    /// Number of passes requested.
     pub passes: usize,
+    /// Patterns selected for this run.
     pub patterns: Vec<Pattern>,
     /// Resolved worker-thread count for pattern execution; 1 means serial.
     pub workers: usize,
@@ -85,10 +98,14 @@ pub struct RunConfig {
 /// Complete results of a test run, suitable for serialization and post-processing.
 #[derive(Debug, serde::Serialize)]
 pub struct RunResults {
+    /// Configuration snapshot the run executed with.
     pub config: RunConfig,
+    /// Results for each completed pass.
     pub passes: Vec<PassResult>,
     #[serde(with = "crate::units::duration_ms")]
+    /// Total wall-clock time for the run.
     pub elapsed: std::time::Duration,
+    /// Sum of failures across all passes.
     pub total_failures: usize,
     /// Fraction of installed physical RAM this run tested. Set by the binary
     /// before rendering; defaults to [`Coverage::Unavailable`](crate::physmem::sysmem::Coverage::Unavailable).

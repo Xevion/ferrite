@@ -27,11 +27,13 @@ pub struct Failure {
 }
 
 impl Failure {
+    /// Bitwise XOR of expected and actual values -- set bits mark where they differ.
     #[must_use]
     pub const fn xor(&self) -> u64 {
         self.expected ^ self.actual
     }
 
+    /// Count of bits that differ between expected and actual.
     #[must_use]
     pub const fn flipped_bits(&self) -> u32 {
         self.xor().count_ones()

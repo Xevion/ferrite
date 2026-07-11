@@ -86,7 +86,9 @@ impl Sub for Pfn {
 /// A contiguous run of physical page frames: `[start, start + count)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PfnRange {
+    /// First frame in the range.
     pub start: Pfn,
+    /// Number of frames in the range.
     pub count: u64,
 }
 

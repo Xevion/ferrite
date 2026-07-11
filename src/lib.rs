@@ -22,8 +22,7 @@
 //! either a live run or a saved JSON document. See `docs/ARCHITECTURE.md` for the full data flow
 //! and `docs/VOCABULARY.md` for domain terminology.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-// Promote to an unconditional `warn` (or `deny`) once docs are backfilled.
-#![cfg_attr(doc, warn(missing_docs))]
+#![deny(missing_docs)]
 #![deny(
     rustdoc::broken_intra_doc_links,
     rustdoc::private_intra_doc_links,
@@ -67,14 +66,17 @@ pub mod bench_api {
     use crate::Failure;
     use crate::ops::{avx512, scalar};
 
+    /// Benchmark wrapper for `scalar::fill_constant`.
     pub fn scalar_fill_constant(buf: &mut [u64], pattern: u64) {
         scalar::fill_constant(buf, pattern);
     }
 
+    /// Benchmark wrapper for `scalar::fill_indexed`.
     pub fn scalar_fill_indexed(buf: &mut [u64], start: usize) {
         scalar::fill_indexed(buf, start);
     }
 
+    /// Benchmark wrapper for `scalar::verify_constant`.
     #[must_use]
     pub fn scalar_verify_constant(
         buf: &[u64],
@@ -85,11 +87,14 @@ pub mod bench_api {
         scalar::verify_constant(buf, pattern, base_addr, word_start)
     }
 
+    /// Benchmark wrapper for `scalar::verify_indexed`.
     #[must_use]
     pub fn scalar_verify_indexed(buf: &[u64], base_addr: usize, start: usize) -> Vec<Failure> {
         scalar::verify_indexed(buf, base_addr, start)
     }
 
+    /// Benchmark wrapper for the scalar/AVX-512 dispatch fill+verify constant-pattern
+    /// path, run with an unlimited failure budget.
     pub fn fill_verify_constant(
         buf: &mut [u64],
         pattern: u64,
@@ -105,6 +110,8 @@ pub mod bench_api {
         )
     }
 
+    /// Benchmark wrapper for the scalar/AVX-512 dispatch fill+verify indexed-pattern
+    /// path, run with an unlimited failure budget.
     pub fn fill_verify_indexed(
         buf: &mut [u64],
         parallel: bool,
@@ -118,6 +125,7 @@ pub mod bench_api {
         )
     }
 
+    /// Benchmark wrapper for `avx512::avx512_available`.
     #[cfg(target_arch = "x86_64")]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[must_use]
@@ -125,6 +133,7 @@ pub mod bench_api {
         avx512::avx512_available()
     }
 
+    /// Benchmark wrapper exposing `avx512::CHUNK`, the parallel work-chunk size in `u64` words.
     #[cfg(target_arch = "x86_64")]
     pub const CHUNK: usize = avx512::CHUNK;
 

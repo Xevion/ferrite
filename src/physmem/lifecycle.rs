@@ -20,7 +20,9 @@ use crate::units::UnitSystem;
 
 /// A loaded (or freshly initialized) coverage store plus its file path.
 pub struct CoverageCtx {
+    /// The loaded (or freshly initialized) store.
     pub store: CoverageStore,
+    /// Where the store was loaded from, and will be saved back to.
     pub path: PathBuf,
 }
 

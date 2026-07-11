@@ -41,6 +41,7 @@ pub struct TuiTraceGuard {
 }
 
 impl TuiTraceGuard {
+    /// Wraps the receiver so buffered log events can be drained to stderr on drop.
     #[must_use]
     pub const fn new(state: Arc<TuiTraceState>, rx: mpsc::Receiver<TuiEvent>) -> Self {
         Self { state, rx }
@@ -69,6 +70,7 @@ pub struct TuiMakeWriter {
 }
 
 impl TuiMakeWriter {
+    /// Creates a writer factory sharing the given channel and routing state.
     #[must_use]
     pub const fn new(tx: mpsc::SyncSender<TuiEvent>, state: Arc<TuiTraceState>) -> Self {
         Self { tx, state }

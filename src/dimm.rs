@@ -13,13 +13,16 @@ use crate::smbios::{self, DimmInfo};
 /// A merged DIMM entry combining EDAC and SMBIOS data.
 #[derive(Debug, Clone)]
 pub struct DimmEntry {
+    /// EDAC error counters for this slot, if the kernel exposed them.
     pub edac: Option<DimmEdac>,
+    /// SMBIOS identity for this slot, if DMI tables were readable.
     pub smbios: Option<DimmInfo>,
 }
 
 /// Unified DIMM topology from EDAC sysfs + SMBIOS Type 17.
 #[derive(Debug)]
 pub struct DimmTopology {
+    /// Every merged slot, including ones known from only one data source.
     pub dimms: Vec<DimmEntry>,
 }
 

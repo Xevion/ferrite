@@ -14,6 +14,7 @@ use crate::runner::RunResults;
 /// Aggregate bit-flip statistics across multiple failures.
 #[derive(Debug, Clone)]
 pub struct BitErrorStats {
+    /// Number of failures recorded so far.
     pub total_failures: usize,
     /// Lowest physical address with an error (None if no physical addresses available).
     pub lowest_phys: Option<u64>,
@@ -38,6 +39,7 @@ impl Default for BitErrorStats {
 }
 
 impl BitErrorStats {
+    /// An empty accumulator with no failures recorded yet.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -122,7 +124,10 @@ pub enum ErrorClassification {
     /// No errors recorded.
     NoErrors,
     /// Same bit position(s) flip in every error -- likely a hard stuck bit.
-    StuckBit { positions: Vec<u8> },
+    StuckBit {
+        /// Bit positions (0-63) that are consistently stuck.
+        positions: Vec<u8>,
+    },
     /// Different bits flip across errors -- coupling or disturbance faults.
     Coupling,
     /// Some bits are consistently stuck, but other bits also flip inconsistently.
@@ -132,6 +137,7 @@ pub enum ErrorClassification {
 /// Enriched error analysis attached to [`RunResults`] after post-processing.
 #[derive(Debug, Serialize)]
 pub struct ErrorAnalysis {
+    /// Overall classification of the observed failures.
     pub classification: ErrorClassification,
     /// `(bit_position, flip_count)` pairs for every bit that flipped at least once.
     pub bit_positions: Vec<(u8, u32)>,

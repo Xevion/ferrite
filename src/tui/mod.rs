@@ -2,13 +2,21 @@
 //! terminal. [`bridge`] hot-swaps tracing's writer to route log lines into the TUI channel.
 #![cfg_attr(coverage_nightly, coverage(off))]
 
+/// Per-segment activity heatmap tracking.
 pub mod activity;
+/// Hot-swaps the tracing writer between stderr and the TUI channel.
 pub mod bridge;
+/// Event types flowing through the channel that drives the TUI loop.
 pub mod event;
+/// Color constants and gradients used by the renderer.
 pub mod palette;
+/// Frame rendering: draws the heatmap, failure table, and controls.
 pub mod render;
+/// Wires up the TUI worker thread, event bridge, and runner for a full run.
 pub mod run;
+/// Shared, atomically-updated state for the segment under test.
 pub mod segment;
+/// Routes tracing output through the TUI channel while it is active.
 pub mod trace;
 
 pub use activity::ActivityBuffer;
@@ -35,6 +43,7 @@ use render::render_heatmap;
 
 /// TUI display configuration.
 pub struct TuiConfig {
+    /// Symbol set used to render activity brightness in the heatmap.
     pub symbols: SymbolSet,
 }
 

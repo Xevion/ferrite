@@ -15,12 +15,19 @@ use tracing::warn;
 /// SMBIOS memory type codes from the Type 17 structure (offset 0x12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryType {
+    /// SMBIOS "Other" memory type (code 0x01).
     Other,
+    /// DDR SDRAM (code 0x12).
     Ddr,
+    /// DDR2 SDRAM (code 0x13).
     Ddr2,
+    /// DDR3 SDRAM (code 0x18).
     Ddr3,
+    /// DDR4 SDRAM (code 0x1A).
     Ddr4,
+    /// DDR5 SDRAM (code 0x22).
     Ddr5,
+    /// LPDDR5 SDRAM (code 0x23).
     Lpddr5,
     /// Unrecognized SMBIOS type code; raw byte preserved.
     Unknown(u8),
@@ -65,16 +72,23 @@ impl Serialize for MemoryType {
 /// SMBIOS Type 17 (Memory Device) information for a single DIMM slot.
 #[derive(Debug, Clone, Serialize)]
 pub struct DimmInfo {
+    /// SMBIOS structure handle uniquely identifying this DIMM entry.
     pub handle: u16,
     /// Silk-screen label, e.g., "`DIMM_A1`".
     pub device_locator: String,
     /// Bank grouping label, e.g., "BANK 0" or "`P0_Node0_Channel0_Dimm0`".
     pub bank_locator: String,
+    /// Manufacturer name, if the SMBIOS string table provides one.
     pub manufacturer: Option<String>,
+    /// Serial number, if the SMBIOS string table provides one.
     pub serial_number: Option<String>,
+    /// Manufacturer part number, if the SMBIOS string table provides one.
     pub part_number: Option<String>,
+    /// Installed capacity in megabytes; 0 for an empty slot.
     pub size_mb: u64,
+    /// DDR generation reported by SMBIOS.
     pub memory_type: MemoryType,
+    /// Configured or rated speed in MHz.
     pub speed_mhz: u16,
 }
 

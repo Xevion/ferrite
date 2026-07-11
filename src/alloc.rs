@@ -11,29 +11,62 @@ use nix::sys::mman::{
 use rayon::prelude::*;
 use snafu::{ResultExt, Snafu};
 
+/// Errors from allocating and locking the test buffer, including budgeted
+/// chunked allocation and `/dev/mem` physical mapping.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum AllocError {
+    /// The caller requested a zero-byte allocation.
     #[snafu(display("requested size must be non-zero"))]
     ZeroSize,
+    /// The `mmap` syscall failed.
     #[snafu(display("mmap failed: {source}"))]
-    Mmap { source: nix::Error },
+    Mmap {
+        /// Underlying OS error.
+        source: nix::Error,
+    },
+    /// The `mlock` syscall failed, typically for lack of privilege or `RLIMIT_MEMLOCK`.
     #[snafu(display("mlock failed (are you root or do you have CAP_IPC_LOCK?): {source}"))]
-    Mlock { source: nix::Error },
+    Mlock {
+        /// Underlying OS error.
+        source: nix::Error,
+    },
+    /// The `mprotect` call to activate a chunk failed.
     #[snafu(display("mprotect failed while activating chunk: {source}"))]
-    Mprotect { source: nix::Error },
+    Mprotect {
+        /// Underlying OS error.
+        source: nix::Error,
+    },
+    /// No chunk could be activated before `MemAvailable` fell below the headroom floor.
     #[snafu(display(
         "could not lock any memory below the headroom floor ({available} bytes available)"
     ))]
-    Exhausted { available: u64 },
+    Exhausted {
+        /// Bytes free at the last headroom check.
+        available: u64,
+    },
+    /// The requested `/dev/mem` physical range was not page-aligned.
     #[snafu(display(
         "/dev/mem physical range must be page-aligned (start {phys_start:#x}, len {len:#x})"
     ))]
-    DevMemAlignment { phys_start: u64, len: usize },
+    DevMemAlignment {
+        /// Requested starting physical address.
+        phys_start: u64,
+        /// Requested range length in bytes.
+        len: usize,
+    },
+    /// `/dev/mem` could not be opened.
     #[snafu(display("could not open /dev/mem: {source}"))]
-    DevMemOpen { source: std::io::Error },
+    DevMemOpen {
+        /// Underlying OS error.
+        source: std::io::Error,
+    },
+    /// The `/dev/mem` mapping call failed.
     #[snafu(display("could not map physical range through /dev/mem: {source}"))]
-    DevMemMap { source: nix::Error },
+    DevMemMap {
+        /// Underlying OS error.
+        source: nix::Error,
+    },
 }
 
 impl AllocError {
@@ -69,7 +102,10 @@ pub enum StopReason {
     /// The full requested size was activated and locked.
     Completed,
     /// `MemAvailable` dropped below the headroom floor before the next chunk.
-    HeadroomFloor { available: u64 },
+    HeadroomFloor {
+        /// Bytes free at the last headroom check.
+        available: u64,
+    },
     /// Activating a chunk failed (mprotect, or mlock); the walk kept what it had.
     ChunkFailed(AllocError),
 }
@@ -78,8 +114,11 @@ pub enum StopReason {
 /// actually activated and locked, and why the walk stopped.
 #[derive(Debug)]
 pub struct AllocOutcome {
+    /// The size originally requested.
     pub requested: usize,
+    /// The size actually activated and locked.
     pub achieved: usize,
+    /// Why the walk stopped short of `requested`, or [`StopReason::Completed`].
     pub stop: StopReason,
 }
 

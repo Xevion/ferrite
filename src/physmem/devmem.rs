@@ -33,7 +33,12 @@ use crate::physmem::{PAGE_BYTES, PAGE_BYTES_USIZE};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DevMemTarget {
     /// An explicit inclusive physical byte range `[start, end]`.
-    Range { start: u64, end: u64 },
+    Range {
+        /// First byte of the range, inclusive.
+        start: u64,
+        /// Last byte of the range, inclusive.
+        end: u64,
+    },
     /// Every `memmap=`-reserved region on the kernel cmdline.
     Reserved,
 }
@@ -41,8 +46,11 @@ pub enum DevMemTarget {
 /// A concrete physical range to map, with its resolved write-safety verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mapping {
+    /// First byte of the range.
     pub phys_start: u64,
+    /// Length of the range in bytes.
     pub len: usize,
+    /// Write-safety verdict for this range.
     pub safety: Safety,
 }
 
@@ -50,17 +58,29 @@ pub struct Mapping {
 #[derive(Debug, Snafu, PartialEq, Eq)]
 #[snafu(visibility(pub(crate)))]
 pub enum DevMemError {
+    /// `--devmem reserved` was requested but the kernel cmdline carries no
+    /// `memmap=` reservations to test.
     #[snafu(display("--devmem reserved: no memmap= reservations found on the kernel cmdline"))]
     NoReservedRegions,
+    /// An explicit `--devmem` range is not page-aligned; mmap requires
+    /// page-aligned offsets and lengths.
     #[snafu(display("--devmem range must be page-aligned (start {start:#x}, len {len:#x})"))]
-    Unaligned { start: u64, len: usize },
+    Unaligned {
+        /// Requested start address.
+        start: u64,
+        /// Requested length in bytes.
+        len: usize,
+    },
 }
 
 /// Result of a read-only reachability probe over a physical range.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ProbeStats {
+    /// Total 64-bit words read.
     pub words_read: usize,
+    /// Words that were nonzero.
     pub nonzero_words: usize,
+    /// XOR of every word read -- a reachability signature, not a stable checksum.
     pub xor_checksum: u64,
 }
 
@@ -273,6 +293,8 @@ pub struct DevMemResolver {
 }
 
 impl DevMemResolver {
+    /// Build a resolver for a `/dev/mem` mapping whose virtual and physical
+    /// bases are already known (no pagemap lookup needed).
     #[must_use]
     pub const fn new(virt_base: usize, phys_base: u64, len: usize) -> Self {
         Self {

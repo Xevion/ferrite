@@ -33,8 +33,11 @@ pub type TracingReloadHandle =
 
 /// Resolved test setup passed into [`run_tui_mode`] from the binary.
 pub struct TuiTestSetup {
+    /// The allocated, locked memory region under test.
     pub buffer: TestBuffer,
+    /// Physical address resolver, if physical-address reporting is available.
     pub resolver: Option<PagemapResolver>,
+    /// Memory map statistics gathered at allocation time.
     pub map_stats: Option<MapStats>,
     /// Keeps the compaction guard alive for the duration of the test.
     pub compaction_guard: Option<CompactionGuard>,
@@ -48,8 +51,11 @@ pub struct TuiTestSetup {
 /// NDJSON summary) is fully drained by the time this is returned; only the
 /// shared results tail remains.
 pub struct TuiRunOutput {
+    /// Results for each completed pass.
     pub pass_results: Vec<PassResult>,
+    /// The run configuration actually executed, including the resolved random seed.
     pub config: RunConfig,
+    /// Wall-clock time the run took, from worker spawn to completion.
     pub elapsed: std::time::Duration,
     /// Single-run coverage measured before `setup` moved into the worker.
     pub coverage: Coverage,

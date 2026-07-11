@@ -1,3 +1,10 @@
+//! Virtual-to-physical address resolution via `/proc/self/pagemap`.
+//!
+//! Resolving physical addresses requires `CAP_SYS_ADMIN` (typically root):
+//! without it, every pagemap entry reports PFN 0 even though the present bit
+//! is set. This module distinguishes "page not present" from "PFN
+//! unavailable" so callers can tell a genuine fault from a permissions gap.
+
 use std::fmt;
 use std::fs::File;
 use std::io;
@@ -54,21 +61,47 @@ impl fmt::UpperHex for PhysAddr {
     }
 }
 
+/// Low-level failures resolving virtual addresses to physical addresses.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum PhysError {
+    /// `/proc/self/pagemap` could not be opened.
     #[snafu(display("failed to open /proc/self/pagemap: {source}"))]
-    OpenPagemap { source: io::Error },
+    OpenPagemap {
+        /// Underlying I/O error.
+        source: io::Error,
+    },
+    /// Pagemap entries could not be read.
     #[snafu(display("failed to read pagemap entries: {source}"))]
-    ReadPagemap { source: io::Error },
+    ReadPagemap {
+        /// Underlying I/O error.
+        source: io::Error,
+    },
+    /// The virtual page is not present (unmapped or swapped out).
     #[snafu(display("page not present at virtual address 0x{vaddr:x}"))]
-    PageNotPresent { vaddr: usize },
+    PageNotPresent {
+        /// The virtual address that was queried.
+        vaddr: usize,
+    },
+    /// The page is present but its PFN reads as zero -- the process lacks
+    /// `CAP_SYS_ADMIN`.
     #[snafu(display("PFN not available (requires CAP_SYS_ADMIN) at virtual address 0x{vaddr:x}"))]
-    PfnUnavailable { vaddr: usize },
+    PfnUnavailable {
+        /// The virtual address that was queried.
+        vaddr: usize,
+    },
+    /// `/proc/kpageflags` could not be opened.
     #[snafu(display("failed to open /proc/kpageflags: {source}"))]
-    OpenKpageflags { source: io::Error },
+    OpenKpageflags {
+        /// Underlying I/O error.
+        source: io::Error,
+    },
+    /// A `/proc/kpageflags` entry could not be read.
     #[snafu(display("failed to read kpageflags: {source}"))]
-    ReadKpageflags { source: io::Error },
+    ReadKpageflags {
+        /// Underlying I/O error.
+        source: io::Error,
+    },
 }
 
 /// Higher-level error type for physical address resolution setup.
@@ -84,16 +117,25 @@ pub enum PhysResolverError {
     /// `CAP_SYS_ADMIN` or is not root. Physical address resolution is not
     /// possible without elevated privileges.
     #[snafu(display("pagemap access denied (requires CAP_SYS_ADMIN or root): {source}"))]
-    PermissionDenied { source: PhysError },
+    PermissionDenied {
+        /// The underlying pagemap error.
+        source: PhysError,
+    },
     /// `/proc/self/pagemap` is not available -- the kernel may not support it,
     /// or the file is missing on this system. Safe to continue without
     /// physical addresses.
     #[snafu(display("pagemap unavailable: {source}"))]
-    Unavailable { source: PhysError },
+    Unavailable {
+        /// The underlying pagemap error.
+        source: PhysError,
+    },
     /// An unexpected I/O error occurred while building the page map.
     /// The region is allocated and locked but physical addresses are unavailable.
     #[snafu(display("failed to build page map: {source}"))]
-    ReadError { source: PhysError },
+    ReadError {
+        /// The underlying pagemap error.
+        source: PhysError,
+    },
 }
 
 impl PhysResolverError {
@@ -125,14 +167,19 @@ const PM_SWAP: u64 = 1 << 62; // bit 62
 /// Statistics from building the page map.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MapStats {
+    /// Total pages in the mapped region.
     pub total_pages: usize,
     /// Pages that resolved to a real physical frame (nonzero PFN). Equals
     /// `total_pages` under root; lower when some PFNs are unavailable. This is
     /// the physical footprint actually tested -- the coverage numerator.
     pub resolved_pages: usize,
+    /// Pages backed by a hugetlbfs huge page.
     pub huge_pages: usize,
+    /// Pages backed by a transparent huge page.
     pub thp_pages: usize,
+    /// Pages hardware-poisoned and taken offline by the kernel.
     pub hwpoison_pages: usize,
+    /// Pages marked unevictable (e.g. mlocked).
     pub unevictable_pages: usize,
 }
 

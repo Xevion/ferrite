@@ -27,8 +27,10 @@ pub fn format_size(bytes: usize) -> String {
 /// Whether to display sizes in binary (KiB, MiB, GiB) or decimal (KB, MB, GB) units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum UnitSystem {
+    /// Powers of 1024 (KiB, MiB, GiB).
     #[default]
     Binary,
+    /// Powers of 1000 (KB, MB, GB).
     Decimal,
 }
 
@@ -38,11 +40,14 @@ const DECIMAL_SUFFIXES: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB"];
 /// A byte count paired with a unit system for display.
 #[derive(Debug, Clone, Copy)]
 pub struct Size {
+    /// Byte count to display.
     pub bytes: f64,
+    /// Unit system to render with.
     pub system: UnitSystem,
 }
 
 impl Size {
+    /// Construct a `Size` from a byte count and unit system.
     pub fn new(bytes: impl Into<f64>, system: UnitSystem) -> Self {
         Self {
             bytes: bytes.into(),
@@ -81,11 +86,14 @@ impl fmt::Display for Size {
 /// A throughput rate (bytes per second) paired with a unit system for display.
 #[derive(Debug, Clone, Copy)]
 pub struct Rate {
+    /// Throughput in bytes per second.
     pub bytes_per_sec: f64,
+    /// Unit system to render with.
     pub system: UnitSystem,
 }
 
 impl Rate {
+    /// Construct a `Rate` from bytes-per-second and unit system.
     #[must_use]
     pub const fn new(bytes_per_sec: f64, system: UnitSystem) -> Self {
         Self {

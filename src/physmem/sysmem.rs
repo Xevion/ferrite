@@ -42,7 +42,9 @@ pub enum RamSource {
 /// Total installed (testable) physical RAM and the source it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstalledRam {
+    /// Total installed physical RAM, in bytes.
     pub bytes: u64,
+    /// Which `/proc` source produced `bytes`.
     pub source: RamSource,
 }
 
@@ -67,9 +69,13 @@ pub struct Cumulative {
 pub enum Coverage {
     /// Coverage was measured for this run.
     Measured {
+        /// Physical bytes resolved and tested this run.
         tested_bytes: u64,
+        /// Installed-RAM denominator.
         total_bytes: u64,
+        /// Which `/proc` source produced `total_bytes`.
         source: RamSource,
+        /// Cross-run cumulative stats, when a coverage store is active.
         #[serde(skip_serializing_if = "Option::is_none")]
         cumulative: Option<Cumulative>,
         /// Classification of the untested remainder, when scannable (root).

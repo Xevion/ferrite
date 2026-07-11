@@ -25,14 +25,24 @@ use crate::alloc::{AllocError, CHUNK_BYTES, MmapSnafu, activate_chunk, walk_chun
 use crate::physmem::PAGE_BYTES_USIZE;
 use crate::physmem::pfn::{Pfn, PfnRange, contains_pfn};
 
+/// Failure modes for [`FrameSieve::hold`].
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum SieveError {
+    /// The sweep reservation could not be allocated.
     #[snafu(display("sieve reservation failed: {source}"))]
     #[snafu(context(false))]
-    Alloc { source: AllocError },
+    Alloc {
+        /// Underlying allocation error.
+        source: AllocError,
+    },
+    /// `/proc/self/pagemap` could not be opened or read to resolve the
+    /// sweep's physical frames.
     #[snafu(display("sieve cannot resolve physical frames: {source}"))]
-    Pagemap { source: std::io::Error },
+    Pagemap {
+        /// Underlying I/O error.
+        source: std::io::Error,
+    },
 }
 
 /// Culling granularity: one transparent huge page.

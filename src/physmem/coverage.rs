@@ -35,35 +35,63 @@ pub struct Fingerprint {
 /// One completed run merged into the store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRecord {
+    /// When the run completed.
     pub timestamp: jiff::Timestamp,
+    /// Patterns exercised, by name.
     pub patterns: Vec<String>,
+    /// Number of passes completed.
     pub passes: usize,
+    /// Total bytes this run tested, regardless of overlap with prior runs.
     pub tested_bytes: u64,
+    /// Bytes newly covered relative to the store's contents before this run.
     pub new_bytes: u64,
+    /// Failures recorded across the run.
     pub failures: u64,
 }
 
 /// What a run contributed, relative to the store's prior contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunDelta {
+    /// Bytes this run added that no prior run had covered.
     pub new_bytes: u64,
+    /// Total bytes covered across all runs after this merge.
     pub cumulative_bytes: u64,
+    /// Number of runs recorded, including this one.
     pub runs: u64,
 }
 
+/// Failure modes for loading or persisting a coverage store.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum CoverageError {
+    /// The coverage file could not be read.
     #[snafu(display("failed to read coverage file: {source}"))]
-    Read { source: io::Error },
+    Read {
+        /// Underlying I/O error.
+        source: io::Error,
+    },
+    /// The coverage file could not be written.
     #[snafu(display("failed to write coverage file: {source}"))]
-    Write { source: io::Error },
+    Write {
+        /// Underlying I/O error.
+        source: io::Error,
+    },
+    /// The coverage file's contents are not valid JSON.
     #[snafu(display("coverage file is not valid JSON: {source}"))]
-    Parse { source: serde_json::Error },
+    Parse {
+        /// Underlying deserialization error.
+        source: serde_json::Error,
+    },
+    /// The file's schema version is not one this build supports.
     #[snafu(display(
         "coverage file schema version {found} is not supported (expected {STORE_VERSION})"
     ))]
-    VersionMismatch { found: u32 },
+    VersionMismatch {
+        /// The version found in the file.
+        found: u32,
+    },
+    /// The file's machine fingerprint does not match this machine's current
+    /// memory layout -- the physical configuration changed since it was written.
     #[snafu(display(
         "coverage file belongs to a different memory configuration \
          (fingerprint mismatch) -- delete it or point --coverage-file elsewhere"
@@ -74,8 +102,11 @@ pub enum CoverageError {
 /// Persistent cumulative coverage: every frame any completed run has tested.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverageStore {
+    /// On-disk schema version.
     pub version: u32,
+    /// Machine memory-layout identity the store is bound to.
     pub fingerprint: Fingerprint,
+    /// History of every run merged into the store.
     pub runs: Vec<RunRecord>,
     /// Sorted, disjoint, non-adjacent ranges -- the canonical covered set.
     pub ranges: Vec<PfnRange>,

@@ -13,10 +13,15 @@ use super::{Segment, TuiFailure};
 /// Symbol sets for fine-grained activity display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolSet {
+    /// Coarse block shading (4 levels).
     Block,
+    /// Braille dot patterns for fine-grained brightness steps.
     Braille,
+    /// Eighth-block horizontal fill characters.
     Eighth,
+    /// Circular shade characters from dot to full circle.
     Shade,
+    /// Plain ASCII ramp, safe for terminals without Unicode support.
     Ascii,
 }
 

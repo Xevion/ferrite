@@ -34,6 +34,7 @@ pub struct LogForwarder {
 }
 
 impl LogForwarder {
+    /// Create an inactive forwarder; call [`LogForwarder::install`] to start forwarding.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+/// Number of discrete heatmap cells spanning the segment's address range.
 pub const ACTIVITY_CELLS: usize = 128;
+/// Seconds for a touched cell to fade from full brightness to zero.
 pub const ACTIVITY_FADE_SECS: f64 = 4.0;
 
 /// Per-segment activity heatmap buffer.
@@ -20,6 +22,7 @@ impl Default for ActivityBuffer {
 }
 
 impl ActivityBuffer {
+    /// Creates a buffer with all cells untouched (zero brightness).
     #[must_use]
     pub fn new() -> Self {
         let cells = (0..ACTIVITY_CELLS).map(|_| AtomicU64::new(0)).collect();

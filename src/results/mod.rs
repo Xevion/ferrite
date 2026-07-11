@@ -101,11 +101,13 @@ impl ResultsDoc {
 pub struct PassDoc<'a>(&'a serde_json::Value);
 
 impl<'a> PassDoc<'a> {
+    /// 1-based pass number.
     #[must_use]
     pub fn pass_number(&self) -> u64 {
         self.0["pass_number"].as_u64().unwrap_or(0)
     }
 
+    /// Sum of failures across every pattern run in this pass.
     #[must_use]
     pub fn total_failures(&self) -> u64 {
         self.pattern_results().map(|pr| pr.failure_count()).sum()
@@ -125,26 +127,31 @@ impl<'a> PassDoc<'a> {
 pub struct PatternDoc<'a>(&'a serde_json::Value);
 
 impl PatternDoc<'_> {
+    /// Display name of the pattern that produced this result.
     #[must_use]
     pub fn pattern_name(&self) -> &str {
         self.0["pattern"].as_str().unwrap_or("unknown")
     }
 
+    /// Wall-clock time this pattern took to run, in milliseconds.
     #[must_use]
     pub fn elapsed_ms(&self) -> f64 {
         self.0["elapsed"].as_f64().unwrap_or(0.0)
     }
 
+    /// Bytes of the buffer this pattern covered.
     #[must_use]
     pub fn bytes_processed(&self) -> u64 {
         self.0["bytes_processed"].as_u64().unwrap_or(0)
     }
 
+    /// Number of failures recorded for this pattern.
     #[must_use]
     pub fn failure_count(&self) -> u64 {
         self.0["failures"].as_array().map_or(0, |a| a.len() as u64)
     }
 
+    /// True if a quit request cut this pattern's run short.
     #[must_use]
     pub fn interrupted(&self) -> bool {
         self.0["interrupted"].as_bool().unwrap_or(false)
@@ -161,6 +168,7 @@ impl PatternDoc<'_> {
 pub struct ConfigDoc<'a>(&'a serde_json::Value);
 
 impl ConfigDoc<'_> {
+    /// Number of passes the run was configured to execute.
     #[must_use]
     pub fn passes(&self) -> u64 {
         self.0["passes"].as_u64().unwrap_or(0)
@@ -171,16 +179,19 @@ impl ConfigDoc<'_> {
 pub struct CoverageDoc<'a>(&'a serde_json::Value);
 
 impl CoverageDoc<'_> {
+    /// True if physical coverage was actually measured (versus unavailable).
     #[must_use]
     pub fn is_measured(&self) -> bool {
         self.0["status"].as_str() == Some("measured")
     }
 
+    /// Bytes of physical RAM the run tested.
     #[must_use]
     pub fn tested_bytes(&self) -> u64 {
         self.0["tested_bytes"].as_u64().unwrap_or(0)
     }
 
+    /// Denominator against which `tested_bytes` is measured.
     #[must_use]
     pub fn total_bytes(&self) -> u64 {
         self.0["total_bytes"].as_u64().unwrap_or(0)
@@ -225,26 +236,31 @@ impl CoverageDoc<'_> {
 pub struct GapDoc<'a>(&'a serde_json::Value);
 
 impl GapDoc<'_> {
+    /// Untested bytes classified as free (never allocated to any process).
     #[must_use]
     pub fn free_bytes(&self) -> u64 {
         self.0["free_bytes"].as_u64().unwrap_or(0)
     }
 
+    /// Untested bytes classified as page-cache or otherwise reclaimable.
     #[must_use]
     pub fn reclaimable_bytes(&self) -> u64 {
         self.0["reclaimable_bytes"].as_u64().unwrap_or(0)
     }
 
+    /// Untested bytes classified as actively in use by other processes.
     #[must_use]
     pub fn in_use_bytes(&self) -> u64 {
         self.0["in_use_bytes"].as_u64().unwrap_or(0)
     }
 
+    /// Untested bytes the kernel reports as reserved or otherwise unaddressable.
     #[must_use]
     pub fn unreachable_bytes(&self) -> u64 {
         self.0["unreachable_bytes"].as_u64().unwrap_or(0)
     }
 
+    /// Untested bytes that couldn't be classified into any other bucket.
     #[must_use]
     pub fn unknown_bytes(&self) -> u64 {
         self.0["unknown_bytes"].as_u64().unwrap_or(0)
@@ -265,16 +281,19 @@ impl GapDoc<'_> {
 pub struct CumulativeDoc<'a>(&'a serde_json::Value, u64);
 
 impl CumulativeDoc<'_> {
+    /// Bytes this run tested that no prior run had covered.
     #[must_use]
     pub fn new_bytes(&self) -> u64 {
         self.0["new_bytes"].as_u64().unwrap_or(0)
     }
 
+    /// Total distinct bytes covered across all runs recorded in the coverage store.
     #[must_use]
     pub fn cumulative_bytes(&self) -> u64 {
         self.0["cumulative_bytes"].as_u64().unwrap_or(0)
     }
 
+    /// Number of runs contributing to the cumulative total.
     #[must_use]
     pub fn runs(&self) -> u64 {
         self.0["runs"].as_u64().unwrap_or(0)

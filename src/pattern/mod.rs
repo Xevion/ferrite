@@ -48,17 +48,28 @@ impl Default for PatternConfig {
     Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, strum::EnumCount, serde::Serialize,
 )]
 pub enum Pattern {
+    /// Fill the buffer with all-0s then all-1s, verifying each. Catches bits stuck at one value.
     SolidBits,
+    /// Sweep a single set bit across every position, verifying against its zeroed neighbors.
     WalkingOnes,
+    /// Sweep a single clear bit across every position, verifying against its set neighbors.
     WalkingZeros,
+    /// Alternating 0/1 fill in both phases, catching adjacent-cell coupling.
     Checkerboard,
+    /// Fill each word with its own address, exposing address-decoder faults.
     StuckAddress,
+    /// The March C- algorithm: linear ascending/descending sweeps that detect
+    /// stuck-at, transition, coupling, and address-decoder faults together.
     MarchCMinus,
+    /// Two-seed bidirectional sweep that inverts the buffer repeatedly, exposing
+    /// pattern-sensitive coupling faults.
     MovingInversions,
+    /// Seeded PRNG fill-and-verify rounds for broad, non-deterministic coverage.
     RandomFill,
 }
 
 impl Pattern {
+    /// Every pattern variant, in the order tests and CLI listings enumerate them.
     pub const ALL: &[Self] = &[
         Self::SolidBits,
         Self::WalkingOnes,

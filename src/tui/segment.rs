@@ -19,18 +19,23 @@ pub const PROGRESS_BP_FULL: u64 = 10_000;
 ///
 /// Worker threads update atomics from their threads; the TUI reads them for rendering.
 pub struct Segment {
+    /// Human-readable name for this segment (e.g. formatted size or index).
     pub name: String,
+    /// Total size of the segment in bytes.
     pub size_bytes: usize,
     patterns: Vec<String>,
+    /// Index into the pattern list of the pattern currently running.
     pub current_pattern_idx: AtomicUsize,
     progress_bp: AtomicU64,
     failure_count: AtomicUsize,
     paused: AtomicBool,
+    /// Heatmap of recent write/read activity across the segment.
     pub activity: ActivityBuffer,
     last_failure_time: Mutex<Option<Instant>>,
 }
 
 impl Segment {
+    /// Creates a segment with zeroed progress, failure count, and activity.
     #[must_use]
     pub fn new(name: String, size_bytes: usize, patterns: Vec<String>) -> Self {
         Self {

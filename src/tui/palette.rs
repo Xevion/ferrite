@@ -1,39 +1,67 @@
 use ratatui::style::Color;
 
 // Activity colors (cyan spectrum)
+/// Brightest cyan, for cells with the most recent activity.
 pub const ACTIVE_BRIGHT: Color = Color::Rgb(0, 255, 220);
+/// Mid-brightness cyan for moderately active cells.
 pub const ACTIVE_MID: Color = Color::Rgb(0, 180, 160);
+/// Dim cyan for cells that touched recently but are fading.
 pub const ACTIVE_DIM: Color = Color::Rgb(0, 80, 70);
+/// Idle color for cells with no recent activity.
 pub const INACTIVE: Color = Color::Rgb(35, 42, 42);
 
 // Failure severity gradient (foreground)
+/// Foreground color when a cell has zero failures.
 pub const FAIL_NONE: Color = Color::Rgb(60, 180, 100);
+/// Foreground color for a single failure.
 pub const FAIL_LOW: Color = Color::Rgb(220, 200, 50);
+/// Foreground color for a moderate failure count.
 pub const FAIL_MED: Color = Color::Rgb(240, 130, 40);
+/// Foreground color for a high failure count.
 pub const FAIL_HIGH: Color = Color::Rgb(255, 50, 30);
+/// Foreground color for the most severe failure count.
 pub const FAIL_FIRE: Color = Color::Rgb(255, 0, 80);
 
 // Failure severity gradient (background -- subtle tints for dark terminals)
+/// Background floor that aged failure tints fade toward.
 pub const FAIL_BG_MIN: Color = Color::Rgb(45, 40, 20);
+/// Background tint for a single failure.
 pub const FAIL_BG_LOW: Color = Color::Rgb(50, 38, 18);
+/// Background tint for a moderate failure count.
 pub const FAIL_BG_MED: Color = Color::Rgb(55, 30, 15);
+/// Background tint for a high failure count.
 pub const FAIL_BG_HIGH: Color = Color::Rgb(60, 20, 15);
+/// Background tint for the most severe failure count.
 pub const FAIL_BG_FIRE: Color = Color::Rgb(70, 12, 18);
 
+/// Accent color for header labels.
 pub const HEADER_CYAN: Color = Color::Rgb(80, 200, 255);
+/// Dimmed color for secondary/muted text.
 pub const DIM: Color = Color::Rgb(100, 100, 110);
+/// Standard body text color.
 pub const TEXT: Color = Color::Rgb(200, 200, 210);
+/// Brighter text color for emphasized values.
 pub const TEXT_BRIGHT: Color = Color::Rgb(240, 240, 250);
+/// Color for divider lines between sections.
 pub const SEPARATOR: Color = Color::Rgb(60, 65, 70);
 
+/// Color for the paused-state indicator in the segment bar.
 pub const PROGRESS_PAUSED: Color = Color::Rgb(200, 180, 50);
 
+/// Log line color for error-level messages.
 pub const LOG_ERROR: Color = Color::Rgb(255, 80, 80);
+/// Log line color for warn-level messages.
 pub const LOG_WARN: Color = Color::Rgb(240, 200, 60);
+/// Log line color for info-level messages.
 pub const LOG_INFO: Color = Color::Rgb(80, 200, 140);
+/// Log line color for debug-level messages.
 pub const LOG_DEBUG: Color = Color::Rgb(100, 150, 255);
+/// Log line color for trace-level messages.
 pub const LOG_TRACE: Color = Color::Rgb(80, 80, 90);
 
+/// Linearly interpolates between two colors, clamping `t` to `0.0..=1.0`.
+///
+/// Falls back to snapping to `a` or `b` at the midpoint if either color isn't RGB.
 #[must_use]
 pub fn lerp(a: Color, b: Color, t: f64) -> Color {
     let t = t.clamp(0.0, 1.0);
@@ -54,6 +82,7 @@ pub fn lerp(a: Color, b: Color, t: f64) -> Color {
     }
 }
 
+/// Maps a failure count to a color along the low-to-fire severity gradient.
 #[must_use]
 pub fn failure_severity(failure_count: usize) -> Color {
     match failure_count {
@@ -93,6 +122,7 @@ pub fn failure_bg(failure_count: usize, age_secs: f64) -> Option<Color> {
     Some(lerp(peak, FAIL_BG_MIN, fade))
 }
 
+/// Maps a brightness value (0.0..=1.0) to a color along the inactive-to-bright gradient.
 #[must_use]
 pub fn activity_color(brightness: f64) -> Color {
     if brightness > 0.7 {

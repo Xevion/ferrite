@@ -18,37 +18,53 @@ bitflags! {
     /// Public /proc/kpageflags bits (Documentation/admin-guide/mm/pagemap.rst).
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct KPageFlags: u64 {
+        /// On an LRU list -- reclaimable page cache or anonymous memory.
         const LRU = 1 << 5;
+        /// Kernel slab allocator page.
         const SLAB = 1 << 7;
+        /// Free page owned by the buddy allocator.
         const BUDDY = 1 << 10;
+        /// Anonymous (non-file-backed) memory.
         const ANON = 1 << 12;
+        /// Backed by swap (anonymous memory or shmem/tmpfs).
         const SWAPBACKED = 1 << 14;
+        /// Part of a hugetlbfs huge page.
         const HUGE = 1 << 17;
+        /// Marked unevictable (e.g. mlocked).
         const UNEVICTABLE = 1 << 18;
+        /// Hardware-poisoned; the kernel has taken this page offline.
         const HWPOISON = 1 << 19;
+        /// Not backed by a real page struct.
         const NOPAGE = 1 << 20;
+        /// Part of a transparent huge page.
         const THP = 1 << 22;
+        /// Logically offline (memory hotplug).
         const OFFLINE = 1 << 23;
+        /// Used as a page table.
         const PGTABLE = 1 << 26;
     }
 }
 
 impl KPageFlags {
+    /// Whether this frame is part of a hugetlbfs huge page.
     #[must_use]
     pub const fn is_huge(self) -> bool {
         self.contains(Self::HUGE)
     }
 
+    /// Whether this frame is part of a transparent huge page.
     #[must_use]
     pub const fn is_thp(self) -> bool {
         self.contains(Self::THP)
     }
 
+    /// Whether this frame is marked unevictable (e.g. mlocked).
     #[must_use]
     pub const fn is_unevictable(self) -> bool {
         self.contains(Self::UNEVICTABLE)
     }
 
+    /// Whether this frame has been hardware-poisoned and taken offline.
     #[must_use]
     pub const fn is_hwpoison(self) -> bool {
         self.contains(Self::HWPOISON)
