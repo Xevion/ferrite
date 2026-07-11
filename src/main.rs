@@ -52,7 +52,7 @@ fn main() -> Result<()> {
     // Init tracing early with stderr output so privilege warnings are visible.
     // The TUI path hot-swaps to its channel writer via the reload handle; the
     // forwarder streams diagnostics into NDJSON on the headless/devmem paths.
-    let (tracing_handle, log_forwarder) = init_tracing();
+    let (tracing_handle, log_forwarder) = init_tracing(cli.verbose);
 
     let need_phys = !cli.no_phys;
     check_privileges(cli.requested_bytes_estimate(), need_phys);
@@ -356,7 +356,10 @@ type TracingReloadHandle =
 /// that layer (e.g. to route tracing through the TUI channel). The forwarder
 /// stays inert until a headless/`--devmem` NDJSON run installs an event sender,
 /// after which tracing events also stream as `RunEvent::Log`.
-fn init_tracing() -> (TracingReloadHandle, LogForwarder) {
+///
+/// A global [`EnvFilter`] gates every layer using three-tier precedence: `RUST_LOG`
+/// wins if set, otherwise `verbose` escalates the default `warn,ferrite=info`.
+fn init_tracing(verbose: u8) -> (TracingReloadHandle, LogForwarder) {
     use tracing_subscriber::prelude::*;
 
     let initial: BoxedTracingLayer =
@@ -366,6 +369,41 @@ fn init_tracing() -> (TracingReloadHandle, LogForwarder) {
     tracing_subscriber::registry()
         .with(reload_layer)
         .with(forwarder.clone())
+        .with(env_filter(verbose))
         .init();
     (handle, forwarder)
+}
+
+/// Build the tracing [`EnvFilter`]. `RUST_LOG` takes precedence when set to a
+/// valid directive; otherwise the filter derives from the `-v` verbosity tier.
+fn env_filter(verbose: u8) -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(verbosity_directive(verbose)))
+}
+
+/// Map `-v` occurrences to a tracing filter directive. `0` keeps ferrite at info
+/// while silencing dependency noise; each `-v` widens the aperture.
+const fn verbosity_directive(verbose: u8) -> &'static str {
+    match verbose {
+        0 => "warn,ferrite=info",
+        1 => "info,ferrite=debug",
+        2 => "debug,ferrite=trace",
+        _ => "trace",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::verbosity_directive;
+
+    #[test]
+    fn verbosity_directive_escalates_by_tier() {
+        check!(verbosity_directive(0) == "warn,ferrite=info");
+        check!(verbosity_directive(1) == "info,ferrite=debug");
+        check!(verbosity_directive(2) == "debug,ferrite=trace");
+        check!(verbosity_directive(3) == "trace");
+        check!(verbosity_directive(255) == "trace");
+    }
 }

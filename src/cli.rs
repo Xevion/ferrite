@@ -130,6 +130,11 @@ pub struct Cli {
     /// crash the machine. Never enables writes to ACPI/PCI/firmware regions.
     #[arg(long, requires = "devmem")]
     pub devmem_unsafe: bool,
+
+    /// Increase log verbosity: -v raises ferrite to debug, -vv to trace, -vvv
+    /// enables trace for all crates. Setting `RUST_LOG` overrides this entirely.
+    #[arg(short = 'v', long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
 }
 
 /// Worker-thread count for pattern execution.
@@ -944,6 +949,7 @@ CapEff:\t0000000000000000";
                 cull: false,
                 devmem: None,
                 devmem_unsafe: false,
+                verbose: 0,
             }
         }
 
