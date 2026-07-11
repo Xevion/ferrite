@@ -106,7 +106,7 @@ fn render_header(
         ),
         Span::styled("│", Style::default().fg(palette::SEPARATOR)),
         Span::styled(
-            format!(" {:.1}s ", elapsed.as_secs_f64()),
+            format!(" {} ", crate::units::format_duration(elapsed)),
             Style::default().fg(palette::TEXT),
         ),
     ];
@@ -114,7 +114,10 @@ fn render_header(
     if total_failures > 0 {
         spans.push(Span::styled("│", Style::default().fg(palette::SEPARATOR)));
         spans.push(Span::styled(
-            format!(" {total_failures} failures "),
+            format!(
+                " {} failures ",
+                crate::units::format_count(total_failures as u64)
+            ),
             Style::default()
                 .fg(palette::failure_severity(total_failures))
                 .bold(),
@@ -261,7 +264,7 @@ fn render_segment_bar(
     let status = if paused { " ⏸" } else { "" };
     let fail_span = if fails > 0 {
         Span::styled(
-            format!(" {fails}fail"),
+            format!(" {}fail", crate::units::format_count(fails as u64)),
             Style::default().fg(palette::failure_severity(fails)).bold(),
         )
     } else {
@@ -477,7 +480,7 @@ mod tests {
         let text = buf_text(&term);
         assert!(text.contains("ferrite"), "header should contain 'ferrite'");
         assert!(text.contains("r0"), "header should show segment name");
-        assert!(text.contains("1.5s"), "header should show elapsed time");
+        assert!(text.contains("1.50 s"), "header should show elapsed time");
         assert!(!text.contains("VERBOSE"));
     }
 

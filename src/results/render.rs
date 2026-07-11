@@ -21,6 +21,7 @@ pub fn write_pattern_result_line(
     capped: bool,
 ) -> io::Result<()> {
     let suffix = if interrupted { "  (interrupted)" } else { "" };
+    let elapsed = crate::units::format_millis(elapsed_ms);
     if failure_count == 0 {
         let label = if interrupted {
             "INTR".yellow().bold().to_string()
@@ -29,19 +30,22 @@ pub fn write_pattern_result_line(
         };
         writeln!(
             out,
-            "  {label} {name:<20} {elapsed_ms:>8.1}ms  {throughput:>}{suffix}",
+            "  {label} {name:<20} {elapsed:>10}  {throughput:>}{suffix}",
         )
     } else {
         // When capped, more failures existed than were collected -- show `N+`
         // and flag the cap so the count isn't mistaken for the true total.
         let count = if capped {
-            format!("{failure_count}+ failures, capped at --max-errors")
+            format!(
+                "{}+ failures, capped at --max-errors",
+                crate::units::format_count(failure_count)
+            )
         } else {
-            format!("{failure_count} failures")
+            format!("{} failures", crate::units::format_count(failure_count))
         };
         writeln!(
             out,
-            "  {} {name:<20} {elapsed_ms:>8.1}ms  {throughput:>}  ({count}){suffix}",
+            "  {} {name:<20} {elapsed:>10}  {throughput:>}  ({count}){suffix}",
             "FAIL".red().bold(),
         )
     }
@@ -66,7 +70,9 @@ pub fn write_pass_summary_line(
         writeln!(
             out,
             "  Pass {pass_number}/{total_passes}: {}",
-            format!("{failures} total failure(s)").red().bold(),
+            format!("{} total failure(s)", crate::units::format_count(failures))
+                .red()
+                .bold(),
         )?;
     }
     writeln!(out)
@@ -88,9 +94,12 @@ pub fn write_verdict_line(
         writeln!(
             out,
             "{}{suffix}",
-            format!("{total_failures} failure(s) detected.")
-                .red()
-                .bold(),
+            format!(
+                "{} failure(s) detected.",
+                crate::units::format_count(total_failures)
+            )
+            .red()
+            .bold(),
         )
     }
 }
@@ -261,7 +270,6 @@ impl ResultsRenderer for TableRenderer {
     fn render(&self, doc: &ResultsDoc, out: &mut dyn Write) -> io::Result<()> {
         let total_failures = doc.total_failures();
         let elapsed_ms = doc.elapsed_ms();
-        let elapsed_secs = elapsed_ms / 1000.0;
 
         // Per-pass, per-pattern results (only in full mode)
         if self.full {
@@ -303,7 +311,12 @@ impl ResultsRenderer for TableRenderer {
             if !bit_positions.is_empty() {
                 let bp_str: Vec<String> = bit_positions
                     .iter()
-                    .map(|(pos, count)| format!("bit {pos} ({count}x)"))
+                    .map(|(pos, count)| {
+                        format!(
+                            "bit {pos} ({}x)",
+                            crate::units::format_count((*count).into())
+                        )
+                    })
                     .collect();
                 writeln!(out, "  Bit flip counts: {}", bp_str.join(", "))?;
             }
@@ -316,7 +329,7 @@ impl ResultsRenderer for TableRenderer {
             if !per_pattern.is_empty() {
                 let pp_str: Vec<String> = per_pattern
                     .iter()
-                    .map(|(name, count)| format!("{name}: {count}"))
+                    .map(|(name, count)| format!("{name}: {}", crate::units::format_count(*count)))
                     .collect();
                 writeln!(out, "  Per-pattern failures: {}", pp_str.join(", "))?;
             }
@@ -329,11 +342,7 @@ impl ResultsRenderer for TableRenderer {
 
         // Final verdict
         writeln!(out)?;
-        let elapsed_display = if elapsed_secs < 1.0 {
-            format!("{elapsed_ms:.0}ms")
-        } else {
-            format!("{elapsed_secs:.1}s")
-        };
+        let elapsed_display = crate::units::format_millis(elapsed_ms);
         write_verdict_line(out, total_failures, Some(&elapsed_display))
     }
 }
@@ -399,7 +408,7 @@ mod tests {
         fn capped_line_flags_truncation() {
             let s = line(1000, false, true);
             check!(s.contains("FAIL"));
-            check!(s.contains("1000+ failures"));
+            check!(s.contains("1,000+ failures"));
             check!(s.contains("capped"));
         }
 
@@ -586,8 +595,8 @@ mod tests {
         #[test]
         fn shows_elapsed_time() {
             let out = render_to_string(&clean_results());
-            // 100ms < 1s so should show as "100ms"
-            assert!(out.contains("ms"));
+            // 100ms < 1s so should render in milliseconds.
+            assert!(out.contains("100.0 ms"));
         }
 
         #[test]
@@ -606,7 +615,7 @@ mod tests {
             let mut buf = Vec::new();
             renderer.render(&doc, &mut buf).unwrap();
             let out = String::from_utf8(buf).unwrap();
-            assert!(out.contains("5.0s"));
+            assert!(out.contains("5.00 s"));
         }
     }
 

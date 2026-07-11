@@ -58,11 +58,14 @@ impl CoverageCtx {
             } else {
                 0.0
             };
+            let size = |bytes: u64| {
+                crate::units::Size::new(bytes as f64, crate::units::UnitSystem::Binary)
+            };
             tracing::info!(
                 "cumulative coverage: {} / {} ({pct:.1}%) across {} previous run(s)",
-                crate::units::format_size(covered as usize),
-                crate::units::format_size(installed as usize),
-                store.runs.len(),
+                size(covered),
+                size(installed),
+                crate::units::format_count(store.runs.len() as u64),
             );
             store
         } else {

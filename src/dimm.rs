@@ -110,7 +110,7 @@ impl fmt::Display for DimmEntry {
                 write!(f, "{}", smbios.device_locator)?;
                 if let Some(mfr) = &smbios.manufacturer {
                     write!(f, " ({mfr}")?;
-                    write!(f, " {}MB", smbios.size_mb)?;
+                    write!(f, " {} MB", smbios.size_mb)?;
                     write!(f, " {}", smbios.memory_type)?;
                     write!(f, "-{}", smbios.speed_mhz)?;
                     write!(f, ")")?;
@@ -122,7 +122,7 @@ impl fmt::Display for DimmEntry {
             (Some(smbios), None) => {
                 write!(f, "{}", smbios.device_locator)?;
                 if let Some(mfr) = &smbios.manufacturer {
-                    write!(f, " ({mfr} {}MB {})", smbios.size_mb, smbios.memory_type)?;
+                    write!(f, " ({mfr} {} MB {})", smbios.size_mb, smbios.memory_type)?;
                 }
             }
             (None, Some(edac)) => {
@@ -259,7 +259,7 @@ mod tests {
         let s = entry.to_string();
         assert!(s.contains("DIMM_B1"));
         assert!(s.contains("TestMfr"));
-        assert!(s.contains("8192MB"));
+        assert!(s.contains("8192 MB"));
     }
 
     #[test]

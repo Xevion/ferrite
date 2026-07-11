@@ -29,7 +29,11 @@ impl fmt::Display for Truncated<'_> {
         }
         let remaining = self.0.len() - shown;
         if remaining > 0 {
-            write!(f, "       ...+{remaining} more")?;
+            write!(
+                f,
+                "       ...+{} more",
+                crate::units::format_count(remaining as u64)
+            )?;
         }
         Ok(())
     }
@@ -128,15 +132,20 @@ impl<W: Write> HeadlessPrinter<W> {
     }
 
     fn print_map_info(&mut self, stats: &MapStats) {
-        let mut parts = vec![format!("{} pages mapped", stats.total_pages)];
+        let count = |n: usize| crate::units::format_count(n as u64);
+        let mut parts = vec![format!("{} pages mapped", count(stats.total_pages))];
         if stats.thp_pages > 0 {
-            parts.push(format!("{} THP", stats.thp_pages));
+            parts.push(format!("{} THP", count(stats.thp_pages)));
         }
         if stats.huge_pages > 0 {
-            parts.push(format!("{} huge", stats.huge_pages));
+            parts.push(format!("{} huge", count(stats.huge_pages)));
         }
         if stats.hwpoison_pages > 0 {
-            parts.push(format!("{} {}", stats.hwpoison_pages, "hw-poisoned".red()));
+            parts.push(format!(
+                "{} {}",
+                count(stats.hwpoison_pages),
+                "hw-poisoned".red()
+            ));
         }
         let _ = writeln!(self.out, "  Physical address map: {}", parts.join(", "));
     }
@@ -184,10 +193,17 @@ impl<W: Write> HeadlessPrinter<W> {
             let label = d.label.as_deref().unwrap_or(&fallback);
             let mut parts = Vec::new();
             if d.ce_delta > 0 {
-                parts.push(format!("{} correctable", d.ce_delta));
+                parts.push(format!(
+                    "{} correctable",
+                    crate::units::format_count(d.ce_delta)
+                ));
             }
             if d.ue_delta > 0 {
-                parts.push(format!("{} {}", d.ue_delta, "uncorrectable".red().bold()));
+                parts.push(format!(
+                    "{} {}",
+                    crate::units::format_count(d.ue_delta),
+                    "uncorrectable".red().bold()
+                ));
             }
             let _ = writeln!(
                 self.out,

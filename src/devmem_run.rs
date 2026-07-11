@@ -293,17 +293,17 @@ fn run_probe(
     // A read-only probe yields no RunResults, so there is nothing to route
     // through the renderers. Under `--format json` the stdout surface is
     // JSON-only, so the summary goes to tracing (stderr) instead.
+    let words = ferrite::units::format_count(stats.words_read as u64);
+    let nonzero = ferrite::units::format_count(stats.nonzero_words as u64);
     if output.format == OutputFormat::Json {
         tracing::info!(
-            "probe: {size} readable ({} words, {} nonzero, checksum {:#018x})",
-            stats.words_read,
-            stats.nonzero_words,
+            "probe: {size} readable ({words} words, {nonzero} nonzero, checksum {:#018x})",
             stats.xor_checksum,
         );
     } else {
         println!(
-            "  probe: {size} readable ({} words, {} nonzero, checksum {:#018x})",
-            stats.words_read, stats.nonzero_words, stats.xor_checksum,
+            "  probe: {size} readable ({words} words, {nonzero} nonzero, checksum {:#018x})",
+            stats.xor_checksum,
         );
     }
     Ok(())

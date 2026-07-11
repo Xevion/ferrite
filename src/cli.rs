@@ -480,17 +480,20 @@ pub fn setup_phys(
     match resolver_result {
         Ok((r, stats)) => {
             info!(
-                pages = stats.total_pages,
-                thp = stats.thp_pages,
-                huge = stats.huge_pages,
-                hwpoison = stats.hwpoison_pages,
+                pages = %ferrite::units::format_count(stats.total_pages as u64),
+                thp = %ferrite::units::format_count(stats.thp_pages as u64),
+                huge = %ferrite::units::format_count(stats.huge_pages as u64),
+                hwpoison = %ferrite::units::format_count(stats.hwpoison_pages as u64),
                 "physical address map built"
             );
 
             std::thread::sleep(Duration::from_millis(100));
             match r.verify_stability(buffer.as_ptr(), buffer.len()) {
                 Ok(0) => {}
-                Ok(n) => warn!(changed = n, "pages changed physical address after locking"),
+                Ok(n) => warn!(
+                    changed = %ferrite::units::format_count(n as u64),
+                    "pages changed physical address after locking"
+                ),
                 Err(e) => warn!("PFN stability check failed: {e}"),
             }
             (Some(r), Some(stats))
@@ -518,16 +521,17 @@ pub fn setup_phys(
 /// expected outcome and logs at info.
 fn report_alloc_outcome(outcome: &ferrite::alloc::AllocOutcome, spec: SizeSpec) {
     use ferrite::alloc::StopReason;
-    use ferrite::units::format_size;
+    use ferrite::units::{Size, UnitSystem};
 
+    let size = |bytes: usize| Size::new(bytes as f64, UnitSystem::Binary);
     match &outcome.stop {
         StopReason::Completed => {}
         StopReason::HeadroomFloor { available } => {
             let msg = format!(
                 "locked {} of {} requested (stopped at headroom floor, {} available)",
-                format_size(outcome.achieved),
-                format_size(outcome.requested),
-                format_size(*available as usize),
+                size(outcome.achieved),
+                size(outcome.requested),
+                size(*available as usize),
             );
             if matches!(spec, SizeSpec::Max) {
                 info!("{msg}");
@@ -538,8 +542,8 @@ fn report_alloc_outcome(outcome: &ferrite::alloc::AllocOutcome, spec: SizeSpec) 
         StopReason::ChunkFailed(e) => {
             warn!(
                 "locked {} of {} requested (chunk activation failed: {e})",
-                format_size(outcome.achieved),
-                format_size(outcome.requested),
+                size(outcome.achieved),
+                size(outcome.requested),
             );
         }
     }
@@ -584,20 +588,21 @@ const fn is_cull_ceiling(sieve_active: bool, err: &ferrite::alloc::AllocError) -
 /// the sieve holding hostage blocks, to be dropped once the test buffer is
 /// locked. Best-effort: failures degrade to an ordinary allocation.
 fn run_sieve(covered: &[ferrite::physmem::pfn::PfnRange], headroom: u64) -> Option<FrameSieve> {
-    use ferrite::units::format_size;
+    use ferrite::units::{Size, UnitSystem};
 
     if covered.is_empty() {
         info!("--cull: no prior coverage to cull against; skipping sieve");
         return None;
     }
+    let size = |bytes: usize| Size::new(bytes as f64, UnitSystem::Binary);
     match FrameSieve::hold(covered, headroom, None) {
         Ok((sieve, outcome)) => {
             info!(
                 "sieve: swept {}, holding {} previously-covered memory hostage, \
                  released {} for the test buffer",
-                format_size(outcome.swept),
-                format_size(outcome.held),
-                format_size(outcome.released),
+                size(outcome.swept),
+                size(outcome.held),
+                size(outcome.released),
             );
             Some(sieve)
         }

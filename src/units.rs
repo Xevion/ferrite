@@ -3,6 +3,58 @@
 //! (`--size`, `--headroom`) back into byte counts.
 
 use std::fmt;
+use std::time::Duration;
+
+/// Format an unsigned integer with comma thousands separators.
+///
+/// Used for human-facing counts (pages, failures, ECC deltas) so large values
+/// like `5111808` read as `5,111,808` instead of an undifferentiated digit run.
+#[must_use]
+pub fn format_count(n: u64) -> String {
+    let digits = n.to_string();
+    let len = digits.len();
+    let mut out = String::with_capacity(len + (len - 1) / 3);
+    for (i, ch) in digits.bytes().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch as char);
+    }
+    out
+}
+
+/// Format a fractional-seconds count, scaling the unit to the magnitude.
+///
+/// Sub-second values render as milliseconds; up to ten minutes as seconds;
+/// up to ten hours as minutes; larger as hours. Keeps a fixed two decimals
+/// (one for milliseconds) so successive rows stay visually aligned.
+#[must_use]
+fn format_secs(secs: f64) -> String {
+    if secs < 1.0 {
+        format!("{:.1} ms", secs * 1000.0)
+    } else if secs < 600.0 {
+        format!("{secs:.2} s")
+    } else if secs < 36_000.0 {
+        format!("{:.2} min", secs / 60.0)
+    } else {
+        format!("{:.2} h", secs / 3600.0)
+    }
+}
+
+/// Format a [`Duration`], scaling the unit (ms, s, min, h) to its magnitude.
+#[must_use]
+pub fn format_duration(d: Duration) -> String {
+    format_secs(d.as_secs_f64())
+}
+
+/// Format a fractional-millisecond count, scaling the unit to its magnitude.
+///
+/// Companion to [`format_duration`] for call sites that already hold elapsed
+/// time as `f64` milliseconds rather than a [`Duration`].
+#[must_use]
+pub fn format_millis(ms: f64) -> String {
+    format_secs(ms / 1000.0)
+}
 
 /// Format a byte count as a size string reversible by `parse_size`.
 ///
@@ -195,6 +247,26 @@ mod tests {
         check!(format_size(0) == "0G"); // 0 is divisible by anything
     }
 
+    #[test]
+    fn format_count_groups_thousands() {
+        check!(format_count(0) == "0");
+        check!(format_count(7) == "7");
+        check!(format_count(999) == "999");
+        check!(format_count(1000) == "1,000");
+        check!(format_count(5_111_808) == "5,111,808");
+        check!(format_count(1_000_000) == "1,000,000");
+    }
+
+    #[test]
+    fn format_duration_scales_by_magnitude() {
+        check!(format_millis(95.0) == "95.0 ms");
+        check!(format_millis(4134.9) == "4.13 s");
+        check!(format_millis(131_242.3) == "131.24 s");
+        check!(format_duration(Duration::from_secs(5)) == "5.00 s");
+        check!(format_duration(Duration::from_mins(90)) == "90.00 min");
+        check!(format_duration(Duration::from_hours(20)) == "20.00 h");
+    }
+
     proptest! {
         #[test]
         fn size_display_never_panics(bytes: f64) {
@@ -206,6 +278,11 @@ mod tests {
         fn rate_display_never_panics(bytes_per_sec: f64) {
             let _ = Rate::new(bytes_per_sec, UnitSystem::Binary).to_string();
             let _ = Rate::new(bytes_per_sec, UnitSystem::Decimal).to_string();
+        }
+
+        #[test]
+        fn format_millis_never_panics(ms: f64) {
+            let _ = format_millis(ms);
         }
     }
 }
