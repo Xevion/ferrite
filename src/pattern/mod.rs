@@ -5,9 +5,15 @@ use crate::{Failure, FailureBudget};
 
 mod checkerboard;
 mod march;
+pub mod metadata;
 mod solid;
 mod stuck_address;
 mod walking;
+
+use metadata::{
+    Complexity, FaultClass, PatternMetadata,
+    PatternTier::{Quick, Standard, Thorough},
+};
 
 /// All supported test patterns.
 #[derive(
@@ -42,6 +48,56 @@ impl Pattern {
             Self::StuckAddress => 1,
             // M0–M5 of the March C- sequence.
             Self::MarchCMinus => 6,
+        }
+    }
+
+    /// Static metadata describing this pattern's fault coverage, cost, and tier
+    /// membership.
+    #[must_use]
+    pub const fn metadata(&self) -> PatternMetadata {
+        match self {
+            Self::SolidBits => PatternMetadata {
+                fault_classes: &[FaultClass::StuckAt],
+                complexity: Complexity::Linear,
+                requires_physical_order: false,
+                is_destructive: false,
+                tiers: &[Quick, Standard, Thorough],
+            },
+            // Walking bits stress data-line shorts (coupling) on top of stuck
+            // bits by driving one hot bit against all its neighbors.
+            Self::WalkingOnes | Self::WalkingZeros => PatternMetadata {
+                fault_classes: &[FaultClass::StuckAt, FaultClass::Coupling],
+                complexity: Complexity::LinearK(64),
+                requires_physical_order: false,
+                is_destructive: false,
+                tiers: &[Standard, Thorough],
+            },
+            Self::Checkerboard => PatternMetadata {
+                fault_classes: &[FaultClass::StuckAt, FaultClass::Coupling],
+                complexity: Complexity::Linear,
+                requires_physical_order: false,
+                is_destructive: false,
+                tiers: &[Quick, Standard, Thorough],
+            },
+            Self::StuckAddress => PatternMetadata {
+                fault_classes: &[FaultClass::AddressDecoder],
+                complexity: Complexity::Linear,
+                requires_physical_order: false,
+                is_destructive: false,
+                tiers: &[Quick, Standard, Thorough],
+            },
+            Self::MarchCMinus => PatternMetadata {
+                fault_classes: &[
+                    FaultClass::StuckAt,
+                    FaultClass::Transition,
+                    FaultClass::AddressDecoder,
+                    FaultClass::Coupling,
+                ],
+                complexity: Complexity::LinearK(10),
+                requires_physical_order: false,
+                is_destructive: false,
+                tiers: &[Standard, Thorough],
+            },
         }
     }
 }
@@ -230,6 +286,85 @@ mod tests {
         ) {
             check!(pattern.to_string() == expected_name);
             check!(pattern.sub_passes() == expected_sub_passes);
+        }
+
+        use metadata::{Complexity, FaultClass, PatternTier};
+
+        /// Every pattern must declare at least one fault class and belong to at
+        /// least one tier -- a pattern that detects nothing or runs in no tier
+        /// is dead weight and almost certainly a metadata mistake.
+        #[test]
+        fn every_pattern_has_faults_and_tiers() {
+            for &pattern in Pattern::ALL {
+                let meta = pattern.metadata();
+                check!(
+                    !meta.fault_classes.is_empty(),
+                    "pattern {pattern} declares no fault classes"
+                );
+                check!(
+                    !meta.tiers.is_empty(),
+                    "pattern {pattern} belongs to no tier"
+                );
+            }
+        }
+
+        /// The Thorough tier is the superset -- anything a lighter tier runs,
+        /// Thorough must also run, or "thorough" is a lie.
+        #[test]
+        fn thorough_tier_is_a_superset() {
+            for &pattern in Pattern::ALL {
+                let tiers = pattern.metadata().tiers;
+                if tiers.contains(&PatternTier::Quick) || tiers.contains(&PatternTier::Standard) {
+                    check!(
+                        tiers.contains(&PatternTier::Thorough),
+                        "pattern {pattern} runs in a lighter tier but not Thorough"
+                    );
+                }
+            }
+        }
+
+        #[rstest]
+        #[case(Pattern::SolidBits, &[FaultClass::StuckAt], Complexity::Linear)]
+        #[case(
+            Pattern::WalkingOnes,
+            &[FaultClass::StuckAt, FaultClass::Coupling],
+            Complexity::LinearK(64)
+        )]
+        #[case(
+            Pattern::WalkingZeros,
+            &[FaultClass::StuckAt, FaultClass::Coupling],
+            Complexity::LinearK(64)
+        )]
+        #[case(
+            Pattern::Checkerboard,
+            &[FaultClass::StuckAt, FaultClass::Coupling],
+            Complexity::Linear
+        )]
+        #[case(
+            Pattern::StuckAddress,
+            &[FaultClass::AddressDecoder],
+            Complexity::Linear
+        )]
+        #[case(
+            Pattern::MarchCMinus,
+            &[
+                FaultClass::StuckAt,
+                FaultClass::Transition,
+                FaultClass::AddressDecoder,
+                FaultClass::Coupling,
+            ],
+            Complexity::LinearK(10)
+        )]
+        fn fault_classes_and_complexity(
+            #[case] pattern: Pattern,
+            #[case] expected_faults: &[FaultClass],
+            #[case] expected_complexity: Complexity,
+        ) {
+            let meta = pattern.metadata();
+            check!(meta.fault_classes == expected_faults);
+            check!(meta.complexity == expected_complexity);
+            check!(!meta.requires_physical_order);
+            check!(!meta.is_destructive);
         }
     }
 
