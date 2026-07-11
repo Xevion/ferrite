@@ -211,6 +211,7 @@ mod tests {
                 bytes: 8192,
                 failures: vec![],
                 interrupted: false,
+                capped: false,
             });
 
             // Next test start should set pattern index 1
@@ -293,6 +294,7 @@ mod tests {
                 bytes: 8192,
                 failures: vec![failure],
                 interrupted: false,
+                capped: false,
             });
 
             check!(segment.failure_count() == 1);
@@ -331,6 +333,7 @@ mod tests {
                 bytes: 4096,
                 failures: vec![],
                 interrupted: false,
+                capped: false,
             });
             // pattern_index is now 1
 

@@ -9,7 +9,16 @@ fn solid_bits(bencher: Bencher, bytes: usize) {
     let mut buf = vec![0u64; bytes / 8];
     bencher
         .counter(BytesCount::new(bytes as u64))
-        .bench_local(|| run_pattern(Pattern::SolidBits, &mut buf, false, &mut || {}, &|_| {}));
+        .bench_local(|| {
+            run_pattern(
+                Pattern::SolidBits,
+                &mut buf,
+                false,
+                &ferrite::FailureBudget::unlimited(),
+                &mut || {},
+                &|_| {},
+            )
+        });
 }
 
 #[divan::bench(args = SIZES)]
@@ -17,7 +26,16 @@ fn walking_ones(bencher: Bencher, bytes: usize) {
     let mut buf = vec![0u64; bytes / 8];
     bencher
         .counter(BytesCount::new(bytes as u64))
-        .bench_local(|| run_pattern(Pattern::WalkingOnes, &mut buf, false, &mut || {}, &|_| {}));
+        .bench_local(|| {
+            run_pattern(
+                Pattern::WalkingOnes,
+                &mut buf,
+                false,
+                &ferrite::FailureBudget::unlimited(),
+                &mut || {},
+                &|_| {},
+            )
+        });
 }
 
 #[divan::bench(args = SIZES)]
@@ -25,7 +43,16 @@ fn walking_zeros(bencher: Bencher, bytes: usize) {
     let mut buf = vec![0u64; bytes / 8];
     bencher
         .counter(BytesCount::new(bytes as u64))
-        .bench_local(|| run_pattern(Pattern::WalkingZeros, &mut buf, false, &mut || {}, &|_| {}));
+        .bench_local(|| {
+            run_pattern(
+                Pattern::WalkingZeros,
+                &mut buf,
+                false,
+                &ferrite::FailureBudget::unlimited(),
+                &mut || {},
+                &|_| {},
+            )
+        });
 }
 
 #[divan::bench(args = SIZES)]
@@ -33,7 +60,16 @@ fn checkerboard(bencher: Bencher, bytes: usize) {
     let mut buf = vec![0u64; bytes / 8];
     bencher
         .counter(BytesCount::new(bytes as u64))
-        .bench_local(|| run_pattern(Pattern::Checkerboard, &mut buf, false, &mut || {}, &|_| {}));
+        .bench_local(|| {
+            run_pattern(
+                Pattern::Checkerboard,
+                &mut buf,
+                false,
+                &ferrite::FailureBudget::unlimited(),
+                &mut || {},
+                &|_| {},
+            )
+        });
 }
 
 #[divan::bench(args = SIZES)]
@@ -41,7 +77,16 @@ fn stuck_address(bencher: Bencher, bytes: usize) {
     let mut buf = vec![0u64; bytes / 8];
     bencher
         .counter(BytesCount::new(bytes as u64))
-        .bench_local(|| run_pattern(Pattern::StuckAddress, &mut buf, false, &mut || {}, &|_| {}));
+        .bench_local(|| {
+            run_pattern(
+                Pattern::StuckAddress,
+                &mut buf,
+                false,
+                &ferrite::FailureBudget::unlimited(),
+                &mut || {},
+                &|_| {},
+            )
+        });
 }
 
 fn main() {

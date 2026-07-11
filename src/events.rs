@@ -45,6 +45,8 @@ pub enum RunEvent {
     ///
     /// `interrupted` is true when the pattern stopped early due to a quit
     /// request; its failures (and absence of failures) are then incomplete.
+    /// `capped` is true when the pattern hit `--max-errors` and its failure
+    /// list was truncated (more failures existed than were collected).
     TestComplete {
         pattern: Pattern,
         pass: usize,
@@ -52,6 +54,7 @@ pub enum RunEvent {
         bytes: u64,
         failures: Vec<Failure>,
         interrupted: bool,
+        capped: bool,
     },
 
     /// All patterns in a pass finished.
@@ -141,6 +144,7 @@ mod tests {
                 bytes: 8192,
                 failures: vec![],
                 interrupted: false,
+                capped: false,
             })
             .unwrap();
             tx.send(RunEvent::RunComplete).unwrap();

@@ -2,8 +2,8 @@ use std::ptr;
 
 use rayon::prelude::*;
 
-use crate::Failure;
 use crate::ops::CHUNK_WORDS as REPORT_CHUNK;
+use crate::{Failure, FailureBudget};
 
 /// Scalar fill: write `pattern` to every word using volatile stores.
 pub fn fill_constant(buf: &mut [u64], pattern: u64) {
@@ -62,11 +62,14 @@ pub fn verify_indexed(buf: &[u64], base_addr: usize, start: usize) -> Vec<Failur
         .collect()
 }
 
-/// Scalar orchestration for constant fill-and-verify.
+/// Scalar orchestration for constant fill-and-verify. Failures are capped at the
+/// shared [`FailureBudget`]: each chunk claims its slice of the budget so total
+/// live `Failure` memory stays bounded even on wholly-bad memory.
 pub fn fill_verify_constant(
     buf: &mut [u64],
     pattern: u64,
     parallel: bool,
+    budget: &FailureBudget,
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
     let base_addr = buf.as_ptr() as usize;
@@ -83,7 +86,13 @@ pub fn fill_verify_constant(
             .flat_map_iter(|(ci, chunk)| {
                 let chunk_start = ci * REPORT_CHUNK;
                 on_activity(chunk_start as f64 / total as f64);
-                verify_constant(chunk, pattern, base_addr + chunk_start * 8, chunk_start)
+                if budget.is_exhausted() {
+                    return Vec::new();
+                }
+                let mut f =
+                    verify_constant(chunk, pattern, base_addr + chunk_start * 8, chunk_start);
+                budget.cap(&mut f);
+                f
             })
             .collect()
     } else {
@@ -91,14 +100,26 @@ pub fn fill_verify_constant(
             fill_constant(chunk, pattern);
             on_activity((ci * REPORT_CHUNK) as f64 / total as f64);
         }
-        verify_constant(buf, pattern, base_addr, 0)
+        let mut failures = Vec::new();
+        for (ci, chunk) in buf.chunks(REPORT_CHUNK).enumerate() {
+            if budget.is_exhausted() {
+                break;
+            }
+            let chunk_start = ci * REPORT_CHUNK;
+            let mut f = verify_constant(chunk, pattern, base_addr + chunk_start * 8, chunk_start);
+            budget.cap(&mut f);
+            failures.append(&mut f);
+        }
+        failures
     }
 }
 
-/// Scalar orchestration for indexed fill-and-verify.
+/// Scalar orchestration for indexed fill-and-verify. Failures are capped at the
+/// shared [`FailureBudget`] (see [`fill_verify_constant`]).
 pub fn fill_verify_indexed(
     buf: &mut [u64],
     parallel: bool,
+    budget: &FailureBudget,
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
     let base_addr = buf.as_ptr() as usize;
@@ -116,7 +137,12 @@ pub fn fill_verify_indexed(
             .flat_map_iter(|(ci, chunk)| {
                 let chunk_start = ci * REPORT_CHUNK;
                 on_activity(chunk_start as f64 / total as f64);
-                verify_indexed(chunk, base_addr + chunk_start * 8, chunk_start)
+                if budget.is_exhausted() {
+                    return Vec::new();
+                }
+                let mut f = verify_indexed(chunk, base_addr + chunk_start * 8, chunk_start);
+                budget.cap(&mut f);
+                f
             })
             .collect()
     } else {
@@ -125,7 +151,17 @@ pub fn fill_verify_indexed(
             fill_indexed(chunk, chunk_start);
             on_activity(chunk_start as f64 / total as f64);
         }
-        verify_indexed(buf, base_addr, 0)
+        let mut failures = Vec::new();
+        for (ci, chunk) in buf.chunks(REPORT_CHUNK).enumerate() {
+            if budget.is_exhausted() {
+                break;
+            }
+            let chunk_start = ci * REPORT_CHUNK;
+            let mut f = verify_indexed(chunk, base_addr + chunk_start * 8, chunk_start);
+            budget.cap(&mut f);
+            failures.append(&mut f);
+        }
+        failures
     }
 }
 
@@ -248,36 +284,49 @@ mod tests {
         use assert2::assert;
 
         use super::*;
+        use crate::FailureBudget;
 
         static NOOP_ACTIVITY: fn(f64) = |_| {};
 
         #[test]
         fn constant_serial_clean() {
             let mut buf = vec![0u64; 1024];
-            let failures =
-                fill_verify_constant(&mut buf, 0xDEAD_BEEF_CAFE_BABE, false, &NOOP_ACTIVITY);
+            let failures = fill_verify_constant(
+                &mut buf,
+                0xDEAD_BEEF_CAFE_BABE,
+                false,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
         #[test]
         fn constant_parallel_clean() {
             let mut buf = vec![0u64; 4096];
-            let failures =
-                fill_verify_constant(&mut buf, 0x5555_5555_5555_5555, true, &NOOP_ACTIVITY);
+            let failures = fill_verify_constant(
+                &mut buf,
+                0x5555_5555_5555_5555,
+                true,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
         #[test]
         fn indexed_serial_clean() {
             let mut buf = vec![0u64; 1024];
-            let failures = fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
+            let failures =
+                fill_verify_indexed(&mut buf, false, &FailureBudget::unlimited(), &NOOP_ACTIVITY);
             assert!(failures.is_empty());
         }
 
         #[test]
         fn indexed_parallel_clean() {
             let mut buf = vec![0u64; 4096];
-            let failures = fill_verify_indexed(&mut buf, true, &NOOP_ACTIVITY);
+            let failures =
+                fill_verify_indexed(&mut buf, true, &FailureBudget::unlimited(), &NOOP_ACTIVITY);
             assert!(failures.is_empty());
         }
 
@@ -285,9 +334,10 @@ mod tests {
         fn constant_serial_activity_fires() {
             let mut buf = vec![0u64; 1024];
             let count = std::sync::atomic::AtomicU32::new(0);
-            let _ = fill_verify_constant(&mut buf, 0xFF, false, &|_| {
-                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            });
+            let _ =
+                fill_verify_constant(&mut buf, 0xFF, false, &FailureBudget::unlimited(), &|_| {
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                });
             assert!(count.load(std::sync::atomic::Ordering::Relaxed) > 0);
         }
 
@@ -295,7 +345,7 @@ mod tests {
         fn indexed_serial_activity_fires() {
             let mut buf = vec![0u64; 1024];
             let count = std::sync::atomic::AtomicU32::new(0);
-            let _ = fill_verify_indexed(&mut buf, false, &|_| {
+            let _ = fill_verify_indexed(&mut buf, false, &FailureBudget::unlimited(), &|_| {
                 count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             });
             assert!(count.load(std::sync::atomic::Ordering::Relaxed) > 0);
@@ -304,14 +354,21 @@ mod tests {
         #[test]
         fn constant_empty() {
             let mut buf: Vec<u64> = vec![];
-            let failures = fill_verify_constant(&mut buf, 0xFF, false, &NOOP_ACTIVITY);
+            let failures = fill_verify_constant(
+                &mut buf,
+                0xFF,
+                false,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
         #[test]
         fn indexed_empty() {
             let mut buf: Vec<u64> = vec![];
-            let failures = fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
+            let failures =
+                fill_verify_indexed(&mut buf, false, &FailureBudget::unlimited(), &NOOP_ACTIVITY);
             assert!(failures.is_empty());
         }
     }

@@ -87,9 +87,10 @@ impl<W: Write> HeadlessPrinter<W> {
                 bytes,
                 failures,
                 interrupted,
+                capped,
                 ..
             } => {
-                self.print_test_result(*pattern, *elapsed, *bytes, failures, *interrupted);
+                self.print_test_result(*pattern, *elapsed, *bytes, failures, *interrupted, *capped);
             }
             RunEvent::EccDeltas { pass, deltas } => {
                 self.print_ecc_deltas(*pass, deltas);
@@ -151,6 +152,7 @@ impl<W: Write> HeadlessPrinter<W> {
         bytes_processed: u64,
         failures: &[Failure],
         interrupted: bool,
+        capped: bool,
     ) {
         let ms = elapsed.as_secs_f64() * 1000.0;
         let throughput = Rate::new(
@@ -166,6 +168,7 @@ impl<W: Write> HeadlessPrinter<W> {
             throughput,
             failures.len() as u64,
             interrupted,
+            capped,
         );
         if !failures.is_empty() {
             let _ = write!(self.out, "{}", Truncated(failures, 5));
@@ -316,6 +319,7 @@ mod tests {
                 bytes: 1024 * 1024,
                 failures: vec![],
                 interrupted: false,
+                capped: false,
             });
             let out = output(&p);
             assert!(out.contains("PASS"));
@@ -339,6 +343,7 @@ mod tests {
                 bytes: 512 * 1024,
                 failures,
                 interrupted: false,
+                capped: false,
             });
             let out = output(&p);
             assert!(out.contains("FAIL"));
@@ -355,6 +360,7 @@ mod tests {
                 bytes: 512 * 1024,
                 failures: vec![],
                 interrupted: true,
+                capped: false,
             });
             let out = output(&p);
             // A cut-short pattern must not masquerade as a clean PASS.
@@ -380,6 +386,7 @@ mod tests {
                 bytes: 512 * 1024,
                 failures,
                 interrupted: true,
+                capped: false,
             });
             let out = output(&p);
             assert!(out.contains("FAIL"));
@@ -506,6 +513,7 @@ mod tests {
                 bytes: 2048,
                 failures: vec![],
                 interrupted: false,
+                capped: false,
             })
             .unwrap();
             tx.send(RunEvent::PassComplete {

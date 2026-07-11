@@ -199,6 +199,7 @@ fn run_write(
         patterns,
         cli.passes,
         parallel,
+        cli.max_errors,
         &tx,
         Some(&resolver as &(dyn PhysResolver + Sync)),
         &|_| {},

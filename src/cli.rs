@@ -135,6 +135,12 @@ pub struct Cli {
     /// enables trace for all crates. Setting `RUST_LOG` overrides this entirely.
     #[arg(short = 'v', long, action = clap::ArgAction::Count)]
     pub verbose: u8,
+
+    /// Cap the number of failures collected per pattern before it stops early.
+    /// Bounds memory on badly-failing DIMMs, where an uncapped pattern would
+    /// record one failure per word. Use 0 for no limit.
+    #[arg(long, value_name = "N", default_value_t = 1000)]
+    pub max_errors: usize,
 }
 
 /// Worker-thread count for pattern execution.
@@ -950,6 +956,7 @@ CapEff:\t0000000000000000";
                 devmem: None,
                 devmem_unsafe: false,
                 verbose: 0,
+                max_errors: 1000,
             }
         }
 

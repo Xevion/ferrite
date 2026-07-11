@@ -20,9 +20,9 @@
 
 use std::ptr;
 
-use crate::Failure;
 use crate::ops::CHUNK_WORDS as REPORT_CHUNK;
 use crate::shutdown;
+use crate::{Failure, FailureBudget};
 
 /// One operation applied to each cell as a march element sweeps the buffer.
 #[derive(Clone, Copy)]
@@ -87,15 +87,19 @@ const fn word(bit: bool) -> u64 {
 
 /// Apply one march element to `buf` in its traversal direction, pushing a
 /// [`Failure`] for every read whose observed word differs from its expected
-/// state. Returns `true` if a quit was requested mid-sweep.
+/// state. Returns `true` if the sweep should stop early -- a quit was requested
+/// or the shared [`FailureBudget`] was exhausted.
 ///
-/// Activity is reported and cancellation checked every [`REPORT_CHUNK`] cells
-/// so a long element bails out promptly on quit.
+/// Activity is reported, cancellation checked, and the accumulated failures
+/// capped against `budget` every [`REPORT_CHUNK`] cells, so a long element on
+/// wholly-bad memory bails out promptly without materializing one record per
+/// failing word.
 fn run_element(
     buf: &mut [u64],
     element: &MarchElement,
     base_addr: usize,
     failures: &mut Vec<Failure>,
+    budget: &FailureBudget,
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> bool {
     let len = buf.len();
@@ -129,11 +133,32 @@ fn run_element(
         }
     };
 
+    // Failures already present belong to prior elements and are already claimed;
+    // only growth since `claimed` is charged against the budget.
+    let mut claimed = failures.len();
+    let cap_growth = |failures: &mut Vec<Failure>, claimed: &mut usize| -> bool {
+        let grown = failures.len() - *claimed;
+        if grown == 0 {
+            return false;
+        }
+        let granted = budget.claim(grown);
+        *claimed += granted;
+        if granted < grown {
+            failures.truncate(*claimed);
+            budget.mark_overflow();
+            return true;
+        }
+        false
+    };
+
     match element.dir {
         Ascending => {
             for i in 0..len {
                 apply(i, failures);
                 if i % REPORT_CHUNK == 0 {
+                    if cap_growth(failures, &mut claimed) {
+                        return true;
+                    }
                     on_activity(i as f64 / len as f64);
                     if shutdown::quit_requested() {
                         return true;
@@ -145,6 +170,9 @@ fn run_element(
             for i in (0..len).rev() {
                 apply(i, failures);
                 if i % REPORT_CHUNK == 0 {
+                    if cap_growth(failures, &mut claimed) {
+                        return true;
+                    }
                     on_activity(i as f64 / len as f64);
                     if shutdown::quit_requested() {
                         return true;
@@ -153,7 +181,8 @@ fn run_element(
             }
         }
     }
-    false
+    // Charge the tail past the last checkpoint.
+    cap_growth(failures, &mut claimed)
 }
 
 /// Run an arbitrary march element sequence over `buf`.
@@ -165,15 +194,16 @@ fn run_element(
 fn run_march(
     buf: &mut [u64],
     elements: &[MarchElement],
+    budget: &FailureBudget,
     on_subpass: &mut impl FnMut(),
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
     let base_addr = buf.as_ptr() as usize;
     let mut failures = Vec::new();
     for element in elements {
-        let quit = run_element(buf, element, base_addr, &mut failures, on_activity);
+        let stop = run_element(buf, element, base_addr, &mut failures, budget, on_activity);
         on_subpass();
-        if quit || shutdown::quit_requested() {
+        if stop || budget.is_exhausted() || shutdown::quit_requested() {
             break;
         }
     }
@@ -189,10 +219,11 @@ fn run_march(
 pub(super) fn run(
     buf: &mut [u64],
     _parallel: bool,
+    budget: &FailureBudget,
     on_subpass: &mut impl FnMut(),
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
-    run_march(buf, MARCH_C_MINUS, on_subpass, on_activity)
+    run_march(buf, MARCH_C_MINUS, budget, on_subpass, on_activity)
 }
 
 #[cfg(test)]
@@ -223,6 +254,7 @@ mod tests {
                 &read0(Ascending),
                 base,
                 &mut failures,
+                &FailureBudget::unlimited(),
                 &NOOP_ACTIVITY,
             );
             check!(!quit);
@@ -245,6 +277,7 @@ mod tests {
                 &read0(Descending),
                 base,
                 &mut failures,
+                &FailureBudget::unlimited(),
                 &NOOP_ACTIVITY,
             );
             let indices: Vec<usize> = failures.iter().map(|f| f.word_index).collect();
@@ -264,8 +297,22 @@ mod tests {
                 dir: Ascending,
                 ops: &[Read(true)],
             };
-            run_element(&mut buf, &w1, base, &mut failures, &NOOP_ACTIVITY);
-            run_element(&mut buf, &r1, base, &mut failures, &NOOP_ACTIVITY);
+            run_element(
+                &mut buf,
+                &w1,
+                base,
+                &mut failures,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
+            run_element(
+                &mut buf,
+                &r1,
+                base,
+                &mut failures,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
@@ -278,14 +325,28 @@ mod tests {
                 dir: Ascending,
                 ops: &[Write(true)],
             };
-            run_element(&mut buf, &w1, base, &mut failures, &NOOP_ACTIVITY);
+            run_element(
+                &mut buf,
+                &w1,
+                base,
+                &mut failures,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             // Simulate a cell that fails to hold the written 1 (stuck-low bit).
             buf[17] = u64::MAX ^ (1 << 2);
             let r1 = MarchElement {
                 dir: Ascending,
                 ops: &[Read(true)],
             };
-            run_element(&mut buf, &r1, base, &mut failures, &NOOP_ACTIVITY);
+            run_element(
+                &mut buf,
+                &r1,
+                base,
+                &mut failures,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.len() == 1);
             check!(failures[0].word_index == 17);
             check!(failures[0].flipped_bits() == 1);
@@ -300,10 +361,36 @@ mod tests {
                 &read0(Ascending),
                 0,
                 &mut failures,
+                &FailureBudget::unlimited(),
                 &NOOP_ACTIVITY,
             );
             check!(!quit);
             assert!(failures.is_empty());
+        }
+
+        #[test]
+        fn budget_caps_a_wholly_bad_element() {
+            // Every cell holds 1 but the element expects 0, so every read fails.
+            let mut buf = vec![u64::MAX; 4096];
+            let base = buf.as_ptr() as usize;
+            let mut failures = Vec::new();
+            let budget = FailureBudget::new(100);
+            let read0 = MarchElement {
+                dir: Ascending,
+                ops: &[Read(false)],
+            };
+            let stopped = run_element(
+                &mut buf,
+                &read0,
+                base,
+                &mut failures,
+                &budget,
+                &NOOP_ACTIVITY,
+            );
+            check!(stopped);
+            check!(failures.len() == 100);
+            check!(budget.overflowed());
+            check!(budget.is_exhausted());
         }
     }
 
@@ -317,7 +404,13 @@ mod tests {
         #[test]
         fn clean_memory_has_no_failures() {
             let mut buf = vec![0u64; 4096];
-            let failures = run(&mut buf, false, &mut || {}, &NOOP_ACTIVITY);
+            let failures = run(
+                &mut buf,
+                false,
+                &FailureBudget::unlimited(),
+                &mut || {},
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
@@ -325,7 +418,13 @@ mod tests {
         fn fires_one_subpass_per_element() {
             let mut buf = vec![0u64; 256];
             let mut count = 0u32;
-            run(&mut buf, false, &mut || count += 1, &NOOP_ACTIVITY);
+            run(
+                &mut buf,
+                false,
+                &FailureBudget::unlimited(),
+                &mut || count += 1,
+                &NOOP_ACTIVITY,
+            );
             check!(count == 6);
         }
 
@@ -338,6 +437,7 @@ mod tests {
             run(
                 &mut buf,
                 false,
+                &FailureBudget::unlimited(),
                 &mut || {
                     count += 1;
                     if count == 2 {

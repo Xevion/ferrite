@@ -1,17 +1,18 @@
-use crate::Failure;
 use crate::shutdown;
+use crate::{Failure, FailureBudget};
 
 use super::fill_and_verify;
 
 pub(super) fn run_ones(
     buf: &mut [u64],
     parallel: bool,
+    budget: &FailureBudget,
     on_subpass: &mut impl FnMut(),
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
     let mut failures = Vec::new();
     for bit in 0..64 {
-        if shutdown::quit_requested() {
+        if budget.is_exhausted() || shutdown::quit_requested() {
             break;
         }
         let pattern = 1u64 << bit;
@@ -19,6 +20,7 @@ pub(super) fn run_ones(
             buf,
             pattern,
             parallel,
+            budget,
             on_subpass,
             on_activity,
         ));
@@ -29,12 +31,13 @@ pub(super) fn run_ones(
 pub(super) fn run_zeros(
     buf: &mut [u64],
     parallel: bool,
+    budget: &FailureBudget,
     on_subpass: &mut impl FnMut(),
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
     let mut failures = Vec::new();
     for bit in 0..64 {
-        if shutdown::quit_requested() {
+        if budget.is_exhausted() || shutdown::quit_requested() {
             break;
         }
         let pattern = !(1u64 << bit);
@@ -42,6 +45,7 @@ pub(super) fn run_zeros(
             buf,
             pattern,
             parallel,
+            budget,
             on_subpass,
             on_activity,
         ));

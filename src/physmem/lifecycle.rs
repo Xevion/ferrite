@@ -215,6 +215,7 @@ mod tests {
             elapsed: Duration::ZERO,
             bytes_processed: 0,
             interrupted,
+            capped: false,
         };
         let pass = PassResult {
             pass_number: 1,

@@ -7,6 +7,7 @@
 //! pattern finds.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::physmem::phys::PhysAddr;
 
@@ -58,6 +59,97 @@ impl fmt::Display for Failure {
             self.xor(),
             self.flipped_bits(),
         )
+    }
+}
+
+/// A shared, thread-safe cap on how many [`Failure`] records a single pattern
+/// run may collect.
+///
+/// On catastrophically-bad memory a pattern would otherwise materialize one
+/// record per failing word -- hundreds of millions of them for a multi-GiB
+/// buffer -- and exhaust RAM inside the verify collect before the runner ever
+/// sees the result. The verify paths claim against this budget as they go,
+/// truncating their contribution once the cap is reached, so total live
+/// `Failure` memory stays bounded regardless of how bad the DIMM is.
+///
+/// A budget is created per pattern (the cap is per pattern) and shared across
+/// that pattern's parallel chunks and sequential sub-passes.
+pub struct FailureBudget {
+    /// Slots still available. `usize::MAX` means unlimited.
+    remaining: AtomicUsize,
+    /// Set once the cap dropped at least one failure.
+    overflowed: AtomicBool,
+}
+
+impl FailureBudget {
+    /// Cap collection at `max` records. `max == 0` means unlimited.
+    #[must_use]
+    pub const fn new(max: usize) -> Self {
+        let remaining = if max == 0 { usize::MAX } else { max };
+        Self {
+            remaining: AtomicUsize::new(remaining),
+            overflowed: AtomicBool::new(false),
+        }
+    }
+
+    /// An unlimited budget that never caps -- for benchmarks and tests.
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self::new(0)
+    }
+
+    /// True once the cap has been hit and at least one failure was dropped.
+    #[must_use]
+    pub fn overflowed(&self) -> bool {
+        self.overflowed.load(Ordering::Relaxed)
+    }
+
+    /// True when no slots remain, so callers can skip further verify work.
+    #[must_use]
+    pub fn is_exhausted(&self) -> bool {
+        self.remaining.load(Ordering::Relaxed) == 0
+    }
+
+    /// Truncate an independent batch of `failures` to the slots still available,
+    /// marking the budget overflowed if any were dropped. Used by the parallel
+    /// verify paths, where each chunk presents its own freshly-built batch.
+    pub fn cap(&self, failures: &mut Vec<Failure>) {
+        let want = failures.len();
+        if want == 0 {
+            return;
+        }
+        let granted = self.claim(want);
+        if granted < want {
+            failures.truncate(granted);
+            self.mark_overflow();
+        }
+    }
+
+    /// Claim up to `want` slots, returning how many were granted (0 when
+    /// exhausted). Sequential accumulators (the march executor) claim only the
+    /// growth since their last checkpoint.
+    pub(crate) fn claim(&self, want: usize) -> usize {
+        let mut cur = self.remaining.load(Ordering::Relaxed);
+        loop {
+            let grant = want.min(cur);
+            if grant == 0 {
+                return 0;
+            }
+            match self.remaining.compare_exchange_weak(
+                cur,
+                cur - grant,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return grant,
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
+    /// Record that the cap dropped at least one failure.
+    pub(crate) fn mark_overflow(&self) {
+        self.overflowed.store(true, Ordering::Relaxed);
     }
 }
 
@@ -189,6 +281,88 @@ mod tests {
             .build();
         assert!(f.xor() == 0xFFFF_FFFF_FFFF_FFFF);
         assert!(f.flipped_bits() == 64);
+    }
+
+    mod budget {
+        use assert2::check;
+
+        use super::super::{Failure, FailureBudget};
+
+        fn failures(n: usize) -> Vec<Failure> {
+            (0..n)
+                .map(|i| Failure {
+                    addr: i * 8,
+                    expected: 0,
+                    actual: 1,
+                    word_index: i,
+                    phys_addr: None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn unlimited_never_caps() {
+            let b = FailureBudget::unlimited();
+            let mut f = failures(10_000);
+            b.cap(&mut f);
+            check!(f.len() == 10_000);
+            check!(!b.overflowed());
+            check!(!b.is_exhausted());
+        }
+
+        #[test]
+        fn cap_truncates_single_batch_to_limit() {
+            let b = FailureBudget::new(100);
+            let mut f = failures(250);
+            b.cap(&mut f);
+            check!(f.len() == 100);
+            check!(b.overflowed());
+            check!(b.is_exhausted());
+        }
+
+        #[test]
+        fn cap_spans_multiple_batches() {
+            let b = FailureBudget::new(100);
+            let mut a = failures(60);
+            let mut c = failures(60);
+            b.cap(&mut a);
+            b.cap(&mut c);
+            // First batch takes 60, second is truncated to the remaining 40.
+            check!(a.len() == 60);
+            check!(c.len() == 40);
+            check!(b.overflowed());
+            check!(b.is_exhausted());
+        }
+
+        #[test]
+        fn cap_under_limit_leaves_batch_and_flag_untouched() {
+            let b = FailureBudget::new(100);
+            let mut f = failures(40);
+            b.cap(&mut f);
+            check!(f.len() == 40);
+            check!(!b.overflowed());
+            check!(!b.is_exhausted());
+        }
+
+        #[test]
+        fn claim_grants_then_exhausts() {
+            let b = FailureBudget::new(10);
+            check!(b.claim(4) == 4);
+            check!(b.claim(4) == 4);
+            // Only 2 slots remain despite asking for 5.
+            check!(b.claim(5) == 2);
+            check!(b.claim(1) == 0);
+            check!(b.is_exhausted());
+        }
+
+        #[test]
+        fn empty_batch_is_a_noop() {
+            let b = FailureBudget::new(10);
+            let mut f: Vec<Failure> = Vec::new();
+            b.cap(&mut f);
+            check!(!b.overflowed());
+            check!(!b.is_exhausted());
+        }
     }
 
     proptest! {

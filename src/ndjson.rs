@@ -69,6 +69,10 @@ enum Event {
         failures: Vec<FailureRecord>,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         interrupted: bool,
+        /// True when `--max-errors` truncated the failure list: more failures
+        /// existed than the `failures` array holds.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        capped: bool,
     },
     PassComplete {
         pass: usize,
@@ -224,6 +228,7 @@ impl NdjsonEventWriter {
                 bytes,
                 failures,
                 interrupted,
+                capped,
             } => {
                 let duration_ms = elapsed.as_secs_f64() * 1000.0;
                 if failures.is_empty() {
@@ -242,6 +247,7 @@ impl NdjsonEventWriter {
                         bytes_processed: *bytes,
                         failures: failures.iter().map(FailureRecord::from).collect(),
                         interrupted: *interrupted,
+                        capped: *capped,
                     });
                 }
             }
@@ -551,6 +557,7 @@ mod tests {
                 bytes: 1024,
                 failures: vec![],
                 interrupted: false,
+                capped: false,
             });
             w.handle_event(&RunEvent::PassComplete {
                 pass: 1,
@@ -614,6 +621,7 @@ mod tests {
                 bytes: 1024,
                 failures: vec![],
                 interrupted: false,
+                capped: false,
             });
             drop(w);
 
@@ -638,6 +646,7 @@ mod tests {
                 bytes: 1024,
                 failures: vec![],
                 interrupted: true,
+                capped: false,
             });
             drop(w);
 
@@ -665,6 +674,7 @@ mod tests {
                 bytes: 512,
                 failures,
                 interrupted: false,
+                capped: false,
             });
             drop(w);
 

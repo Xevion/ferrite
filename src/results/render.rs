@@ -18,6 +18,7 @@ pub fn write_pattern_result_line(
     throughput: crate::units::Rate,
     failure_count: u64,
     interrupted: bool,
+    capped: bool,
 ) -> io::Result<()> {
     let suffix = if interrupted { "  (interrupted)" } else { "" };
     if failure_count == 0 {
@@ -31,9 +32,16 @@ pub fn write_pattern_result_line(
             "  {label} {name:<20} {elapsed_ms:>8.1}ms  {throughput:>}{suffix}",
         )
     } else {
+        // When capped, more failures existed than were collected -- show `N+`
+        // and flag the cap so the count isn't mistaken for the true total.
+        let count = if capped {
+            format!("{failure_count}+ failures, capped at --max-errors")
+        } else {
+            format!("{failure_count} failures")
+        };
         writeln!(
             out,
-            "  {} {name:<20} {elapsed_ms:>8.1}ms  {throughput:>}  ({failure_count} failures){suffix}",
+            "  {} {name:<20} {elapsed_ms:>8.1}ms  {throughput:>}  ({count}){suffix}",
             "FAIL".red().bold(),
         )
     }
@@ -276,6 +284,7 @@ impl ResultsRenderer for TableRenderer {
                         throughput,
                         failures,
                         interrupted,
+                        p.capped(),
                     )?;
                 }
                 let pass_number = pass.pass_number();
@@ -364,6 +373,52 @@ mod tests {
         }
     }
 
+    mod pattern_result_line {
+        use assert2::check;
+
+        use super::*;
+        use crate::units::Rate;
+
+        fn line(failure_count: u64, interrupted: bool, capped: bool) -> String {
+            let mut out = Vec::new();
+            let rate = Rate::new(1.0e9, UnitSystem::Binary);
+            write_pattern_result_line(
+                &mut out,
+                "Solid Bits",
+                12.3,
+                rate,
+                failure_count,
+                interrupted,
+                capped,
+            )
+            .unwrap();
+            String::from_utf8(out).unwrap()
+        }
+
+        #[test]
+        fn capped_line_flags_truncation() {
+            let s = line(1000, false, true);
+            check!(s.contains("FAIL"));
+            check!(s.contains("1000+ failures"));
+            check!(s.contains("capped"));
+        }
+
+        #[test]
+        fn uncapped_line_shows_plain_count() {
+            let s = line(3, false, false);
+            check!(s.contains("3 failures"));
+            check!(!s.contains("capped"));
+        }
+
+        #[test]
+        fn clean_line_has_no_cap_annotation() {
+            // capped is meaningless with zero failures; the PASS line ignores it.
+            let s = line(0, false, true);
+            check!(s.contains("PASS"));
+            check!(!s.contains("capped"));
+        }
+    }
+
     mod table_renderer {
         use assert2::assert;
 
@@ -404,6 +459,7 @@ mod tests {
                         elapsed: Duration::from_millis(10),
                         bytes_processed: 1024,
                         interrupted: true,
+                        capped: false,
                     }],
                     ecc_deltas: vec![],
                 }],

@@ -146,6 +146,12 @@ impl PatternDoc<'_> {
     pub fn interrupted(&self) -> bool {
         self.0["interrupted"].as_bool().unwrap_or(false)
     }
+
+    /// True when `--max-errors` truncated this pattern's failure list.
+    #[must_use]
+    pub fn capped(&self) -> bool {
+        self.0["capped"].as_bool().unwrap_or(false)
+    }
 }
 
 /// Borrowed view into run configuration.

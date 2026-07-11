@@ -33,6 +33,10 @@ use cli::{Cli, OutputConfig, OutputFormat, SetupOutcome, check_privileges, setup
 /// need a specific one.
 type Result<T, E = Whatever> = std::result::Result<T, E>;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "top-level entry point wiring CLI parsing, tracing, privilege checks, coverage, and TUI/headless dispatch in sequence"
+)]
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
     let shutdown_handle = shutdown::install_signal_handlers()?;
@@ -142,6 +146,7 @@ fn main() -> Result<()> {
                 size,
                 cli.passes,
                 workers,
+                cli.max_errors,
                 tui_setup,
                 patterns,
                 &tracing_handle,
@@ -276,6 +281,7 @@ fn run_non_tui(
         patterns,
         cli.passes,
         parallel,
+        cli.max_errors,
         &tx,
         setup
             .resolver

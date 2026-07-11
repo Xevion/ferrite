@@ -12,9 +12,9 @@ use std::ptr;
 use rayon::prelude::*;
 
 #[cfg(target_arch = "x86_64")]
-use crate::Failure;
-#[cfg(target_arch = "x86_64")]
 use crate::ops::scalar;
+#[cfg(target_arch = "x86_64")]
+use crate::{Failure, FailureBudget};
 
 /// Number of u64 words processed per Rayon task.
 /// Must be a multiple of 8 (one AVX-512 register = 8 * u64 = 64 bytes) so that
@@ -237,12 +237,15 @@ pub unsafe fn verify_indexed_avx512(
     failures
 }
 
-/// AVX-512 orchestration for constant fill-and-verify.
+/// AVX-512 orchestration for constant fill-and-verify. Failures are capped at the
+/// shared [`FailureBudget`] so total live `Failure` memory stays bounded on
+/// wholly-bad memory.
 #[cfg(target_arch = "x86_64")]
 pub fn fill_verify_constant(
     buf: &mut [u64],
     pattern: u64,
     parallel: bool,
+    budget: &FailureBudget,
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
     let base_addr = buf.as_ptr() as usize;
@@ -261,19 +264,33 @@ pub fn fill_verify_constant(
             .enumerate()
             .flat_map_iter(|(ci, chunk)| {
                 on_activity((ci * CHUNK) as f64 / total as f64);
+                if budget.is_exhausted() {
+                    return Vec::new();
+                }
                 // SAFETY: same alignment argument as write side.
-                unsafe { verify_avx512(chunk, pattern, base_addr, ci * CHUNK) }
+                let mut f = unsafe { verify_avx512(chunk, pattern, base_addr, ci * CHUNK) };
+                budget.cap(&mut f);
+                f
             })
             .collect()
     } else {
-        on_activity(0.0);
-        unsafe {
-            fill_nt(buf, pattern);
+        for (ci, chunk) in buf.chunks_mut(CHUNK).enumerate() {
+            // SAFETY: chunk is 64-byte aligned (see parallel branch).
+            unsafe { fill_nt(chunk, pattern) };
+            on_activity((ci * CHUNK) as f64 / total as f64);
         }
-        on_activity(0.5);
-        let result = unsafe { verify_avx512(buf, pattern, base_addr, 0) };
-        on_activity(1.0);
-        result
+        let mut failures = Vec::new();
+        for (ci, chunk) in buf.chunks(CHUNK).enumerate() {
+            if budget.is_exhausted() {
+                break;
+            }
+            on_activity((ci * CHUNK) as f64 / total as f64);
+            // SAFETY: same alignment argument as the write side.
+            let mut f = unsafe { verify_avx512(chunk, pattern, base_addr, ci * CHUNK) };
+            budget.cap(&mut f);
+            failures.append(&mut f);
+        }
+        failures
     }
 }
 
@@ -289,6 +306,7 @@ pub fn fill_verify_constant(
 pub fn fill_verify_indexed(
     buf: &mut [u64],
     parallel: bool,
+    budget: &FailureBudget,
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
     let base_addr = buf.as_ptr() as usize;
@@ -305,18 +323,31 @@ pub fn fill_verify_indexed(
             .flat_map_iter(|(ci, chunk)| {
                 let chunk_start = ci * CHUNK;
                 on_activity(chunk_start as f64 / total as f64);
-                scalar::verify_indexed(chunk, base_addr + chunk_start * 8, chunk_start)
+                if budget.is_exhausted() {
+                    return Vec::new();
+                }
+                let mut f = scalar::verify_indexed(chunk, base_addr + chunk_start * 8, chunk_start);
+                budget.cap(&mut f);
+                f
             })
             .collect()
     } else {
-        on_activity(0.0);
-        unsafe {
-            fill_nt_indexed(buf, 0);
+        for (ci, chunk) in buf.chunks_mut(CHUNK).enumerate() {
+            unsafe { fill_nt_indexed(chunk, ci * CHUNK) };
+            on_activity((ci * CHUNK) as f64 / total as f64);
         }
-        on_activity(0.5);
-        let result = scalar::verify_indexed(buf, base_addr, 0);
-        on_activity(1.0);
-        result
+        let mut failures = Vec::new();
+        for (ci, chunk) in buf.chunks(CHUNK).enumerate() {
+            if budget.is_exhausted() {
+                break;
+            }
+            let chunk_start = ci * CHUNK;
+            on_activity(chunk_start as f64 / total as f64);
+            let mut f = scalar::verify_indexed(chunk, base_addr + chunk_start * 8, chunk_start);
+            budget.cap(&mut f);
+            failures.append(&mut f);
+        }
+        failures
     }
 }
 

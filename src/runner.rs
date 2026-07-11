@@ -4,12 +4,12 @@ use std::time::Instant;
 
 use snafu::Snafu;
 
-use crate::Failure;
 use crate::edac::{EccDelta, EdacSnapshot};
 use crate::events::{EventTx, RunEvent};
 use crate::pattern::{Pattern, run_pattern};
 use crate::physmem::phys::PhysResolver;
 use crate::shutdown;
+use crate::{Failure, FailureBudget};
 
 /// Extract a human-readable message from a panic payload.
 ///
@@ -45,6 +45,9 @@ pub struct PatternResult {
     /// True if the pattern stopped early due to a quit request, so its
     /// failures (and absence of failures) are incomplete.
     pub interrupted: bool,
+    /// True if the pattern hit `--max-errors` and its failure list was
+    /// truncated -- more failures existed than were collected.
+    pub capped: bool,
 }
 
 /// Result of a full pass (all patterns).
@@ -144,6 +147,7 @@ pub fn run(
     patterns: &[Pattern],
     passes: usize,
     parallel: bool,
+    max_errors: usize,
     tx: &EventTx,
     resolver: Option<&(dyn PhysResolver + Sync)>,
     on_activity: &(dyn Fn(f64) + Sync),
@@ -187,6 +191,9 @@ pub fn run(
 
             let start = Instant::now();
 
+            // One budget per pattern: caps total collected failures so a wholly
+            // bad DIMM cannot exhaust memory materializing one record per word.
+            let budget = FailureBudget::new(max_errors);
             let mut sub_pass_count: u64 = 0;
             // SAFETY: captured state (sub_pass_count, tx) is not used after
             // an unwind -- we return Err immediately on panic.
@@ -195,6 +202,7 @@ pub fn run(
                     pattern,
                     buf,
                     parallel,
+                    &budget,
                     &mut || {
                         sub_pass_count += 1;
                         let _ = tx.send(RunEvent::Progress {
@@ -220,6 +228,7 @@ pub fn run(
             // A quit observed now means the pattern's inner loop bailed out
             // early, so its results are partial.
             let interrupted = shutdown::quit_requested();
+            let capped = budget.overflowed();
 
             if let Some(resolver) = resolver {
                 for f in &mut failures {
@@ -234,6 +243,7 @@ pub fn run(
                 bytes: bytes_processed,
                 failures: failures.clone(),
                 interrupted,
+                capped,
             });
 
             pattern_results.push(PatternResult {
@@ -242,6 +252,7 @@ pub fn run(
                 elapsed,
                 bytes_processed,
                 interrupted,
+                capped,
             });
         }
 
@@ -359,6 +370,7 @@ mod tests {
                     elapsed: std::time::Duration::ZERO,
                     bytes_processed: 0,
                     interrupted: false,
+                    capped: false,
                 },
                 PatternResult {
                     pattern: Pattern::Checkerboard,
@@ -372,6 +384,7 @@ mod tests {
                     elapsed: std::time::Duration::ZERO,
                     bytes_processed: 0,
                     interrupted: false,
+                    capped: false,
                 },
             ],
             ecc_deltas: vec![],
@@ -415,6 +428,7 @@ mod tests {
                     elapsed: Duration::from_millis(10),
                     bytes_processed: 8192,
                     interrupted: false,
+                    capped: false,
                 }],
                 ecc_deltas: vec![],
             }
@@ -506,6 +520,7 @@ mod tests {
             &[Pattern::SolidBits],
             1,
             false,
+            0,
             &tx,
             None,
             &|_| {},
@@ -535,6 +550,7 @@ mod tests {
             &[Pattern::SolidBits],
             3,
             false,
+            0,
             &tx,
             None,
             &|_| {},
@@ -552,7 +568,18 @@ mod tests {
     fn run_all_patterns_clean() {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, Pattern::ALL, 1, false, &tx, None, &|_| {}, None).unwrap();
+        let results = run(
+            &mut buf,
+            Pattern::ALL,
+            1,
+            false,
+            0,
+            &tx,
+            None,
+            &|_| {},
+            None,
+        )
+        .unwrap();
         assert!(results.len() == 1);
         check!(results[0].pattern_results.len() == Pattern::ALL.len());
         check!(results[0].total_failures() == 0);
@@ -562,7 +589,7 @@ mod tests {
     fn run_empty_patterns() {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, &[], 1, false, &tx, None, &|_| {}, None).unwrap();
+        let results = run(&mut buf, &[], 1, false, 0, &tx, None, &|_| {}, None).unwrap();
         check!(results.len() == 1);
         check!(results[0].pattern_results.is_empty());
         check!(results[0].total_failures() == 0);
@@ -572,7 +599,7 @@ mod tests {
     fn run_parallel_clean() {
         let mut buf = vec![0u64; 4096];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, Pattern::ALL, 1, true, &tx, None, &|_| {}, None).unwrap();
+        let results = run(&mut buf, Pattern::ALL, 1, true, 0, &tx, None, &|_| {}, None).unwrap();
         assert!(results.len() == 1);
         check!(results[0].total_failures() == 0);
     }
@@ -621,6 +648,7 @@ mod tests {
             &[Pattern::SolidBits],
             1,
             false,
+            0,
             &tx,
             Some(&resolver),
             &|_| {},
@@ -659,6 +687,7 @@ mod tests {
             &[Pattern::WalkingOnes],
             1,
             false,
+            0,
             &tx,
             None,
             &|_| shutdown::request_quit(shutdown::QuitReason::UserQuit),
@@ -682,6 +711,7 @@ mod tests {
             &[Pattern::SolidBits],
             1,
             false,
+            0,
             &tx,
             None,
             &|_| {},
@@ -698,7 +728,18 @@ mod tests {
         shutdown::request_quit(shutdown::QuitReason::UserQuit);
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, Pattern::ALL, 100, false, &tx, None, &|_| {}, None).unwrap();
+        let results = run(
+            &mut buf,
+            Pattern::ALL,
+            100,
+            false,
+            0,
+            &tx,
+            None,
+            &|_| {},
+            None,
+        )
+        .unwrap();
         check!(results.is_empty());
     }
 
@@ -711,6 +752,7 @@ mod tests {
             &[Pattern::SolidBits],
             1,
             false,
+            0,
             &tx,
             None,
             &|_| {},

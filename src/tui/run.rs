@@ -70,10 +70,15 @@ pub struct TuiRunOutput {
     clippy::too_many_lines,
     reason = "tightly-coupled TUI worker setup/teardown; see clippy.toml too-many-lines-threshold note"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "run config (size, passes, workers, max_errors) plus setup, patterns, tracing, and event writer all thread into one entry point"
+)]
 pub fn run_tui_mode(
     size: usize,
     passes: usize,
     workers: usize,
+    max_errors: usize,
     mut setup: TuiTestSetup,
     patterns: Vec<Pattern>,
     tracing_handle: &TracingReloadHandle,
@@ -163,6 +168,7 @@ pub fn run_tui_mode(
                 &patterns,
                 passes,
                 parallel,
+                max_errors,
                 &event_tx,
                 resolver_ref,
                 &on_activity,
@@ -264,6 +270,7 @@ mod tests {
             &[Pattern::SolidBits],
             1,
             false,
+            0,
             &tx,
             None,
             &|_| {},
@@ -292,6 +299,7 @@ mod tests {
             &[Pattern::SolidBits],
             1,
             false,
+            0,
             &tx,
             None,
             &|_| {},
@@ -318,8 +326,18 @@ mod tests {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = events::event_bus();
 
-        let results =
-            runner::run(&mut buf, Pattern::ALL, 100, false, &tx, None, &|_| {}, None).unwrap();
+        let results = runner::run(
+            &mut buf,
+            Pattern::ALL,
+            100,
+            false,
+            0,
+            &tx,
+            None,
+            &|_| {},
+            None,
+        )
+        .unwrap();
 
         check!(results.is_empty());
     }
@@ -336,6 +354,7 @@ mod tests {
             &[Pattern::SolidBits],
             3,
             false,
+            0,
             &tx,
             None,
             &|_| {},
@@ -356,8 +375,18 @@ mod tests {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = events::event_bus();
 
-        let results =
-            runner::run(&mut buf, Pattern::ALL, 1, false, &tx, None, &|_| {}, None).unwrap();
+        let results = runner::run(
+            &mut buf,
+            Pattern::ALL,
+            1,
+            false,
+            0,
+            &tx,
+            None,
+            &|_| {},
+            None,
+        )
+        .unwrap();
 
         let total: usize = results.iter().map(runner::PassResult::total_failures).sum();
         check!(total == 0);

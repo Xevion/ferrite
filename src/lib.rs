@@ -22,7 +22,7 @@ pub mod tui;
 pub mod units;
 
 pub use alloc::CompactionGuard;
-pub use failure::Failure;
+pub use failure::{Failure, FailureBudget};
 
 /// Internal functions exposed for benchmark targets via thin wrappers.
 /// Not stable API -- only available with `--features bench`.
@@ -60,7 +60,13 @@ pub mod bench_api {
         parallel: bool,
         on_activity: &(dyn Fn(f64) + Sync),
     ) -> Vec<Failure> {
-        crate::ops::fill_verify_constant(buf, pattern, parallel, on_activity)
+        crate::ops::fill_verify_constant(
+            buf,
+            pattern,
+            parallel,
+            &crate::FailureBudget::unlimited(),
+            on_activity,
+        )
     }
 
     pub fn fill_verify_indexed(
@@ -68,7 +74,12 @@ pub mod bench_api {
         parallel: bool,
         on_activity: &(dyn Fn(f64) + Sync),
     ) -> Vec<Failure> {
-        crate::ops::fill_verify_indexed(buf, parallel, on_activity)
+        crate::ops::fill_verify_indexed(
+            buf,
+            parallel,
+            &crate::FailureBudget::unlimited(),
+            on_activity,
+        )
     }
 
     #[cfg(target_arch = "x86_64")]

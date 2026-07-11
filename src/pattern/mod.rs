@@ -1,7 +1,7 @@
 use std::fmt;
 
-use crate::Failure;
 use crate::ops;
+use crate::{Failure, FailureBudget};
 
 mod checkerboard;
 mod march;
@@ -69,32 +69,37 @@ impl fmt::Display for Pattern {
 /// for driving a progress bar in the caller.
 /// `on_activity` is called from worker threads with a position (0.0..1.0) within
 /// the buffer, suitable for driving activity heatmaps.
+/// `budget` caps how many failures this pattern collects; once exhausted the
+/// pattern stops early (see [`FailureBudget`]).
 pub fn run_pattern(
     pattern: Pattern,
     buf: &mut [u64],
     parallel: bool,
+    budget: &FailureBudget,
     on_subpass: &mut impl FnMut(),
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
     match pattern {
-        Pattern::SolidBits => solid::run(buf, parallel, on_subpass, on_activity),
-        Pattern::WalkingOnes => walking::run_ones(buf, parallel, on_subpass, on_activity),
-        Pattern::WalkingZeros => walking::run_zeros(buf, parallel, on_subpass, on_activity),
-        Pattern::Checkerboard => checkerboard::run(buf, parallel, on_subpass, on_activity),
-        Pattern::StuckAddress => stuck_address::run(buf, parallel, on_subpass, on_activity),
-        Pattern::MarchCMinus => march::run(buf, parallel, on_subpass, on_activity),
+        Pattern::SolidBits => solid::run(buf, parallel, budget, on_subpass, on_activity),
+        Pattern::WalkingOnes => walking::run_ones(buf, parallel, budget, on_subpass, on_activity),
+        Pattern::WalkingZeros => walking::run_zeros(buf, parallel, budget, on_subpass, on_activity),
+        Pattern::Checkerboard => checkerboard::run(buf, parallel, budget, on_subpass, on_activity),
+        Pattern::StuckAddress => stuck_address::run(buf, parallel, budget, on_subpass, on_activity),
+        Pattern::MarchCMinus => march::run(buf, parallel, budget, on_subpass, on_activity),
     }
 }
 
-/// Fill with `pattern`, verify, then call `on_complete`.
+/// Fill with `pattern`, verify (capping failures at `budget`), then call
+/// `on_complete`.
 pub(super) fn fill_and_verify(
     buf: &mut [u64],
     pattern: u64,
     parallel: bool,
+    budget: &FailureBudget,
     on_complete: &mut impl FnMut(),
     on_activity: &(dyn Fn(f64) + Sync),
 ) -> Vec<Failure> {
-    let failures = ops::fill_verify_constant(buf, pattern, parallel, on_activity);
+    let failures = ops::fill_verify_constant(buf, pattern, parallel, budget, on_activity);
     on_complete();
     failures
 }
@@ -130,7 +135,14 @@ mod tests {
         #[case(Pattern::MarchCMinus)]
         fn serial(#[case] pattern: Pattern) {
             let mut buf = make_test_buf();
-            let failures = run_pattern(pattern, &mut buf, false, &mut || {}, &NOOP_ACTIVITY);
+            let failures = run_pattern(
+                pattern,
+                &mut buf,
+                false,
+                &FailureBudget::unlimited(),
+                &mut || {},
+                &NOOP_ACTIVITY,
+            );
             assert!(
                 failures.is_empty(),
                 "pattern {pattern} had failures on clean memory"
@@ -146,7 +158,14 @@ mod tests {
         #[case(Pattern::MarchCMinus)]
         fn parallel(#[case] pattern: Pattern) {
             let mut buf = make_test_buf();
-            let failures = run_pattern(pattern, &mut buf, true, &mut || {}, &NOOP_ACTIVITY);
+            let failures = run_pattern(
+                pattern,
+                &mut buf,
+                true,
+                &FailureBudget::unlimited(),
+                &mut || {},
+                &NOOP_ACTIVITY,
+            );
             assert!(
                 failures.is_empty(),
                 "pattern {pattern} had failures on clean memory (parallel)"
@@ -158,7 +177,13 @@ mod tests {
     fn subpass_callback_fires() {
         let mut buf = make_test_buf();
         let mut count = 0u32;
-        solid::run(&mut buf, false, &mut || count += 1, &NOOP_ACTIVITY);
+        solid::run(
+            &mut buf,
+            false,
+            &FailureBudget::unlimited(),
+            &mut || count += 1,
+            &NOOP_ACTIVITY,
+        );
         check!(count == 2); // solid_bits has 2 sub-passes
     }
 
@@ -227,6 +252,7 @@ mod tests {
                 Pattern::WalkingOnes,
                 &mut buf,
                 false,
+                &FailureBudget::unlimited(),
                 &mut || {
                     sub_passes += 1;
                     if sub_passes == 3 {
@@ -250,6 +276,7 @@ mod tests {
                 Pattern::WalkingOnes,
                 &mut buf,
                 false,
+                &FailureBudget::unlimited(),
                 &mut || sub_passes += 1,
                 &NOOP_ACTIVITY,
             );
@@ -266,51 +293,88 @@ mod tests {
         #[test]
         fn fill_verify_constant_clean_memory() {
             let mut buf = make_test_buf();
-            let failures =
-                ops::fill_verify_constant(&mut buf, 0xFFFF_FFFF_FFFF_FFFF, false, &NOOP_ACTIVITY);
+            let failures = ops::fill_verify_constant(
+                &mut buf,
+                0xFFFF_FFFF_FFFF_FFFF,
+                false,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
         #[test]
         fn fill_verify_constant_single_word() {
             let mut buf = vec![0u64; 1];
-            let failures = ops::fill_verify_constant(&mut buf, 0xDEAD_BEEF, false, &NOOP_ACTIVITY);
+            let failures = ops::fill_verify_constant(
+                &mut buf,
+                0xDEAD_BEEF,
+                false,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
         #[test]
         fn fill_verify_indexed_single_word() {
             let mut buf = vec![0u64; 1];
-            let failures = ops::fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
+            let failures = ops::fill_verify_indexed(
+                &mut buf,
+                false,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
         #[test]
         fn fill_verify_constant_parallel_clean() {
             let mut buf = vec![0u64; 4096];
-            let failures =
-                ops::fill_verify_constant(&mut buf, 0x5555_5555_5555_5555, true, &NOOP_ACTIVITY);
+            let failures = ops::fill_verify_constant(
+                &mut buf,
+                0x5555_5555_5555_5555,
+                true,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
         #[test]
         fn fill_verify_indexed_parallel_clean() {
             let mut buf = vec![0u64; 4096];
-            let failures = ops::fill_verify_indexed(&mut buf, true, &NOOP_ACTIVITY);
+            let failures = ops::fill_verify_indexed(
+                &mut buf,
+                true,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
         #[test]
         fn fill_verify_constant_empty_buffer() {
             let mut buf: Vec<u64> = vec![];
-            let failures = ops::fill_verify_constant(&mut buf, 0xFF, false, &NOOP_ACTIVITY);
+            let failures = ops::fill_verify_constant(
+                &mut buf,
+                0xFF,
+                false,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
         #[test]
         fn fill_verify_indexed_empty_buffer() {
             let mut buf: Vec<u64> = vec![];
-            let failures = ops::fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
+            let failures = ops::fill_verify_indexed(
+                &mut buf,
+                false,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
@@ -318,7 +382,14 @@ mod tests {
         fn fill_and_verify_calls_on_complete() {
             let mut buf = vec![0u64; 64];
             let mut called = false;
-            let _ = fill_and_verify(&mut buf, 0xAA, false, &mut || called = true, &NOOP_ACTIVITY);
+            let _ = fill_and_verify(
+                &mut buf,
+                0xAA,
+                false,
+                &FailureBudget::unlimited(),
+                &mut || called = true,
+                &NOOP_ACTIVITY,
+            );
             assert!(called);
         }
 
@@ -326,11 +397,21 @@ mod tests {
         fn non_chunk_multiple_buffer_size() {
             // 1000 is not a multiple of REPORT_CHUNK (64*1024), testing partial chunk handling
             let mut buf = vec![0u64; 1000];
-            let failures =
-                ops::fill_verify_constant(&mut buf, 0x1234_5678_9ABC_DEF0, false, &NOOP_ACTIVITY);
+            let failures = ops::fill_verify_constant(
+                &mut buf,
+                0x1234_5678_9ABC_DEF0,
+                false,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
 
-            let failures = ops::fill_verify_indexed(&mut buf, false, &NOOP_ACTIVITY);
+            let failures = ops::fill_verify_indexed(
+                &mut buf,
+                false,
+                &FailureBudget::unlimited(),
+                &NOOP_ACTIVITY,
+            );
             assert!(failures.is_empty());
         }
 
