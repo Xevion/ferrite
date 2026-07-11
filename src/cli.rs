@@ -16,6 +16,7 @@ type Result<T, E = Whatever> = std::result::Result<T, E>;
 
 use ferrite::alloc::{CompactionGuard, TestBuffer};
 use ferrite::dimm::DimmTopology;
+use ferrite::pattern::PatternConfig;
 use ferrite::physmem::phys::{MapStats, PagemapResolver, PhysResolver, PhysResolverError};
 use ferrite::physmem::sieve::FrameSieve;
 use ferrite::units::UnitSystem;
@@ -141,6 +142,17 @@ pub struct Cli {
     /// record one failure per word. Use 0 for no limit.
     #[arg(long, value_name = "N", default_value_t = 1000)]
     pub max_errors: usize,
+
+    /// Seed for the Random Fill pattern's PRNG, as hex (`0xDEADBEEF`) or a
+    /// decimal integer. Omitted: a fresh random seed each run, reported so the
+    /// run can be replayed with this flag.
+    #[arg(long, value_name = "SEED", value_parser = parse_seed)]
+    pub seed: Option<u64>,
+
+    /// Seeded fill-and-verify rounds the Random Fill pattern runs, each with a
+    /// distinct derived seed.
+    #[arg(long, value_name = "N", default_value_t = 1, value_parser = parse_random_passes)]
+    pub random_passes: usize,
 }
 
 /// Worker-thread count for pattern execution.
@@ -180,6 +192,48 @@ pub fn parse_parallel(s: &str) -> Result<Parallelism, String> {
         .ok_or_else(|| "--parallel must be at least 1".to_owned())
 }
 
+/// Parse the `--seed` flag: a `0x`-prefixed hex value or a decimal `u64`.
+///
+/// # Errors
+///
+/// Returns a descriptive error string if the value is neither.
+pub fn parse_seed(s: &str) -> Result<u64, String> {
+    let t = s.trim();
+    let parsed = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .map_or_else(|| t.parse::<u64>(), |hex| u64::from_str_radix(hex, 16));
+    parsed.map_err(|_| {
+        format!("invalid --seed value: {s} (expected hex like 0xDEADBEEF or a decimal u64)")
+    })
+}
+
+/// Parse the `--random-passes` flag: a positive integer.
+///
+/// # Errors
+///
+/// Returns a descriptive error string if the value is `0` or not an integer.
+pub fn parse_random_passes(s: &str) -> Result<usize, String> {
+    let n: usize = s
+        .parse()
+        .map_err(|_| format!("invalid --random-passes value: {s} (expected a positive integer)"))?;
+    if n == 0 {
+        return Err("--random-passes must be at least 1".to_owned());
+    }
+    Ok(n)
+}
+
+/// A fresh seed from OS entropy, used when `--seed` is not given.
+///
+/// `RandomState` is seeded from the OS RNG on construction; hashing a fixed
+/// value yields a per-process-random `u64` without pulling in an RNG crate.
+fn os_random_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(0x9E37_79B9_7F4A_7C15);
+    h.finish()
+}
+
 /// Resolved output configuration after validating CLI flag interactions.
 #[derive(Debug)]
 pub struct OutputConfig {
@@ -195,6 +249,16 @@ impl Cli {
     /// Upper-bound estimate of the requested allocation in bytes, for
     /// privilege checks that run before allocation. `max` estimates with
     /// `MemTotal` (the reservation size used by [`setup_test`]).
+    /// Resolve the pattern runtime config, generating a fresh random seed when
+    /// `--seed` was not given. Call once per run so the seed stays stable.
+    #[must_use]
+    pub fn pattern_config(&self) -> PatternConfig {
+        PatternConfig {
+            random_seed: self.seed.unwrap_or_else(os_random_seed),
+            random_passes: self.random_passes,
+        }
+    }
+
     #[must_use]
     pub fn requested_bytes_estimate(&self) -> usize {
         match self.size {
@@ -925,6 +989,49 @@ CapEff:\t0000000000000000";
         }
     }
 
+    mod seed_parsing {
+        use assert2::{assert, check};
+
+        use crate::cli::{parse_random_passes, parse_seed};
+
+        #[test]
+        fn hex_with_prefix() {
+            check!(parse_seed("0xDEADBEEF") == Ok(0xDEAD_BEEF));
+            check!(parse_seed("0Xff") == Ok(255));
+        }
+
+        #[test]
+        fn decimal() {
+            check!(parse_seed("42") == Ok(42));
+            check!(parse_seed("  1000  ") == Ok(1000));
+        }
+
+        #[test]
+        fn max_u64_round_trips() {
+            check!(parse_seed("0xFFFFFFFFFFFFFFFF") == Ok(u64::MAX));
+        }
+
+        #[test]
+        fn rejects_junk() {
+            assert!(parse_seed("nope").is_err());
+            assert!(parse_seed("0xZZ").is_err());
+            assert!(parse_seed("").is_err());
+        }
+
+        #[test]
+        fn random_passes_accepts_positive() {
+            check!(parse_random_passes("1") == Ok(1));
+            check!(parse_random_passes("30") == Ok(30));
+        }
+
+        #[test]
+        fn random_passes_rejects_zero_and_junk() {
+            assert!(parse_random_passes("0").is_err());
+            assert!(parse_random_passes("-1").is_err());
+            assert!(parse_random_passes("x").is_err());
+        }
+    }
+
     mod output_resolution {
         use std::path::PathBuf;
 
@@ -957,6 +1064,8 @@ CapEff:\t0000000000000000";
                 devmem_unsafe: false,
                 verbose: 0,
                 max_errors: 1000,
+                seed: None,
+                random_passes: 1,
             }
         }
 

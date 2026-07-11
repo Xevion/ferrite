@@ -1,6 +1,6 @@
 use divan::Bencher;
 use divan::counter::BytesCount;
-use ferrite::pattern::{Pattern, run_pattern};
+use ferrite::pattern::{Pattern, PatternConfig, run_pattern};
 
 const SIZES: [usize; 3] = [4 << 20, 64 << 20, 256 << 20]; // 4 / 64 / 256 MiB
 
@@ -14,6 +14,7 @@ fn solid_bits(bencher: Bencher, bytes: usize) {
                 Pattern::SolidBits,
                 &mut buf,
                 false,
+                &PatternConfig::default(),
                 &ferrite::FailureBudget::unlimited(),
                 &mut || {},
                 &|_| {},
@@ -31,6 +32,7 @@ fn walking_ones(bencher: Bencher, bytes: usize) {
                 Pattern::WalkingOnes,
                 &mut buf,
                 false,
+                &PatternConfig::default(),
                 &ferrite::FailureBudget::unlimited(),
                 &mut || {},
                 &|_| {},
@@ -48,6 +50,7 @@ fn walking_zeros(bencher: Bencher, bytes: usize) {
                 Pattern::WalkingZeros,
                 &mut buf,
                 false,
+                &PatternConfig::default(),
                 &ferrite::FailureBudget::unlimited(),
                 &mut || {},
                 &|_| {},
@@ -65,6 +68,7 @@ fn checkerboard(bencher: Bencher, bytes: usize) {
                 Pattern::Checkerboard,
                 &mut buf,
                 false,
+                &PatternConfig::default(),
                 &ferrite::FailureBudget::unlimited(),
                 &mut || {},
                 &|_| {},
@@ -82,6 +86,7 @@ fn stuck_address(bencher: Bencher, bytes: usize) {
                 Pattern::StuckAddress,
                 &mut buf,
                 false,
+                &PatternConfig::default(),
                 &ferrite::FailureBudget::unlimited(),
                 &mut || {},
                 &|_| {},

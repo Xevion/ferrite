@@ -7,6 +7,7 @@ mod checkerboard;
 mod march;
 pub mod metadata;
 mod moving_inversions;
+mod random;
 mod solid;
 mod stuck_address;
 mod walking;
@@ -15,6 +16,26 @@ use metadata::{
     Complexity, FaultClass, PatternMetadata,
     PatternTier::{Quick, Standard, Thorough},
 };
+
+/// Runtime options for patterns whose work depends on user configuration.
+/// Patterns that ignore it (everything except [`Pattern::RandomFill`]) simply
+/// don't read the fields.
+#[derive(Clone, Copy, Debug)]
+pub struct PatternConfig {
+    /// Master seed for the random-fill PRNG.
+    pub random_seed: u64,
+    /// Seeded fill-and-verify rounds the random-fill pattern runs.
+    pub random_passes: usize,
+}
+
+impl Default for PatternConfig {
+    fn default() -> Self {
+        Self {
+            random_seed: 0,
+            random_passes: 1,
+        }
+    }
+}
 
 /// All supported test patterns.
 #[derive(
@@ -28,6 +49,7 @@ pub enum Pattern {
     StuckAddress,
     MarchCMinus,
     MovingInversions,
+    RandomFill,
 }
 
 impl Pattern {
@@ -39,12 +61,13 @@ impl Pattern {
         Self::StuckAddress,
         Self::MarchCMinus,
         Self::MovingInversions,
+        Self::RandomFill,
     ];
 
     /// Number of fill-and-verify sub-passes this pattern performs.
     /// Used to size the inner progress bar.
     #[must_use]
-    pub const fn sub_passes(&self) -> u64 {
+    pub const fn sub_passes(&self, cfg: &PatternConfig) -> u64 {
         match self {
             Self::SolidBits | Self::Checkerboard => 2,
             Self::WalkingOnes | Self::WalkingZeros => 64,
@@ -52,6 +75,8 @@ impl Pattern {
             // M0–M5 of the March C- sequence.
             Self::MarchCMinus => 6,
             Self::MovingInversions => moving_inversions::SUB_PASSES,
+            // One fill and one verify per seeded round.
+            Self::RandomFill => cfg.random_passes as u64 * 2,
         }
     }
 
@@ -113,6 +138,17 @@ impl Pattern {
                 is_destructive: false,
                 tiers: &[Standard, Thorough],
             },
+            Self::RandomFill => PatternMetadata {
+                fault_classes: &[
+                    FaultClass::StuckAt,
+                    FaultClass::Coupling,
+                    FaultClass::AddressDecoder,
+                ],
+                complexity: Complexity::LinearK(2),
+                requires_physical_order: false,
+                is_destructive: false,
+                tiers: &[Standard, Thorough],
+            },
         }
     }
 }
@@ -127,8 +163,18 @@ impl fmt::Display for Pattern {
             Self::StuckAddress => write!(f, "Stuck Address"),
             Self::MarchCMinus => write!(f, "March C-"),
             Self::MovingInversions => write!(f, "Moving Inversions"),
+            Self::RandomFill => write!(f, "Random Fill"),
         }
     }
+}
+
+/// The seed worth recording for a run: `Some` when [`Pattern::RandomFill`] is
+/// in the selection (so the run can be replayed with `--seed`), else `None`.
+#[must_use]
+pub fn random_fill_seed(patterns: &[Pattern], cfg: PatternConfig) -> Option<u64> {
+    patterns
+        .contains(&Pattern::RandomFill)
+        .then_some(cfg.random_seed)
 }
 
 /// Run a test pattern on the given buffer, returning any failures found.
@@ -143,10 +189,13 @@ impl fmt::Display for Pattern {
 /// the buffer, suitable for driving activity heatmaps.
 /// `budget` caps how many failures this pattern collects; once exhausted the
 /// pattern stops early (see [`FailureBudget`]).
+/// `cfg` supplies runtime options for patterns that need them (the random-fill
+/// seed and pass count); others ignore it.
 pub fn run_pattern(
     pattern: Pattern,
     buf: &mut [u64],
     parallel: bool,
+    cfg: &PatternConfig,
     budget: &FailureBudget,
     on_subpass: &mut impl FnMut(),
     on_activity: &(dyn Fn(f64) + Sync),
@@ -161,6 +210,15 @@ pub fn run_pattern(
         Pattern::MovingInversions => {
             moving_inversions::run(buf, parallel, budget, on_subpass, on_activity)
         }
+        Pattern::RandomFill => random::run(
+            buf,
+            parallel,
+            cfg.random_seed,
+            cfg.random_passes,
+            budget,
+            on_subpass,
+            on_activity,
+        ),
     }
 }
 
@@ -209,12 +267,14 @@ mod tests {
         #[case(Pattern::StuckAddress)]
         #[case(Pattern::MarchCMinus)]
         #[case(Pattern::MovingInversions)]
+        #[case(Pattern::RandomFill)]
         fn serial(#[case] pattern: Pattern) {
             let mut buf = make_test_buf();
             let failures = run_pattern(
                 pattern,
                 &mut buf,
                 false,
+                &PatternConfig::default(),
                 &FailureBudget::unlimited(),
                 &mut || {},
                 &NOOP_ACTIVITY,
@@ -233,12 +293,14 @@ mod tests {
         #[case(Pattern::StuckAddress)]
         #[case(Pattern::MarchCMinus)]
         #[case(Pattern::MovingInversions)]
+        #[case(Pattern::RandomFill)]
         fn parallel(#[case] pattern: Pattern) {
             let mut buf = make_test_buf();
             let failures = run_pattern(
                 pattern,
                 &mut buf,
                 true,
+                &PatternConfig::default(),
                 &FailureBudget::unlimited(),
                 &mut || {},
                 &NOOP_ACTIVITY,
@@ -301,13 +363,27 @@ mod tests {
         #[case(Pattern::StuckAddress, "Stuck Address", 1)]
         #[case(Pattern::MarchCMinus, "March C-", 6)]
         #[case(Pattern::MovingInversions, "Moving Inversions", 8)]
+        #[case(Pattern::RandomFill, "Random Fill", 2)]
         fn display_and_sub_passes(
             #[case] pattern: Pattern,
             #[case] expected_name: &str,
             #[case] expected_sub_passes: u64,
         ) {
             check!(pattern.to_string() == expected_name);
-            check!(pattern.sub_passes() == expected_sub_passes);
+            check!(pattern.sub_passes(&PatternConfig::default()) == expected_sub_passes);
+        }
+
+        /// The random-fill pattern is the one whose sub-pass count is
+        /// configurable: each requested pass is a fill plus a verify.
+        #[rstest]
+        #[case(1, 2)]
+        #[case(3, 6)]
+        fn random_sub_passes_scale_with_passes(#[case] passes: usize, #[case] expected: u64) {
+            let cfg = PatternConfig {
+                random_seed: 0,
+                random_passes: passes,
+            };
+            check!(Pattern::RandomFill.sub_passes(&cfg) == expected);
         }
 
         use metadata::PatternTier;
@@ -380,6 +456,7 @@ mod tests {
                 Pattern::WalkingOnes,
                 &mut buf,
                 false,
+                &PatternConfig::default(),
                 &FailureBudget::unlimited(),
                 &mut || {
                     sub_passes += 1;
@@ -404,6 +481,7 @@ mod tests {
                 Pattern::WalkingOnes,
                 &mut buf,
                 false,
+                &PatternConfig::default(),
                 &FailureBudget::unlimited(),
                 &mut || sub_passes += 1,
                 &NOOP_ACTIVITY,

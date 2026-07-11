@@ -193,6 +193,7 @@ fn run_write(
         (stdout_ndjson, events_ndjson)
     });
 
+    let pattern_cfg = cli.pattern_config();
     let run_start = std::time::Instant::now();
     let pass_results = runner::run(
         buf.as_u64_slice_mut(),
@@ -200,6 +201,7 @@ fn run_write(
         cli.passes,
         parallel,
         cli.max_errors,
+        pattern_cfg,
         &tx,
         Some(&resolver as &(dyn PhysResolver + Sync)),
         &|_| {},
@@ -223,6 +225,7 @@ fn run_write(
         passes: cli.passes,
         patterns: patterns.to_vec(),
         workers,
+        random_seed: ferrite::pattern::random_fill_seed(patterns, pattern_cfg),
     };
     // devmem tests a fixed physical target, not acquired frames: no coverage
     // denominator and no cross-run store/gap machinery apply.

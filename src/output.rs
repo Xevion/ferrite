@@ -115,6 +115,7 @@ mod tests {
             passes: 1,
             patterns: vec![Pattern::SolidBits],
             workers: 1,
+            random_seed: None,
         };
         RunResults::from_passes(vec![], config, Duration::ZERO)
     }

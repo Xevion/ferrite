@@ -14,6 +14,7 @@ pub fn make_config() -> RunConfig {
         passes: 1,
         patterns: vec![Pattern::SolidBits],
         workers: 1,
+        random_seed: None,
     }
 }
 
@@ -102,6 +103,7 @@ pub fn multi_pattern_results() -> RunResults {
             passes: 1,
             patterns: vec![Pattern::SolidBits, Pattern::Checkerboard],
             workers: 4,
+            random_seed: None,
         },
         Duration::from_millis(150),
     )

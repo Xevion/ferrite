@@ -12,7 +12,7 @@ use crate::alloc::TestBuffer;
 use crate::dimm::DimmTopology;
 use crate::events::{self, RunEvent};
 use crate::ndjson::NdjsonEventWriter;
-use crate::pattern::Pattern;
+use crate::pattern::{Pattern, PatternConfig};
 use crate::physmem::phys::{MapStats, PagemapResolver, PhysResolver};
 use crate::physmem::sysmem::Coverage;
 use crate::runner::{self, PassResult, RunConfig};
@@ -72,13 +72,14 @@ pub struct TuiRunOutput {
 )]
 #[expect(
     clippy::too_many_arguments,
-    reason = "run config (size, passes, workers, max_errors) plus setup, patterns, tracing, and event writer all thread into one entry point"
+    reason = "run config (size, passes, workers, max_errors, pattern_cfg) plus setup, patterns, tracing, and event writer all thread into one entry point"
 )]
 pub fn run_tui_mode(
     size: usize,
     passes: usize,
     workers: usize,
     max_errors: usize,
+    pattern_cfg: PatternConfig,
     mut setup: TuiTestSetup,
     patterns: Vec<Pattern>,
     tracing_handle: &TracingReloadHandle,
@@ -169,6 +170,7 @@ pub fn run_tui_mode(
                 passes,
                 parallel,
                 max_errors,
+                pattern_cfg,
                 &event_tx,
                 resolver_ref,
                 &on_activity,
@@ -225,11 +227,13 @@ pub fn run_tui_mode(
         .unwrap()
         .unwrap_or_default();
 
+    let random_seed = crate::pattern::random_fill_seed(&patterns_for_config, pattern_cfg);
     let config = RunConfig {
         size,
         passes,
         patterns: patterns_for_config,
         workers,
+        random_seed,
     };
 
     // The events-file NDJSON summary is written here, before the caller runs the
@@ -254,7 +258,7 @@ mod tests {
     use serial_test::serial;
 
     use crate::events::{self, RunEvent};
-    use crate::pattern::Pattern;
+    use crate::pattern::{Pattern, PatternConfig};
     use crate::runner;
     use crate::shutdown;
 
@@ -271,6 +275,7 @@ mod tests {
             1,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| {},
@@ -300,6 +305,7 @@ mod tests {
             1,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| {},
@@ -332,6 +338,7 @@ mod tests {
             100,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| {},
@@ -355,6 +362,7 @@ mod tests {
             3,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| {},
@@ -381,6 +389,7 @@ mod tests {
             1,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| {},

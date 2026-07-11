@@ -6,7 +6,7 @@ use snafu::Snafu;
 
 use crate::edac::{EccDelta, EdacSnapshot};
 use crate::events::{EventTx, RunEvent};
-use crate::pattern::{Pattern, run_pattern};
+use crate::pattern::{Pattern, PatternConfig, run_pattern};
 use crate::physmem::phys::PhysResolver;
 use crate::shutdown;
 use crate::{Failure, FailureBudget};
@@ -73,6 +73,10 @@ pub struct RunConfig {
     pub patterns: Vec<Pattern>,
     /// Resolved worker-thread count for pattern execution; 1 means serial.
     pub workers: usize,
+    /// Seed the random-fill pattern ran with, present only when it was
+    /// selected. Recorded so a run can be reproduced with `--seed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub random_seed: Option<u64>,
 }
 
 /// Complete results of a test run, suitable for serialization and post-processing.
@@ -148,6 +152,7 @@ pub fn run(
     passes: usize,
     parallel: bool,
     max_errors: usize,
+    cfg: PatternConfig,
     tx: &EventTx,
     resolver: Option<&(dyn PhysResolver + Sync)>,
     on_activity: &(dyn Fn(f64) + Sync),
@@ -155,6 +160,14 @@ pub fn run(
 ) -> Result<Vec<PassResult>, PatternError> {
     let buf_bytes = buf.len() as u64 * 8;
     let mut results = Vec::with_capacity(passes);
+
+    // Surface the seed so a random-fill failure can be reproduced with --seed.
+    if patterns.contains(&Pattern::RandomFill) {
+        tracing::info!(
+            seed = format_args!("0x{:016X}", cfg.random_seed),
+            "random fill seed"
+        );
+    }
 
     // Fuse the pause check into activity reporting: both fire at the same
     // per-chunk granularity in every pattern (march and the ops callbacks), so
@@ -182,7 +195,7 @@ pub fn run(
             if shutdown::quit_requested() {
                 break;
             }
-            let sub_passes = pattern.sub_passes();
+            let sub_passes = pattern.sub_passes(&cfg);
 
             let _ = tx.send(RunEvent::TestStart {
                 pattern,
@@ -202,6 +215,7 @@ pub fn run(
                     pattern,
                     buf,
                     parallel,
+                    &cfg,
                     &budget,
                     &mut || {
                         sub_pass_count += 1;
@@ -224,7 +238,7 @@ pub fn run(
                 }
             };
             let elapsed = start.elapsed();
-            let bytes_processed = buf_bytes * 2 * pattern.sub_passes();
+            let bytes_processed = buf_bytes * 2 * pattern.sub_passes(&cfg);
             // A quit observed now means the pattern's inner loop bailed out
             // early, so its results are partial.
             let interrupted = shutdown::quit_requested();
@@ -407,6 +421,7 @@ mod tests {
                 passes: 1,
                 patterns: vec![Pattern::SolidBits],
                 workers: 1,
+                random_seed: None,
             }
         }
 
@@ -493,6 +508,7 @@ mod tests {
                 passes: 1,
                 patterns: vec![Pattern::SolidBits],
                 workers: 1,
+                random_seed: None,
             }
         }
 
@@ -521,6 +537,7 @@ mod tests {
             1,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| {},
@@ -551,6 +568,7 @@ mod tests {
             3,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| {},
@@ -574,6 +592,7 @@ mod tests {
             1,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| {},
@@ -589,7 +608,19 @@ mod tests {
     fn run_empty_patterns() {
         let mut buf = vec![0u64; 1024];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, &[], 1, false, 0, &tx, None, &|_| {}, None).unwrap();
+        let results = run(
+            &mut buf,
+            &[],
+            1,
+            false,
+            0,
+            PatternConfig::default(),
+            &tx,
+            None,
+            &|_| {},
+            None,
+        )
+        .unwrap();
         check!(results.len() == 1);
         check!(results[0].pattern_results.is_empty());
         check!(results[0].total_failures() == 0);
@@ -599,7 +630,19 @@ mod tests {
     fn run_parallel_clean() {
         let mut buf = vec![0u64; 4096];
         let (tx, _rx) = make_tx();
-        let results = run(&mut buf, Pattern::ALL, 1, true, 0, &tx, None, &|_| {}, None).unwrap();
+        let results = run(
+            &mut buf,
+            Pattern::ALL,
+            1,
+            true,
+            0,
+            PatternConfig::default(),
+            &tx,
+            None,
+            &|_| {},
+            None,
+        )
+        .unwrap();
         assert!(results.len() == 1);
         check!(results[0].total_failures() == 0);
     }
@@ -649,6 +692,7 @@ mod tests {
             1,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             Some(&resolver),
             &|_| {},
@@ -688,6 +732,7 @@ mod tests {
             1,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| shutdown::request_quit(shutdown::QuitReason::UserQuit),
@@ -712,6 +757,7 @@ mod tests {
             1,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| {},
@@ -734,6 +780,7 @@ mod tests {
             100,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| {},
@@ -753,6 +800,7 @@ mod tests {
             1,
             false,
             0,
+            PatternConfig::default(),
             &tx,
             None,
             &|_| {},

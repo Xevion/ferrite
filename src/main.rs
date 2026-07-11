@@ -147,6 +147,7 @@ fn main() -> Result<()> {
                 cli.passes,
                 workers,
                 cli.max_errors,
+                cli.pattern_config(),
                 tui_setup,
                 patterns,
                 &tracing_handle,
@@ -189,6 +190,10 @@ fn main() -> Result<()> {
 }
 
 /// Non-TUI mode: headless output with tracing to stderr.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear headless setup: event-consumer wiring, run, NDJSON summary, and results tail in one flow"
+)]
 fn run_non_tui(
     cli: &Cli,
     patterns: &[Pattern],
@@ -275,6 +280,7 @@ fn run_non_tui(
         (printer, stdout_ndjson, events_ndjson)
     });
 
+    let pattern_cfg = cli.pattern_config();
     let run_start = std::time::Instant::now();
     let pass_results = runner::run(
         setup.buffer.as_u64_slice_mut(),
@@ -282,6 +288,7 @@ fn run_non_tui(
         cli.passes,
         parallel,
         cli.max_errors,
+        pattern_cfg,
         &tx,
         setup
             .resolver
@@ -309,6 +316,7 @@ fn run_non_tui(
         passes: cli.passes,
         patterns: patterns.to_vec(),
         workers,
+        random_seed: ferrite::pattern::random_fill_seed(patterns, pattern_cfg),
     };
     let coverage = ferrite::physmem::sysmem::coverage_for(setup.map_stats.as_ref());
     let results = runner::execute_run(
