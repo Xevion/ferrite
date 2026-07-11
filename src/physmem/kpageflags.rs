@@ -3,7 +3,7 @@
 //! `/proc/kpageflags` is a flat array of 64-bit flag words indexed by PFN
 //! (8 bytes per frame, root-readable). This module owns the single canonical
 //! [`KPageFlags`] bit table used by page-map statistics ([`super::phys::MapStats`]),
-//! and both readers: [`read_one`] for a single frame and [`read_batch`] for the
+//! and both readers: `read_one` for a single frame and `read_batch` for the
 //! large sequential scans that gap classification ([`super::gap`]) performs.
 
 use std::fs::File;

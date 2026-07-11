@@ -1,3 +1,6 @@
+//! The non-TUI [`RunEvent`] consumer: prints PASS/FAIL lines, banners, and ECC summaries
+//! directly to stdout.
+
 use std::fmt;
 use std::io::Write;
 use std::time::Duration;

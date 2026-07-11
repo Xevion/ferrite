@@ -1,3 +1,6 @@
+//! The unified pattern-execution runner: drives each [`crate::pattern::Pattern`] over the
+//! allocation, emitting [`crate::events::RunEvent`]s and collecting [`crate::Failure`]s.
+
 use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
 use std::time::Instant;
@@ -88,7 +91,7 @@ pub struct RunResults {
     pub elapsed: std::time::Duration,
     pub total_failures: usize,
     /// Fraction of installed physical RAM this run tested. Set by the binary
-    /// before rendering; defaults to [`Coverage::Unavailable`].
+    /// before rendering; defaults to [`Coverage::Unavailable`](crate::physmem::sysmem::Coverage::Unavailable).
     pub coverage: crate::physmem::sysmem::Coverage,
     /// Populated by [`crate::error_analysis::analyze`] after the run completes.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,7 +101,7 @@ pub struct RunResults {
 impl RunResults {
     /// Build `RunResults` from pass results.
     ///
-    /// `coverage` defaults to [`Coverage::Unavailable`]; the binary overwrites
+    /// `coverage` defaults to [`Coverage::Unavailable`](crate::physmem::sysmem::Coverage::Unavailable); the binary overwrites
     /// it once the installed-RAM denominator is known.
     #[must_use]
     pub fn from_passes(

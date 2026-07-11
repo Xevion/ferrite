@@ -1,3 +1,6 @@
+//! [`RunEvent`]: the internal event channel connecting the [`crate::runner`] to its consumers
+//! ([`crate::headless`], [`crate::ndjson`], and the TUI).
+
 use std::time::Duration;
 
 use crate::Failure;

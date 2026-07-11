@@ -1,3 +1,6 @@
+//! NDJSON event serialization: the stable, versioned wire format for `--format json`, streamed
+//! to stdout and/or written to a file via `--events`.
+
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::time::Duration;

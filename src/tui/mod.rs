@@ -1,3 +1,5 @@
+//! The inline TUI: a ratatui-based live view over stdout, active when `--tui auto` detects a
+//! terminal. [`bridge`] hot-swaps tracing's writer to route log lines into the TUI channel.
 #![cfg_attr(coverage_nightly, coverage(off))]
 
 pub mod activity;

@@ -1,3 +1,6 @@
+//! Post-run results: [`ResultsDoc`] plus the [`ResultsRenderer`] trait for rendering a
+//! completed run's summary, from either a live run or a saved JSON document.
+
 use std::io;
 use std::path::Path;
 

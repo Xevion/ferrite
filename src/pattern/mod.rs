@@ -1,3 +1,9 @@
+//! The test pattern registry.
+//!
+//! Fill-verify patterns (solid, walking ones/zeros, checkerboard, stuck-address, march, moving
+//! inversions, random-fill), their [`metadata`], and the shared [`run_pattern`] entrypoint the
+//! [`crate::runner`] drives.
+
 use std::fmt;
 
 use crate::ops;

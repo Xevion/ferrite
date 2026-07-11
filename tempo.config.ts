@@ -17,6 +17,9 @@ export default defineConfig({
         "lint-no-default": "cargo clippy --all-targets --no-default-features -- -D warnings",
         "test-no-default":
           "cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final --no-default-features",
+        // Catches broken intra-doc links, bad code blocks, and bare URLs (denied in lib.rs).
+        // No -D warnings here: missing_docs is warn-level by design, not yet a full backfill.
+        doc: "cargo doc --no-deps --all-features --quiet",
         "dep-check": {
           cmd: "cargo machete",
           requires: [{ tool: "cargo-machete", hint: "Install with `cargo install cargo-machete`" }],

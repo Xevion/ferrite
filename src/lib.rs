@@ -1,4 +1,40 @@
+//! A userspace RAM tester: allocates and `mlock`s physical memory, then runs a suite of
+//! fill-verify [`pattern`]s over it to detect stuck bits, address-line faults, and coupling
+//! errors.
+//!
+//! # Core modules
+//!
+//! - [`alloc`]: mmap + `mlock` the test region and page-fault it in.
+//! - [`pattern`]: the test patterns themselves (solid, walking ones/zeros, checkerboard,
+//!   stuck-address, march, moving inversions, random-fill) and their [`pattern::metadata`].
+//! - [`runner`]: drives each pattern over the allocation, emitting [`events::RunEvent`]s and
+//!   collecting [`Failure`]s.
+//! - [`physmem`]: physical-address resolution, coverage tracking, and gap classification.
+//! - [`error_analysis`]: classifies collected [`Failure`]s as stuck-bit vs. coupling faults.
+//! - [`edac`] / [`dimm`] / [`smbios`]: ECC counters, DIMM identity, and topology, so a failure
+//!   can be pinned to a real module.
+//!
+//! # Output model
+//!
+//! Three independent consumers subscribe to the same [`events::RunEvent`] stream: [`headless`]
+//! (human text to stdout), [`ndjson`] (the stable `--format json` wire format), and, with the
+//! `tui` feature, [`tui`] (the inline live view). [`results`] renders the post-run summary from
+//! either a live run or a saved JSON document. See `docs/ARCHITECTURE.md` for the full data flow
+//! and `docs/VOCABULARY.md` for domain terminology.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+// Promote to an unconditional `warn` (or `deny`) once docs are backfilled.
+#![cfg_attr(doc, warn(missing_docs))]
+#![deny(
+    rustdoc::broken_intra_doc_links,
+    rustdoc::private_intra_doc_links,
+    rustdoc::missing_crate_level_docs,
+    rustdoc::bare_urls,
+    rustdoc::invalid_codeblock_attributes,
+    rustdoc::invalid_rust_codeblocks,
+    rustdoc::invalid_html_tags,
+    rustdoc::unescaped_backticks,
+    rustdoc::redundant_explicit_links
+)]
 
 pub mod alloc;
 pub mod dimm;

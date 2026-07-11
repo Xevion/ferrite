@@ -1,3 +1,5 @@
+//! The test-buffer allocator: mmap's a region, page-faults it in, and `mlock`s it against swap.
+
 use std::ffi::c_void;
 use std::fs::OpenOptions;
 use std::num::NonZeroUsize;
