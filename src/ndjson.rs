@@ -530,7 +530,7 @@ mod tests {
             drop(w);
 
             let events = read_events(&path);
-            // Only header — RunComplete from event bus is a no-op;
+            // Only header: RunComplete from event bus is a no-op;
             // the summary is written explicitly via write_run_complete.
             check!(events.len() == 1);
             let _ = std::fs::remove_file(&path);
@@ -895,7 +895,7 @@ mod tests {
             let count_after_break = count.load(AtomicOrdering::Relaxed);
             check!(count_after_break > 0);
 
-            // Second event should be suppressed — no additional write calls
+            // Second event should be suppressed: no additional write calls
             w.handle_event(&RunEvent::PassStart {
                 pass: 2,
                 total_passes: 2,

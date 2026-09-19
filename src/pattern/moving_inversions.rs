@@ -50,7 +50,7 @@ pub(super) const SUB_PASSES: u64 = SEEDS.len() as u64 * PHASES_PER_SEED;
 /// `phase.expect` (when set) before overwriting it with `phase.write` (when set),
 /// pushing a [`Failure`] on every mismatch.
 ///
-/// Returns `true` if the sweep should stop early -- a quit was requested or the
+/// Returns `true` if the sweep should stop early: a quit was requested or the
 /// shared [`FailureBudget`] was exhausted. Budget, activity, and cancellation
 /// are checked every [`REPORT_CHUNK`] cells so a wholly-bad sweep bails out
 /// without materializing one record per failing word.

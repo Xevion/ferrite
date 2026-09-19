@@ -36,13 +36,13 @@ Output is split into three independent concerns:
 - **NDJSON events:** `NdjsonEventWriter` serializes `RunEvent`s as newline-delimited JSON. Streams to stdout when `--format json`; additionally written to a file when `--events <path>` is given (independent of `--format`).
 - **Post-run results:** `ResultsDoc` + `ResultsRenderer` trait (`TableRenderer`, `JsonRenderer`) render the final summary after the run completes.
 
-**Constraint:** `--format json` is incompatible with `--tui` (the TUI owns stdout for its live display). ferrite errors with guidance: use `--tui never` for JSON output. `--events <file>` *is* supported alongside the TUI — the event stream is written to the file while the TUI renders.
+**Constraint:** `--format json` is incompatible with `--tui` (the TUI owns stdout for its live display). ferrite errors with guidance: use `--tui never` for JSON output. `--events <file>` *is* supported alongside the TUI: the event stream is written to the file while the TUI renders.
 
 In TUI mode, the `EventBridge` translates `RunEvent`s to `TuiEvent`s for the TUI event loop, and optionally writes the NDJSON event stream to the `--events` file. No headless human printing occurs.
 
 Code: `src/headless.rs`, `src/ndjson.rs`, `src/results/`, `src/tui/bridge.rs`
 
-Error handling is [snafu](https://docs.rs/snafu) exclusively (`Snafu` enums for typed library errors, `Whatever` for loose message-based errors in binary-side glue) — no `thiserror`/`anyhow`.
+Error handling is [snafu](https://docs.rs/snafu) exclusively (`Snafu` enums for typed library errors, `Whatever` for loose message-based errors in binary-side glue). `thiserror`/`anyhow` are not used.
 
 ## Module Map
 
@@ -50,16 +50,16 @@ Error handling is [snafu](https://docs.rs/snafu) exclusively (`Snafu` enums for 
 |---|---|
 | `main.rs` | Entry point, mode dispatch (`--devmem` / TUI / headless), signal handler installation |
 | `cli.rs` | `Cli` (clap derive), `setup_test()`, `check_privileges()`, size parsing |
-| `output.rs` | Shared headless output wiring: event consumption, post-run results rendering, NDJSON events-file opening — used by both the anonymous-memory path (`main.rs`) and `devmem_run.rs` so `--format`/`--events` behave identically |
+| `output.rs` | Shared headless output wiring: event consumption, post-run results rendering, NDJSON events-file opening. Used by both the anonymous-memory path (`main.rs`) and `devmem_run.rs` so `--format`/`--events` behave identically |
 | `devmem_run.rs` | `/dev/mem` targeted-testing execution path (`--devmem`): resolves the requested physical range into concrete mappings, then tests or read-only probes each; always headless |
-| `alloc.rs` | `TestBuffer` — chunked, OOM-safe mmap + mlock of anonymous memory; `CompactionGuard` — disables kernel page compaction during tests |
-| `failure.rs` | `Failure` — one failing 64-bit word (virtual address, expected, actual, physical address) |
+| `alloc.rs` | `TestBuffer`: chunked, OOM-safe mmap + mlock of anonymous memory; `CompactionGuard`: disables kernel page compaction during tests |
+| `failure.rs` | `Failure`: one failing 64-bit word (virtual address, expected, actual, physical address) |
 | `pattern/` | `Pattern` enum, `run_pattern()`, per-pattern modules: `solid`, `walking`, `checkerboard`, `stuck_address`, `march` (March C-, sequential per-cell march executor) |
 | `runner.rs` | Headless multi-pass runner: `run()`, `PassResult`, `PatternResult` |
 | `ops/` | Three-layer fill/verify operations: `scalar.rs` (coverage-measured), `avx512.rs` (excluded from coverage), `mod.rs` (dispatch) |
 | `physmem/mod.rs` | Physical-memory subsystem root: `Pfn`/`PfnRange` re-exports, `PAGE_BYTES` constant, hex-range parsing shared by `--devmem` |
 | `physmem/phys.rs` | Physical address resolution via `/proc/self/pagemap`; `PhysAddr`, `PagemapResolver`, `PhysResolver` trait, `MapStats` |
-| `physmem/pfn.rs` | `Pfn` newtype (page frame number, `physical address >> 12`) and `PfnRange` set algebra (compaction, union, subtraction, membership) — the shared substrate for coverage, gap classification, and culling |
+| `physmem/pfn.rs` | `Pfn` newtype (page frame number, `physical address >> 12`) and `PfnRange` set algebra (compaction, union, subtraction, membership): the shared substrate for coverage, gap classification, and culling |
 | `physmem/kpageflags.rs` | Unified `/proc/kpageflags` bit table (`KPageFlags`, via the `bitflags` crate); single-frame and batch readers used by `phys.rs` and `gap.rs` |
 | `physmem/sysmem.rs` | Installed-RAM denominator (`/proc/iomem` "System RAM", `MemTotal` fallback) and single-run physical `Coverage`; `RamSource`, `InstalledRam`, `Cumulative` |
 | `physmem/coverage.rs` | Cross-run coverage persistence (`--coverage-file`): `CoverageStore`, PFN range compaction/merge/subtraction, machine fingerprint guard |
@@ -69,23 +69,23 @@ Error handling is [snafu](https://docs.rs/snafu) exclusively (`Snafu` enums for 
 | `physmem/devmem.rs` | `/dev/mem` targeted testing (`--devmem`): target parsing, `memmap=`/iomem write-safety classification (`Safety::Reserved`/`SystemRam`/`FirmwareOrMmio`), `pread` read-only probe, trivial `DevMemResolver` (phys known exactly) |
 | `edac.rs` | ECC error counters from `/sys/devices/system/edac/`; `EdacSnapshot`, `DimmEdac`, `EccDelta` |
 | `smbios.rs` | DIMM info from `/sys/firmware/dmi/tables/` |
-| `dimm.rs` | `DimmTopology` — merges SMBIOS + EDAC into a per-DIMM view |
+| `dimm.rs` | `DimmTopology`: merges SMBIOS + EDAC into a per-DIMM view |
 | `error_analysis.rs` | Post-test bit error classification: `BitErrorStats`, `ErrorClassification` (StuckBit, Coupling, Mixed) |
-| `headless.rs` | `HeadlessPrinter` — human-readable live output from event bus |
-| `ndjson.rs` | `NdjsonEventWriter` — NDJSON event serialization for `--format json` / `--events` |
+| `headless.rs` | `HeadlessPrinter`: human-readable live output from event bus |
+| `ndjson.rs` | `NdjsonEventWriter`: NDJSON event serialization for `--format json` / `--events` |
 | `results/mod.rs` | `ResultsDoc`, `ResultsRenderer` trait, `TableRenderer`, `JsonRenderer` |
 | `results/render.rs` | Shared line rendering (`write_pattern_result_line`, etc.) used by both `HeadlessPrinter` and `TableRenderer` |
 | `results/fixtures.rs` | Test-only `RunResults`/`PassResult` builders shared by doc and render tests |
 | `units.rs` | Binary/decimal size and rate formatting |
 | `shutdown.rs` | Signal handling, panic hook, coordinated shutdown, exit codes |
-| `tui/mod.rs` | `TuiConfig`, `run_tui()`, `run_event_loop<B>()`, `finish_viewport<B>()` — the event-loop hub (exit teardown: drain buffered logs to scrollback, collapse the viewport cleanly) |
+| `tui/mod.rs` | `TuiConfig`, `run_tui()`, `run_event_loop<B>()`, `finish_viewport<B>()`: the event-loop hub (exit teardown: drain buffered logs to scrollback, collapse the viewport cleanly) |
 | `tui/run.rs` | `run_tui_mode()`, `TuiTestSetup` |
-| `tui/bridge.rs` | `EventBridge` — translates `RunEvent` → `TuiEvent`, updates `Segment` atomics |
-| `tui/segment.rs` | `Segment` — the TUI's per-run display unit (pattern index, progress, failure count) |
+| `tui/bridge.rs` | `EventBridge`: translates `RunEvent` → `TuiEvent`, updates `Segment` atomics |
+| `tui/segment.rs` | `Segment`: the TUI's per-run display unit (pattern index, progress, failure count) |
 | `tui/event.rs` | `TuiEvent`, `TuiFailure`, `TuiOutcome`, `TuiLoopResult`, `FlippedBits` |
-| `tui/trace.rs` | `TuiMakeWriter`, `TuiTraceState`, `TuiTraceGuard` — routes tracing output into the TUI channel and back to stderr on exit |
+| `tui/trace.rs` | `TuiMakeWriter`, `TuiTraceState`, `TuiTraceGuard`: routes tracing output into the TUI channel and back to stderr on exit |
 | `tui/render.rs` | Frame rendering: heatmaps, progress bars, status header |
-| `tui/activity.rs` | `ActivityBuffer` — activity tracking for heatmap data |
+| `tui/activity.rs` | `ActivityBuffer`: activity tracking for heatmap data |
 | `tui/palette.rs` | Color palette functions (error severity, background fade) |
 
 ## Data Flow

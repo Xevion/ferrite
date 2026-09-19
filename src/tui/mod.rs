@@ -79,7 +79,7 @@ where
     let mut log_buf: VecDeque<ratatui::text::Text<'static>> = VecDeque::with_capacity(32);
     let mut verbose = false;
 
-    // Establish the viewport before processing any events -- insert_before
+    // Establish the viewport before processing any events, since insert_before
     // misbehaves if called before the first draw.
     terminal
         .draw(|frame| {
@@ -192,7 +192,7 @@ where
 /// arrival order, so late diagnostics read continuously with the lines already
 /// shown during the run instead of being dumped after teardown. Then collapses
 /// the viewport: the region is cleared and the cursor is parked at its
-/// top-left, so the post-run summary begins exactly where the viewport was —
+/// top-left, so the post-run summary begins exactly where the viewport was,
 /// with no dead whitespace. Finally restores cursor visibility for the shell.
 ///
 /// Generic over the backend so tests can drive it with `TestBackend`.

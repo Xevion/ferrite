@@ -214,7 +214,7 @@ pub fn run_tui_mode(
     drop(TuiTraceGuard::new(trace_state, tui_rx));
 
     // Wait for the worker with a bounded timeout (recv_timeout is race-free
-    // unlike Condvar::wait_timeout — the message sits in the buffer).
+    // unlike Condvar::wait_timeout, because the message sits in the buffer).
     if done_rx.recv_timeout(Duration::from_secs(5)).is_err() {
         eprintln!("Worker did not exit within 5s, forcing exit");
         shutdown::force_exit(2);
@@ -244,7 +244,7 @@ pub fn run_tui_mode(
 
     // The events-file NDJSON summary is written here, before the caller runs the
     // shared results tail. Its coverage therefore reflects only this run (no
-    // cumulative merge yet) -- matching the pre-refactor behavior.
+    // cumulative merge yet), matching the pre-refactor behavior.
     let total_failures: usize = pass_results.iter().map(PassResult::total_failures).sum();
     if let Some(w) = events_writer.as_mut() {
         w.write_run_complete(passes, total_failures, run_elapsed, coverage);

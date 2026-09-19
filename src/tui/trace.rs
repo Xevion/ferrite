@@ -201,6 +201,6 @@ mod tests {
         assert!(state.is_active());
         drop(guard);
         assert!(!state.is_active());
-        // rx is consumed by the guard — channel fully disconnected
+        // rx is consumed by the guard: channel fully disconnected
     }
 }

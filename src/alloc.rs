@@ -333,7 +333,7 @@ impl TestBuffer {
     /// `phys_start` and `len` must both be page-aligned. `writable` selects
     /// `PROT_READ|PROT_WRITE` (for destructive pattern testing) versus a
     /// read-only probe. The mapping is `MAP_SHARED` so writes reach physical
-    /// memory. No `mlock` is needed — a `/dev/mem` mapping already points at
+    /// memory. No `mlock` is needed because a `/dev/mem` mapping already points at
     /// fixed physical frames.
     ///
     /// # Errors
@@ -405,7 +405,7 @@ impl TestBuffer {
         self.len
     }
 
-    /// Always returns `false` -- the constructor rejects zero-size allocations.
+    /// Always returns `false` because the constructor rejects zero-size allocations.
     #[must_use]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub const fn is_empty(&self) -> bool {
@@ -623,7 +623,7 @@ mod tests {
         fn small_budgeted_allocation_completes() {
             // 4 MiB fits default RLIMIT_MEMLOCK on modern systems. If this
             // environment forbids mlock outright, that's an env limitation,
-            // not a code failure -- the walk logic is covered by walk_chunks.
+            // not a code failure, since the walk logic is covered by walk_chunks.
             match TestBuffer::new_budgeted(4 * 1024 * 1024, 0) {
                 Ok((buf, outcome)) => {
                     check!(buf.len() == 4 * 1024 * 1024);

@@ -193,7 +193,7 @@ fn try_read_csrow_api(mc_path: &Path, mc_index: usize, dimms: &mut Vec<DimmEdac>
 
 fn read_u64_file(path: &Path) -> Option<u64> {
     // A missing counter file is normal (feature/field absent); any other read
-    // failure -- e.g. permission denied on a present file -- is worth surfacing
+    // failure (e.g. permission denied on a present file) is worth surfacing
     // rather than silently reporting a zero count.
     match fs::read_to_string(path) {
         Ok(s) => s.trim().parse().ok(),

@@ -72,7 +72,7 @@ pub fn failing_results() -> RunResults {
     results
 }
 
-/// One pass, two patterns -- distinct timings and sizes so per-pattern
+/// One pass, two patterns: distinct timings and sizes so per-pattern
 /// rendering is observable.
 pub fn multi_pattern_results() -> RunResults {
     RunResults::from_passes(

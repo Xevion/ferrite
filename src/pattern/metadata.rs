@@ -54,7 +54,7 @@ pub enum Complexity {
 ///
 /// Tiers are cumulative in coverage: [`Thorough`](Self::Thorough) is a superset
 /// of [`Standard`](Self::Standard), which is a superset of [`Quick`](Self::Quick).
-/// [`Destructive`](Self::Destructive) is orthogonal -- opt-in patterns that may
+/// [`Destructive`](Self::Destructive) is orthogonal: opt-in patterns that may
 /// induce errors as a side effect and are never run implicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum PatternTier {

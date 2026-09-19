@@ -2,7 +2,7 @@
 //!
 //! Aggregates a run's [`crate::Failure`]s into [`BitErrorStats`] and
 //! classifies the pattern as [`ErrorClassification::StuckBit`], `Coupling`,
-//! or `Mixed` -- distinguishing a cell permanently stuck at one value from an
+//! or `Mixed`: distinguishing a cell permanently stuck at one value from an
 //! address-aliasing fault where writes bleed between cells.
 
 use serde::Serialize;
@@ -20,7 +20,7 @@ pub struct BitErrorStats {
     pub lowest_phys: Option<u64>,
     /// Highest physical address with an error.
     pub highest_phys: Option<u64>,
-    /// OR of all XOR masks -- which bit positions have ever flipped.
+    /// OR of all XOR masks: which bit positions have ever flipped.
     pub union_xor_mask: u64,
     /// Count of flips per bit position (index 0 = bit 0).
     pub bit_flip_counts: [u32; 64],
@@ -123,12 +123,12 @@ impl BitErrorStats {
 pub enum ErrorClassification {
     /// No errors recorded.
     NoErrors,
-    /// Same bit position(s) flip in every error -- likely a hard stuck bit.
+    /// Same bit position(s) flip in every error: likely a hard stuck bit.
     StuckBit {
         /// Bit positions (0-63) that are consistently stuck.
         positions: Vec<u8>,
     },
-    /// Different bits flip across errors -- coupling or disturbance faults.
+    /// Different bits flip across errors: coupling or disturbance faults.
     Coupling,
     /// Some bits are consistently stuck, but other bits also flip inconsistently.
     Mixed,
@@ -141,7 +141,7 @@ pub struct ErrorAnalysis {
     pub classification: ErrorClassification,
     /// `(bit_position, flip_count)` pairs for every bit that flipped at least once.
     pub bit_positions: Vec<(u8, u32)>,
-    /// OR of all XOR masks -- which bit positions have ever flipped.
+    /// OR of all XOR masks (which bit positions have ever flipped).
     pub union_xor_mask: u64,
     /// Lowest physical address with an error.
     pub lowest_phys: Option<u64>,
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn bit_position_counts() {
         let mut stats = BitErrorStats::new();
-        // Bits 0, 1, and 2 flip -- bit 0 flips twice
+        // Bits 0, 1, and 2 flip. Bit 0 flips twice
         stats.record(&f(0x1000, 0x7, 0x4)); // bits 0,1 flipped
         stats.record(&f(0x2000, 0x5, 0x0)); // bits 0,2 flipped
 
@@ -305,7 +305,7 @@ mod tests {
         #[test]
         fn coupling_errors_vary() {
             let mut stats = BitErrorStats::new();
-            // Different bits flip each time -- no consistently stuck bit
+            // Different bits flip each time: no consistently stuck bit
             stats.record(&f(0x1000, 0xFF, 0xFE)); // bit 0 flipped
             stats.record(&f(0x2000, 0xFF, 0xFD)); // bit 1 flipped
 

@@ -60,7 +60,7 @@ pub use alloc::CompactionGuard;
 pub use failure::{Failure, FailureBudget};
 
 /// Internal functions exposed for benchmark targets via thin wrappers.
-/// Not stable API -- only available with `--features bench`.
+/// Not stable API, only available with `--features bench`.
 #[cfg(feature = "bench")]
 pub mod bench_api {
     use crate::Failure;

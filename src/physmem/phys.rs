@@ -24,13 +24,13 @@ use super::{PAGE_BYTES, PAGE_BYTES_USIZE};
 pub struct PhysAddr(pub u64);
 
 impl PhysAddr {
-    /// The page frame number (PFN) -- physical address >> 12.
+    /// The page frame number (PFN): physical address >> 12.
     #[must_use]
     pub const fn pfn(self) -> u64 {
         self.0 >> 12
     }
 
-    /// The page offset -- lower 12 bits.
+    /// The page offset: lower 12 bits.
     #[must_use]
     pub const fn page_offset(self) -> u64 {
         self.0 & 0xFFF
@@ -83,7 +83,7 @@ pub enum PhysError {
         /// The virtual address that was queried.
         vaddr: usize,
     },
-    /// The page is present but its PFN reads as zero -- the process lacks
+    /// The page is present but its PFN reads as zero because the process lacks
     /// `CAP_SYS_ADMIN`.
     #[snafu(display("PFN not available (requires CAP_SYS_ADMIN) at virtual address 0x{vaddr:x}"))]
     PfnUnavailable {
@@ -121,7 +121,7 @@ pub enum PhysResolverError {
         /// The underlying pagemap error.
         source: PhysError,
     },
-    /// `/proc/self/pagemap` is not available -- the kernel may not support it,
+    /// `/proc/self/pagemap` is not available: the kernel may not support it,
     /// or the file is missing on this system. Safe to continue without
     /// physical addresses.
     #[snafu(display("pagemap unavailable: {source}"))]
@@ -171,7 +171,7 @@ pub struct MapStats {
     pub total_pages: usize,
     /// Pages that resolved to a real physical frame (nonzero PFN). Equals
     /// `total_pages` under root; lower when some PFNs are unavailable. This is
-    /// the physical footprint actually tested -- the coverage numerator.
+    /// the physical footprint actually tested: the coverage numerator.
     pub resolved_pages: usize,
     /// Pages backed by a hugetlbfs huge page.
     pub huge_pages: usize,
@@ -184,8 +184,8 @@ pub struct MapStats {
 }
 
 impl MapStats {
-    /// Physical bytes backed by resolved page frames -- the numerator for
-    /// coverage. Pages whose PFN could not be resolved are excluded.
+    /// Physical bytes backed by resolved page frames (the numerator for
+    /// coverage). Pages whose PFN could not be resolved are excluded.
     #[must_use]
     pub const fn tested_bytes(&self) -> u64 {
         self.resolved_pages as u64 * PAGE_BYTES

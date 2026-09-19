@@ -33,7 +33,7 @@ fn read_proc(path: &str) -> Option<String> {
 pub enum RamSource {
     /// Summed `/proc/iomem` "System RAM" ranges (authoritative, needs root).
     ProcIomem,
-    /// `/proc/meminfo` `MemTotal` -- a slight underestimate (excludes
+    /// `/proc/meminfo` `MemTotal`: a slight underestimate (excludes
     /// firmware/kernel-reserved regions), used when `/proc/iomem` is not
     /// readable as root.
     MemTotal,
@@ -82,7 +82,7 @@ pub enum Coverage {
         #[serde(skip_serializing_if = "Option::is_none")]
         gap: Option<crate::physmem::gap::GapReport>,
     },
-    /// Coverage could not be measured -- no physical address resolution
+    /// Coverage could not be measured: no physical address resolution
     /// (`--no-phys` or missing `CAP_SYS_ADMIN`), or no denominator available.
     Unavailable,
 }
@@ -159,7 +159,7 @@ pub fn installed_ram() -> Option<InstalledRam> {
 /// large as `MemTotal` (the root case), otherwise `MemTotal`.
 ///
 /// Without root, every `/proc/iomem` address reads as zero, collapsing each
-/// range to a single byte -- far below `MemTotal` -- so the comparison routes
+/// range to a single byte (far below `MemTotal`), so the comparison routes
 /// to the fallback automatically.
 #[must_use]
 const fn select_installed_ram(iomem_bytes: u64, memtotal: Option<u64>) -> Option<InstalledRam> {

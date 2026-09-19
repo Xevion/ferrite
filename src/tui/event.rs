@@ -31,7 +31,7 @@ pub struct TuiLoopResult {
 pub enum FlippedBits {
     /// Exactly one bit flipped.
     Single(u8),
-    /// Multiple bits flipped — stores bit count and the full XOR mask.
+    /// Multiple bits flipped: stores bit count and the full XOR mask.
     Multi {
         /// Number of bits that differed.
         count: u8,

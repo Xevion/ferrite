@@ -11,7 +11,7 @@ use crate::physmem::phys::MapStats;
 
 /// Top-level event emitted by the unified runner via `crossbeam_channel`.
 ///
-/// These are **internal** event types — unstable, free to change between versions.
+/// These are **internal** event types: unstable, free to change between versions.
 /// The stable NDJSON schema (XEV-611) is a curated projection of these.
 #[derive(Debug)]
 pub enum RunEvent {

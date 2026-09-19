@@ -154,7 +154,7 @@ pub fn install_signal_handlers() -> Result<ShutdownHandle, Whatever> {
 /// normal exits and unwind-style panics, while this hook fires even with
 /// `panic = "abort"` (where Drop doesn't run).
 ///
-/// Safe to call even when the TUI isn't active -- `disable_raw_mode` is
+/// Safe to call even when the TUI isn't active, because `disable_raw_mode` is
 /// idempotent.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn install_panic_hook() {

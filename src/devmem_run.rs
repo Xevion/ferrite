@@ -155,7 +155,7 @@ fn run_write(
 
     // --format json without --events <file>: NDJSON events stream to stdout.
     let json_to_stdout = format == OutputFormat::Json && output.events_file.is_none();
-    // Suppress human output when format is JSON -- stdout is a JSON-only surface.
+    // Suppress human output when format is JSON, since stdout is a JSON-only surface.
     let suppress_human = format == OutputFormat::Json;
 
     let mut stdout_ndjson =

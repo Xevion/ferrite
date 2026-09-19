@@ -6,11 +6,11 @@
 
 A userspace memory tester for Linux, written in Rust.
 
-Named after ferrite core memory -- the dominant RAM technology of the 1960s and 70s, where tiny iron rings were magnetized to store individual bits. Testing RAM with iron.
+Named after ferrite core memory: the dominant RAM technology of the 1960s and 70s, where tiny iron rings were magnetized to store individual bits. Testing RAM with iron.
 
 ## What it does
 
-Allocates a region of physical RAM, locks it against swapping via `mlock`, then runs a suite of test patterns to detect stuck bits, address aliasing, and coupling faults. Designed to run while the OS is live -- not a replacement for memtest86+, but a fast sanity check you can run without a reboot.
+Allocates a region of physical RAM, locks it against swapping via `mlock`, then runs a suite of test patterns to detect stuck bits, address aliasing, and coupling faults. Designed to run while the OS is live. It's not a replacement for memtest86+, but a fast sanity check you can run without a reboot.
 
 Patterns: Solid Bits, Walking Ones/Zeros, Checkerboard, Stuck Address, and March C- (a sequential march test that also catches coupling and address-decoder faults the others miss).
 
@@ -38,11 +38,11 @@ ferrite --format json
 ferrite --coverage-file coverage.json --cull
 ```
 
-Large allocations require sufficient `RLIMIT_MEMLOCK` -- either run as root, raise the limit with `ulimit -l unlimited`, or grant `CAP_IPC_LOCK` to the binary.
+Large allocations require sufficient `RLIMIT_MEMLOCK`: either run as root, raise the limit with `ulimit -l unlimited`, or grant `CAP_IPC_LOCK` to the binary.
 
 ## Limitations
 
-Userspace testing cannot reach 100% of RAM -- the kernel, running processes, and ferrite itself occupy memory that can't be touched. `--cull` and cross-run coverage tracking push the reachable ceiling higher, but for comprehensive coverage use memtest86+.
+Userspace testing cannot reach 100% of RAM because the kernel, running processes, and ferrite itself occupy memory that can't be touched. `--cull` and cross-run coverage tracking push the reachable ceiling higher, but for comprehensive coverage use memtest86+.
 
 ## Building
 

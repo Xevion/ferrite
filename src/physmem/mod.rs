@@ -3,8 +3,8 @@
 //! `/dev/mem` targeted testing.
 //!
 //! Everything here reasons about physical frames (PFNs) and byte-granular
-//! physical addresses. The two are distinct units -- [`pfn::Pfn`] is the frame
-//! number, [`phys::PhysAddr`] the byte address -- and conversions between them
+//! physical addresses. The two are distinct units ([`pfn::Pfn`] is the frame
+//! number, [`phys::PhysAddr`] the byte address), and conversions between them
 //! go through [`pfn::Pfn::to_addr`] / [`pfn::Pfn::from_addr`].
 
 pub mod coverage;
@@ -32,7 +32,7 @@ pub const PAGE_BYTES_USIZE: usize = PAGE_BYTES as usize;
 /// `allow_prefix` tolerates a leading `0x`/`0X` on each number (as `--devmem`
 /// arguments may carry); with it `false`, only bare hex is accepted (matching
 /// the format `/proc/iomem` prints). No ordering relationship between `start`
-/// and `end` is imposed -- callers apply their own validation and error style.
+/// and `end` is imposed. Callers apply their own validation and error style.
 #[must_use]
 pub fn parse_hex_range(s: &str, allow_prefix: bool) -> Option<(u64, u64)> {
     let (start, end) = s.split_once('-')?;

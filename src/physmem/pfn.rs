@@ -3,7 +3,7 @@
 //! A [`Pfn`] is a page-granular frame index (`physical address >> 12`), the
 //! unit every PFN-indexed kernel interface speaks. It is deliberately a
 //! separate type from [`super::phys::PhysAddr`] (a byte-granular physical
-//! address) to prevent unit confusion -- a PFN is not a physical address, and
+//! address) to prevent unit confusion, because a PFN is not a physical address, and
 //! the two never mix without an explicit [`Pfn::to_addr`] / [`Pfn::from_addr`]
 //! conversion. Zero is a valid frame.
 //!

@@ -2,7 +2,7 @@
 //! memory fault in ferrite.
 //!
 //! Carries the virtual address, expected/actual values, and (when physical
-//! resolution is available) the [`crate::physmem::phys::PhysAddr`] -- enough
+//! resolution is available) the [`crate::physmem::phys::PhysAddr`], enough
 //! to report and later classify ([`crate::error_analysis`]) every fault a
 //! pattern finds.
 
@@ -27,7 +27,7 @@ pub struct Failure {
 }
 
 impl Failure {
-    /// Bitwise XOR of expected and actual values -- set bits mark where they differ.
+    /// Bitwise XOR of expected and actual values: set bits mark where they differ.
     #[must_use]
     pub const fn xor(&self) -> u64 {
         self.expected ^ self.actual
@@ -68,8 +68,8 @@ impl fmt::Display for Failure {
 /// run may collect.
 ///
 /// On catastrophically-bad memory a pattern would otherwise materialize one
-/// record per failing word -- hundreds of millions of them for a multi-GiB
-/// buffer -- and exhaust RAM inside the verify collect before the runner ever
+/// record per failing word (hundreds of millions of them for a multi-GiB
+/// buffer) and exhaust RAM inside the verify collect before the runner ever
 /// sees the result. The verify paths claim against this budget as they go,
 /// truncating their contribution once the cap is reached, so total live
 /// `Failure` memory stays bounded regardless of how bad the DIMM is.
@@ -94,7 +94,7 @@ impl FailureBudget {
         }
     }
 
-    /// An unlimited budget that never caps -- for benchmarks and tests.
+    /// An unlimited budget that never caps, for benchmarks and tests.
     #[must_use]
     pub const fn unlimited() -> Self {
         Self::new(0)

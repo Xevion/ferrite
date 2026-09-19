@@ -18,14 +18,14 @@ use crate::physmem::pfn::{Pfn, PfnRange, subtract_ranges};
 /// run could reach it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameClass {
-    /// In the buddy allocator -- acquirable right now.
+    /// In the buddy allocator: acquirable right now.
     Free,
-    /// File-backed page cache -- acquirable under allocation pressure.
+    /// File-backed page cache: acquirable under allocation pressure.
     Reclaimable,
-    /// Anonymous or shmem/tmpfs memory of other processes -- freed by
+    /// Anonymous or shmem/tmpfs memory of other processes, freed by
     /// stopping services or rebooting.
     InUse,
-    /// Kernel text/data, slab, page tables, reserved, poisoned, offline --
+    /// Kernel text/data, slab, page tables, reserved, poisoned, offline:
     /// unreachable from userspace by design.
     Unreachable,
 }
@@ -56,9 +56,9 @@ pub const fn classify(flags: KPageFlags) -> FrameClass {
 /// Byte totals per [`FrameClass`] over the untested remainder.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct GapReport {
-    /// In the buddy allocator -- acquirable right now.
+    /// In the buddy allocator: acquirable right now.
     pub free_bytes: u64,
-    /// File-backed page cache -- acquirable under allocation pressure.
+    /// File-backed page cache: acquirable under allocation pressure.
     pub reclaimable_bytes: u64,
     /// In use by other processes (anonymous or shmem/tmpfs).
     pub in_use_bytes: u64,

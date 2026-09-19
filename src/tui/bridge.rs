@@ -409,7 +409,7 @@ mod tests {
             let (bridge, rx) = make_bridge(segment, 1);
 
             let (event_tx, event_rx) = crate::events::event_bus();
-            // Send RunComplete without any PassComplete -- the segment never completed.
+            // Send RunComplete without any PassComplete. The segment never completed.
             event_tx.send(RunEvent::RunComplete).unwrap();
             drop(event_tx);
 
@@ -453,7 +453,7 @@ mod tests {
             let (bridge, rx) = make_bridge(segment, 1);
 
             let (event_tx, event_rx) = crate::events::event_bus();
-            // Drop sender without sending RunComplete -- simulates disconnect
+            // Drop sender without sending RunComplete: simulates disconnect
             drop(event_tx);
 
             bridge.run(&event_rx, None);

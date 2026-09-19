@@ -96,7 +96,7 @@ impl<S: tracing::Subscriber> Layer<S> for LogForwarder {
 ///
 /// `record_debug` and `record_str` are implemented; every other typed
 /// `record_*` method defaults to `record_debug`, so most fields are captured
-/// as their `Debug` rendering. This is a deliberately minimal projection --
+/// as their `Debug` rendering. This is a deliberately minimal projection:
 /// structured typing is not preserved.
 #[derive(Default)]
 struct LogVisitor {

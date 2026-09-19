@@ -22,7 +22,7 @@ pub const FAIL_HIGH: Color = Color::Rgb(255, 50, 30);
 /// Foreground color for the most severe failure count.
 pub const FAIL_FIRE: Color = Color::Rgb(255, 0, 80);
 
-// Failure severity gradient (background -- subtle tints for dark terminals)
+// Failure severity gradient (background, subtle tints for dark terminals)
 /// Background floor that aged failure tints fade toward.
 pub const FAIL_BG_MIN: Color = Color::Rgb(45, 40, 20);
 /// Background tint for a single failure.

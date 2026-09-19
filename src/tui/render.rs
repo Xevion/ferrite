@@ -703,7 +703,7 @@ mod tests {
             render_heatmap(frame, &segment, &failures, elapsed, false, SymbolSet::Ascii);
         })
         .unwrap();
-        // Should not panic -- layout fits all sections
+        // Should not panic: layout fits all sections
     }
 
     #[test]

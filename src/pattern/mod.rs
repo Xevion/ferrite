@@ -268,7 +268,7 @@ mod tests {
 
     static NOOP_ACTIVITY: fn(f64) = |_| {};
 
-    /// Parametrized clean-memory tests -- one case per pattern x serial/parallel.
+    /// Parametrized clean-memory tests: one case per pattern x serial/parallel.
     /// New patterns added to `Pattern::ALL` are automatically covered here.
     mod clean_memory {
         use assert2::assert;
@@ -406,7 +406,7 @@ mod tests {
         use metadata::PatternTier;
 
         /// Every pattern must declare at least one fault class and belong to at
-        /// least one tier -- a pattern that detects nothing or runs in no tier
+        /// least one tier, because a pattern that detects nothing or runs in no tier
         /// is dead weight and almost certainly a metadata mistake.
         #[test]
         fn every_pattern_has_faults_and_tiers() {
@@ -423,7 +423,7 @@ mod tests {
             }
         }
 
-        /// The Thorough tier is the superset -- anything a lighter tier runs,
+        /// The Thorough tier is the superset: anything a lighter tier runs,
         /// Thorough must also run, or "thorough" is a lie.
         #[test]
         fn thorough_tier_is_a_superset() {
@@ -438,7 +438,7 @@ mod tests {
             }
         }
 
-        /// A pattern listing the same fault class twice is a copy-paste slip --
+        /// A pattern listing the same fault class twice is a copy-paste slip:
         /// the declaration is meant to be a set.
         #[test]
         fn fault_classes_have_no_duplicates() {

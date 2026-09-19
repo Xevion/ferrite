@@ -18,7 +18,7 @@ bitflags! {
     /// Public /proc/kpageflags bits (Documentation/admin-guide/mm/pagemap.rst).
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct KPageFlags: u64 {
-        /// On an LRU list -- reclaimable page cache or anonymous memory.
+        /// On an LRU list: reclaimable page cache or anonymous memory.
         const LRU = 1 << 5;
         /// Kernel slab allocator page.
         const SLAB = 1 << 7;

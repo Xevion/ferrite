@@ -9,7 +9,7 @@ use crate::units::UnitSystem;
 /// live headless printer ([`crate::headless::HeadlessPrinter`]) and the full
 /// post-run table renderer ([`TableRenderer`]).
 ///
-/// Does not print individual failure details -- callers with access to raw
+/// Does not print individual failure details. Callers with access to raw
 /// `Failure` values append those separately.
 pub fn write_pattern_result_line(
     out: &mut dyn Write,
@@ -33,7 +33,7 @@ pub fn write_pattern_result_line(
             "  {label} {name:<20} {elapsed:>10}  {throughput:>}{suffix}",
         )
     } else {
-        // When capped, more failures existed than were collected -- show `N+`
+        // When capped, more failures existed than were collected, so show `N+`
         // and flag the cap so the count isn't mistaken for the true total.
         let count = if capped {
             format!(
@@ -335,7 +335,7 @@ impl ResultsRenderer for TableRenderer {
             }
         }
 
-        // Physical coverage block -- the memory-centric headline for the run.
+        // Physical coverage block: the memory-centric headline for the run.
         if let Some(cov) = doc.coverage() {
             self.render_coverage(&cov, out)?;
         }

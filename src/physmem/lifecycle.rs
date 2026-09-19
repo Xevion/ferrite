@@ -87,7 +87,7 @@ pub fn cull_ranges(cull: bool, ctx: Option<&CoverageCtx>) -> Option<Vec<PfnRange
 }
 
 /// Merge a completed run into the coverage store, persist it, and attach
-/// cumulative stats to the results. Interrupted runs are not merged -- their
+/// cumulative stats to the results. Interrupted runs are not merged, because their
 /// frames were not tested by every selected pattern.
 ///
 /// Returns the covered set for gap classification: the store's cumulative

@@ -53,7 +53,7 @@ pub enum ColorMode {
     Never,
 }
 
-/// ferrite -- userspace RAM testing tool for Linux
+/// ferrite: userspace RAM testing tool for Linux
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Cli {
@@ -551,7 +551,7 @@ fn report_alloc_outcome(outcome: &ferrite::alloc::AllocOutcome, spec: SizeSpec) 
 
 pub struct TestSetup {
     pub buffer: TestBuffer,
-    /// Held for its [`Drop`] side-effect -- restores the compaction sysctl on teardown.
+    /// Held for its [`Drop`] side-effect: restores the compaction sysctl on teardown.
     #[cfg_attr(
         not(feature = "tui"),
         expect(

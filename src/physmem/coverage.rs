@@ -1,8 +1,8 @@
 //! Cross-run physical coverage persistence.
 //!
 //! A coverage store accumulates the set of physical frames (PFNs) that
-//! completed runs have tested, so consecutive runs -- and runs separated by
-//! reboots -- can report cumulative coverage and how much new physical memory
+//! completed runs have tested, so consecutive runs (and runs separated by
+//! reboots) can report cumulative coverage and how much new physical memory
 //! each run contributed. See `docs/COVERAGE.md`.
 //!
 //! On-disk format: versioned JSON with compacted PFN ranges. The store is
@@ -91,7 +91,7 @@ pub enum CoverageError {
         found: u32,
     },
     /// The file's machine fingerprint does not match this machine's current
-    /// memory layout -- the physical configuration changed since it was written.
+    /// memory layout, because the physical configuration changed since it was written.
     #[snafu(display(
         "coverage file belongs to a different memory configuration \
          (fingerprint mismatch) -- delete it or point --coverage-file elsewhere"
@@ -108,7 +108,7 @@ pub struct CoverageStore {
     pub fingerprint: Fingerprint,
     /// History of every run merged into the store.
     pub runs: Vec<RunRecord>,
-    /// Sorted, disjoint, non-adjacent ranges -- the canonical covered set.
+    /// Sorted, disjoint, non-adjacent ranges: the canonical covered set.
     pub ranges: Vec<PfnRange>,
 }
 

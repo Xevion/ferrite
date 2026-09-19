@@ -15,7 +15,7 @@
 //! traversal visits physically adjacent cells. With scattered 4 KiB pages that
 //! holds only within a page; SAF/TF/AF detection is unaffected by layout.
 //! Hugepages (2 MiB) restore physical contiguity within each page. This
-//! mirrors what `MemTest86`+ does with Moving Inversions -- a practical
+//! mirrors what `MemTest86`+ does with Moving Inversions: a practical
 //! approximation, not a formal guarantee.
 
 use std::ptr;
@@ -87,8 +87,8 @@ const fn word(bit: bool) -> u64 {
 
 /// Apply one march element to `buf` in its traversal direction, pushing a
 /// [`Failure`] for every read whose observed word differs from its expected
-/// state. Returns `true` if the sweep should stop early -- a quit was requested
-/// or the shared [`FailureBudget`] was exhausted.
+/// state. Returns `true` if the sweep should stop early (a quit was requested
+/// or the shared [`FailureBudget`] was exhausted).
 ///
 /// Activity is reported, cancellation checked, and the accumulated failures
 /// capped against `budget` every [`REPORT_CHUNK`] cells, so a long element on

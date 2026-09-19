@@ -34,7 +34,7 @@ impl AlignedBuffer {
     fn new(words: usize) -> Self {
         let layout = Layout::from_size_align(words * size_of::<u64>(), 64).expect("invalid layout");
         // SAFETY: layout has non-zero size (words > 0 for any bench size).
-        // SAFETY: alloc_zeroed uses layout which guarantees 64-byte alignment — sufficient for u64 (8 bytes).
+        // SAFETY: alloc_zeroed uses layout which guarantees 64-byte alignment, sufficient for u64 (8 bytes).
         #[expect(
             clippy::cast_ptr_alignment,
             reason = "layout guarantees 64-byte alignment, satisfying u64's stricter alignment"

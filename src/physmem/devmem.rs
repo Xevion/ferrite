@@ -2,7 +2,7 @@
 //!
 //! The normal path tests whatever physical pages the allocator hands out.
 //! This backend maps a *chosen* physical range through `/dev/mem`, so you can
-//! test a specific address — e.g. the neighborhood of a known-bad cell — or
+//! test a specific address (e.g. the neighborhood of a known-bad cell) or
 //! the `memmap=`-reserved regions the kernel has carved out of RAM.
 //!
 //! # Safety model
@@ -11,11 +11,11 @@
 //! instantly. Every target is classified against `/proc/iomem` and the
 //! `memmap=` reservations on `/proc/cmdline`:
 //!
-//! - [`Safety::Reserved`] — inside a `memmap=`-reserved region. The kernel
+//! - [`Safety::Reserved`]: inside a `memmap=`-reserved region. The kernel
 //!   does not touch it, so writes are safe. Allowed by default.
-//! - [`Safety::SystemRam`] — live System RAM. Writing here can crash the
+//! - [`Safety::SystemRam`]: live System RAM. Writing here can crash the
 //!   machine; allowed only with `--devmem-unsafe`.
-//! - [`Safety::FirmwareOrMmio`] — neither reserved-RAM nor System RAM (ACPI
+//! - [`Safety::FirmwareOrMmio`]: neither reserved-RAM nor System RAM (ACPI
 //!   tables, PCI MMIO, firmware). Writing can brick hardware; **never**
 //!   allowed, even with `--devmem-unsafe`.
 //!
@@ -80,7 +80,7 @@ pub struct ProbeStats {
     pub words_read: usize,
     /// Words that were nonzero.
     pub nonzero_words: usize,
-    /// XOR of every word read -- a reachability signature, not a stable checksum.
+    /// XOR of every word read: a reachability signature, not a stable checksum.
     pub xor_checksum: u64,
 }
 
@@ -411,7 +411,7 @@ mod tests {
 
         #[test]
         fn ignores_non_reserve_forms() {
-            // @ = usable, # = ACPI, ! = mark -- none are safe-to-write reservations.
+            // @ = usable, # = ACPI, ! = mark: none are safe-to-write reservations.
             let cmdline = "memmap=1G@0x100000000 memmap=4M#0x50000000 memmap=1M!0x60000000";
             check!(parse_memmap_reserved(cmdline).is_empty());
         }

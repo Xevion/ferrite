@@ -58,9 +58,9 @@ pub const BLOCK_FRAMES: usize = BLOCK_BYTES / PAGE_BYTES_USIZE;
 /// shorter when the region is not block-aligned.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Partition {
-    /// Block runs whose every frame is already covered -- keep mapped.
+    /// Block runs whose every frame is already covered: keep mapped.
     pub hostages: Vec<(usize, usize)>,
-    /// Block runs holding at least one untested or unresolved frame --
+    /// Block runs holding at least one untested or unresolved frame:
     /// return to the kernel for the test buffer to re-acquire.
     pub fresh: Vec<(usize, usize)>,
 }
@@ -368,8 +368,8 @@ mod tests {
         #[test]
         fn bounded_sweep_with_no_coverage_holds_nothing() {
             // Without prior coverage every block is fresh. In environments
-            // where mlock or the sweep fails, the sieve degrades to empty --
-            // the invariants below hold either way.
+            // where mlock or the sweep fails, the sieve degrades to empty.
+            // The invariants below hold either way.
             match FrameSieve::hold(&[], 0, Some(4 * BLOCK_BYTES)) {
                 Ok((sieve, outcome)) => {
                     check!(outcome.held == 0);

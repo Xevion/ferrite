@@ -1,4 +1,4 @@
-//! Dispatch layer (Layer C of the SIMD three-layer pattern -- see `CLAUDE.md`): checks AVX-512
+//! Dispatch layer (Layer C of the SIMD three-layer pattern, see `CLAUDE.md`): checks AVX-512
 //! availability at runtime and routes to the AVX-512 or scalar implementation.
 
 #[cfg(target_arch = "x86_64")]

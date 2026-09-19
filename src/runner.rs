@@ -25,7 +25,7 @@ fn extract_panic_msg(val: &Box<dyn Any + Send>) -> &str {
         .unwrap_or("unknown panic")
 }
 
-/// Unrecoverable error from the test runner -- indicates a panic in a pattern
+/// Unrecoverable error from the test runner: indicates a panic in a pattern
 /// worker that could not be handled gracefully.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -55,7 +55,7 @@ pub struct PatternResult {
     /// failures (and absence of failures) are incomplete.
     pub interrupted: bool,
     /// True if the pattern hit `--max-errors` and its failure list was
-    /// truncated -- more failures existed than were collected.
+    /// truncated because more failures existed than were collected.
     pub capped: bool,
 }
 
@@ -229,7 +229,7 @@ pub fn run(
             let budget = FailureBudget::new(max_errors);
             let mut sub_pass_count: u64 = 0;
             // SAFETY: captured state (sub_pass_count, tx) is not used after
-            // an unwind -- we return Err immediately on panic.
+            // an unwind, because we return Err immediately on panic.
             let pattern_result = panic::catch_unwind(AssertUnwindSafe(|| {
                 run_pattern(
                     pattern,
@@ -667,7 +667,7 @@ mod tests {
         check!(results[0].total_failures() == 0);
     }
 
-    /// Minimal resolver that always succeeds -- for testing the resolver branch.
+    /// Minimal resolver that always succeeds, for testing the resolver branch.
     struct StubResolver;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
