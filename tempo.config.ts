@@ -1,57 +1,55 @@
-import { defineConfig, presets, runners } from "@xevion/tempo";
-
-const ferritePreset = presets.rust();
+import { defineConfig, presets, task } from "@xevion/tempo";
 
 export default defineConfig({
-  subsystems: {
-    ferrite: {
-      ...ferritePreset,
-      aliases: ["f"],
-      commands: {
-        ...ferritePreset.commands,
+  tasks: [
+    ...presets.rust({
+      name: "ferrite",
+      override: {
         // Match CI: --all-targets --all-features -D warnings
         lint: "cargo clippy --all-targets --all-features -- -D warnings",
         // Match CI: --no-fail-fast --hide-progress-bar --failure-output final
         test: "cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final",
-        // Feature-combination checks: catch compilation failures behind feature gates
-        "lint-no-default": "cargo clippy --all-targets --no-default-features -- -D warnings",
-        "test-no-default":
-          "cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final --no-default-features",
-        // Catches broken intra-doc links, bad code blocks, and bare URLs (denied in lib.rs).
-        // No -D warnings here: missing_docs is warn-level by design, not yet a full backfill.
-        doc: "cargo doc --no-deps --all-features --quiet",
-        "dep-check": {
-          cmd: "cargo machete",
-          requires: [{ tool: "cargo-machete", hint: "Install with `cargo install cargo-machete`" }],
-        },
       },
-    },
-    security: {
-      alwaysRun: true,
-      aliases: ["sec", "audit"],
-      commands: {
-        audit: {
-          cmd: "cargo deny check advisories bans sources",
-          requires: [{ tool: "cargo-deny", hint: "Install with `cargo install cargo-deny`" }],
-        },
-      },
-    },
-  },
+    }),
+
+    // Feature-combination checks: catch compilation failures behind feature gates.
+    task({
+      name: "ferrite:lint-no-default",
+      body: "cargo clippy --all-targets --no-default-features -- -D warnings",
+      tags: ["check", "lint"],
+    }),
+    task({
+      name: "ferrite:test-no-default",
+      body: "cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final --no-default-features",
+      tags: ["check", "test"],
+    }),
+
+    // Catches broken intra-doc links, bad code blocks, and bare URLs (denied in lib.rs).
+    // No -D warnings here: missing_docs is warn-level by design, not yet a full backfill.
+    task({
+      name: "ferrite:doc",
+      body: "cargo doc --no-deps --all-features --quiet",
+      tags: ["check"],
+    }),
+
+    task({
+      name: "ferrite:dep-check",
+      body: "cargo machete",
+      tags: ["check"],
+      requires: [{ tool: "cargo-machete", hint: "cargo install cargo-machete" }],
+    }),
+
+    task({
+      name: "security:audit",
+      body: "cargo deny check advisories bans sources",
+      tags: ["check"],
+      requires: [{ tool: "cargo-deny", hint: "cargo install cargo-deny" }],
+    }),
+  ],
+
   commands: {
-    check: runners.check({
-      autoFixStrategy: "fix-first",
-      exclude: ["ferrite:build"],
-    }),
-    fmt: runners.sequential("format-apply", {
-      description: "Format all subsystems",
-      autoFixFallback: true,
-    }),
-    lint: runners.sequential("lint", {
-      description: "Lint all subsystems",
-    }),
-    "pre-commit": runners.preCommit(),
-  },
-  ci: {
-    groupedOutput: true,
+    check: { description: "Run every check", tags: ["check"] },
+    fmt: { description: "Format all sources", tags: ["format"], concurrency: 1 },
+    lint: { description: "Clippy only", tags: ["lint"] },
   },
 });
