@@ -18,6 +18,11 @@ allow = [
     "Zlib",
 ]
 
+# Unpublished workspace crates are not checked, which covers ferrite-wifi-sys
+# (GPL-2.0-only, compiled from Linux sources) without allowing GPL globally.
+[licenses.private]
+ignore = true
+
 [bans]
 # Warn on duplicate versions of the same crate across the dependency tree.
 multiple-versions = "warn"

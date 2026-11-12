@@ -9,3 +9,5 @@ perf.data
 /esp
 /OVMF_VARS.fd
 *.efi
+/crates/ferrite-wifi-sys/linux*/
+/.env

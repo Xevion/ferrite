@@ -11,14 +11,15 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 
 use snafu::ResultExt;
 
-use crate::cli::{BenchArgs, Cli, Command, LoaderArgs, LogArgs, PushArgs, RunArgs};
+use crate::cli::{BenchArgs, Cli, Command, LoaderArgs, LogArgs, PushArgs, RunArgs, VendorArgs};
 use crate::config::{self, Config, ConfigError};
 use crate::emit::Emitter;
-use crate::error::{BenchSnafu, Error, LoaderSnafu, LogSnafu, OutputSnafu, PushSnafu, RunSnafu};
+use crate::error::{BenchSnafu, Error, LoaderSnafu, LogSnafu, OutputSnafu, PushSnafu, RunSnafu, VendorSnafu};
 use crate::live::Live;
 use crate::loader::{self, LoaderOptions};
 use crate::push::{self, PushOptions};
 use crate::run::{self, RunPlan, RunResult};
+use crate::vendor::{self, VendorOptions};
 use crate::{bench, log};
 
 const REPORT_TAIL_LINES: usize = 15;
@@ -37,6 +38,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Error> {
         Command::Run(args) => run_command(&config, &args),
         Command::Push(args) => push_command(&config, &args),
         Command::Loader(args) => loader_command(&config, &args),
+        Command::Vendor(args) => vendor_command(&args),
     }
 }
 
@@ -111,6 +113,11 @@ fn loader_command(config: &Config, args: &LoaderArgs) -> Result<(), Error> {
         link: args.link.options(),
     };
     loader::run(config, &options, &stop_on_signals()).context(LoaderSnafu)
+}
+
+fn vendor_command(args: &VendorArgs) -> Result<(), Error> {
+    let options = VendorOptions::from_env(args.crate_dir.clone(), args.force).context(VendorSnafu)?;
+    vendor::run(&options).context(VendorSnafu)
 }
 
 fn run_command(config: &Config, args: &RunArgs) -> Result<(), Error> {

@@ -3,7 +3,8 @@ resolver = "3"
 members = ["crates/*"]
 # Host-buildable crates. The UEFI binaries are built through the `efi-*`
 # aliases in .cargo/config.toml, which pass `--target x86_64-unknown-uefi`.
-default-members = ["crates/ferrite-hal", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-wire", "crates/ferrite-dev", "crates/ferrite-linux"]
+# ferrite-wifi-sys needs its Linux snapshot, which the Justfile recipes make first with `just vendor`.
+default-members = ["crates/ferrite-hal", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-wire", "crates/ferrite-dev", "crates/ferrite-wifi-sys", "crates/ferrite-linux"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,6 +22,7 @@ ferrite-xhci = { path = "crates/ferrite-xhci" }
 
 arbitrary-int = { version = "2.2.0", default-features = false }
 bitbybit = "2.0.1"
+cc = "1.11.1"
 clap = { version = "4.6.7", features = ["derive"] }
 crc32fast = { version = "1.5.5", default-features = false }
 humantime = "2.4.0"
@@ -33,6 +35,7 @@ ratatui-core = "0.1.2"
 rustix = { version = "1.1.6", features = ["event", "fs", "pty", "std", "termios"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.1"
 signal-hook = { version = "0.4.6", default-features = false }
 smoltcp = { version = "0.13.1", default-features = false, features = [
     "alloc",

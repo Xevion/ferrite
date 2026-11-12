@@ -19,19 +19,19 @@ default:
     @just --list
 
 # type-check the host crates and the UEFI apps
-check:
+check: vendor
     cargo check --all-targets
     cargo efi-check
 
 # clippy over the host crates and the UEFI apps, plus unused-dependency check
-lint:
+lint: vendor
     cargo clippy --all-targets
     cargo clippy -p ferrite-uefi -p ferrite-recon --lib --tests
     cargo efi-clippy
     cargo machete
 
 # run the unit tests on the host
-test *args:
+test *args: vendor
     cargo nextest run {{ args }}
     cargo nextest run -p ferrite-uefi -p ferrite-recon --lib {{ args }}
 
@@ -42,12 +42,16 @@ format:
 dev *args:
     cargo run -q -p ferrite-dev -- {{ args }}
 
+# fetch the pinned Linux release and regenerate the untracked snapshot ferrite-wifi-sys compiles; `just vendor --force` redoes it
+vendor *args:
+    cargo run -q -p ferrite-dev -- vendor {{ args }}
+
 # build every UEFI app (debug, or `just build release`)
-build profile="dev":
+build profile="dev": vendor
     cargo efi-build --profile {{ profile }}
 
 # build one UEFI app and stage it as the ESP bootloader under ./esp
-stage app="ferrite-uefi":
+stage app="ferrite-uefi": vendor
     cargo build --target {{ uefi }} --workspace --bin {{ app }}
     mkdir -p esp/efi/boot
     cp -f target/{{ uefi }}/debug/{{ app }}.efi esp/efi/boot/bootx64.efi

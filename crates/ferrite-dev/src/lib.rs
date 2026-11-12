@@ -21,6 +21,7 @@ pub mod runner;
 pub mod session;
 pub mod tty;
 pub mod usb;
+pub mod vendor;
 
 #[cfg(test)]
 mod testing;

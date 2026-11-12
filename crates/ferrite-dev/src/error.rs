@@ -11,6 +11,7 @@ use crate::loader::LoaderError;
 use crate::log::LogError;
 use crate::push::PushError;
 use crate::run::RunError;
+use crate::vendor::VendorError;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -32,6 +33,9 @@ pub enum Error {
 
     #[snafu(display("loader command failed"))]
     Loader { source: LoaderError },
+
+    #[snafu(display("vendor failed"))]
+    Vendor { source: VendorError },
 
     #[snafu(display("cannot create {}", path.display()))]
     Output { path: PathBuf, source: io::Error },

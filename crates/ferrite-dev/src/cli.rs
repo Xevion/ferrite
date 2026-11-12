@@ -37,6 +37,8 @@ pub enum Command {
     Push(PushArgs),
     /// Start the resident loader on the target, or have it reset the target
     Loader(LoaderArgs),
+    /// Fetch the pinned Linux release and regenerate the untracked snapshot ferrite-wifi-sys compiles
+    Vendor(VendorArgs),
     /// Print the effective configuration
     Config,
 }
@@ -185,6 +187,17 @@ pub struct LoaderArgs {
     pub link: LinkArgs,
 }
 
+#[derive(Debug, Args)]
+pub struct VendorArgs {
+    /// Regenerate the snapshot even when its inputs are unchanged
+    #[arg(long)]
+    pub force: bool,
+
+    /// The ferrite-wifi-sys crate directory, which holds vendor.toml and receives linux/
+    #[arg(long, value_name = "DIR", default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../ferrite-wifi-sys"))]
+    pub crate_dir: PathBuf,
+}
+
 /// A transfer count between 1 and 1024.
 pub fn parse_count(text: &str) -> Result<usize, String> {
     let count: usize = text.parse().map_err(|e| format!("{e}"))?;
@@ -321,6 +334,14 @@ mod tests {
         assert!(let Command::Loader(args) = cli.command);
         check!((args.action, args.timeout) == (LoaderAction::Reboot, Some(Duration::from_secs(20))));
         check!(Cli::try_parse_from(["ferrite-dev", "loader", "restart"]).is_err());
+    }
+
+    #[test]
+    fn vendor_takes_force_and_defaults_to_the_sibling_crate() {
+        assert!(let Ok(cli) = Cli::try_parse_from(["ferrite-dev", "vendor", "--force"]));
+        assert!(let Command::Vendor(args) = cli.command);
+        check!(args.force);
+        check!(args.crate_dir.ends_with("ferrite-wifi-sys"));
     }
 
     #[test]

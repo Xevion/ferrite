@@ -1,0 +1,39 @@
+# The Linux release the Wi-Fi C is taken from, and how `ferrite-dev vendor` configures it.
+
+[pin]
+tag = "v6.18.63"
+url = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.63.tar.xz"
+# From kernel.org's sha256sums.asc for v6.x.
+sha256 = "81764a545072d160748beff4d9de2e7d95aa9f16e8261110288f067a2cc61d71"
+
+[config]
+# Applied to a tinyconfig, then resolved with olddefconfig.
+enable = [
+    "64BIT", "PCI", "NET", "NETDEVICES", "WIRELESS", "CFG80211", "MAC80211", "WLAN",
+    "WLAN_VENDOR_REALTEK", "RTW89", "RTW89_8852CE", "EXPERT", "CFG80211_CERTIFICATION_ONUS",
+    "UNWINDER_GUESS", "PRINTK", "BUG",
+]
+disable = [
+    "SMP", "MODULES", "PM", "JUMP_LABEL", "CPU_MITIGATIONS", "MITIGATION_RETPOLINE",
+    "X86_KERNEL_IBT", "UNWINDER_ORC", "STACKPROTECTOR", "CFG80211_WEXT", "MAC80211_MESH",
+    "CFG80211_REQUIRE_SIGNED_REGDB", "CFG80211_USE_KERNEL_REGDB_KEYS", "CFG80211_CRDA_SUPPORT",
+    "CFG80211_DEFAULT_PS", "PCIEASPM", "NET_RX_BUSY_POLL", "RTW89_DEBUGMSG", "RTW89_DEBUGFS",
+]
+# kconfig drops an option whose dependencies are unmet without a word, so the result is checked.
+expect_set = [
+    "CONFIG_CC_IS_CLANG=y", "CONFIG_64BIT=y", "CONFIG_PCI=y", "CONFIG_NETDEVICES=y", "CONFIG_WLAN=y",
+    "CONFIG_CFG80211=y", "CONFIG_MAC80211=y", "CONFIG_RTW89=y", "CONFIG_RTW89_8852CE=y",
+    "CONFIG_PRINTK=y", "CONFIG_BUG=y", "CONFIG_TINY_RCU=y", "CONFIG_PREEMPT_NONE=y", "CONFIG_SLUB_TINY=y",
+    "CONFIG_UNWINDER_GUESS=y",
+]
+expect_unset = [
+    "CONFIG_SMP", "CONFIG_MODULES", "CONFIG_PM", "CONFIG_ACPI", "CONFIG_JUMP_LABEL", "CONFIG_DEBUG_FS",
+    "CONFIG_TRACEPOINTS", "CONFIG_STACKPROTECTOR", "CONFIG_X86_KERNEL_IBT", "CONFIG_MITIGATION_RETPOLINE",
+    "CONFIG_CFG80211_WEXT", "CONFIG_MAC80211_MESH", "CONFIG_RTW89_DEBUGMSG", "CONFIG_RTW89_DEBUGFS",
+]
+
+[kbuild]
+# Directories whose Kbuild Makefiles decide which C files exist. `source.list` must agree with them.
+dirs = ["net/mac80211", "net/wireless", "drivers/net/wireless/realtek/rtw89"]
+# Files Kbuild builds that we leave out on purpose (the userspace interface).
+cut = ["net/wireless/nl80211.c"]

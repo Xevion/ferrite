@@ -1,0 +1,38 @@
+# Compile flags shared by every Linux C file, one or more arguments per line. Paths are relative to
+# this crate. The per-file KBUILD defines and Kbuild's own ccflags come from linux/kbuild-flags.txt.
+# The C always targets x86_64-unknown-none: x86_64-unknown-uefi is LLP64 with the MS ABI.
+--target=x86_64-unknown-none
+-nostdinc
+-D__KERNEL__
+-D__DISABLE_EXPORTS
+-Ishadow/arch/x86/include
+-Ishadow/include
+-Ilinux/arch/x86/include
+-Ilinux/generated/arch/x86/include/generated
+-Ilinux/include
+-Ilinux/generated/include
+-Ilinux/arch/x86/include/uapi
+-Ilinux/generated/arch/x86/include/generated/uapi
+-Ilinux/include/uapi
+-Ilinux/generated/include/generated/uapi
+-include linux/compiler-version.h
+-include linux/kconfig.h
+-include linux/compiler_types.h
+-std=gnu11
+-fshort-wchar
+-funsigned-char
+-fno-common
+-fno-strict-aliasing
+-fno-delete-null-pointer-checks
+-fno-strict-overflow
+-fstrict-flex-arrays=3
+-mgeneral-regs-only
+-mno-red-zone
+-fno-stack-protector
+-O2
+-fPIE
+-fno-plt
+-fdirect-access-external-data
+-ffunction-sections
+-fdata-sections
+-Wno-pointer-sign
