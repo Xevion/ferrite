@@ -1,69 +1,173 @@
-//! A ratatui [`Backend`] that renders to the UEFI Simple Text Output Protocol.
+//! A ratatui [`Backend`] over the UEFI Simple Text Output Protocol.
 //!
-//! Vendored from `ratatuefi` (MIT OR Apache-2.0) and reworked. The upstream
-//! `draw` issued three firmware protocol calls per character cell
-//! (`set_cursor_position` + `set_color` + `write_str`), which is painfully slow
-//! on real firmware where each STOP call is expensive. Here we coalesce runs of
-//! contiguous, identically-styled cells on the same row into a single
-//! `write_str`, and only re-issue cursor/color calls when they actually change.
-//! Combined with ratatui's own frame diffing (only changed cells reach `draw`),
-//! this collapses "calls per character" down to "calls per styled run".
+//! Derived from `ratatuefi` (MIT OR Apache-2.0). Firmware text calls are slow,
+//! so contiguous cells on one row with the same colours are written as a
+//! single string, and the cursor position and colour attribute are only set
+//! when they differ from what the console already has. Together with ratatui's
+//! frame diffing this costs a few calls per styled run rather than per cell.
 //!
-//! This is a text-console backend: a 16-colour character grid, no pixel
-//! graphics. A GOP framebuffer backend with an embedded font is the upgrade
-//! path for a truecolor UI.
+//! This is a 16-colour character grid; a GOP framebuffer backend with an
+//! embedded font is the route to a truecolor UI.
 
-use alloc::string::String;
+use alloc::vec::Vec;
 
-use ratatui_core::{
-    backend::{self, Backend, ClearType, WindowSize},
-    buffer,
-    layout::{Position, Size},
-    style::Color,
-};
+use ratatui_core::backend::{Backend, ClearType, WindowSize};
+use ratatui_core::buffer;
+use ratatui_core::layout::{Position, Size};
+use ratatui_core::style::{Color, Modifier};
+use snafu::{ResultExt as _, Snafu};
 use uefi::proto::console::text::{Color as UefiColor, Output};
+use uefi::{CStr16, Char16};
+
+/// Columns and rows of text mode 0, which every console must support.
+const MODE0_SIZE: Size = Size { width: 80, height: 25 };
+const REPLACEMENT: u16 = b'?' as u16;
+
+/// The Simple Text Output call that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsoleOp {
+    QueryMode,
+    SetCursorPosition,
+    SetColor,
+    OutputString,
+    Clear,
+    EnableCursor,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("console {op:?} failed: {source}"))]
+pub struct BackendError {
+    op: ConsoleOp,
+    source: uefi::Error,
+}
+
+/// Foreground and background of a run, as the console's attribute colours.
+#[derive(Clone, Copy, Debug)]
+struct Attr {
+    fg: UefiColor,
+    bg: UefiColor,
+}
+
+impl Attr {
+    fn of(cell: &buffer::Cell) -> Self {
+        let (fg, bg) = if cell.modifier.contains(Modifier::REVERSED) {
+            (or_default(cell.bg, Color::Black), or_default(cell.fg, Color::White))
+        } else {
+            (cell.fg, cell.bg)
+        };
+        Self { fg: fg_color(fg), bg: bg_color(bg) }
+    }
+
+    fn same(self, other: Self) -> bool {
+        self.fg as usize == other.fg as usize && self.bg as usize == other.bg as usize
+    }
+}
+
+fn or_default(color: Color, default: Color) -> Color {
+    if color == Color::Reset { default } else { color }
+}
 
 pub struct UefiBackend<'a> {
     output: &'a mut Output,
+    /// Attribute the console is known to have, or `None` after anything that may change it.
+    attr: Option<Attr>,
+    /// Where the console's cursor is known to be.
+    cursor: Option<Position>,
+    /// Console width, read once: the text mode is not changed while we run.
+    width: u16,
+    /// UCS-2 text of the current run.
+    text: Vec<u16>,
 }
 
 impl<'a> UefiBackend<'a> {
     pub fn new(output: &'a mut Output) -> Self {
-        Self { output }
+        let mut backend = Self { output, attr: None, cursor: None, width: MODE0_SIZE.width, text: Vec::new() };
+        backend.width = backend.console_size().map_or(MODE0_SIZE.width, |s| s.width);
+        backend
+    }
+
+    fn console_size(&self) -> Result<Size, BackendError> {
+        let mode = self.output.current_mode().context(BackendSnafu { op: ConsoleOp::QueryMode })?;
+        Ok(mode.map_or(MODE0_SIZE, |m| Size { width: m.columns() as u16, height: m.rows() as u16 }))
+    }
+
+    /// Write the run buffered in `self.text` at `start` in `attr`.
+    fn flush_run(&mut self, start: Position, attr: Attr) -> Result<(), BackendError> {
+        if self.text.is_empty() {
+            return Ok(());
+        }
+        if self.cursor != Some(start) {
+            self.cursor = None;
+            self.output
+                .set_cursor_position(start.x.into(), start.y.into())
+                .context(BackendSnafu { op: ConsoleOp::SetCursorPosition })?;
+        }
+        if !self.attr.is_some_and(|a| a.same(attr)) {
+            self.attr = None;
+            self.output.set_color(attr.fg, attr.bg).context(BackendSnafu { op: ConsoleOp::SetColor })?;
+            self.attr = Some(attr);
+        }
+        let advance = self.text.len() as u16;
+        self.text.push(0);
+        // `push_ucs2` never stores a NUL, so the only one is the terminator.
+        let written = match CStr16::from_u16_with_nul(&self.text) {
+            Ok(text) => self.output.output_string_lossy(text).context(BackendSnafu { op: ConsoleOp::OutputString }),
+            Err(_) => Ok(()),
+        };
+        self.text.clear();
+        self.cursor = None;
+        written?;
+        // Reaching the last column wraps or scrolls depending on the firmware.
+        let end = start.x.saturating_add(advance);
+        self.cursor = (end < self.width).then_some(Position { x: end, y: start.y });
+        Ok(())
+    }
+
+    /// Put the console back as firmware and the next program expect it.
+    fn restore(&mut self) -> Result<(), BackendError> {
+        self.attr = None;
+        self.cursor = None;
+        self.output
+            .set_color(UefiColor::LightGray, UefiColor::Black)
+            .context(BackendSnafu { op: ConsoleOp::SetColor })?;
+        self.output.clear().context(BackendSnafu { op: ConsoleOp::Clear })?;
+        self.output.enable_cursor(true).context(BackendSnafu { op: ConsoleOp::EnableCursor })
     }
 }
 
-/// The text console cannot fail from our side; every STOP call we make is
-/// infallible-by-construction or best-effort ignored, so the error type is
-/// uninhabited.
-#[derive(Debug)]
-pub enum UefiBackendError {}
-
-impl core::fmt::Display for UefiBackendError {
-    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match *self {}
+impl Drop for UefiBackend<'_> {
+    fn drop(&mut self) {
+        if let Err(e) = self.restore() {
+            log::debug!("ui: restoring the console failed: {e}");
+        }
     }
 }
 
-impl core::error::Error for UefiBackendError {}
+/// Push `symbol` as UCS-2, replacing what the console cannot represent.
+fn push_ucs2(text: &mut Vec<u16>, symbol: &str) {
+    text.extend(
+        symbol
+            .chars()
+            .map(|c| Char16::try_from(c).map_or(REPLACEMENT, u16::from))
+            .map(|u| if u == 0 { REPLACEMENT } else { u }),
+    );
+}
 
-/// Map a ratatui foreground colour onto the 16 EFI text colours. Anything we
-/// don't have an exact slot for degrades to a sensible neighbour rather than
-/// panicking (upstream `panic!`d here).
+/// Map a ratatui foreground colour onto the 16 EFI text colours.
 fn fg_color(color: Color) -> UefiColor {
     match color {
-        Color::Reset | Color::White | Color::Gray => UefiColor::White,
+        Color::Reset | Color::White => UefiColor::White,
+        Color::Gray => UefiColor::LightGray,
         Color::Black => UefiColor::Black,
         Color::Red => UefiColor::Red,
         Color::Green => UefiColor::Green,
-        Color::Yellow => UefiColor::Yellow,
+        Color::Yellow | Color::LightYellow => UefiColor::Yellow,
         Color::Blue => UefiColor::Blue,
         Color::Magenta => UefiColor::Magenta,
         Color::Cyan => UefiColor::Cyan,
         Color::DarkGray => UefiColor::DarkGray,
         Color::LightRed => UefiColor::LightRed,
         Color::LightGreen => UefiColor::LightGreen,
-        Color::LightYellow => UefiColor::Yellow,
         Color::LightBlue => UefiColor::LightBlue,
         Color::LightMagenta => UefiColor::LightMagenta,
         Color::LightCyan => UefiColor::LightCyan,
@@ -72,8 +176,7 @@ fn fg_color(color: Color) -> UefiColor {
     }
 }
 
-/// Backgrounds are restricted to the first 8 EFI colours by the spec, so we map
-/// onto that subset only.
+/// Backgrounds are limited to the first 8 EFI colours.
 fn bg_color(color: Color) -> UefiColor {
     match color {
         Color::Reset | Color::Black => UefiColor::Black,
@@ -90,51 +193,44 @@ fn bg_color(color: Color) -> UefiColor {
 }
 
 fn index_to_fg(i: u8) -> UefiColor {
-    // 16-colour ANSI slots map directly; the 216-colour cube and greyscale ramp
-    // fall back to a luma-based light/dark grey.
+    // The 16 ANSI slots map directly; the colour cube and grey ramp fall back to grey by luma.
     match i {
         0 => UefiColor::Black,
         1 => UefiColor::Red,
         2 => UefiColor::Green,
-        3 => UefiColor::Yellow,
+        3 | 11 => UefiColor::Yellow,
         4 => UefiColor::Blue,
         5 => UefiColor::Magenta,
         6 => UefiColor::Cyan,
-        7 => UefiColor::LightGray,
-        8 => UefiColor::DarkGray,
+        8 | 232..=243 => UefiColor::DarkGray,
         9 => UefiColor::LightRed,
         10 => UefiColor::LightGreen,
-        11 => UefiColor::Yellow,
         12 => UefiColor::LightBlue,
         13 => UefiColor::LightMagenta,
         14 => UefiColor::LightCyan,
         15 => UefiColor::White,
-        232..=243 => UefiColor::DarkGray,
         _ => UefiColor::LightGray,
     }
 }
 
 fn index_to_bg(i: u8) -> UefiColor {
     match i {
-        0 | 8 => UefiColor::Black,
+        0 | 8 | 232..=243 => UefiColor::Black,
         1 | 9 => UefiColor::Red,
         2 | 10 => UefiColor::Green,
         3 | 11 => UefiColor::Brown,
         4 | 12 => UefiColor::Blue,
         5 | 13 => UefiColor::Magenta,
         6 | 14 => UefiColor::Cyan,
-        232..=243 => UefiColor::Black,
         _ => UefiColor::LightGray,
     }
 }
 
 fn rgb_to_fg(r: u8, g: u8, b: u8) -> UefiColor {
-    if u16::from(r) + u16::from(g) + u16::from(b) > 600 {
-        UefiColor::White
-    } else if u16::from(r) + u16::from(g) + u16::from(b) < 128 {
-        UefiColor::DarkGray
-    } else {
-        UefiColor::LightGray
+    match u16::from(r) + u16::from(g) + u16::from(b) {
+        601.. => UefiColor::White,
+        ..128 => UefiColor::DarkGray,
+        _ => UefiColor::LightGray,
     }
 }
 
@@ -143,23 +239,22 @@ fn bg_from_luma(r: u8, g: u8, b: u8) -> UefiColor {
 }
 
 impl Backend for UefiBackend<'_> {
-    type Error = UefiBackendError;
+    type Error = BackendError;
 
     fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    fn window_size(&mut self) -> Result<backend::WindowSize, Self::Error> {
-        Ok(WindowSize { columns_rows: self.size()?, pixels: Size::ZERO })
+    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        Ok(WindowSize { columns_rows: self.console_size()?, pixels: Size::ZERO })
     }
 
     fn size(&self) -> Result<Size, Self::Error> {
-        let mode = self.output.current_mode().ok().flatten().expect("text output always has a current mode");
-        Ok(Size { width: mode.columns() as u16, height: mode.rows() as u16 })
+        self.console_size()
     }
 
     fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
-        // The text console only exposes a full clear; treat everything as such.
+        // The text console only offers a full clear.
         match clear_type {
             ClearType::All => self.clear(),
             _ => Ok(()),
@@ -167,13 +262,19 @@ impl Backend for UefiBackend<'_> {
     }
 
     fn clear(&mut self) -> Result<(), Self::Error> {
-        let _ = self.output.clear();
+        self.cursor = None;
+        self.output.clear().context(BackendSnafu { op: ConsoleOp::Clear })?;
+        self.cursor = Some(Position::ORIGIN);
         Ok(())
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
         let pos = position.into();
-        let _ = self.output.set_cursor_position(pos.x as usize, pos.y as usize);
+        self.cursor = None;
+        self.output
+            .set_cursor_position(pos.x.into(), pos.y.into())
+            .context(BackendSnafu { op: ConsoleOp::SetCursorPosition })?;
+        self.cursor = Some(pos);
         Ok(())
     }
 
@@ -186,58 +287,30 @@ impl Backend for UefiBackend<'_> {
     where
         I: Iterator<Item = (u16, u16, &'a buffer::Cell)>,
     {
-        // A run is a maximal sequence of contiguous cells on one row sharing the
-        // same fg/bg. We buffer its glyphs and flush with a single reposition +
-        // colour + write, instead of one triple per cell. `uefi`'s `Color` has
-        // no `PartialEq`, so continuity is judged on the source ratatui colours.
-        let mut run = String::new();
-        let mut run_start: Position = Position::ORIGIN;
-        let mut next_x: u16 = 0;
-        let mut run_row: u16 = 0;
-        let mut run_fg = Color::Reset;
-        let mut run_bg = Color::Reset;
+        let mut start = Position::ORIGIN;
+        let mut attr = Attr { fg: UefiColor::White, bg: UefiColor::Black };
+        let mut cells: u16 = 0;
 
         for (x, y, cell) in content {
-            let contiguous = !run.is_empty() && y == run_row && x == next_x && cell.fg == run_fg && cell.bg == run_bg;
-
+            let cell_attr = Attr::of(cell);
+            let contiguous = cells > 0 && y == start.y && x == start.x + cells && cell_attr.same(attr);
             if !contiguous {
-                self.flush_run(&run, run_start, run_fg, run_bg);
-                run.clear();
-                run_start = Position { x, y };
-                run_row = y;
-                run_fg = cell.fg;
-                run_bg = cell.bg;
+                self.flush_run(start, attr)?;
+                start = Position { x, y };
+                attr = cell_attr;
+                cells = 0;
             }
-
-            run.push_str(cell.symbol());
-            next_x = x + 1;
+            push_ucs2(&mut self.text, cell.symbol());
+            cells += 1;
         }
-
-        self.flush_run(&run, run_start, run_fg, run_bg);
-        Ok(())
+        self.flush_run(start, attr)
     }
 
     fn hide_cursor(&mut self) -> Result<(), Self::Error> {
-        let _ = self.output.enable_cursor(false);
-        Ok(())
+        self.output.enable_cursor(false).context(BackendSnafu { op: ConsoleOp::EnableCursor })
     }
 
     fn show_cursor(&mut self) -> Result<(), Self::Error> {
-        let _ = self.output.enable_cursor(true);
-        Ok(())
-    }
-}
-
-impl UefiBackend<'_> {
-    fn flush_run(&mut self, run: &str, start: Position, fg: Color, bg: Color) {
-        if run.is_empty() {
-            return;
-        }
-        let _ = self.output.set_cursor_position(start.x as usize, start.y as usize);
-        let _ = self.output.set_color(fg_color(fg), bg_color(bg));
-        // `Output` implements `core::fmt::Write`; ignore write faults (e.g. a
-        // glyph the firmware font lacks) rather than aborting the frame.
-        use core::fmt::Write as _;
-        let _ = self.output.write_str(run);
+        self.output.enable_cursor(true).context(BackendSnafu { op: ConsoleOp::EnableCursor })
     }
 }

@@ -1,255 +1,178 @@
+//! The main loop: poll the network every few milliseconds, render at about
+//! 20 Hz, and give the time in between to the memory sweep.
+
+use alloc::format;
 use core::time::Duration;
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph, Wrap};
-use uefi::boot;
+use ferrite_efi::clock::Clock;
+use ratatui::Terminal;
+use uefi::Event;
+use uefi::boot::{self, EventType, TimerTrigger, Tpl};
 use uefi::proto::console::text::{Input, Key, Output, ScanCode};
 
-use crate::backend::UefiBackend;
-use crate::diag::Diag;
-use crate::net::{Net, NetStatus};
-use crate::sweep::{Sweep, SweepStatus};
+use crate::backend::{BackendError, UefiBackend};
+use crate::diag::{self, Diag};
+use crate::net::Net;
+use crate::sweep::Sweep;
+use crate::ui::{self, View};
 
-/// Wall time we sleep between render/poll iterations.
-const TICK_MS: u64 = 40;
-/// Size of the memory region the sweep exercises.
 const SWEEP_BYTES: usize = 64 << 20;
-/// Bytes processed per tick; keeps the UI and network responsive.
-const CHUNK_BYTES: usize = 4 << 20;
+const FRAME_INTERVAL: Duration = Duration::from_millis(50);
+/// Sweep chunks are sized to take about this long, so the network is polled in time.
+const SWEEP_SLICE: Duration = Duration::from_millis(1);
+const MIN_CHUNK_BYTES: usize = 64 << 10;
+const MAX_CHUNK_BYTES: usize = 4 << 20;
+const START_CHUNK_BYTES: usize = 256 << 10;
+
+/// Sleeps until a timeout or a keypress, for when there is no sweep to run.
+struct Waiter {
+    /// The timer, then the console's key event.
+    events: [Event; 2],
+}
+
+impl Waiter {
+    fn new(input: &Input) -> uefi::Result<Self> {
+        // SAFETY: a plain timer event with no notify function.
+        let timer = unsafe { boot::create_event(EventType::TIMER, Tpl::APPLICATION, None, None) }?;
+        let key = input.wait_for_key_event()?;
+        Ok(Self { events: [timer, key] })
+    }
+
+    fn wait(&mut self, timeout: Duration) -> uefi::Result<()> {
+        boot::set_timer(&self.events[0], TimerTrigger::Relative(timeout))?;
+        boot::wait_for_event(&mut self.events).map_err(|e| e.to_err_without_payload())?;
+        Ok(())
+    }
+}
+
+impl Drop for Waiter {
+    fn drop(&mut self) {
+        // SAFETY: the clone is the only handle used from here on; the original is dropped unused.
+        let timer = unsafe { self.events[0].unsafe_clone() };
+        if let Err(e) = boot::close_event(timer) {
+            log::debug!("ui: closing the timer event failed: {e}");
+        }
+    }
+}
 
 pub struct App<'a> {
-    quit: bool,
     input: &'a mut Input,
     terminal: Terminal<UefiBackend<'a>>,
+    clock: Clock,
     net: Option<Net>,
     net_err: Option<&'static str>,
     sweep: Sweep,
-    diag: &'a mut Diag,
-    uptime_ms: u64,
+    chunk_bytes: usize,
+    diag: Diag,
+    waiter: Option<Waiter>,
+    last_view: Option<View>,
+    draw_failures: u32,
 }
 
 impl<'a> App<'a> {
-    pub fn new(input: &'a mut Input, output: &'a mut Output, diag: &'a mut Diag) -> Self {
-        let terminal = Terminal::new(UefiBackend::new(output)).unwrap();
-        let (net, net_err) = match Net::setup() {
+    pub fn new(input: &'a mut Input, output: &'a mut Output) -> Result<Self, BackendError> {
+        let terminal = Terminal::new(UefiBackend::new(output))?;
+        let clock = Clock::start();
+        let (net, net_err) = match Net::setup(Duration::from_millis(clock.ms())) {
             Ok(net) => {
-                let s = net.status();
-                diag.event(0, &format!("net: SNP up, {}", net_summary(&s)));
+                log::debug!("net: SNP up, {}", net.status());
                 (Some(net), None)
             },
             Err(e) => {
-                let reason = status_reason(e.status());
-                diag.event(0, &format!("net: SNP setup failed: {reason} [{:?}]", e.status()));
-                (None, Some(reason))
+                diag::milestone(&format!("net: setup failed: {e}"));
+                (None, Some(e.reason()))
             },
         };
-        Self { quit: false, input, terminal, net, net_err, sweep: Sweep::new(SWEEP_BYTES), diag, uptime_ms: 0 }
+        let waiter = Waiter::new(input).inspect_err(|e| log::warn!("ui: no wait events, stalling instead: {e}")).ok();
+        Ok(Self {
+            input,
+            terminal,
+            clock,
+            net,
+            net_err,
+            sweep: Sweep::new(SWEEP_BYTES),
+            chunk_bytes: START_CHUNK_BYTES,
+            diag: Diag::new(),
+            waiter,
+            last_view: None,
+            draw_failures: 0,
+        })
     }
 
+    fn now(&self) -> Duration {
+        Duration::from_millis(self.clock.ms())
+    }
+
+    /// Run until `q` or `Esc`.
     pub fn run(&mut self) {
-        while !self.quit {
-            self.uptime_ms = self.uptime_ms.wrapping_add(TICK_MS);
-            self.sweep.step(CHUNK_BYTES);
+        let mut next_frame = Duration::ZERO;
+        loop {
+            let now = self.now();
             let sweep = self.sweep.status();
-            if let Some(net) = self.net.as_mut() {
-                net.set_page(http_page(net.status(), &sweep));
-                net.poll(TICK_MS);
+            let net_wait = self.net.as_mut().map_or(FRAME_INTERVAL, |net| net.poll(now, &sweep));
+            if self.quit_requested() {
+                return;
             }
-            let net_line = self.net.as_ref().map_or_else(|| String::from("net: no NIC"), |n| net_summary(&n.status()));
-            self.diag.tick(self.uptime_ms, &net_line, &sweep_line(&sweep));
-            self.draw(&sweep);
-            self.poll_input();
-            boot::stall(Duration::from_millis(TICK_MS));
+            let net = self.net.as_ref().map(Net::status);
+            if now >= next_frame {
+                self.draw(View { sweep, net, net_err: self.net_err });
+                next_frame = now.saturating_add(FRAME_INTERVAL);
+            }
+            self.diag.tick(now, net.as_ref(), &sweep);
+            self.idle_until(now.saturating_add(net_wait).min(next_frame));
         }
     }
 
-    fn poll_input(&mut self) {
-        // Non-blocking: read_key returns Ok(None) when nothing is queued.
+    fn quit_requested(&mut self) -> bool {
+        let mut quit = false;
         while let Ok(Some(key)) = self.input.read_key() {
-            match key {
-                Key::Printable(c) if matches!(char::from(c), 'q' | 'Q') => self.quit = true,
-                Key::Special(ScanCode::ESCAPE) => self.quit = true,
-                _ => {},
+            quit |= match key {
+                Key::Printable(c) => matches!(char::from(c), 'q' | 'Q'),
+                Key::Special(code) => code == ScanCode::ESCAPE,
+            };
+        }
+        quit
+    }
+
+    /// Sweep until `deadline` (at least one chunk), or sleep when there is nothing to sweep.
+    fn idle_until(&mut self, deadline: Duration) {
+        if !self.sweep.has_work() {
+            let timeout = deadline.saturating_sub(self.now());
+            let waited = self.waiter.as_mut().map(|w| w.wait(timeout));
+            if !matches!(waited, Some(Ok(()))) {
+                boot::stall(timeout);
+            }
+            return;
+        }
+        loop {
+            let start = self.now();
+            self.sweep.step(self.chunk_bytes);
+            let end = self.now();
+            let took = end.saturating_sub(start);
+            if took < SWEEP_SLICE {
+                self.chunk_bytes = (self.chunk_bytes * 2).min(MAX_CHUNK_BYTES);
+            } else if took > SWEEP_SLICE * 2 {
+                self.chunk_bytes = (self.chunk_bytes / 2).max(MIN_CHUNK_BYTES);
+            }
+            if end >= deadline {
+                return;
             }
         }
     }
 
-    fn draw(&mut self, sweep: &SweepStatus) {
-        let status = self.net.as_ref().map(Net::status);
-        let net_err = self.net_err;
-        self.terminal.draw(|frame| render(frame, sweep, status, net_err)).unwrap();
+    fn draw(&mut self, view: View) {
+        if self.last_view == Some(view) {
+            return;
+        }
+        match self.terminal.draw(|frame| ui::render(frame, &view)) {
+            Ok(_) => self.last_view = Some(view),
+            Err(e) => {
+                if self.draw_failures == 0 {
+                    log::warn!("ui: drawing failed: {e}");
+                }
+                self.draw_failures = self.draw_failures.saturating_add(1);
+                self.last_view = None;
+            },
+        }
     }
-}
-
-fn render(frame: &mut Frame, sweep: &SweepStatus, status: Option<NetStatus>, net_err: Option<&str>) {
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::new().fg(Color::Cyan))
-        .title(" ferrite-uefi ")
-        .title_alignment(Alignment::Center);
-    let inner = outer.inner(frame.area());
-    frame.render_widget(outer, frame.area());
-
-    let rows = Layout::vertical([
-        Constraint::Length(2), // banner
-        Constraint::Length(7), // network
-        Constraint::Length(3), // sweep gauge
-        Constraint::Length(1), // sweep summary
-        Constraint::Min(0),    // spacer
-        Constraint::Length(1), // footer
-    ])
-    .split(inner);
-
-    let banner = Paragraph::new(vec![
-        Line::from(Span::styled(
-            "bare-metal memory tester - spike",
-            Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled("ratatui on UEFI, no OS underneath", Style::new().fg(Color::DarkGray))),
-    ])
-    .alignment(Alignment::Center);
-    frame.render_widget(banner, rows[0]);
-
-    frame.render_widget(network_panel(status, net_err), rows[1]);
-
-    let phase = if sweep.verifying { "verify" } else { "write" };
-    let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(" memory sweep "))
-        .gauge_style(Style::new().fg(Color::Green).bg(Color::Black))
-        .percent(sweep.percent)
-        .label(format!("{:#04x} {} {}%", sweep.pattern, phase, sweep.percent));
-    frame.render_widget(gauge, rows[2]);
-
-    frame.render_widget(sweep_summary(sweep), rows[3]);
-
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled("q", Style::new().fg(Color::Yellow)),
-        Span::raw(" / "),
-        Span::styled("Esc", Style::new().fg(Color::Yellow)),
-        Span::raw(" to exit"),
-    ]))
-    .alignment(Alignment::Center);
-    frame.render_widget(footer, rows[5]);
-}
-
-fn sweep_summary(sweep: &SweepStatus) -> Paragraph<'static> {
-    let mib = sweep.bytes / (1 << 20);
-    let mut spans = vec![
-        Span::styled(format!(" {mib} MiB "), Style::new().fg(Color::DarkGray)),
-        Span::styled(format!("pass {}  ", sweep.passes), Style::new().fg(Color::White)),
-    ];
-    if sweep.faults == 0 {
-        spans.push(Span::styled("no faults", Style::new().fg(Color::Green)));
-    } else {
-        let detail = sweep.first_fault.map_or_else(String::new, |f| {
-            format!(" (first @ {:#x}: exp {:#04x} got {:#04x})", f.offset, f.expected, f.actual)
-        });
-        spans.push(Span::styled(
-            format!("{} FAULTS{detail}", sweep.faults),
-            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ));
-    }
-    Paragraph::new(Line::from(spans))
-}
-
-fn network_panel(status: Option<NetStatus>, net_err: Option<&str>) -> Paragraph<'static> {
-    let mut lines = Vec::new();
-
-    match status {
-        None => {
-            let reason = net_err.unwrap_or("no NIC found");
-            lines.push(info_line("nic", reason, Color::Red));
-            lines.push(info_line("hint", "OVMF may lack a network stack; add -device e1000", Color::DarkGray));
-        },
-        Some(s) => {
-            let mac = format!(
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                s.mac[0], s.mac[1], s.mac[2], s.mac[3], s.mac[4], s.mac[5]
-            );
-            let (link, link_color) = if s.link_up { ("up", Color::Green) } else { ("down", Color::Red) };
-            lines.push(info_line("mac", &mac, Color::White));
-            lines.push(info_line("link", link, link_color));
-
-            match s.address {
-                Some(cidr) => lines.push(info_line("ip", &format!("{cidr}"), Color::LightGreen)),
-                None => lines.push(info_line("ip", "requesting (DHCP)...", Color::Yellow)),
-            }
-            lines.push(info_line("gateway", &opt_addr(s.gateway), Color::White));
-            lines.push(info_line("dns", &opt_addr(s.dns), Color::White));
-        },
-    }
-
-    Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" network ")).wrap(Wrap { trim: true })
-}
-
-fn opt_addr(addr: Option<smoltcp::wire::Ipv4Address>) -> String {
-    addr.map_or_else(|| String::from("-"), |a| format!("{a}"))
-}
-
-/// One-line network summary for the diagnostic log.
-fn net_summary(s: &NetStatus) -> String {
-    let ip = s.address.map_or_else(|| String::from("none"), |c| format!("{c}"));
-    format!(
-        "link={} ip={} gw={} dns={} mdns={} http={}",
-        if s.link_up { "up" } else { "down" },
-        ip,
-        opt_addr(s.gateway),
-        opt_addr(s.dns),
-        s.mdns_queries,
-        s.http_requests
-    )
-}
-
-/// One-line sweep summary for the diagnostic log.
-fn sweep_line(s: &SweepStatus) -> String {
-    format!(
-        "{:#04x} {} {}% pass{} faults{}",
-        s.pattern,
-        if s.verifying { "verify" } else { "write" },
-        s.percent,
-        s.passes,
-        s.faults
-    )
-}
-
-fn http_page(status: NetStatus, sweep: &SweepStatus) -> String {
-    let ip = status.address.map_or_else(|| String::from("(none)"), |c| format!("{c}"));
-    let mac = format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        status.mac[0], status.mac[1], status.mac[2], status.mac[3], status.mac[4], status.mac[5]
-    );
-    let phase = if sweep.verifying { "verify" } else { "write" };
-    let mib = sweep.bytes / (1 << 20);
-    let verdict = if sweep.faults == 0 { String::from("no faults") } else { format!("{} FAULTS", sweep.faults) };
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\">\
-         <title>ferrite-uefi</title></head><body style=\"font-family:monospace\">\
-         <h1>ferrite-uefi</h1>\
-         <p>bare-metal memory tester &mdash; spike, no OS underneath</p>\
-         <ul><li>ip: {ip}</li><li>mac: {mac}</li>\
-         <li>sweep: {mib} MiB, pattern {:#04x} {phase}, {}%</li>\
-         <li>pass {}, {verdict}</li>\
-         <li>mdns queries: {}, http requests: {}</li></ul>\
-         </body></html>",
-        sweep.pattern, sweep.percent, sweep.passes, status.mdns_queries, status.http_requests
-    )
-}
-
-const fn status_reason(status: uefi::Status) -> &'static str {
-    match status {
-        uefi::Status::NOT_FOUND => "no SNP device (no NIC / OVMF lacks net stack)",
-        uefi::Status::ACCESS_DENIED => "SNP busy (held by firmware net stack)",
-        uefi::Status::UNSUPPORTED => "SNP unsupported by firmware",
-        _ => "SNP setup failed",
-    }
-}
-
-fn info_line(key: &str, value: &str, value_color: Color) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{key:>8}  "), Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(String::from(value), Style::new().fg(value_color)),
-    ])
 }

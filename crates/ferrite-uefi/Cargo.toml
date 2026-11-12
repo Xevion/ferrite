@@ -7,14 +7,21 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ferrite-efi.workspace = true
+log.workspace = true
 ratatui.workspace = true
 ratatui-core.workspace = true
 smoltcp.workspace = true
+snafu.workspace = true
 uefi.workspace = true
 
 # The allocator and panic handler would collide with std's on a host build.
 [target.'cfg(target_os = "uefi")'.dependencies]
 uefi = { workspace = true, features = ["global_allocator", "panic_handler"] }
+
+[dev-dependencies]
+assert2.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

@@ -1,73 +1,84 @@
-//! Headless diagnostics written to the FAT volume we booted from.
+//! What the headless log on the boot volume records while the app runs.
 //!
-//! A target box with no screen gives us no feedback, so key milestones are
-//! mirrored to `\ferrite.log` on the boot USB: power off, pull the stick, read
-//! the file. The whole document is rewritten on every flush
-//! ([`FileSystem::write`] truncates), so whatever we captured survives the
-//! abrupt power-off that stops a headless machine.
-//!
-//! The *absence* of the file is itself a signal: if the log never appears, the
-//! app never ran -- a firmware boot-policy problem, not a code problem.
+//! A target box with no screen gives no other feedback, so link and lease
+//! changes, the first memory fault and a periodic alive line go to the
+//! [`BootLog`] behind the `log` sink. A missing log file means the app never
+//! started: a firmware boot-policy problem, not a code one.
 
-use alloc::string::String;
-use core::fmt::Write as _;
+use core::time::Duration;
 
-use uefi::boot;
-use uefi::fs::FileSystem;
-use uefi::{CStr16, cstr16};
+use ferrite_efi::bootlog::BootLog;
+use ferrite_efi::logger;
 
-/// Log lives at the volume root so it's trivial to find on the pulled USB.
-const LOG_PATH: &CStr16 = cstr16!("\\ferrite.log");
-/// Liveness cadence: emit an `alive` line at least this often so a healthy but
-/// quiet box still proves its loop is turning.
-const KEEPALIVE_MS: u64 = 30_000;
+use crate::net::{Link, NetStatus};
+use crate::sweep::SweepStatus;
 
+/// Name of the log file, `\EFI\ferrite\ferrite-uefi.txt`.
+pub const LOG_NAME: &str = "ferrite-uefi";
+/// A healthy but quiet box still proves its loop is turning this often.
+const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Log `msg` and save the file now: for boot, net up, faults and exit.
+pub fn milestone(msg: &str) {
+    logger::with(|log| log.milestone(msg));
+}
+
+#[derive(Default)]
 pub struct Diag {
-    fs: Option<FileSystem>,
-    log: String,
-    last_net: String,
-    last_keepalive: u64,
+    last_link: Option<Link>,
+    fault_logged: bool,
+    last_alive: Duration,
 }
 
 impl Diag {
-    /// Open the boot volume's file system and start a fresh log. If the volume
-    /// can't be opened, logging degrades to a no-op and the app runs unchanged.
     #[must_use]
-    pub fn open() -> Self {
-        let fs = boot::get_image_file_system(boot::image_handle()).ok().map(FileSystem::new);
-        let mut diag = Self { fs, log: String::new(), last_net: String::new(), last_keepalive: 0 };
-        diag.event(0, "boot: entry reached, uefi init ok");
-        diag
+    pub const fn new() -> Self {
+        Self { last_link: None, fault_logged: false, last_alive: Duration::ZERO }
     }
 
-    /// Append a timestamped milestone line and flush immediately.
-    pub fn event(&mut self, ms: u64, msg: &str) {
-        let _ = writeln!(self.log, "[{ms:>8}] {msg}");
-        self.flush();
-    }
-
-    /// Per-tick update: log the network snapshot only when it changes, plus a
-    /// periodic `alive` line so a healthy-but-idle box still shows progress.
-    /// `sweep` is a short one-line summary of the current sweep state.
-    pub fn tick(&mut self, ms: u64, net: &str, sweep: &str) {
-        if net != self.last_net {
-            self.last_net.clear();
-            self.last_net.push_str(net);
-            let _ = writeln!(self.log, "[{ms:>8}] {net}");
-            self.flush();
+    /// Log what changed since the last call, and let the log save itself when due.
+    pub fn tick(&mut self, now: Duration, net: Option<&NetStatus>, sweep: &SweepStatus) {
+        if let Some(net) = net {
+            self.link_changed(&net.link);
         }
-        if ms.saturating_sub(self.last_keepalive) >= KEEPALIVE_MS {
-            self.last_keepalive = ms;
-            let _ = writeln!(self.log, "[{ms:>8}] alive {sweep}");
-            self.flush();
+        if !self.fault_logged
+            && let Some(fault) = sweep.first_fault
+        {
+            self.fault_logged = true;
+            milestone(&alloc::format!(
+                "sweep: FAULT at {}: expected {:#018x}, read {:#018x} (pattern {:#04x}, pass {})",
+                fault.addr,
+                fault.expected,
+                fault.actual,
+                sweep.pattern,
+                sweep.passes
+            ));
         }
+        if now.saturating_sub(self.last_alive) >= ALIVE_INTERVAL {
+            self.last_alive = now;
+            match net {
+                Some(net) => log::debug!("alive sweep: {sweep} net: {}", net.counters),
+                None => log::debug!("alive sweep: {sweep}"),
+            }
+        }
+        logger::with(BootLog::poll);
     }
 
-    /// Rewrite the whole log file. A failed write just loses logging; the tester
-    /// keeps running, so errors are deliberately swallowed.
-    fn flush(&mut self) {
-        if let Some(fs) = self.fs.as_mut() {
-            let _ = fs.write(LOG_PATH, self.log.as_bytes());
+    fn link_changed(&mut self, link: &Link) {
+        let previous = self.last_link.replace(*link);
+        if previous == Some(*link) {
+            return;
+        }
+        let was_up = previous.is_some_and(|p| p.up);
+        let had_address = previous.and_then(|p| p.address);
+        if link.address.is_some() && link.address != had_address {
+            milestone(&alloc::format!("net: up, {link}"));
+        } else if was_up && !link.up {
+            log::warn!("net: link lost, {link}");
+        } else if had_address.is_some() && link.address.is_none() {
+            log::warn!("net: lease lost, {link}");
+        } else {
+            log::debug!("net: {link}");
         }
     }
 }
