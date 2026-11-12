@@ -2,17 +2,20 @@
 
 pub mod app;
 pub mod bench;
+pub mod claim;
 pub mod cli;
 pub mod config;
 pub mod connect;
 pub mod emit;
 pub mod error;
+pub mod link;
 pub mod live;
 pub mod log;
 pub mod metadata;
 pub mod run;
 pub mod runner;
 pub mod tty;
+pub mod usb;
 
 #[cfg(test)]
 mod testing;

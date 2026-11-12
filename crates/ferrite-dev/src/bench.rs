@@ -21,6 +21,8 @@ pub use self::report::Report;
 use crate::config::Config;
 use crate::connect::{ConnectError, Connector, Waited};
 use crate::emit::Emitter;
+use crate::link::{LinkOptions, Transport};
+use crate::usb::RealUsb;
 
 /// How long the target gets to announce each phase after the first.
 const PHASE_WAIT: Duration = Duration::from_secs(30);
@@ -89,6 +91,7 @@ pub struct BenchOptions {
     pub phases: Vec<Phase>,
     /// How long to wait for the device and the target's first announcement.
     pub wait: Duration,
+    pub link: LinkOptions,
 }
 
 /// Wait for the target, run the phases, and print the summary next to the target's own lines.
@@ -104,11 +107,15 @@ pub fn run(
         humantime::format_duration(options.wait)
     ));
     let mut connector = Connector::new(config);
+    if options.link.transport == Transport::Usb {
+        connector = connector.usb(RealUsb::new(options.link.usb));
+    }
     let mut report = Report::default();
     let outcome = loop {
         match connector.wait(emitter, Some(deadline), stop).context(ConnectSnafu)? {
-            Waited::Connected(mut tty) => {
-                let result = session(&mut Peer::new(&mut tty, emitter, stop), &options.phases, deadline, &mut report);
+            Waited::Connected(mut link) => {
+                report.transport = Some(link.describe());
+                let result = session(&mut Peer::new(&mut link, emitter, stop), &options.phases, deadline, &mut report);
                 match result {
                     Err(e) if e.is_link_loss() => {
                         emitter.line("--- link down ---");

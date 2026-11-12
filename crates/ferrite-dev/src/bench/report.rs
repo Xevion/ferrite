@@ -84,6 +84,8 @@ impl EchoResult {
 pub struct Report {
     /// Whether the target announced its first phase.
     pub started: bool,
+    /// The transport the last session ran over, with its parameters.
+    pub transport: Option<String>,
     pub source: Option<SourceResult>,
     pub sink: Option<SinkResult>,
     pub echo: Option<EchoResult>,
@@ -94,6 +96,7 @@ pub struct Report {
 impl Report {
     pub fn render(&self) -> Vec<String> {
         let mut out = vec!["--- bench summary ---".to_owned()];
+        out.extend(self.transport.as_ref().map(|transport| format!("transport: {transport}")));
         if let Some(s) = &self.source {
             out.push(row(Phase::Source, "desktop", &source_line(s)));
         }
@@ -235,6 +238,12 @@ mod tests {
         check!(lines[1].starts_with("source desktop: ok bytes=2048 window=1.000s rate=0.002MB/s frames_ok=2/2"));
         check!(lines[2] == "source target : bytes=2048 rate=2.048MB/s");
         check!(lines[3] == "micro  target : per_read_ns=900");
+    }
+
+    #[test]
+    fn the_summary_names_the_transport_it_ran_over() {
+        let report = Report { transport: Some("usb (bus 3 address 12)".into()), ..Report::default() };
+        check!(report.render() == ["--- bench summary ---", "transport: usb (bus 3 address 12)"]);
     }
 
     #[test]

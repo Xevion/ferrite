@@ -2,7 +2,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+
+use signal_hook::consts::{SIGINT, SIGTERM};
 
 use snafu::ResultExt;
 
@@ -55,8 +58,16 @@ fn log_command(config: &Config, args: &LogArgs) -> Result<(), Error> {
 }
 
 fn bench_command(config: &Config, args: &BenchArgs) -> Result<(), Error> {
-    let options = bench::BenchOptions { phases: args.phases.clone(), wait: args.wait };
-    bench::run(config, &options, &mut emitter(args.out.as_deref())?, &AtomicBool::new(false)).context(BenchSnafu)
+    let options = bench::BenchOptions { phases: args.phases.clone(), wait: args.wait, link: args.link.options() };
+    let stop = Arc::new(AtomicBool::new(false));
+    for signal in [SIGINT, SIGTERM] {
+        if let Err(e) = signal_hook::flag::register(signal, Arc::clone(&stop)) {
+            eprintln!(
+                "ferrite-dev: cannot catch signal {signal}, so an interrupt will not hand the USB device back: {e}"
+            );
+        }
+    }
+    bench::run(config, &options, &mut emitter(args.out.as_deref())?, &stop).context(BenchSnafu)
 }
 
 fn run_command(config: &Config, args: &RunArgs) -> Result<(), Error> {
@@ -70,6 +81,7 @@ fn run_command(config: &Config, args: &RunArgs) -> Result<(), Error> {
         timeout: args.timeout,
         log_for: args.log_for,
         capture: !args.no_capture,
+        link: args.link.options(),
     };
     let result = run::execute(&Live::new(config), config, &plan).context(RunSnafu)?;
     print_result(&plan.app, &result);

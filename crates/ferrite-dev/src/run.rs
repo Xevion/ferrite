@@ -8,9 +8,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 
 use crate::config::Config;
+use crate::link::LinkOptions;
 use crate::metadata::{Metadata, MetadataError};
 use crate::runner::{Cmd, CmdOutput, OutputMode};
 
@@ -35,6 +36,9 @@ pub enum RunError {
 
     #[snafu(display("{step} failed ({status}): `{cmd}`{}", detail(stderr)))]
     Failed { step: &'static str, cmd: Cmd, status: String, stderr: String },
+
+    #[snafu(display("no ssh host answered: {hosts}"))]
+    Unreachable { hosts: String },
 
     #[snafu(display("`{cmd}` printed no boot id"))]
     NoBootId { cmd: Cmd },
@@ -63,6 +67,7 @@ pub enum CaptureKind {
     },
     Bench {
         wait: Duration,
+        link: LinkOptions,
     },
 }
 
@@ -96,6 +101,8 @@ pub struct RunPlan {
     /// Longest a plain log capture runs.
     pub log_for: Duration,
     pub capture: bool,
+    /// The transport the benchmark peer uses.
+    pub link: LinkOptions,
 }
 
 #[derive(Debug)]
@@ -108,9 +115,9 @@ pub struct RunResult {
 
 /// The capture that suits `app`: the benchmark peer for `dbcbench`, else a log, with the probe
 /// line for `dbcping`.
-pub fn capture_kind(app: &str, log_for: Duration, wait: Duration) -> CaptureKind {
+pub fn capture_kind(app: &str, log_for: Duration, wait: Duration, link: LinkOptions) -> CaptureKind {
     match app {
-        BENCH_APP => CaptureKind::Bench { wait },
+        BENCH_APP => CaptureKind::Bench { wait, link },
         PING_APP => CaptureKind::Log { probe: Some(PING_PROBE.to_owned()), duration: log_for },
         _ => CaptureKind::Log { probe: None, duration: log_for },
     }
@@ -129,7 +136,6 @@ pub fn execute(env: &impl Env, config: &Config, plan: &RunPlan) -> Result<RunRes
     if !valid_app_name(app) {
         return Err(RunError::BadAppName { app: app.to_owned() });
     }
-    let commands = Commands { config, app };
 
     env.say(&format!("resolving the package of {app}"));
     let cmd = Commands::metadata();
@@ -138,10 +144,14 @@ pub fn execute(env: &impl Env, config: &Config, plan: &RunPlan) -> Result<RunRes
     let package = metadata.package_of_bin(app).context(PackageSnafu { app })?.to_owned();
 
     env.say(&format!("building {app} ({package})"));
-    checked(env, "build", &commands.build(&package), OutputMode::Passthrough)?;
+    checked(env, "build", &Commands::build(app, &package), OutputMode::Passthrough)?;
+
+    let first = reach(env, config, app)?;
+    env.say(&format!("using ssh host {} (boot id {})", first.host, first.boot_id));
+    let commands = Commands::new(config, app, &first.host);
 
     let efi = metadata.target_directory.join(UEFI_TARGET).join("debug").join(format!("{app}.efi"));
-    env.say(&format!("staging {} on {}", efi.display(), config.ssh_host));
+    env.say(&format!("staging {} on {}", efi.display(), first.host));
     checked(env, "scp of the app", &commands.upload(&efi), OutputMode::Collect)?;
     checked(env, "clean-reports", &commands.deploy("clean-reports"), OutputMode::Collect)?;
     checked(env, "install", &commands.deploy_app("install"), OutputMode::Collect)?;
@@ -149,65 +159,106 @@ pub fn execute(env: &impl Env, config: &Config, plan: &RunPlan) -> Result<RunRes
     let capture_file = plan.capture.then(|| plan.run_dir.join(CAPTURE_FILE));
     let capture = match &capture_file {
         Some(file) => {
-            let kind = capture_kind(app, plan.log_for, plan.timeout);
+            let kind = capture_kind(app, plan.log_for, plan.timeout, plan.link);
             Some(env.start_capture(&CapturePlan { kind, file: file.clone() }).context(CaptureSnafu)?)
         },
         None => None,
     };
 
-    let cycle = reboot_cycle(env, &commands, plan.timeout);
+    let cycle = reboot_cycle(env, config, app, &first, plan.timeout);
     let capture_error = capture.and_then(Capture::stop);
-    cycle?;
+    let back_host = cycle?;
 
+    let commands = Commands::new(config, app, &back_host);
     checked(env, "clearing old reports", &commands.clear_reports(), OutputMode::Collect)?;
     checked(env, "collect", &commands.deploy("collect"), OutputMode::Collect)?;
     let collected = match run_cmd(env, &commands.download(&plan.run_dir), OutputMode::Collect)? {
         out if out.success => true,
         out => {
-            env.say(&format!("no reports copied from {}: {}", config.ssh_host, out.stderr.trim()));
+            env.say(&format!("no reports copied from {back_host}: {}", out.stderr.trim()));
             false
         },
     };
     Ok(RunResult { run_dir: plan.run_dir.clone(), capture_file, capture_error, collected })
 }
 
-/// Note the target's boot id, trigger the one-shot reboot, then wait for ssh to answer with another one.
-fn reboot_cycle(env: &impl Env, commands: &Commands<'_>, timeout: Duration) -> Result<(), RunError> {
-    let probe = commands.boot_id();
-    let before = checked(env, "reading the boot id", &probe, OutputMode::Collect)?.stdout.trim().to_owned();
-    if before.is_empty() {
-        return Err(RunError::NoBootId { cmd: probe });
+/// A host that answered, with the boot id it reported and the command that read it.
+struct Answer {
+    host: String,
+    boot_id: String,
+    cmd: Cmd,
+}
+
+/// Read the boot id from the first configured host that answers, trying them in order.
+fn probe_hosts(env: &impl Env, config: &Config, app: &str) -> Result<Option<Answer>, RunError> {
+    for host in &config.ssh_hosts {
+        let cmd = Commands::new(config, app, host).boot_id();
+        let out = run_cmd(env, &cmd, OutputMode::Collect)?;
+        if out.success {
+            return Ok(Some(Answer { host: host.clone(), boot_id: out.stdout.trim().to_owned(), cmd }));
+        }
     }
-    env.say(&format!("rebooting {} into {} (boot id {before})", commands.config.ssh_host, commands.app));
-    let cmd = commands.deploy_app("run");
+    Ok(None)
+}
+
+fn reach(env: &impl Env, config: &Config, app: &str) -> Result<Answer, RunError> {
+    probe_hosts(env, config, app)?.context(UnreachableSnafu { hosts: config.ssh_hosts.join(", ") })
+}
+
+/// The name progress messages use for the target, whichever address answers.
+fn label(config: &Config) -> &str {
+    config.host_key_alias.as_deref().or_else(|| config.ssh_hosts.first().map(String::as_str)).unwrap_or("the target")
+}
+
+/// Trigger the one-shot reboot on the host that answered, then wait for any host to answer with
+/// another boot id. Returns the host that did.
+fn reboot_cycle(
+    env: &impl Env,
+    config: &Config,
+    app: &str,
+    first: &Answer,
+    timeout: Duration,
+) -> Result<String, RunError> {
+    if first.boot_id.is_empty() {
+        return Err(RunError::NoBootId { cmd: first.cmd.clone() });
+    }
+    env.say(&format!("rebooting {} into {app} (boot id {})", first.host, first.boot_id));
+    let cmd = Commands::new(config, app, &first.host).deploy_app("run");
     let out = run_cmd(env, &cmd, OutputMode::Collect)?;
     if !out.success && out.code != Some(255) {
         return Err(failure("run", cmd, &out));
     }
-    wait_for_reboot(env, commands, &before, timeout)
+    wait_for_reboot(env, config, app, &first.boot_id, timeout)
 }
 
-/// Poll until ssh answers with a boot id other than `before`. Seeing the target go unreachable only
-/// shapes the progress output: a reboot faster than the poll interval is still detected.
-fn wait_for_reboot(env: &impl Env, commands: &Commands<'_>, before: &str, timeout: Duration) -> Result<(), RunError> {
+/// Poll until some host answers with a boot id other than `before`, and return that host. Seeing
+/// the target go unreachable only shapes the progress output: a reboot faster than the poll interval is
+/// still detected.
+fn wait_for_reboot(
+    env: &impl Env,
+    config: &Config,
+    app: &str,
+    before: &str,
+    timeout: Duration,
+) -> Result<String, RunError> {
     let start = env.now();
-    let probe = commands.boot_id();
+    let name = label(config);
     let (mut went_down, mut last_progress) = (false, None::<Duration>);
     loop {
-        let out = run_cmd(env, &probe, OutputMode::Collect)?;
-        let reachable = out.success;
-        let now_id = out.stdout.trim();
-        if reachable && !now_id.is_empty() && now_id != before {
+        let answer = probe_hosts(env, config, app)?;
+        if let Some(Answer { host, boot_id, .. }) = &answer
+            && !boot_id.is_empty()
+            && boot_id != before
+        {
             env.say(&format!(
-                "{} is back after {}s",
-                commands.config.ssh_host,
+                "{name} is back after {}s, answering on {host}",
                 env.now().saturating_sub(start).as_secs()
             ));
-            return Ok(());
+            return Ok(host.clone());
         }
-        if !went_down && !reachable {
+        if !went_down && answer.is_none() {
             went_down = true;
-            env.say(&format!("{} went down", commands.config.ssh_host));
+            env.say(&format!("{name} went down"));
         }
         let elapsed = env.now().saturating_sub(start);
         if elapsed >= timeout {
@@ -218,7 +269,7 @@ fn wait_for_reboot(env: &impl Env, commands: &Commands<'_>, before: &str, timeou
         if last_progress.is_none_or(|at| elapsed.saturating_sub(at) >= PROGRESS_EVERY) {
             last_progress = Some(elapsed);
             let waiting = if went_down { "to come back" } else { "to reboot" };
-            env.say(&format!("waiting for {} {waiting} ({}s)", commands.config.ssh_host, elapsed.as_secs()));
+            env.say(&format!("waiting for {name} {waiting} ({}s)", elapsed.as_secs()));
         }
         env.sleep(POLL_EVERY);
     }
@@ -238,43 +289,62 @@ fn failure(step: &'static str, cmd: Cmd, out: &CmdOutput) -> RunError {
     RunError::Failed { step, cmd, status, stderr: out.stderr.clone() }
 }
 
-/// Every command line `execute` can issue.
+/// Every command line `execute` can issue, for one host.
 struct Commands<'a> {
     config: &'a Config,
     app: &'a str,
+    host: &'a str,
 }
 
-impl Commands<'_> {
-    fn ssh_args(&self) -> [&str; 3] {
-        ["-o", "BatchMode=yes", self.config.ssh_host.as_str()]
+impl<'a> Commands<'a> {
+    const fn new(config: &'a Config, app: &'a str, host: &'a str) -> Self {
+        Self { config, app, host }
+    }
+
+    fn options(&self) -> Vec<String> {
+        let mut options: Vec<String> = ["-o", "BatchMode=yes"].map(String::from).to_vec();
+        if let Some(alias) = &self.config.host_key_alias {
+            options.extend(["-o".to_owned(), format!("HostKeyAlias={alias}")]);
+        }
+        options
     }
 
     fn remote(&self, path: &str) -> String {
-        format!("{}:{}/{path}", self.config.ssh_host, self.config.stage_dir)
+        format!("{}:{}/{path}", self.host, self.config.stage_dir)
     }
 
     fn metadata() -> Cmd {
         Cmd::new("cargo", ["metadata", "--format-version", "1", "--no-deps"])
     }
 
-    fn build(&self, package: &str) -> Cmd {
-        Cmd::new("cargo", ["build", "--target", UEFI_TARGET, "-p", package, "--bin", self.app])
+    fn build(app: &str, package: &str) -> Cmd {
+        Cmd::new("cargo", ["build", "--target", UEFI_TARGET, "-p", package, "--bin", app])
     }
 
     fn upload(&self, efi: &Path) -> Cmd {
-        let [o, opt, _] = self.ssh_args();
-        Cmd::new("scp", ["-q", o, opt, &efi.to_string_lossy(), &self.remote(&format!("{}.efi", self.app))])
+        let mut args = vec!["-q".to_owned()];
+        args.extend(self.options());
+        args.extend([efi.to_string_lossy().into_owned(), self.remote(&format!("{}.efi", self.app))]);
+        Cmd::new("scp", args)
     }
 
     fn download(&self, run_dir: &Path) -> Cmd {
-        let [o, opt, _] = self.ssh_args();
-        Cmd::new("scp", ["-q", o, opt, &self.remote("out/*"), &run_dir.to_string_lossy()])
+        let mut args = vec!["-q".to_owned()];
+        args.extend(self.options());
+        args.extend([self.remote("out/*"), run_dir.to_string_lossy().into_owned()]);
+        Cmd::new("scp", args)
+    }
+
+    fn ssh(&self, extra: &[&str], remote: &[&str]) -> Cmd {
+        let mut args = self.options();
+        args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+        args.push(self.host.to_owned());
+        args.extend(remote.iter().map(|arg| (*arg).to_owned()));
+        Cmd::new("ssh", args)
     }
 
     fn deploy(&self, subcommand: &str) -> Cmd {
-        let mut args: Vec<&str> = self.ssh_args().to_vec();
-        args.extend(["sudo", "-n", self.config.helper.as_str(), subcommand]);
-        Cmd::new("ssh", args)
+        self.ssh(&[], &["sudo", "-n", self.config.helper.as_str(), subcommand])
     }
 
     fn deploy_app(&self, subcommand: &str) -> Cmd {
@@ -284,19 +354,16 @@ impl Commands<'_> {
     }
 
     fn boot_id(&self) -> Cmd {
-        let [o, opt, host] = self.ssh_args();
         let timeout = format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}");
-        Cmd::new("ssh", [o, opt, "-o", &timeout, host, "cat", BOOT_ID_PATH])
+        self.ssh(&["-o", &timeout], &["cat", BOOT_ID_PATH])
     }
 
     /// Remove the previous runs' files from the user-owned staging output. The stage directory
     /// is validated to be a plain relative-or-absolute path without `..`, so the glob stays
     /// inside `<stage_dir>/out/`.
     fn clear_reports(&self) -> Cmd {
-        let mut args: Vec<String> = self.ssh_args().map(String::from).to_vec();
-        args.extend(["rm", "-f", "--"].map(String::from));
-        args.push(format!("{}/out/*", self.config.stage_dir));
-        Cmd::new("ssh", args)
+        let out = format!("{}/out/*", self.config.stage_dir);
+        self.ssh(&[], &["rm", "-f", "--", &out])
     }
 }
 
@@ -367,6 +434,8 @@ mod tests {
         /// Fail any command whose line contains this text.
         fail: Option<&'static str>,
         run_exit: i32,
+        /// Hosts whose boot id reads fail with ssh's connection error, until the run command.
+        down: RefCell<Vec<&'static str>>,
     }
 
     impl Fake {
@@ -377,6 +446,7 @@ mod tests {
                 clock: Cell::new(Duration::ZERO),
                 fail: None,
                 run_exit: 0,
+                down: RefCell::default(),
             }
         }
 
@@ -424,9 +494,13 @@ mod tests {
                 return reply(true, 0, METADATA, "");
             }
             if text.ends_with("ferrite-esp run dbcping") {
+                self.down.borrow_mut().clear();
                 return reply(self.run_exit == 0, self.run_exit, "", "");
             }
             if text.ends_with(BOOT_ID_PATH) {
+                if self.down.borrow().iter().any(|host| text.contains(&format!(" {host} cat "))) {
+                    return reply(false, 255, "", "");
+                }
                 let mut answers = self.answers.borrow_mut();
                 let answer = if answers.len() > 1 { answers.remove(0) } else { answers.first().copied().flatten() };
                 return answer.map_or_else(|| reply(false, 255, "", ""), |id| reply(true, 0, &format!("{id}\n"), ""));
@@ -459,6 +533,7 @@ mod tests {
             timeout: Duration::from_secs(300),
             log_for: Duration::from_secs(120),
             capture: true,
+            link: LinkOptions::default(),
         }
     }
 
@@ -473,11 +548,11 @@ mod tests {
                 == [
                     "cargo metadata --format-version 1 --no-deps".to_owned(),
                     "cargo build --target x86_64-unknown-uefi -p ferrite-recon --bin dbcping".into(),
+                    probe.clone(),
                     "scp -q -o BatchMode=yes /w/target/x86_64-unknown-uefi/debug/dbcping.efi target:ferrite-stage/dbcping.efi"
                         .into(),
                     format!("{DEPLOY} clean-reports"),
                     format!("{DEPLOY} install dbcping"),
-                    probe.clone(),
                     format!("{DEPLOY} run dbcping"),
                     probe.clone(),
                     probe.clone(),
@@ -627,7 +702,7 @@ mod tests {
     #[test]
     fn config_values_reach_the_command_lines() {
         let config = Config {
-            ssh_host: "laptop".into(),
+            ssh_hosts: vec!["laptop".into()],
             helper: "/opt/deploy".into(),
             stage_dir: "stage".into(),
             ..Config::default()
@@ -641,11 +716,104 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bench("dbcbench", CaptureKind::Bench { wait: Duration::from_secs(300) })]
+    #[case::bench("dbcbench", CaptureKind::Bench { wait: Duration::from_secs(300), link: LinkOptions::default() })]
     #[case::ping("dbcping", CaptureKind::Log { probe: Some("probe-from-host".into()), duration: Duration::from_secs(120) })]
     #[case::other("xhciscan", CaptureKind::Log { probe: None, duration: Duration::from_secs(120) })]
     fn the_capture_follows_the_app(#[case] app: &str, #[case] want: CaptureKind) {
-        check!(capture_kind(app, Duration::from_secs(120), Duration::from_secs(300)) == want);
+        let link = LinkOptions::default();
+        check!(capture_kind(app, Duration::from_secs(120), Duration::from_secs(300), link) == want);
+    }
+
+    const LAN: &str = "192.0.2.10";
+
+    fn two_hosts() -> Config {
+        Config {
+            ssh_hosts: vec![LAN.into(), "target".into()],
+            host_key_alias: Some("target-key".into()),
+            ..Config::default()
+        }
+    }
+
+    fn via(host: &str, tail: &str) -> String {
+        format!("ssh -o BatchMode=yes -o HostKeyAlias=target-key {host} {tail}")
+    }
+
+    fn probe_of(host: &str) -> String {
+        format!("ssh -o BatchMode=yes -o HostKeyAlias=target-key -o ConnectTimeout=3 {host} cat {BOOT_ID_PATH}")
+    }
+
+    const SETUP: [&str; 2] = [
+        "cargo metadata --format-version 1 --no-deps",
+        "cargo build --target x86_64-unknown-uefi -p ferrite-recon --bin dbcping",
+    ];
+
+    #[test]
+    fn the_first_host_that_answers_serves_every_step_and_the_alias_reaches_every_ssh_and_scp() {
+        let fake = Fake::new(&[BEFORE, AFTER]);
+        assert!(let Ok(_) = execute(&fake, &two_hosts(), &plan("dbcping")));
+        let helper = "sudo -n /usr/local/sbin/ferrite-esp";
+        let mut want: Vec<String> = SETUP.map(String::from).to_vec();
+        want.extend([
+            probe_of(LAN),
+            format!("scp -q -o BatchMode=yes -o HostKeyAlias=target-key /w/target/x86_64-unknown-uefi/debug/dbcping.efi {LAN}:ferrite-stage/dbcping.efi"),
+            via(LAN, &format!("{helper} clean-reports")),
+            via(LAN, &format!("{helper} install dbcping")),
+            via(LAN, &format!("{helper} run dbcping")),
+            probe_of(LAN),
+            via(LAN, "rm -f -- ferrite-stage/out/*"),
+            via(LAN, &format!("{helper} collect")),
+            format!("scp -q -o BatchMode=yes -o HostKeyAlias=target-key {LAN}:ferrite-stage/out/* /runs/x"),
+        ]);
+        check!(fake.commands() == want);
+        check!(fake.said().iter().any(|m| m == &format!("using ssh host {LAN} (boot id aaaa-1111)")));
+        check!(
+            fake.said()
+                .iter()
+                .any(|m| m.starts_with("target-key is back after") && m.ends_with(&format!("answering on {LAN}")))
+        );
+    }
+
+    #[test]
+    fn an_unreachable_first_host_falls_back_and_the_first_host_is_preferred_again_after_the_reboot() {
+        let fake = Fake::new(&[BEFORE, AFTER]);
+        fake.down.borrow_mut().push(LAN);
+        assert!(let Ok(_) = execute(&fake, &two_hosts(), &plan("dbcping")));
+        let helper = "sudo -n /usr/local/sbin/ferrite-esp";
+        let mut want: Vec<String> = SETUP.map(String::from).to_vec();
+        want.extend([
+            probe_of(LAN),
+            probe_of("target"),
+            "scp -q -o BatchMode=yes -o HostKeyAlias=target-key /w/target/x86_64-unknown-uefi/debug/dbcping.efi target:ferrite-stage/dbcping.efi".to_owned(),
+            via("target", &format!("{helper} clean-reports")),
+            via("target", &format!("{helper} install dbcping")),
+            via("target", &format!("{helper} run dbcping")),
+            probe_of(LAN),
+            via(LAN, "rm -f -- ferrite-stage/out/*"),
+            via(LAN, &format!("{helper} collect")),
+            format!("scp -q -o BatchMode=yes -o HostKeyAlias=target-key {LAN}:ferrite-stage/out/* /runs/x"),
+        ]);
+        check!(fake.commands() == want);
+        check!(fake.said().iter().any(|m| m == "using ssh host target (boot id aaaa-1111)"));
+    }
+
+    #[test]
+    fn a_target_that_answers_on_no_host_stops_before_staging() {
+        let fake = Fake::new(&[BEFORE]);
+        fake.down.borrow_mut().extend([LAN, "target"]);
+        assert!(let Err(e) = execute(&fake, &two_hosts(), &plan("dbcping")));
+        check!(e.to_string() == format!("no ssh host answered: {LAN}, target"));
+        check!(fake.commands().len() == 4, "{:?}", fake.commands());
+        check!(!fake.events.borrow().iter().any(|e| matches!(e, Event::CaptureStart(_))));
+    }
+
+    #[test]
+    fn the_transport_choice_reaches_the_benchmark_capture() {
+        let fake = Fake::new(&[BEFORE, None, AFTER]);
+        let link = LinkOptions { transport: crate::link::Transport::Tty, ..LinkOptions::default() };
+        assert!(let Ok(_) = execute(&fake, &Config::default(), &RunPlan { link, ..plan("dbcbench") }));
+        let events = fake.events.borrow();
+        assert!(let Some(Event::CaptureStart(started)) = events.iter().find(|e| matches!(e, Event::CaptureStart(_))));
+        check!(started.kind == CaptureKind::Bench { wait: Duration::from_secs(300), link });
     }
 
     #[rstest]

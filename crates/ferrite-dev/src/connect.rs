@@ -15,7 +15,9 @@ use snafu::{ResultExt, Snafu};
 
 use crate::config::Config;
 use crate::emit::Emitter;
+use crate::link::{Link, Transport};
 use crate::tty::{Tty, TtyError};
+use crate::usb::{UsbError, UsbOpener, permission_help};
 
 pub const KICK_EVERY: Duration = Duration::from_secs(6);
 const KICK_PAUSE: Duration = Duration::from_millis(300);
@@ -34,7 +36,7 @@ enum KickError {
 }
 
 pub enum Waited {
-    Connected(Tty),
+    Connected(Link),
     TimedOut,
     Stopped,
 }
@@ -44,7 +46,8 @@ pub struct Connector<'a> {
     kick_every: Duration,
     last_kick: Instant,
     port_unset_noted: bool,
-    last_open_error: Option<Errno>,
+    last_open_error: Option<String>,
+    usb: Option<Box<dyn UsbOpener>>,
 }
 
 impl<'a> Connector<'a> {
@@ -55,12 +58,20 @@ impl<'a> Connector<'a> {
             last_kick: Instant::now(),
             port_unset_noted: false,
             last_open_error: None,
+            usb: None,
         }
     }
 
     #[must_use]
     pub const fn kick_every(mut self, every: Duration) -> Self {
         self.kick_every = every;
+        self
+    }
+
+    /// Try the USB device first. A permission error drops back to the tty for the rest of the wait.
+    #[must_use]
+    pub fn usb(mut self, opener: impl UsbOpener + 'static) -> Self {
+        self.usb = Some(Box::new(opener));
         self
     }
 
@@ -83,29 +94,62 @@ impl<'a> Connector<'a> {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Ok(Waited::TimedOut);
             }
-            if self.config.device.exists() {
+            if let Some(opener) = self.usb.as_mut() {
+                match opener.open() {
+                    Ok(link) => {
+                        self.last_open_error = None;
+                        emitter.line(&format!("--- transport: {} ---", link.describe()));
+                        emitter.line("--- link up ---");
+                        return Ok(Waited::Connected(link));
+                    },
+                    Err(UsbError::Absent) => self.kick_if_due(emitter),
+                    Err(UsbError::Denied { node }) => {
+                        for line in permission_help(&node) {
+                            if line.starts_with("---") {
+                                emitter.line(&line);
+                            } else {
+                                emitter.plain(&line);
+                            }
+                        }
+                        self.usb = None;
+                        continue;
+                    },
+                    Err(e) => self.note_unusable(emitter, &crate::chain(&e)),
+                }
+            } else if self.config.device.exists() {
                 match Tty::open(&self.config.device) {
                     Ok(tty) => {
                         self.last_open_error = None;
                         emitter.line("--- link up ---");
-                        return Ok(Waited::Connected(tty));
+                        let device = self.config.device.display().to_string();
+                        return Ok(Waited::Connected(Link::new(Transport::Tty, device, tty)));
                     },
                     Err(TtyError::Open { source, .. } | TtyError::Configure { source, .. })
                         if !matches!(source, Errno::ACCESS | Errno::PERM) =>
                     {
-                        if self.last_open_error != Some(source) {
-                            emitter.line(&format!("--- device present but not usable yet: {source} ---"));
-                            self.last_open_error = Some(source);
-                        }
+                        self.note_unusable(emitter, &source.to_string());
                     },
                     Err(e) => return Err(ConnectError::Device { source: e }),
                 }
-            } else if self.last_kick.elapsed() >= self.kick_every {
-                self.kick(emitter);
+            } else {
+                self.kick_if_due(emitter);
             }
             let nap = deadline
                 .map_or(POLL_EVERY, |deadline| POLL_EVERY.min(deadline.saturating_duration_since(Instant::now())));
             thread::sleep(nap);
+        }
+    }
+
+    fn note_unusable(&mut self, emitter: &mut Emitter, reason: &str) {
+        if self.last_open_error.as_deref() != Some(reason) {
+            emitter.line(&format!("--- device present but not usable yet: {reason} ---"));
+            self.last_open_error = Some(reason.to_owned());
+        }
+    }
+
+    fn kick_if_due(&mut self, emitter: &mut Emitter) {
+        if self.last_kick.elapsed() >= self.kick_every {
+            self.kick(emitter);
         }
     }
 
@@ -146,6 +190,7 @@ mod tests {
 
     use super::*;
     use crate::emit::tests::Shared;
+    use crate::testing::FakeLink;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ferrite-dev-test-{}-{name}", std::process::id()));
@@ -194,6 +239,91 @@ mod tests {
         let waited = Connector::new(&config).wait(&mut emitter(&out), None, &AtomicBool::new(false));
         assert!(let Ok(Waited::Connected(_)) = waited);
         check!(out.text() == "T --- link up ---\n");
+    }
+
+    /// Answers each `open` from a script, then reports the device absent; counts the calls.
+    struct Scripted {
+        script: std::collections::VecDeque<Result<Link, UsbError>>,
+        calls: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl Scripted {
+        fn new(script: Vec<Result<Link, UsbError>>) -> (Self, std::rc::Rc<std::cell::Cell<u32>>) {
+            let calls = std::rc::Rc::default();
+            (Self { script: script.into(), calls: std::rc::Rc::clone(&calls) }, calls)
+        }
+    }
+
+    impl UsbOpener for Scripted {
+        fn open(&mut self) -> Result<Link, UsbError> {
+            self.calls.set(self.calls.get() + 1);
+            self.script.pop_front().unwrap_or(Err(UsbError::Absent))
+        }
+    }
+
+    fn usb_link() -> Link {
+        Link::new(Transport::Usb, "fake", FakeLink::new())
+    }
+
+    fn pty_config() -> (Config, rustix::fd::OwnedFd) {
+        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).expect("ptmx");
+        grantpt(&master).expect("grantpt");
+        unlockpt(&master).expect("unlockpt");
+        let slave = PathBuf::from(ptsname(&master, Vec::new()).expect("ptsname").to_str().expect("ascii"));
+        (Config { device: slave, ..Config::default() }, master)
+    }
+
+    #[test]
+    fn the_usb_transport_waits_through_absence_and_reenables_the_port() {
+        let dir = scratch("usb-kick");
+        fs::write(dir.join("state"), "disabled\n").expect("state");
+        let config = Config { port_path: Some(dir.clone()), ..Config::default() };
+        let (opener, calls) = Scripted::new(vec![Err(UsbError::Absent), Err(UsbError::Absent), Ok(usb_link())]);
+        let out = Shared::default();
+        let mut connector = Connector::new(&config).kick_every(Duration::ZERO).usb(opener);
+        let waited = connector.wait(&mut emitter(&out), None, &AtomicBool::new(false));
+        assert!(let Ok(Waited::Connected(link)) = waited);
+        check!(link.transport() == Transport::Usb);
+        check!(calls.get() == 3);
+        check!(out.text().matches("--- port re-enabled (state was: disabled) ---").count() == 2, "{}", out.text());
+        check!(out.text().ends_with("T --- transport: usb (fake) ---\nT --- link up ---\n"), "{}", out.text());
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_permission_error_prints_the_udev_rule_and_falls_back_to_the_tty_for_good() {
+        let (config, _master) = pty_config();
+        let denied = UsbError::Denied { node: "/dev/bus/usb/003/012".into() };
+        let (opener, calls) = Scripted::new(vec![Err(denied), Ok(usb_link())]);
+        let out = Shared::default();
+        let mut connector = Connector::new(&config).usb(opener);
+        let waited = connector.wait(&mut emitter(&out), None, &AtomicBool::new(false));
+        assert!(let Ok(Waited::Connected(link)) = waited);
+        check!(link.transport() == Transport::Tty);
+        check!(calls.get() == 1, "the usb device is not tried again after a permission error");
+        let text = out.text();
+        check!(text.contains("T --- cannot open /dev/bus/usb/003/012: permission denied ---\n"), "{text}");
+        check!(
+            text.contains(
+                "\nSUBSYSTEM==\"usb\", ATTR{idVendor}==\"1d6b\", ATTR{idProduct}==\"0010\", TAG+=\"uaccess\"\n"
+            )
+        );
+        check!(text.contains("T --- falling back to the tty transport ---\n"));
+        check!(text.ends_with("T --- link up ---\n"));
+    }
+
+    #[test]
+    fn a_device_that_is_present_but_unusable_is_reported_once_and_retried() {
+        let broken = || UsbError::NoEndpoint { interface: 0, direction: "OUT" };
+        let (opener, calls) = Scripted::new(vec![Err(broken()), Err(broken()), Ok(usb_link())]);
+        let out = Shared::default();
+        let config = Config::default();
+        let mut connector = Connector::new(&config).usb(opener);
+        assert!(let Ok(Waited::Connected(_)) = connector.wait(&mut emitter(&out), None, &AtomicBool::new(false)));
+        check!(calls.get() == 3);
+        check!(
+            out.text().matches("device present but not usable yet: interface 0 has no bulk OUT endpoint").count() == 1
+        );
     }
 
     #[test]

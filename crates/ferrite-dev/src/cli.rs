@@ -6,6 +6,12 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 
 use crate::bench::Phase;
+use crate::link::{
+    DEFAULT_IN_SIZE, DEFAULT_IN_TRANSFERS, DEFAULT_OUT_SIZE, DEFAULT_OUT_TRANSFERS, LinkOptions, Transport, UsbConfig,
+};
+
+const MAX_TRANSFERS: usize = 1024;
+const MAX_TRANSFER_SIZE: usize = 16 << 20;
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrite-dev", about = "Desktop tool for the ferrite DbC link and the remote target loop")]
@@ -58,6 +64,46 @@ pub struct BenchArgs {
     /// Also write the output to this file
     #[arg(long, value_name = "FILE")]
     pub out: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub link: LinkArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct LinkArgs {
+    /// How to reach the target: usb drives the device directly, tty uses the `usb_debug` tty
+    #[arg(long, value_enum, default_value_t = Transport::Usb)]
+    pub transport: Transport,
+
+    /// USB transport: IN transfers kept in flight
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_IN_TRANSFERS, value_parser = parse_count)]
+    pub usb_in_transfers: usize,
+
+    /// USB transport: size of each IN transfer, like 16KiB
+    #[arg(long, value_name = "SIZE", default_value_t = DEFAULT_IN_SIZE, value_parser = parse_size)]
+    pub usb_in_size: usize,
+
+    /// USB transport: OUT transfers kept in flight
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_OUT_TRANSFERS, value_parser = parse_count)]
+    pub usb_out_transfers: usize,
+
+    /// USB transport: size of each OUT transfer, like 64KiB
+    #[arg(long, value_name = "SIZE", default_value_t = DEFAULT_OUT_SIZE, value_parser = parse_size)]
+    pub usb_out_size: usize,
+}
+
+impl LinkArgs {
+    pub const fn options(&self) -> LinkOptions {
+        LinkOptions {
+            transport: self.transport,
+            usb: UsbConfig {
+                in_transfers: self.usb_in_transfers,
+                in_size: self.usb_in_size,
+                out_transfers: self.usb_out_transfers,
+                out_size: self.usb_out_size,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -76,6 +122,37 @@ pub struct RunArgs {
     /// How long the target gets to go down and come back
     #[arg(long, value_name = "DURATION", default_value = "300s", value_parser = parse_duration)]
     pub timeout: Duration,
+
+    #[command(flatten)]
+    pub link: LinkArgs,
+}
+
+/// A transfer count between 1 and 1024.
+pub fn parse_count(text: &str) -> Result<usize, String> {
+    let count: usize = text.parse().map_err(|e| format!("{e}"))?;
+    if (1..=MAX_TRANSFERS).contains(&count) { Ok(count) } else { Err(format!("must be between 1 and {MAX_TRANSFERS}")) }
+}
+
+/// A byte count like `65536`, `64k`, `64KiB` or `1MiB`, between 1 byte and 16 MiB.
+pub fn parse_size(text: &str) -> Result<usize, String> {
+    let lower = text.trim().to_ascii_lowercase();
+    let digits = lower.trim_end_matches(|c: char| !c.is_ascii_digit());
+    let multiplier = match &lower[digits.len()..] {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1 << 10,
+        "m" | "mb" | "mib" => 1 << 20,
+        other => return Err(format!("unknown unit `{other}`, use KiB or MiB")),
+    };
+    let bytes = digits
+        .parse::<usize>()
+        .map_err(|e| format!("{e}"))?
+        .checked_mul(multiplier)
+        .ok_or_else(|| "too large".to_owned())?;
+    if (1..=MAX_TRANSFER_SIZE).contains(&bytes) {
+        Ok(bytes)
+    } else {
+        Err("must be between 1 byte and 16 MiB".to_owned())
+    }
 }
 
 /// A duration like `90s` or `5m`; a bare number is seconds.
@@ -118,6 +195,45 @@ mod tests {
         assert!(let Command::Bench(args) = cli.command);
         check!(args.phases == [Phase::Echo, Phase::Micro]);
         check!(args.wait == Duration::from_secs(90));
+    }
+
+    #[rstest]
+    #[case::bytes("65536", Ok(65536))]
+    #[case::kib("64KiB", Ok(64 << 10))]
+    #[case::short_k("16k", Ok(16 << 10))]
+    #[case::mib("1MiB", Ok(1 << 20))]
+    #[case::zero("0", Err(()))]
+    #[case::too_big("17MiB", Err(()))]
+    #[case::unit("5GiB", Err(()))]
+    #[case::garbage("big", Err(()))]
+    fn sizes_parse(#[case] text: &str, #[case] want: Result<usize, ()>) {
+        check!(parse_size(text).map_err(|_| ()) == want);
+    }
+
+    #[test]
+    fn the_transport_defaults_to_usb_and_takes_transfer_overrides() {
+        assert!(let Ok(cli) = Cli::try_parse_from(["ferrite-dev", "bench"]));
+        assert!(let Command::Bench(args) = cli.command);
+        check!(args.link.options() == LinkOptions::default());
+        check!(args.link.options().usb.to_string() == "16 x 16 KiB in, 8 x 64 KiB out");
+
+        let line = [
+            "ferrite-dev",
+            "run",
+            "dbcbench",
+            "--transport",
+            "tty",
+            "--usb-in-transfers",
+            "4",
+            "--usb-out-size",
+            "128k",
+        ];
+        assert!(let Ok(cli) = Cli::try_parse_from(line));
+        assert!(let Command::Run(args) = cli.command);
+        let options = args.link.options();
+        check!(options.transport == Transport::Tty);
+        check!((options.usb.in_transfers, options.usb.out_size) == (4, 128 << 10));
+        check!(Cli::try_parse_from(["ferrite-dev", "bench", "--usb-out-transfers", "0"]).is_err());
     }
 
     #[test]

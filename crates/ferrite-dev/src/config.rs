@@ -18,6 +18,9 @@ pub enum ConfigError {
     #[snafu(display("config value `{field}` is not usable in a remote command line: {value:?}"))]
     UnsafeValue { field: &'static str, value: String },
 
+    #[snafu(display("`ssh_hosts` needs at least one host"))]
+    NoHosts,
+
     #[snafu(display("cannot render the config"))]
     Render { source: toml::ser::Error },
 
@@ -29,8 +32,11 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// The target laptop as `ssh` and `scp` know it.
-    pub ssh_host: String,
+    /// The target laptop as `ssh` and `scp` know it, most preferred first; the first that answers is used.
+    pub ssh_hosts: Vec<String>,
+    /// Passed as `-o HostKeyAlias=` so every address of the target shares one known-hosts entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_key_alias: Option<String>,
     /// The tty the DbC link appears as on this machine.
     pub device: PathBuf,
     /// The sysfs directory of the USB port the DbC cable is plugged into. Unset by default, and
@@ -48,7 +54,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            ssh_host: "target".into(),
+            ssh_hosts: vec!["target".into()],
+            host_key_alias: None,
             device: "/dev/ferrite-dbc".into(),
             port_path: None,
             helper: "/usr/local/sbin/ferrite-esp".into(),
@@ -82,11 +89,11 @@ impl Config {
     /// The values that end up inside `ssh` and `scp` arguments must not look like options or
     /// carry shell syntax, since the remote side re-parses them.
     fn validate(&self) -> Result<(), ConfigError> {
-        for (field, value) in [
-            ("ssh_host", self.ssh_host.as_str()),
-            ("helper", self.helper.as_str()),
-            ("stage_dir", self.stage_dir.as_str()),
-        ] {
+        ensure!(!self.ssh_hosts.is_empty(), NoHostsSnafu);
+        let hosts = self.ssh_hosts.iter().map(|host| ("ssh_hosts", host.as_str()));
+        let alias = self.host_key_alias.iter().map(|alias| ("host_key_alias", alias.as_str()));
+        let others = [("helper", self.helper.as_str()), ("stage_dir", self.stage_dir.as_str())];
+        for (field, value) in hosts.chain(alias).chain(others) {
             ensure!(remote_safe(value), UnsafeValueSnafu { field, value });
         }
         let stage = self.stage_dir.as_str();
@@ -120,7 +127,8 @@ mod tests {
     #[test]
     fn defaults_are_todays_values() {
         let config = Config::default();
-        check!(config.ssh_host == "target");
+        check!(config.ssh_hosts == ["target"]);
+        check!(config.host_key_alias.is_none());
         check!(config.device == Path::new("/dev/ferrite-dbc"));
         check!(config.helper == "/usr/local/sbin/ferrite-esp");
         check!(config.stage_dir == "ferrite-stage");
@@ -135,9 +143,9 @@ mod tests {
 
     #[test]
     fn a_partial_file_overrides_only_what_it_names() {
-        let text = "ssh_host = \"spare\"\nport_path = \"/sys/other\"\n";
+        let text = "ssh_hosts = [\"spare\"]\nport_path = \"/sys/other\"\n";
         assert!(let Ok(config) = Config::parse(text, Path::new("c.toml")));
-        check!(config.ssh_host == "spare");
+        check!(config.ssh_hosts == ["spare"]);
         check!(config.port_path.as_deref() == Some(Path::new("/sys/other")));
         check!(config.device == Config::default().device);
         check!(config.helper == Config::default().helper);
@@ -145,8 +153,12 @@ mod tests {
 
     #[rstest]
     #[case::typo("ssh_hots = \"x\"")]
+    #[case::old_single_key("ssh_host = \"target\"")]
+    #[case::no_hosts("ssh_hosts = []")]
+    #[case::unsafe_second_host("ssh_hosts = [\"target\", \"-oProxyCommand=x\"]")]
+    #[case::shell_in_alias("host_key_alias = \"a b; reboot\"")]
     #[case::wrong_type("device = 4")]
-    #[case::option_lookalike("ssh_host = \"-oProxyCommand=x\"")]
+    #[case::option_lookalike("ssh_hosts = [\"-oProxyCommand=x\"]")]
     #[case::shell_syntax("stage_dir = \"a; rm -rf ~\"")]
     #[case::empty_helper("helper = \"\"")]
     #[case::stage_climbs_out("stage_dir = \"../elsewhere\"")]
@@ -168,7 +180,11 @@ mod tests {
 
     #[test]
     fn rendered_config_parses_back_to_itself() {
-        let config = Config { ssh_host: "other".into(), ..Config::default() };
+        let config = Config {
+            ssh_hosts: vec!["192.0.2.7".into(), "other".into()],
+            host_key_alias: Some("target".into()),
+            ..Config::default()
+        };
         assert!(let Ok(text) = config.render());
         check!(Config::parse(&text, Path::new("c.toml")).ok() == Some(config));
     }

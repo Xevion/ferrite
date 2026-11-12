@@ -11,9 +11,11 @@ clap.workspace = true
 ferrite-wire.workspace = true
 humantime.workspace = true
 jiff.workspace = true
+nusb.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
 snafu = { workspace = true, features = ["std"] }
 toml.workspace = true
 
