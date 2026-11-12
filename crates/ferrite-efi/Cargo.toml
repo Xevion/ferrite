@@ -11,7 +11,10 @@ publish.workspace = true
 panic-handler = []
 
 [dependencies]
+ferrite-hal.workspace = true
+ferrite-xhci.workspace = true
 log.workspace = true
+snafu.workspace = true
 uefi.workspace = true
 
 [dev-dependencies]

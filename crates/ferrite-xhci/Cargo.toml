@@ -7,8 +7,18 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-ferrite-efi.workspace = true
-uefi.workspace = true
+arbitrary-int.workspace = true
+bitbybit.workspace = true
+ferrite-hal.workspace = true
+log.workspace = true
+snafu.workspace = true
+strum.workspace = true
+
+[dev-dependencies]
+assert2.workspace = true
+ferrite-testing.workspace = true
+proptest.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

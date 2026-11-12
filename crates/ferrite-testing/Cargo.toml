@@ -1,0 +1,13 @@
+[package]
+name = "ferrite-testing"
+description = "Host-only test doubles: simulated MMIO, PCI config, DMA, clock and an xHCI DbC register file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ferrite-hal.workspace = true
+
+[lints]
+workspace = true
