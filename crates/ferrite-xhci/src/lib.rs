@@ -28,7 +28,7 @@ pub mod stats;
 pub mod trb;
 mod watch;
 
-pub use config::Config;
+pub use config::{Config, InTrbSize};
 pub use dbc::{BLOCK_PAGES, Dbc, State, Written};
 pub use device::{ExtCap, PortNumber, PortRange, XhciDevice, XhciFunction, ext_caps};
 pub use error::{DmaError, Error};

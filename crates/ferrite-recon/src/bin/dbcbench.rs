@@ -8,6 +8,10 @@
 //!   - echo: reply to each 64-byte message at once for 10 s, the desktop timing round trips;
 //!   - micro: the cost of a DCCTRL read through the root bridge, a log line and a log flush.
 //!
+//! The whole run receives on 16 KiB IN TRBs, which complete only when full or on a short packet,
+//! so the desktop peer must end every write that is a multiple of 1 KiB with a zero-length packet. `ferrite-dev bench`
+//! over direct usbfs does; the `usb_serial` tty never sends one and can no longer drive this tool.
+//!
 //! Measured regions log nothing and only record timestamps and counters in memory. The
 //! results are logged afterwards to the console and `\EFI\ferrite\dbcbench.txt`.
 
@@ -32,7 +36,7 @@ use ferrite_recon::display::{Chain, Ms, Rate};
 use ferrite_recon::summary;
 use ferrite_wire::bench::{self, FRAME_LEN, FrameReader, FrameSource, Marker, ReadyDetector, SinkStats};
 use ferrite_xhci::dbc::OUT_BYTES;
-use ferrite_xhci::{Config, State};
+use ferrite_xhci::{Config, InTrbSize, State};
 use log::LevelFilter;
 use uefi::prelude::*;
 
@@ -129,12 +133,13 @@ fn main() -> Status {
     let start = clock.now();
     log::info!("ferrite-uefi :: dbcbench - DbC throughput and latency");
 
-    let link = bringup::bring_up(clock, start, &Config::default()).map(|mut link| {
-        let results = run(&mut link, clock);
-        log_results(&results);
-        summary::report(&mut link.dbc, start);
-        link
-    });
+    let link =
+        bringup::bring_up(clock, start, &Config { in_trb: InTrbSize::Kib16, ..Config::default() }).map(|mut link| {
+            let results = run(&mut link, clock);
+            log_results(&results);
+            summary::report(&mut link.dbc, start);
+            link
+        });
 
     logger::with(|log| session::finish(log, EXIT_AFTER));
     drop(link);

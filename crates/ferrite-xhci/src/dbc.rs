@@ -6,6 +6,8 @@
 //! `wait_configured`, and every wait has a deadline.
 
 use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 use core::sync::atomic::{Ordering, fence};
 use core::time::Duration;
@@ -17,7 +19,7 @@ use ferrite_hal::{
 };
 use snafu::{OptionExt, ResultExt, ensure};
 
-use crate::config::{Config, MANUFACTURER, PRODUCT, SERIAL};
+use crate::config::{Config, IN_WINDOW, InTrbSize, MANUFACTURER, PRODUCT, SERIAL};
 use crate::device::{PortNumber, XhciDevice};
 use crate::dma::{DmaBlock, DmaSlice, boundary_slack};
 use crate::endpoint::{Endpoint, HaltChange};
@@ -45,11 +47,8 @@ pub const OUT_TRB_MAX: usize = 16 * 1024;
 ///
 /// Only small writes reach it: each write posted alone becomes a TRB, and each TRB costs one event.
 pub const OUT_MAX_TRBS: usize = 128;
-/// Receive buffers kept posted on the IN endpoint, one packet each.
-///
-/// A host burst of 64 packets finds every buffer posted without a poll in between.
-pub const IN_SLOTS: usize = 64;
-const IN_BYTES: usize = IN_SLOTS * MAX_PACKET;
+/// Most IN TRBs kept posted at any [`InTrbSize`].
+pub const IN_SLOTS_MAX: usize = 64;
 /// Event slots set aside for port status changes and anything else the controller reports on its own.
 const EVENT_SPARE: usize = 16;
 
@@ -57,32 +56,36 @@ const EVENT_SPARE: usize = 16;
 // controller only after a drain, so the worst case is every posted TRB's event
 // plus the spare ones. The ring keeps one slot free to tell full from empty.
 const _: () = {
-    assert!(OUT_MAX_TRBS + IN_SLOTS + EVENT_SPARE < RING_TRBS);
-    assert!(OUT_MAX_TRBS < RING_TRBS - 1 && IN_SLOTS < RING_TRBS - 1);
+    assert!(OUT_MAX_TRBS + IN_SLOTS_MAX + EVENT_SPARE < RING_TRBS);
+    assert!(OUT_MAX_TRBS < RING_TRBS - 1 && IN_SLOTS_MAX < RING_TRBS - 1);
     // A TRB moves at most 64 KiB, and its length is kept as a u16 tag.
     assert!(OUT_TRB_MAX <= u16::MAX as usize && OUT_TRB_MAX.is_multiple_of(MAX_PACKET));
     // The byte ring is one 64 KiB window, so no TRB cut from it crosses a boundary.
     assert!(OUT_BYTES <= 64 * 1024 && OUT_BYTES.is_power_of_two() && OUT_TRB_MAX <= OUT_BYTES);
-    assert!(IN_BYTES <= 64 * 1024);
+    assert!(IN_WINDOW <= 64 * 1024);
 };
 
 const TABLE_PAGES: PageCount = PageCount::new(1);
 const RING_PAGES: PageCount = PageCount::for_bytes(RING_BYTES);
 const OUT_PAGES: PageCount = PageCount::for_bytes(OUT_BYTES);
-const IN_PAGES: PageCount = PageCount::for_bytes(IN_BYTES);
+const IN_WINDOW_PAGES: PageCount = PageCount::for_bytes(IN_WINDOW);
 
-/// Pages for the table, three rings, the OUT byte ring and the IN buffers, plus
-/// what each region may skip to dodge a 64 KiB boundary.
-pub const BLOCK_PAGES: PageCount = {
-    let regions = [TABLE_PAGES, RING_PAGES, RING_PAGES, RING_PAGES, OUT_PAGES, IN_PAGES];
-    let mut total = 0;
+/// Pages for the table, three rings, the OUT byte ring and the IN buffers of
+/// `size`, plus what each region may skip to dodge a 64 KiB boundary.
+#[must_use]
+pub const fn block_pages(size: InTrbSize) -> PageCount {
+    let regions = [TABLE_PAGES, RING_PAGES, RING_PAGES, RING_PAGES, OUT_PAGES];
+    let mut total = size.windows() * (IN_WINDOW_PAGES.get() + boundary_slack(IN_WINDOW_PAGES).get());
     let mut i = 0;
     while i < regions.len() {
         total += regions[i].get() + boundary_slack(regions[i]).get();
         i += 1;
     }
     PageCount::new(total)
-};
+}
+
+/// The block for the largest IN TRB size, which fits every configuration.
+pub const BLOCK_PAGES: PageCount = block_pages(InTrbSize::Kib16);
 
 /// Offsets inside the table page.
 const CTX_OFF: usize = 0;
@@ -142,18 +145,19 @@ struct Layout {
     out_ring: DmaSlice,
     in_ring: DmaSlice,
     out_buf: DmaSlice,
-    in_buf: DmaSlice,
+    /// 64 KiB windows holding the IN buffers, one `InTrbSize` slot after another.
+    in_bufs: Vec<DmaSlice>,
 }
 
 impl Layout {
-    fn carve<R: DmaRegion>(block: &mut DmaBlock<R>) -> Result<Self, DmaError> {
+    fn carve<R: DmaRegion>(block: &mut DmaBlock<R>, in_trb: InTrbSize) -> Result<Self, DmaError> {
         Ok(Self {
             table: block.carve(TABLE_PAGES.bytes(), PAGE_SIZE)?,
             evt: block.carve(RING_BYTES, PAGE_SIZE)?,
             out_ring: block.carve(RING_BYTES, PAGE_SIZE)?,
             in_ring: block.carve(RING_BYTES, PAGE_SIZE)?,
             out_buf: block.carve(OUT_BYTES, PAGE_SIZE)?,
-            in_buf: block.carve(IN_BYTES, PAGE_SIZE)?,
+            in_bufs: (0..in_trb.windows()).map(|_| block.carve(IN_WINDOW, PAGE_SIZE)).collect::<Result<_, _>>()?,
         })
     }
 }
@@ -162,13 +166,14 @@ impl fmt::Display for Layout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "table {} evt {} out {} in {} outbuf {} inbuf {}",
+            "table {} evt {} out {} in {} outbuf {} inbuf {:?} x{}",
             self.table.bus(),
             self.evt.bus(),
             self.out_ring.bus(),
             self.in_ring.bus(),
             self.out_buf.bus(),
-            self.in_buf.bus()
+            self.in_bufs.first().map(DmaSlice::bus),
+            self.in_bufs.len()
         )
     }
 }
@@ -204,8 +209,11 @@ pub struct Dbc<H: Mmio, C: Clock + Delay, R: DmaRegion> {
     out_bytes: ByteRing,
     /// The last OUT TD ended on a full packet, so the host's read is still open.
     out_tail_full: bool,
-    in_buf: DmaSlice,
+    in_bufs: Vec<DmaSlice>,
+    in_trb: InTrbSize,
     in_next_slot: usize,
+    /// Landing space for one received IN TRB, reused across events.
+    rx_scratch: Vec<u8>,
     stats: Stats,
     timings: Timings,
     watch: LinkWatch,
@@ -236,9 +244,10 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
         let prep = pci::prepare(&mut hal, &clock, dev.addr())?;
         log::debug!("pci {dev}: command {:#06x} before, power {:?}", prep.command_before, prep.power_before);
 
-        let region = dma.alloc_dma32(BLOCK_PAGES).context(AllocSnafu { pages: BLOCK_PAGES.get() }).context(DmaSnafu)?;
+        let pages = block_pages(cfg.in_trb);
+        let region = dma.alloc_dma32(pages).context(AllocSnafu { pages: pages.get() }).context(DmaSnafu)?;
         let mut block = DmaBlock::new(region).context(DmaSnafu)?;
-        let mem = Layout::carve(&mut block).context(DmaSnafu)?;
+        let mem = Layout::carve(&mut block, cfg.in_trb).context(DmaSnafu)?;
         log::debug!("dma block {} ({} pages): {mem}", block.bus_addr(), block.pages().get());
 
         let mut dbc = Self {
@@ -256,8 +265,10 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
             in_ep: Endpoint::new(ProducerRing::new(mem.in_ring), "IN", DB_IN),
             out_bytes: ByteRing::new(mem.out_buf),
             out_tail_full: false,
-            in_buf: mem.in_buf,
+            in_bufs: mem.in_bufs,
+            in_trb: cfg.in_trb,
             in_next_slot: 0,
+            rx_scratch: vec![0; cfg.in_trb.bytes()],
             stats: Stats::default(),
             timings: Timings::default(),
             watch: LinkWatch::new(),
@@ -734,17 +745,28 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
         if self.in_ep.ring.complete_to(ptr, |s| slot = Some(s)).is_some() {
             self.stats.in_done += 1;
             if ok && let Some(slot) = slot {
-                let got = MAX_PACKET.saturating_sub(status.residual().value() as usize);
-                let mut packet = [0u8; MAX_PACKET];
-                self.in_buf.copy_to(usize::from(slot) * MAX_PACKET, &mut packet[..got]);
+                let got = self.in_trb.bytes().saturating_sub(status.residual().value() as usize);
                 self.stats.bytes_received += got as u64;
-                rx(&packet[..got]);
+                if got > 0 {
+                    let (window, off) = self.in_slot(usize::from(slot));
+                    let mut buf = core::mem::take(&mut self.rx_scratch);
+                    window.copy_to(off, &mut buf[..got]);
+                    rx(&buf[..got]);
+                    self.rx_scratch = buf;
+                }
             }
             return;
         }
 
         self.stats.unknown_transfer_events += 1;
         log::debug!("t={}ms transfer event for {ptr:#x} matches no in-flight TRB", ms(self.clock.now()));
+    }
+
+    /// The window and offset inside it of IN buffer `slot`.
+    fn in_slot(&self, slot: usize) -> (DmaSlice, usize) {
+        let bytes = self.in_trb.bytes();
+        let per_window = IN_WINDOW / bytes;
+        (self.in_bufs[slot / per_window], (slot % per_window) * bytes)
     }
 
     /// Turn buffered bytes into OUT TRBs and keep IN buffers posted.
@@ -779,13 +801,15 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
             }
         }
         if !self.in_ep.halted() {
-            while self.in_ep.ring.pending() < IN_SLOTS && self.in_ep.ring.free() > 0 {
+            let slots = self.in_trb.slots();
+            while self.in_ep.ring.pending() < slots && self.in_ep.ring.free() > 0 {
                 let slot = self.in_next_slot;
-                let addr = self.in_buf.bus_at(slot * MAX_PACKET);
-                if !self.in_ep.ring.push(Trb::normal(addr, u17::new(MAX_PACKET as u32)), slot as u16) {
+                let (window, off) = self.in_slot(slot);
+                let trb = Trb::normal(window.bus_at(off), u17::new(self.in_trb.bytes() as u32));
+                if !self.in_ep.ring.push(trb, slot as u16) {
                     break;
                 }
-                self.in_next_slot = (slot + 1) % IN_SLOTS;
+                self.in_next_slot = (slot + 1) % slots;
                 ring_in = true;
             }
         }
@@ -843,22 +867,35 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Drop for Dbc<H, C, R> {
 mod tests {
     use assert2::{assert, check};
     use ferrite_testing::Sim;
+    use rstest::rstest;
 
     use super::*;
 
-    #[test]
-    fn layout_fits_block_at_every_offset_in_a_64k_window() {
+    #[rstest]
+    #[case::kib1(InTrbSize::Kib1)]
+    #[case::kib4(InTrbSize::Kib4)]
+    #[case::kib16(InTrbSize::Kib16)]
+    fn layout_fits_block_at_every_offset_in_a_64k_window(#[case] size: InTrbSize) {
         let sim = Sim::new();
+        let crosses = |start: u64, len: usize| start / 0x1_0000 != (start + len as u64 - 1) / 0x1_0000;
         for page in 0..16u32 {
             sim.set_dma_base(0x10_0000 + page * PAGE_SIZE as u32);
-            let mut block = DmaBlock::new(sim.dma().alloc_dma32(BLOCK_PAGES).expect("sim allocation")).expect("low");
-            assert!(let Ok(mem) = Layout::carve(&mut block), "base page {page}");
-            let regions = [mem.table, mem.evt, mem.out_ring, mem.in_ring, mem.out_buf, mem.in_buf];
-            for (i, r) in regions.iter().enumerate() {
-                let (start, end) = (u64::from(r.bus().get()), u64::from(r.bus().get()) + r.len() as u64 - 1);
-                check!(start / 0x1_0000 == end / 0x1_0000, "region {i} crosses 64 KiB at base page {page}");
+            let mut block =
+                DmaBlock::new(sim.dma().alloc_dma32(block_pages(size)).expect("sim allocation")).expect("low");
+            assert!(let Ok(mem) = Layout::carve(&mut block, size), "base page {page}");
+            let regions = [mem.table, mem.evt, mem.out_ring, mem.in_ring, mem.out_buf];
+            for (i, r) in regions.iter().chain(&mem.in_bufs).enumerate() {
+                check!(!crosses(u64::from(r.bus().get()), r.len()), "region {i} crosses 64 KiB at base page {page}");
             }
-            check!(mem.out_buf.len() == OUT_BYTES && mem.in_buf.len() == IN_BYTES);
+            check!(mem.out_buf.len() == OUT_BYTES);
+            check!(mem.in_bufs.len() == size.windows() && mem.in_bufs.iter().all(|w| w.len() == IN_WINDOW));
+
+            let per_window = IN_WINDOW / size.bytes();
+            for slot in 0..size.slots() {
+                let start =
+                    u64::from(mem.in_bufs[slot / per_window].bus().get()) + ((slot % per_window) * size.bytes()) as u64;
+                check!(!crosses(start, size.bytes()), "IN slot {slot} crosses 64 KiB");
+            }
         }
     }
 }

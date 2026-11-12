@@ -4,11 +4,14 @@ use std::time::Duration;
 
 use assert2::{assert, check};
 use ferrite_testing::{DBC_DEV, Sim, SimClock, SimHal, SimRegion};
-use ferrite_xhci::dbc::{IN_SLOTS, OUT_BYTES, OUT_MAX_TRBS, OUT_TRB_MAX};
-use ferrite_xhci::{Config, Dbc, Error, State, XhciDevice, XhciFunction};
+use ferrite_xhci::dbc::{OUT_BYTES, OUT_MAX_TRBS, OUT_TRB_MAX};
+use ferrite_xhci::{Config, Dbc, Error, InTrbSize, State, XhciDevice, XhciFunction};
 use rstest::rstest;
 
 type SimDbc = Dbc<SimHal, SimClock, SimRegion>;
+
+/// IN TRBs kept posted at the default 1 KiB size.
+const IN_SLOTS: usize = InTrbSize::Kib1.slots();
 
 const DCE: u32 = 1 << 31;
 
@@ -29,7 +32,11 @@ fn open(sim: &Sim) -> SimDbc {
 }
 
 fn configured(sim: &Sim) -> SimDbc {
-    let mut dbc = open(sim);
+    configured_with(sim, &Config::default())
+}
+
+fn configured_with(sim: &Sim, cfg: &Config) -> SimDbc {
+    assert!(let Ok(mut dbc) = open_with(sim, cfg));
     sim.connect();
     dbc.poll(|_| {});
     sim.configure();
@@ -464,4 +471,116 @@ fn in_burst_of_every_slot_arrives_in_order_across_ring_laps() {
     check!(dbc.stats().unknown_transfer_events == 0);
     check!(sim.event_overflows() == 0);
     check!(sim.trb_violations() == 0);
+}
+
+fn in_config(size: InTrbSize) -> Config {
+    Config { in_trb: size, ..Config::default() }
+}
+
+/// Poll once and return what arrived as one entry per delivery.
+fn received(dbc: &mut SimDbc) -> Vec<Vec<u8>> {
+    let mut got = Vec::new();
+    dbc.poll(|p| got.push(p.to_vec()));
+    got
+}
+
+#[test]
+fn a_16k_in_trb_completes_on_full() {
+    let sim = Sim::with_dbc_controller();
+    let mut dbc = configured_with(&sim, &in_config(InTrbSize::Kib16));
+    let data = pattern(16 * 1024);
+    assert!(sim.deliver_in(&data));
+    check!(received(&mut dbc) == [data], "one delivery of the whole TRB");
+    check!(dbc.stats().in_done == 1);
+    check!(dbc.stats().bytes_received == 16 * 1024);
+}
+
+#[rstest]
+fn in_delivers_exactly_the_bytes_received(
+    #[values(InTrbSize::Kib1, InTrbSize::Kib4, InTrbSize::Kib16)] size: InTrbSize,
+    #[values(1, 1023, 1024, 1500, 4096, 4097, 16383, 16384, 17_000, 20_480)] len: usize,
+) {
+    let sim = Sim::with_dbc_controller();
+    let mut dbc = configured_with(&sim, &in_config(size));
+    let data = pattern(len);
+    // A write ending on a full packet needs the host's zero-length packet to close the last TRB.
+    assert!(sim.host_write(&data, len.is_multiple_of(1024)));
+
+    let got: Vec<u8> = received(&mut dbc).concat();
+    check!(got == data, "residual math for {len} bytes in {size:?} TRBs");
+    check!(dbc.stats().bytes_received == len as u64);
+    check!(sim.trb_violations() == 0);
+    check!(sim.dma_violations() == 0);
+}
+
+#[test]
+fn short_packet_mid_trb_delivers_only_its_bytes() {
+    let sim = Sim::with_dbc_controller();
+    let mut dbc = configured_with(&sim, &in_config(InTrbSize::Kib16));
+    let (first, second) = (pattern(5000), pattern(3));
+    assert!(sim.deliver_in(&first));
+    assert!(sim.deliver_in(&second));
+    check!(received(&mut dbc) == [first, second], "each write ends its own TRB");
+    check!(dbc.stats().in_done == 2);
+    check!(dbc.stats().unknown_transfer_events == 0);
+}
+
+#[test]
+fn exact_multiple_write_stays_in_its_trb_until_a_zero_length_packet() {
+    let sim = Sim::with_dbc_controller();
+    let mut dbc = configured_with(&sim, &in_config(InTrbSize::Kib16));
+    let data = pattern(4096);
+    assert!(sim.deliver_in(&data));
+    check!(received(&mut dbc).is_empty(), "the TRB is not full and no short packet ended it");
+    check!(dbc.stats().in_done == 0);
+
+    assert!(sim.deliver_in_zlp(&[]));
+    check!(received(&mut dbc) == [data]);
+    check!(dbc.stats().in_done == 1);
+}
+
+#[test]
+fn zero_length_packet_after_a_full_trb_delivers_nothing() {
+    for size in [InTrbSize::Kib1, InTrbSize::Kib16] {
+        let sim = Sim::with_dbc_controller();
+        let mut dbc = configured_with(&sim, &in_config(size));
+        let data = pattern(size.bytes());
+        assert!(sim.deliver_in_zlp(&data));
+        check!(received(&mut dbc) == [data], "{size:?}: the ZLP is not an empty delivery");
+        check!(dbc.stats().in_done == 2, "{size:?}: the ZLP used up a TRB");
+        check!(dbc.stats().bytes_received == size.bytes() as u64);
+    }
+}
+
+#[test]
+fn large_in_trbs_keep_order_across_ring_laps() {
+    let sim = Sim::with_dbc_controller();
+    let size = InTrbSize::Kib16;
+    let mut dbc = configured_with(&sim, &in_config(size));
+    let sizes: [usize; 7] = [100, 16 * 1024, 20_000, 1500, 32 * 1024, 7, 16 * 1024 + 1];
+    let (mut sent, mut got) = (Vec::new(), Vec::new());
+    let (mut trbs, mut n) = (0usize, 0usize);
+    while trbs < 300 {
+        let mut used = 0;
+        loop {
+            let len = sizes[n % sizes.len()];
+            let needed = len.div_ceil(size.bytes());
+            if used + needed > size.slots() {
+                break;
+            }
+            let data: Vec<u8> = pattern(len).iter().map(|b| b.wrapping_add(n as u8)).collect();
+            assert!(sim.deliver_in(&data), "write {n} found its TRBs posted");
+            sent.extend_from_slice(&data);
+            used += needed;
+            n += 1;
+        }
+        trbs += used;
+        dbc.poll(|p| got.extend_from_slice(p));
+    }
+    check!(got == sent, "bytes arrive in the order the host wrote them");
+    check!(dbc.stats().in_done as usize == trbs);
+    check!(dbc.stats().unknown_transfer_events == 0);
+    check!(sim.event_overflows() == 0);
+    check!(sim.trb_violations() == 0);
+    check!(sim.dma_violations() == 0);
 }

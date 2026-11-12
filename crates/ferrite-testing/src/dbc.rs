@@ -63,6 +63,8 @@ pub struct DbcModel {
     evt_cycle: bool,
     out: Cursor,
     in_ep: Cursor,
+    /// The IN TRB the host is part way through filling: (TRB address, buffer, length, bytes so far).
+    in_open: Option<(u64, u64, u32, u32)>,
     /// Most event slots in use at once: written by the controller, not yet acknowledged through ERDP.
     evt_high_water: u64,
     /// Events written while the ring had no free slot beyond the one that tells full from empty.
@@ -132,6 +134,23 @@ impl State {
             (u32::from(cc) << 24) | residual,
             (TRB_TRANSFER_EVENT << 10) | (ep << 16),
         ])
+    }
+
+    /// The IN TRB being filled, taking the next posted one if none is open.
+    fn open_in_trb(&mut self) -> Option<(u64, u64, u32, u32)> {
+        if let Some(open) = self.dbc.as_ref()?.in_open {
+            return Some(open);
+        }
+        let (at, buf, len) = self.next_trb(false)?;
+        let open = (at, buf, len, 0);
+        self.dbc.as_mut()?.in_open = Some(open);
+        Some(open)
+    }
+
+    /// Complete the open IN TRB.
+    fn finish_in(&mut self, at: u64, cc: u8, residual: u32) -> Option<()> {
+        self.dbc.as_mut()?.in_open = None;
+        self.transfer_event(at, cc, residual, EP_IN)
     }
 
     /// Next posted TRB on a transfer ring as (address, buffer, length), following link TRBs.
@@ -313,6 +332,7 @@ impl Sim {
         if let Some(m) = st.dbc.as_mut() {
             m.out = Cursor { base: out & !0xf, idx: 0, cycle: out & 1 != 0 };
             m.in_ep = Cursor { base: inn & !0xf, idx: 0, cycle: inn & 1 != 0 };
+            m.in_open = None;
         }
     }
 
@@ -370,22 +390,60 @@ impl Sim {
         Some((at, bytes))
     }
 
-    /// Fill the next posted IN TRB with `data` and complete it.
+    /// The host writes `data` as one transfer, as a bulk OUT: full packets then
+    /// a short one if `data` is not a multiple of 1024 bytes, and a zero-length
+    /// packet after it when `zlp` is set. Each packet lands in the posted IN
+    /// TRBs the way an xHC places it: a TRB completes when it is full (Success)
+    /// or when a short packet ends it (Short Packet, with the bytes left over as
+    /// residual). A write ending on a full packet without `zlp` leaves the
+    /// current TRB open. False when the data or the terminator found no posted TRB.
     #[must_use]
-    pub fn deliver_in(&self, data: &[u8]) -> bool {
+    pub fn host_write(&self, data: &[u8], zlp: bool) -> bool {
         let mut st = self.0.borrow_mut();
-        let Some((at, buf, len)) = st.next_trb(false) else {
-            return false;
-        };
-        let n = data.len().min(len as usize);
-        for (i, chunk) in data[..n].chunks(4).enumerate() {
-            let mut word = [0u8; 4];
-            word[..chunk.len()].copy_from_slice(chunk);
-            if st.dma_write(buf + 4 * i as u64, u32::from_le_bytes(word)).is_none() {
+        let ends_short = zlp || !data.len().is_multiple_of(1024);
+        let mut rest = data;
+        while !rest.is_empty() {
+            let Some((at, buf, len, filled)) = st.open_in_trb() else {
                 return false;
+            };
+            let n = rest.len().min((len - filled) as usize);
+            for (i, chunk) in rest[..n].chunks(4).enumerate() {
+                let mut word = [0u8; 4];
+                word[..chunk.len()].copy_from_slice(chunk);
+                if st.dma_write(buf + u64::from(filled) + 4 * i as u64, u32::from_le_bytes(word)).is_none() {
+                    return false;
+                }
+            }
+            rest = &rest[n..];
+            let filled = filled + n as u32;
+            if filled == len {
+                if st.finish_in(at, CC_SUCCESS, 0).is_none() {
+                    return false;
+                }
+            } else if let Some(m) = st.dbc.as_mut() {
+                m.in_open = Some((at, buf, len, filled));
             }
         }
-        let cc = if n < len as usize { CC_SHORT_PACKET } else { CC_SUCCESS };
-        st.transfer_event(at, cc, len - n as u32, EP_IN).is_some()
+        if ends_short {
+            // A zero-length packet after an exact fill takes a fresh TRB; after a partial fill it closes that one.
+            let Some((at, _, len, filled)) = st.open_in_trb() else {
+                return false;
+            };
+            return st.finish_in(at, CC_SHORT_PACKET, len - filled).is_some();
+        }
+        true
+    }
+
+    /// Fill the next posted IN TRB with `data` and complete it. A write that is
+    /// a multiple of 1024 bytes and does not fill the TRB leaves it open; see [`Sim::host_write`].
+    #[must_use]
+    pub fn deliver_in(&self, data: &[u8]) -> bool {
+        self.host_write(data, false)
+    }
+
+    /// As [`Sim::deliver_in`], followed by a zero-length packet.
+    #[must_use]
+    pub fn deliver_in_zlp(&self, data: &[u8]) -> bool {
+        self.host_write(data, true)
     }
 }
