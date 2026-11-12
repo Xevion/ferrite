@@ -11,6 +11,7 @@ use crate::loader::LoaderError;
 use crate::log::LogError;
 use crate::push::PushError;
 use crate::run::RunError;
+use crate::stubs::StubsError;
 use crate::vendor::VendorError;
 
 #[derive(Debug, Snafu)]
@@ -36,6 +37,9 @@ pub enum Error {
 
     #[snafu(display("vendor failed"))]
     Vendor { source: VendorError },
+
+    #[snafu(display("stubs failed"))]
+    Stubs { source: StubsError },
 
     #[snafu(display("cannot create {}", path.display()))]
     Output { path: PathBuf, source: io::Error },

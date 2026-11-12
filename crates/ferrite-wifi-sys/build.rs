@@ -3,6 +3,9 @@
 //! The snapshot is made by `ferrite-dev vendor`. Every flag is passed explicitly: `cc`'s own defaults
 //! (profile optimisation level, PIC, target flags) would change what the kernel headers assume.
 //!
+//! Hand-written and generated C in `glue/` (the kernel symbols the shim defines in C) is compiled with the
+//! same flags into the same archive, after the passes below and so without the rename.
+//!
 //! Two passes run over each object before archiving: the symbols of `libc-collisions.txt` are renamed so
 //! they cannot bind to the host libc, and the initcall and exitcall pointers the shadow `linux/init.h`
 //! emits are collected into ordered tables (`lx_initcalls`, `lx_exitcalls`) compiled into the archive.
@@ -181,6 +184,40 @@ fn builder(clang: &Path, llvm: &Path, flags: &[String], extra: &[&str]) -> cc::B
     build
 }
 
+/// The `.c` files of `glue/`, in name order; none when the directory is missing.
+fn glue_sources(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    let mut sources: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "c"))
+        .collect();
+    sources.sort();
+    sources
+}
+
+/// Compile each glue file as a unit of a module named `glue`; headers outside the include roots are
+/// reachable as `"linux/..."` from the crate directory.
+fn glue_objects(crate_dir: &Path, clang: &Path, llvm: &Path, flags: &[String]) -> Vec<PathBuf> {
+    glue_sources(&crate_dir.join("glue"))
+        .into_iter()
+        .flat_map(|source| {
+            let stem = source.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+            let defines = [
+                format!("-DKBUILD_BASENAME=\"{stem}\""),
+                "-DKBUILD_MODNAME=\"glue\"".to_owned(),
+                "-D__KBUILD_MODNAME=kmod_glue".to_owned(),
+                format!("-DKBUILD_MODFILE=\"glue/{stem}\""),
+                "-I.".to_owned(),
+            ];
+            let extra: Vec<&str> = defines.iter().map(String::as_str).collect();
+            let mut build = builder(clang, llvm, flags, &extra);
+            build.file(&source);
+            build.compile_intermediates()
+        })
+        .collect()
+}
+
 fn main() {
     let crate_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap_or_else(|| fail("CARGO_MANIFEST_DIR is not set")));
@@ -195,6 +232,7 @@ fn main() {
         "linux/VERSION",
         "shadow",
         "libc-collisions.txt",
+        "glue",
     ] {
         println!("cargo:rerun-if-changed={tracked}");
     }
@@ -277,6 +315,7 @@ fn main() {
     build.file(&table);
     objects.extend(build.compile_intermediates());
     println!("cargo:rustc-env=FERRITE_WIFI_INITCALLS={}", table.display());
+    objects.extend(glue_objects(&crate_dir, &clang, &llvm, &flags));
 
     let archive = builder(&clang, &llvm, &[], &[]).create_archive(ARCHIVE, &objects);
     println!("cargo:rustc-env=FERRITE_WIFI_ARCHIVE={}", archive.display());

@@ -163,7 +163,7 @@ fn libc_colliding_names_are_renamed_and_never_defined() {
     for (libc, shim) in collisions() {
         check!(!undefined.contains(libc), "{libc} is still imported");
         check!(undefined.contains(shim), "{shim} is not imported");
-        check!(!defined.contains(libc) && !defined.contains(shim), "the archive defines {libc} or {shim}");
+        check!(!defined.contains(libc), "the archive defines {libc}");
     }
 }
 

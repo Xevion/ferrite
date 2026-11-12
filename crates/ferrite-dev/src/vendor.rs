@@ -4,13 +4,13 @@
 //! work directory only long enough to configure Kbuild, evaluate which C files it builds and find the
 //! headers they read; it is deleted afterwards. The snapshot lands in the crate's untracked `linux/`.
 
-mod fetch;
+pub(crate) mod fetch;
 #[path = "../../ferrite-wifi-sys/vendor_inputs.rs"]
 mod inputs;
 mod kbuild;
 mod kernel;
 mod snapshot;
-mod spec;
+pub(crate) mod spec;
 
 use std::fs;
 use std::io;

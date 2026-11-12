@@ -39,6 +39,8 @@ pub enum Command {
     Loader(LoaderArgs),
     /// Fetch the pinned Linux release and regenerate the untracked snapshot ferrite-wifi-sys compiles
     Vendor(VendorArgs),
+    /// Regenerate the stubs for the kernel symbols the Linux C imports and nothing defines
+    Stubs(StubsArgs),
     /// Print the effective configuration
     Config,
 }
@@ -198,6 +200,21 @@ pub struct VendorArgs {
     pub crate_dir: PathBuf,
 }
 
+#[derive(Debug, Args)]
+pub struct StubsArgs {
+    /// Fail if a generated file would change, and write nothing
+    #[arg(long)]
+    pub check: bool,
+
+    /// The ferrite-wifi-sys crate directory, which holds the Linux C inputs and receives glue/
+    #[arg(long, value_name = "DIR", default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../ferrite-wifi-sys"))]
+    pub wifi_dir: PathBuf,
+
+    /// The ferrite-lkpi crate directory, which receives the Rust stubs
+    #[arg(long, value_name = "DIR", default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../ferrite-lkpi"))]
+    pub lkpi_dir: PathBuf,
+}
+
 /// A transfer count between 1 and 1024.
 pub fn parse_count(text: &str) -> Result<usize, String> {
     let count: usize = text.parse().map_err(|e| format!("{e}"))?;
@@ -342,6 +359,14 @@ mod tests {
         assert!(let Command::Vendor(args) = cli.command);
         check!(args.force);
         check!(args.crate_dir.ends_with("ferrite-wifi-sys"));
+    }
+
+    #[test]
+    fn stubs_defaults_to_the_sibling_crates_and_takes_check() {
+        assert!(let Ok(cli) = Cli::try_parse_from(["ferrite-dev", "stubs", "--check"]));
+        assert!(let Command::Stubs(args) = cli.command);
+        check!(args.check);
+        check!(args.wifi_dir.ends_with("ferrite-wifi-sys") && args.lkpi_dir.ends_with("ferrite-lkpi"));
     }
 
     #[test]

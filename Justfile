@@ -42,6 +42,10 @@ format:
 dev *args:
     cargo run -q -p ferrite-dev -- {{ args }}
 
+# regenerate the lkpi stubs and data glue from the built Linux archive; `just stubs --check` only reports drift
+stubs *args: vendor
+    cargo run -q -p ferrite-dev -- stubs {{ args }}
+
 # fetch the pinned Linux release and regenerate the untracked snapshot ferrite-wifi-sys compiles; `just vendor --force` redoes it
 vendor *args:
     cargo run -q -p ferrite-dev -- vendor {{ args }}

@@ -19,6 +19,7 @@ pub mod push;
 pub mod run;
 pub mod runner;
 pub mod session;
+pub mod stubs;
 pub mod tty;
 pub mod usb;
 pub mod vendor;

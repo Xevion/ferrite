@@ -12,13 +12,13 @@
 | `ferrite-recon` | `no_std`, UEFI apps | `pciscan`, `xhciscan`, `dbcping`, `dbcbench` |
 | `ferrite-loader` | `no_std`, UEFI app | Resident loader: keeps the DbC up, receives pushed `.efi` images and runs them under a watchdog |
 | `ferrite-wire` | `no_std` + `alloc` | Message formats spoken over the DbC link (the benchmark frames and the loader's `link` protocol), shared by both ends |
-| `ferrite-dev` | std | Desktop tool: `log` (DbC capture), `bench` (dbcbench peer), `run` (one-shot cycle on the laptop), `push` and `loader` (client of the resident loader) |
+| `ferrite-lkpi` | `no_std` + `alloc` | Linux kernel API shim the Wi-Fi drivers link against; its `stubs` feature holds the generated trace-and-stop stubs |
+| `ferrite-dev` | std | Desktop tool: `log` (DbC capture), `bench` (dbcbench peer), `run` (one-shot cycle on the laptop), `push` and `loader` (client of the resident loader), `vendor` (Linux snapshot), `stubs` (generates the kernel-symbol stubs) |
 
 Planned, created when their milestone starts:
 
 | Crate | Mode | Contents |
 | --- | --- | --- |
-| `ferrite-lkpi` | `no_std` + `alloc` | Linux kernel API shim the Wi-Fi drivers link against |
 | `ferrite-wifi-sys` | `no_std` | Pinned Linux driver C built by `build.rs`, plus bindings |
 | `ferrite-wifi` | `no_std` + `alloc` | WPA2-PSK and the station state machine |
 | `ferrite-hal-vfio` | std | HAL backend over Linux VFIO |

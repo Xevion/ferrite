@@ -1,0 +1,23 @@
+[package]
+name = "ferrite-lkpi"
+description = "Linux kernel API shim the Wi-Fi drivers link against"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["stubs"]
+# The generated trace-and-stop stubs. `ferrite-dev stubs` builds without it, so that what the crate
+# defines by hand can be told apart from what the stubs define.
+stubs = []
+
+[dependencies]
+log.workspace = true
+snafu.workspace = true
+
+[dev-dependencies]
+assert2.workspace = true
+
+[lints]
+workspace = true
