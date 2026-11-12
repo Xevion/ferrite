@@ -30,20 +30,13 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::fmt::Write;
 
-use uefi::boot::{
-    self, EventType, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol, TimerTrigger, Tpl,
-};
-use uefi::fs::FileSystem;
+use ferrite_uefi::session::{self, Report};
+use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
 use uefi::prelude::*;
 use uefi::proto::pci::PciIoAddress;
 use uefi::proto::pci::root_bridge::PciRootBridgeIo;
-use uefi::runtime::{self, ResetType, VariableVendor};
-use uefi::{CStr16, cstr16, guid};
 
-const REPORT_DIR: &CStr16 = cstr16!("\\EFI\\ferrite");
-const REPORT_PATH: &CStr16 = cstr16!("\\EFI\\ferrite\\xhciscan.txt");
 /// How long to keep the report on screen before exiting back to the boot manager.
 const EXIT_AFTER_SECS: u64 = 20;
 
@@ -59,43 +52,12 @@ const XCAP_DEBUG_CAPABILITY: u8 = 0x0a;
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
-    let report = build_report();
-    let saved = save_report(&report);
-    system::with_stdout(|out| {
-        let _ = out.clear();
-        for line in &report {
-            let _ = writeln!(out, "{line}\r");
-        }
-        let _ = writeln!(
-            out,
-            "\r\nreport file: {}\r\npress a key to exit (auto-exit in {EXIT_AFTER_SECS}s)...\r",
-            if saved {
-                "\\EFI\\ferrite\\xhciscan.txt"
-            } else {
-                "NOT written"
-            }
-        );
-    });
-    // An unattended one-shot run reboots instead of returning, so the machine
-    // lands back in its default OS rather than at a boot-loader prompt.
-    if !wait_for_key_or_timeout(EXIT_AFTER_SECS) && launched_by_systemd_boot() {
-        runtime::reset(ResetType::COLD, Status::SUCCESS, None);
+    let mut report = Report::open("xhciscan");
+    for line in build_report() {
+        report.line(&line);
     }
+    session::finish(&mut report, EXIT_AFTER_SECS);
     Status::SUCCESS
-}
-
-/// Write the report to the boot volume. Failure only loses the file copy.
-fn save_report(report: &[String]) -> bool {
-    let Ok(sfs) = boot::get_image_file_system(boot::image_handle()) else {
-        return false;
-    };
-    let mut fs = FileSystem::new(sfs);
-    let mut text = String::new();
-    for line in report {
-        text.push_str(line);
-        text.push('\n');
-    }
-    fs.create_dir_all(REPORT_DIR).is_ok() && fs.write(REPORT_PATH, text.as_bytes()).is_ok()
 }
 
 /// Enumerate every xHCI controller and produce a human-readable report.
@@ -213,7 +175,7 @@ fn report_controller(
     }
 
     // Capability registers (base-relative).
-    let cap0 = mrd(rb, base + 0x00).unwrap_or(0);
+    let cap0 = mrd(rb, base).unwrap_or(0);
     let caplength = (cap0 & 0xff) as u64;
     let hci_version = (cap0 >> 16) as u16;
     let hcs1 = mrd(rb, base + 0x04).unwrap_or(0);
@@ -429,39 +391,5 @@ const fn speed_name(s: u32) -> &'static str {
         4 => "Super",
         5 => "Super+",
         _ => "?",
-    }
-}
-
-/// True when systemd-boot chainloaded us: it publishes `LoaderInfo` before
-/// starting an entry, and nothing else sets that variable.
-fn launched_by_systemd_boot() -> bool {
-    let vendor = VariableVendor(guid!("4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"));
-    runtime::variable_exists(cstr16!("LoaderInfo"), &vendor).unwrap_or(false)
-}
-
-/// Wait for a keypress, but give up after `secs` so unattended runs still exit.
-/// Returns whether a key was pressed.
-fn wait_for_key_or_timeout(secs: u64) -> bool {
-    let stall = || boot::stall(core::time::Duration::from_secs(secs));
-    let timer = unsafe { boot::create_event(EventType::TIMER, Tpl::APPLICATION, None, None) };
-    let Ok(timer) = timer else {
-        stall();
-        return false;
-    };
-    if boot::set_timer(
-        &timer,
-        TimerTrigger::Relative(core::time::Duration::from_secs(secs)),
-    )
-    .is_err()
-    {
-        stall();
-        return false;
-    }
-    match system::with_stdin(|input| input.wait_for_key_event().ok()) {
-        Some(key) => matches!(boot::wait_for_event(&mut [key, timer]), Ok(0)),
-        None => {
-            let _ = boot::wait_for_event(&mut [timer]);
-            false
-        }
     }
 }

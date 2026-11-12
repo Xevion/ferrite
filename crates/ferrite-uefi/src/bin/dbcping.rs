@@ -29,15 +29,9 @@ use ferrite_uefi::dbc::discover::{XhciDevice, find_xhcis};
 use ferrite_uefi::dbc::dma::iommu_handle_count;
 use ferrite_uefi::dbc::regs::trb_type_name;
 use ferrite_uefi::dbc::{Config, Dbc, State, snapshot_device};
-use uefi::boot::{self, EventType, TimerTrigger, Tpl};
-use uefi::fs::FileSystem;
+use ferrite_uefi::session::{self, Report};
 use uefi::prelude::*;
-use uefi::println;
-use uefi::runtime::{self, ResetType, VariableVendor};
-use uefi::{CStr16, cstr16, guid};
 
-const REPORT_DIR: &CStr16 = cstr16!("\\EFI\\ferrite");
-const REPORT_PATH: &CStr16 = cstr16!("\\EFI\\ferrite\\dbcping.txt");
 /// How long to keep the result on screen before exiting.
 const EXIT_AFTER_SECS: u64 = 10;
 /// How long to send hello lines once the link is up.
@@ -45,64 +39,17 @@ const PING_SECS: u64 = 30;
 /// Controller tried first when several have a DbC (the Thunderbolt xHCI on the X1 Carbon).
 const PREFERRED_BDF: (u8, u8, u8) = (0x3b, 0x00, 0);
 
-/// Report text mirrored to the console and to a file rewritten on every line.
-struct Report {
-    fs: Option<FileSystem>,
-    text: String,
-}
-
-impl Report {
-    fn open() -> Self {
-        let fs = boot::get_image_file_system(boot::image_handle())
-            .ok()
-            .map(FileSystem::new);
-        let mut report = Self {
-            fs,
-            text: String::new(),
-        };
-        if let Some(fs) = report.fs.as_mut() {
-            let _ = fs.create_dir_all(REPORT_DIR);
-        }
-        report
-    }
-
-    fn line(&mut self, s: &str) {
-        self.text.push_str(s);
-        self.text.push('\n');
-        println!("{s}");
-        self.flush();
-    }
-
-    fn flush(&mut self) -> bool {
-        self.fs
-            .as_mut()
-            .is_some_and(|fs| fs.write(REPORT_PATH, self.text.as_bytes()).is_ok())
-    }
-}
-
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
-    let mut report = Report::open();
+    let mut report = Report::open("dbcping");
     report.line("ferrite-uefi :: dbcping  -  xHCI Debug Capability bring-up");
 
     let link = run(&mut report);
 
-    let saved = report.flush();
-    println!(
-        "\nreport file: {}\npress a key to exit (auto-exit in {EXIT_AFTER_SECS}s)...",
-        if saved {
-            "\\EFI\\ferrite\\dbcping.txt"
-        } else {
-            "NOT written"
-        }
-    );
-    // An unattended one-shot run resets instead of returning, so the machine
-    // lands back in its default OS. The reset also clears DbC, which is why it
-    // is left enabled until then.
-    if !wait_for_key_or_timeout(EXIT_AFTER_SECS) && launched_by_systemd_boot() {
-        runtime::reset(ResetType::COLD, Status::SUCCESS, None);
-    }
+    // An unattended run cold-resets inside `finish`, which also clears DbC, so
+    // the link stays enabled until then.
+    session::finish(&mut report, EXIT_AFTER_SECS);
     // Returning to the firmware: dropping the driver clears DCE so the
     // controller stops using memory we are about to give back.
     drop(link);
@@ -288,33 +235,4 @@ fn summarize(report: &mut Report, dbc: &mut Dbc) {
 
 fn key_pressed() -> bool {
     system::with_stdin(|input| matches!(input.read_key(), Ok(Some(_))))
-}
-
-/// True when systemd-boot chainloaded us: it publishes `LoaderInfo` before
-/// starting an entry, and nothing else sets that variable.
-fn launched_by_systemd_boot() -> bool {
-    let vendor = VariableVendor(guid!("4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"));
-    runtime::variable_exists(cstr16!("LoaderInfo"), &vendor).unwrap_or(false)
-}
-
-/// Wait for a keypress, but give up after `secs` so unattended runs still exit.
-/// Returns whether a key was pressed.
-fn wait_for_key_or_timeout(secs: u64) -> bool {
-    let stall = || boot::stall(Duration::from_secs(secs));
-    let timer = unsafe { boot::create_event(EventType::TIMER, Tpl::APPLICATION, None, None) };
-    let Ok(timer) = timer else {
-        stall();
-        return false;
-    };
-    if boot::set_timer(&timer, TimerTrigger::Relative(Duration::from_secs(secs))).is_err() {
-        stall();
-        return false;
-    }
-    match system::with_stdin(|input| input.wait_for_key_event().ok()) {
-        Some(key) => matches!(boot::wait_for_event(&mut [key, timer]), Ok(0)),
-        None => {
-            let _ = boot::wait_for_event(&mut [timer]);
-            false
-        }
-    }
 }

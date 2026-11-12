@@ -17,6 +17,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use core::fmt::Write as _;
 use core::sync::atomic::{Ordering, fence};
 use core::time::Duration;
 
@@ -647,12 +648,8 @@ impl Dbc {
         if self.dev.vendor != INTEL_VENDOR {
             return;
         }
-        let debug_port = self.debug_port();
-        let before = if debug_port != 0 {
-            self.host_portsc(debug_port)
-        } else {
-            0
-        };
+        // DCST's debug port number is only valid after a host connects, so log
+        // every port touched rather than guessing which one is the debug port.
         let mut reset = Vec::new();
         for (first, count) in self.dev.usb3_ports.clone() {
             for port in first..first.saturating_add(count) {
@@ -661,19 +658,17 @@ impl Dbc {
                 if val != u32::MAX && val & PORTSC_CCS == 0 {
                     self.bridge
                         .write32(addr, (val & PORTSC_PRESERVE) | PORTSC_PR);
-                    reset.push(port);
+                    reset.push((port, val));
                 }
             }
         }
         boot::stall(Duration::from_millis(20));
-        let after = if debug_port != 0 {
-            self.host_portsc(debug_port)
-        } else {
-            0
-        };
-        note(&format!(
-            "port reset: ports {reset:?}; debug port {debug_port} host PORTSC {before:#010x} -> {after:#010x}"
-        ));
+        let mut line = String::from("port reset:");
+        for (port, before) in reset {
+            let after = self.host_portsc(port);
+            let _ = write!(line, " {port}:{before:#010x}->{after:#010x}");
+        }
+        note(&line);
     }
 
     fn bios_handoff(&mut self, note: &mut dyn FnMut(&str)) {
