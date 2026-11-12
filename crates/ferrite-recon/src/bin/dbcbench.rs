@@ -30,7 +30,7 @@ use ferrite_hal::{Clock as _, Instant, Mmio};
 use ferrite_recon::bringup::{self, Link};
 use ferrite_recon::display::{Chain, Ms, Rate};
 use ferrite_recon::summary;
-use ferrite_wire::bench::{self, FRAME_LEN, FrameReader, Marker, ReadyDetector, SinkStats};
+use ferrite_wire::bench::{self, FRAME_LEN, FrameReader, FrameSource, Marker, ReadyDetector, SinkStats};
 use ferrite_xhci::dbc::OUT_BYTES;
 use ferrite_xhci::{Config, State};
 use log::LevelFilter;
@@ -38,7 +38,8 @@ use uefi::prelude::*;
 
 const EXIT_AFTER: Duration = Duration::from_secs(10);
 
-const SOURCE_FRAMES: u32 = 4096;
+/// 512 MiB: about 10 s at the tty path's rate, long enough to settle the number.
+const SOURCE_FRAMES: u32 = 1 << 19;
 const SOURCE_TIMEOUT: Duration = Duration::from_secs(60);
 const SINK_WINDOW: Duration = Duration::from_secs(10);
 const ECHO_WINDOW: Duration = Duration::from_secs(10);
@@ -102,6 +103,8 @@ struct EchoResult {
 
 struct MicroResult {
     read_total: Duration,
+    direct_total: Duration,
+    poll_total: Duration,
     line: Duration,
     flush: Duration,
     flushed: bool,
@@ -199,22 +202,18 @@ fn begin(dbc: &mut OpenDbc, clock: Clock, timeout: Duration, marker: Marker) -> 
 }
 
 fn source(dbc: &mut OpenDbc, clock: Clock) -> Option<SourceResult> {
-    let stream = bench::source_stream(SOURCE_FRAMES);
-    if !begin(
-        dbc,
-        clock,
-        FIRST_READY_TIMEOUT,
-        Marker::Source { bytes: stream.len() as u64, frame_len: FRAME_LEN as u16 },
-    ) {
+    let mut frames = FrameSource::new();
+    let total = SOURCE_FRAMES as usize * FRAME_LEN;
+    if !begin(dbc, clock, FIRST_READY_TIMEOUT, Marker::Source { bytes: total as u64, frame_len: FRAME_LEN as u16 }) {
         return None;
     }
     let mut polled = Polled::default();
     let (mut sent, mut refused_frames, mut blocked, mut complete) = (0, 0, false, true);
     let sent_before = dbc.stats().bytes_sent;
     let t0 = clock.now();
-    while sent < stream.len() {
+    while sent < total {
         if OUT_BYTES - dbc.buffered() >= FRAME_LEN {
-            sent += dbc.write(&stream[sent..sent + FRAME_LEN]).accepted;
+            sent += dbc.write(frames.frame((sent / FRAME_LEN) as u32)).accepted;
             blocked = false;
         } else if !blocked {
             refused_frames += 1;
@@ -339,7 +338,13 @@ fn micro(dbc: &mut OpenDbc, clock: Clock) -> Option<MicroResult> {
         acc ^= rb.read32(dcctrl);
     }
     let read_total = clock.now() - t0;
+    let direct_total = direct_reads(dcctrl, clock, &mut acc);
     black_box(acc);
+    let t0 = clock.now();
+    for _ in 0..MICRO_READS {
+        dbc.poll(|_| {});
+    }
+    let poll_total = clock.now() - t0;
 
     logger::with(|log| {
         log.flush();
@@ -348,8 +353,23 @@ fn micro(dbc: &mut OpenDbc, clock: Clock) -> Option<MicroResult> {
         let t1 = clock.now();
         let flushed = log.flush();
         let t2 = clock.now();
-        MicroResult { read_total, line: t1 - t0, flush: t2 - t1, flushed }
+        MicroResult { read_total, direct_total, poll_total, line: t1 - t0, flush: t2 - t1, flushed }
     })
+}
+
+/// The same DCCTRL reads as plain loads, to price the firmware root bridge call against the bus itself.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "measures direct MMIO against the root bridge path; never used for control"
+)]
+fn direct_reads(dcctrl: ferrite_hal::PhysAddr, clock: Clock, acc: &mut u32) -> Duration {
+    let reg = dcctrl.get() as usize as *const u32;
+    let t0 = clock.now();
+    for _ in 0..MICRO_READS {
+        // SAFETY: UEFI identity-maps MMIO, and DCCTRL is a 4-byte aligned register the driver itself reads.
+        *acc ^= unsafe { core::ptr::read_volatile(reg) };
+    }
+    clock.now() - t0
 }
 
 fn log_results(r: &Results) {
@@ -406,9 +426,11 @@ fn log_results(r: &Results) {
     }
     match &r.micro {
         Some(m) => log::info!(
-            "bench micro: dcctrl_reads={MICRO_READS} total={} per_read_ns={} log_line={} log_flush={}{}",
+            "bench micro: dcctrl_reads={MICRO_READS} total={} per_read_ns={} direct_read_ns={} idle_poll_ns={} log_line={} log_flush={}{}",
             Ms(m.read_total),
             m.read_total.as_nanos() / u128::from(MICRO_READS),
+            m.direct_total.as_nanos() / u128::from(MICRO_READS),
+            m.poll_total.as_nanos() / u128::from(MICRO_READS),
             Ms(m.line),
             Ms(m.flush),
             if m.flushed { "" } else { " (flush failed)" },

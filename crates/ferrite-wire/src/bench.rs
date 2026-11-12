@@ -137,6 +137,38 @@ pub fn encode_frame(seq: u32, out: &mut [u8; FRAME_LEN]) {
     head.copy_from_slice(&Header::for_payload(seq, payload).to_bytes());
 }
 
+/// Frames for any sequence number with no per-frame payload or CRC work.
+///
+/// The payload depends only on `seq` modulo 256, so 256 encoded frames cover every
+/// sequence number once the header's `seq` field is patched.
+pub struct FrameSource {
+    frames: Vec<[u8; FRAME_LEN]>,
+}
+
+impl FrameSource {
+    #[must_use]
+    pub fn new() -> Self {
+        let mut frames = alloc::vec![[0; FRAME_LEN]; 256];
+        for (seq, frame) in (0..).zip(&mut frames) {
+            encode_frame(seq, frame);
+        }
+        Self { frames }
+    }
+
+    /// Frame `seq`, identical to what [`encode_frame`] produces.
+    pub fn frame(&mut self, seq: u32) -> &[u8; FRAME_LEN] {
+        let frame = &mut self.frames[(seq % 256) as usize];
+        frame[4..8].copy_from_slice(&seq.to_le_bytes());
+        frame
+    }
+}
+
+impl Default for FrameSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Frames `0..frames` back to back.
 #[must_use]
 pub fn source_stream(frames: u32) -> Vec<u8> {
@@ -305,6 +337,15 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    fn frame_source_matches_the_reference_encoder(#[values(0, 1, 255, 256, 257, 70_000, u32::MAX)] seq: u32) {
+        let mut expected = [0; FRAME_LEN];
+        encode_frame(seq, &mut expected);
+        let mut source = FrameSource::new();
+        source.frame(seq.wrapping_add(1));
+        check!(source.frame(seq) == &expected);
+    }
 
     /// Pinned bytes: a change here breaks the deployed other end of the link.
     #[rstest]

@@ -9,17 +9,22 @@ use uefi::{Status, cstr16, guid, system};
 use crate::bootlog::BootLog;
 use crate::clock;
 
-/// Show where the report went and wait up to `wait` for a key.
+/// A systemd-boot run is normally driven remotely, so nobody is waiting to read the screen.
+const UNATTENDED_WAIT: Duration = Duration::from_secs(3);
+
+/// Show where the report went and wait up to `wait` for a key (at most 3 s when unattended).
 ///
 /// With no key, a run launched by systemd-boot cold-resets so the machine lands
 /// back in its default OS; otherwise this returns and the caller exits to the firmware.
 #[expect(clippy::disallowed_methods, reason = "session is the one home of the reset")]
 pub fn finish(report: &mut BootLog, wait: Duration) {
+    let unattended = launched_by_systemd_boot();
+    let wait = if unattended { wait.min(UNATTENDED_WAIT) } else { wait };
     let saved = report.flush();
     let path = if saved { report.display_path() } else { "NOT written" };
     let note = alloc::format!("\nreport file: {path}\npress a key to exit (auto-exit in {}s)...", wait.as_secs());
     report.line(&note);
-    if !wait_for_key_or_timeout(wait) && launched_by_systemd_boot() {
+    if !wait_for_key_or_timeout(wait) && unattended {
         runtime::reset(ResetType::COLD, Status::SUCCESS, None);
     }
 }
