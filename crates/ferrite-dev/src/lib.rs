@@ -1,4 +1,4 @@
-//! Desktop tooling for the ferrite DbC link: log capture, the benchmark peer and the remote run cycle.
+//! Desktop tooling for the ferrite DbC link: log capture, the benchmark peer, the remote run cycle and the loader client.
 
 pub mod app;
 pub mod bench;
@@ -6,14 +6,19 @@ pub mod claim;
 pub mod cli;
 pub mod config;
 pub mod connect;
+pub mod conversation;
+pub mod efi_status;
 pub mod emit;
 pub mod error;
 pub mod link;
 pub mod live;
+pub mod loader;
 pub mod log;
 pub mod metadata;
+pub mod push;
 pub mod run;
 pub mod runner;
+pub mod session;
 pub mod tty;
 pub mod usb;
 

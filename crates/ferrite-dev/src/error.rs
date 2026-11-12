@@ -7,7 +7,9 @@ use snafu::Snafu;
 
 use crate::bench::BenchError;
 use crate::config::ConfigError;
+use crate::loader::LoaderError;
 use crate::log::LogError;
+use crate::push::PushError;
 use crate::run::RunError;
 
 #[derive(Debug, Snafu)]
@@ -24,6 +26,12 @@ pub enum Error {
 
     #[snafu(display("run failed"))]
     Run { source: RunError },
+
+    #[snafu(display("push failed"))]
+    Push { source: PushError },
+
+    #[snafu(display("loader command failed"))]
+    Loader { source: LoaderError },
 
     #[snafu(display("cannot create {}", path.display()))]
     Output { path: PathBuf, source: io::Error },

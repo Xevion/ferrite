@@ -4,16 +4,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
+use ferrite_wire::link::{DEFAULT_WATCHDOG_SECS, PushKind};
 use signal_hook::consts::{SIGINT, SIGTERM};
 
 use snafu::ResultExt;
 
-use crate::cli::{BenchArgs, Cli, Command, LogArgs, RunArgs};
+use crate::cli::{BenchArgs, Cli, Command, LoaderArgs, LogArgs, PushArgs, RunArgs};
 use crate::config::{self, Config, ConfigError};
 use crate::emit::Emitter;
-use crate::error::{BenchSnafu, Error, LogSnafu, OutputSnafu, RunSnafu};
+use crate::error::{BenchSnafu, Error, LoaderSnafu, LogSnafu, OutputSnafu, PushSnafu, RunSnafu};
 use crate::live::Live;
+use crate::loader::{self, LoaderOptions};
+use crate::push::{self, PushOptions};
 use crate::run::{self, RunPlan, RunResult};
 use crate::{bench, log};
 
@@ -31,6 +35,8 @@ pub fn dispatch(cli: Cli) -> Result<(), Error> {
         Command::Log(args) => log_command(&config, &args),
         Command::Bench(args) => bench_command(&config, &args),
         Command::Run(args) => run_command(&config, &args),
+        Command::Push(args) => push_command(&config, &args),
+        Command::Loader(args) => loader_command(&config, &args),
     }
 }
 
@@ -68,6 +74,42 @@ fn bench_command(config: &Config, args: &BenchArgs) -> Result<(), Error> {
         }
     }
     bench::run(config, &options, &mut emitter(args.out.as_deref())?, &stop).context(BenchSnafu)
+}
+
+/// A flag that an interrupt sets, so the USB device is handed back to the kernel on the way out.
+fn stop_on_signals() -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    for signal in [SIGINT, SIGTERM] {
+        if let Err(e) = signal_hook::flag::register(signal, Arc::clone(&stop)) {
+            eprintln!(
+                "ferrite-dev: cannot catch signal {signal}, so an interrupt will not hand the USB device back: {e}"
+            );
+        }
+    }
+    stop
+}
+
+fn push_command(config: &Config, args: &PushArgs) -> Result<(), Error> {
+    let options = PushOptions {
+        app: args.app.clone(),
+        kind: if args.loader { PushKind::Loader } else { PushKind::App },
+        watchdog: args.watchdog.unwrap_or_else(|| Duration::from_secs(DEFAULT_WATCHDOG_SECS.into())),
+        wait: args.wait,
+        boot: args.boot.then_some(args.boot_timeout),
+        reboot: args.reboot,
+        out: args.out.clone(),
+        link: args.link.options(),
+    };
+    push::run(config, &options, &stop_on_signals()).context(PushSnafu)
+}
+
+fn loader_command(config: &Config, args: &LoaderArgs) -> Result<(), Error> {
+    let options = LoaderOptions {
+        action: args.action,
+        timeout: args.timeout.unwrap_or_else(|| args.action.default_timeout()),
+        link: args.link.options(),
+    };
+    loader::run(config, &options, &stop_on_signals()).context(LoaderSnafu)
 }
 
 fn run_command(config: &Config, args: &RunArgs) -> Result<(), Error> {

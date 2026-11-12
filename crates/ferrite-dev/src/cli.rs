@@ -9,6 +9,7 @@ use crate::bench::Phase;
 use crate::link::{
     DEFAULT_IN_SIZE, DEFAULT_IN_TRANSFERS, DEFAULT_OUT_SIZE, DEFAULT_OUT_TRANSFERS, LinkOptions, Transport, UsbConfig,
 };
+use crate::loader::LoaderAction;
 
 const MAX_TRANSFERS: usize = 1024;
 const MAX_TRANSFER_SIZE: usize = 16 << 20;
@@ -32,6 +33,10 @@ pub enum Command {
     Bench(BenchArgs),
     /// Build an app, boot it once on the target, capture its output and collect its reports
     Run(RunArgs),
+    /// Send a .efi to the resident loader, run it there and stream its output
+    Push(PushArgs),
+    /// Start the resident loader on the target, or have it reset the target
+    Loader(LoaderArgs),
     /// Print the effective configuration
     Config,
 }
@@ -122,6 +127,55 @@ pub struct RunArgs {
     /// How long the target gets to go down and come back
     #[arg(long, value_name = "DURATION", default_value = "300s", value_parser = parse_duration)]
     pub timeout: Duration,
+
+    #[command(flatten)]
+    pub link: LinkArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct PushArgs {
+    /// The binary to build and push (like dbcping), or the path of a .efi file
+    pub app: String,
+
+    /// Replace the running loader with this image instead of running it as an app
+    #[arg(long)]
+    pub loader: bool,
+
+    /// Longest the app may run before the firmware resets the target; the default is 300s
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
+    pub watchdog: Option<Duration>,
+
+    /// How long to wait for the loader to answer
+    #[arg(long, value_name = "DURATION", default_value = "10s", value_parser = parse_duration)]
+    pub wait: Duration,
+
+    /// Start the loader on the target, as `loader boot` does, when none answers within --wait
+    #[arg(long)]
+    pub boot: bool,
+
+    /// With --boot: how long the loader gets to come up after the target is told to reboot into it
+    #[arg(long, value_name = "DURATION", default_value = "3m", value_parser = parse_duration, requires = "boot")]
+    pub boot_timeout: Duration,
+
+    /// Reset the target into its default OS once the app has exited, and confirm the DbC device leaves
+    #[arg(long, conflicts_with = "loader")]
+    pub reboot: bool,
+
+    /// Also write the app's log lines to this file
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub link: LinkArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct LoaderArgs {
+    pub action: LoaderAction,
+
+    /// How long to wait: for `boot` the loader to come up (default 3m), for `reboot` the loader to answer (default 15s)
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
+    pub timeout: Option<Duration>,
 
     #[command(flatten)]
     pub link: LinkArgs,
@@ -234,6 +288,30 @@ mod tests {
         check!(options.transport == Transport::Tty);
         check!((options.usb.in_transfers, options.usb.out_size) == (4, 128 << 10));
         check!(Cli::try_parse_from(["ferrite-dev", "bench", "--usb-out-transfers", "0"]).is_err());
+    }
+
+    #[test]
+    fn push_takes_an_app_and_loader_flags_with_their_defaults() {
+        assert!(let Ok(cli) = Cli::try_parse_from(["ferrite-dev", "push", "dbcping"]));
+        assert!(let Command::Push(args) = cli.command);
+        check!((args.app.as_str(), args.loader, args.boot, args.reboot) == ("dbcping", false, false, false));
+        check!((args.watchdog, args.wait) == (None, Duration::from_secs(10)));
+
+        let line = ["ferrite-dev", "push", "a.efi", "--boot", "--boot-timeout", "5m", "--watchdog", "90s", "--reboot"];
+        assert!(let Ok(cli) = Cli::try_parse_from(line));
+        assert!(let Command::Push(args) = cli.command);
+        check!((args.boot_timeout, args.watchdog) == (Duration::from_secs(300), Some(Duration::from_secs(90))));
+
+        check!(Cli::try_parse_from(["ferrite-dev", "push", "a.efi", "--boot-timeout", "5m"]).is_err());
+        check!(Cli::try_parse_from(["ferrite-dev", "push", "a.efi", "--loader", "--reboot"]).is_err());
+    }
+
+    #[test]
+    fn loader_takes_one_action_and_its_own_timeout() {
+        assert!(let Ok(cli) = Cli::try_parse_from(["ferrite-dev", "loader", "reboot", "--timeout", "20s"]));
+        assert!(let Command::Loader(args) = cli.command);
+        check!((args.action, args.timeout) == (LoaderAction::Reboot, Some(Duration::from_secs(20))));
+        check!(Cli::try_parse_from(["ferrite-dev", "loader", "restart"]).is_err());
     }
 
     #[test]

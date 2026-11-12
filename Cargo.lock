@@ -789,6 +789,7 @@ version = "0.1.0"
 dependencies = [
  "assert2",
  "clap",
+ "crc32fast",
  "ferrite-wire",
  "humantime",
  "jiff",

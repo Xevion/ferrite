@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
+crc32fast = { workspace = true, features = ["std"] }
 ferrite-wire.workspace = true
 humantime.workspace = true
 jiff.workspace = true

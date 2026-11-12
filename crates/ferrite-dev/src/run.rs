@@ -188,6 +188,48 @@ pub fn execute(env: &impl Env, config: &Config, plan: &RunPlan) -> Result<RunRes
     Ok(RunResult { run_dir: plan.run_dir.clone(), capture_file, capture_error, collected })
 }
 
+/// Build `app` for the UEFI target and return the path of its `.efi`.
+pub fn build_app(env: &impl Env, app: &str) -> Result<PathBuf, RunError> {
+    if !valid_app_name(app) {
+        return Err(RunError::BadAppName { app: app.to_owned() });
+    }
+    env.say(&format!("resolving the package of {app}"));
+    let out = checked(env, "cargo metadata", &Commands::metadata(), OutputMode::Collect)?;
+    let metadata = Metadata::parse(&out.stdout).context(PackageSnafu { app })?;
+    let package = metadata.package_of_bin(app).context(PackageSnafu { app })?.to_owned();
+
+    env.say(&format!("building {app} ({package})"));
+    checked(env, "build", &Commands::build(app, &package), OutputMode::Passthrough)?;
+    Ok(metadata.target_directory.join(UEFI_TARGET).join("debug").join(format!("{app}.efi")))
+}
+
+/// Build `app`, install it on the target and trigger the one-shot reboot into it.
+///
+/// Returns without waiting for the target: the caller finds out it is up some other way, such as
+/// the DbC device appearing. The result is the host that took the commands.
+pub fn stage_and_reboot(env: &impl Env, config: &Config, app: &str) -> Result<String, RunError> {
+    let efi = build_app(env, app)?;
+    let first = reach(env, config, app)?;
+    if first.boot_id.is_empty() {
+        return Err(RunError::NoBootId { cmd: first.cmd });
+    }
+    env.say(&format!("using ssh host {} (boot id {})", first.host, first.boot_id));
+    let commands = Commands::new(config, app, &first.host);
+
+    env.say(&format!("staging {} on {}", efi.display(), first.host));
+    checked(env, "scp of the app", &commands.upload(&efi), OutputMode::Collect)?;
+    checked(env, "clean-reports", &commands.deploy("clean-reports"), OutputMode::Collect)?;
+    checked(env, "install", &commands.deploy_app("install"), OutputMode::Collect)?;
+
+    env.say(&format!("rebooting {} into {app}", first.host));
+    let cmd = commands.reboot();
+    let out = run_cmd(env, &cmd, OutputMode::Collect)?;
+    if !out.success && out.code != Some(255) && !out.timed_out {
+        return Err(failure("run", cmd, &out));
+    }
+    Ok(first.host)
+}
+
 /// A host that answered, with the boot id it reported and the command that read it.
 struct Answer {
     host: String,
@@ -939,5 +981,17 @@ mod tests {
         check!(pick_report(&names, "dbcping") == Some("dbcping.txt"));
         check!(pick_report(&names, "xhciscan") == Some("other.txt"));
         check!(pick_report(&names[..1], "xhciscan").is_none());
+    }
+
+    #[test]
+    fn staging_for_a_boot_stops_at_the_reboot_and_never_polls_for_the_target() {
+        let fake = Fake::new(&[BEFORE]);
+        assert!(let Ok(host) = stage_and_reboot(&fake, &Config::default(), "dbcping"));
+        check!(host == "target");
+        let commands = fake.commands();
+        check!(commands.last().map(String::as_str) == Some(REBOOT));
+        check!(commands[1].starts_with("cargo build --target x86_64-unknown-uefi -p ferrite-recon --bin dbcping"));
+        check!(fake.boot_id_reads() == 1, "only the read before the reboot");
+        check!(commands.iter().all(|c| !c.contains("collect") && !c.contains("uninstall")));
     }
 }

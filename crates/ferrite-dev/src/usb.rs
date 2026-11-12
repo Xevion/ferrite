@@ -102,6 +102,13 @@ pub fn permission_help(node: &str) -> Vec<String> {
     ]
 }
 
+/// Whether the DbC device is on the bus, whoever holds it. A bus that cannot be listed counts as present.
+pub fn is_present() -> bool {
+    nusb::list_devices()
+        .wait()
+        .map_or(true, |mut devices| devices.any(|d| d.vendor_id() == VENDOR_ID && d.product_id() == PRODUCT_ID))
+}
+
 /// Opens the DbC device as a [`Link`], or says why it cannot yet.
 pub trait UsbOpener {
     fn open(&mut self) -> Result<Link, UsbError>;
