@@ -398,9 +398,10 @@ fn pick_nic() -> Result<Handle, NetError> {
 
 fn media_present(handle: Handle) -> bool {
     let params = OpenProtocolParams { handle, agent: boot::image_handle(), controller: None };
-    // SAFETY: only the mode is read, and the interface is closed before anything opens it exclusively.
+    // SAFETY: only the mode is read, before anything opens the interface exclusively.
     let snp = unsafe { boot::open_protocol::<SimpleNetwork>(params, OpenProtocolAttributes::GetProtocol) };
-    snp.is_ok_and(|snp| bool::from(snp.mode().media_present))
+    // Never closed: some firmware does not track a `GetProtocol` open and fails the close.
+    snp.map(core::mem::ManuallyDrop::new).is_ok_and(|snp| bool::from(snp.mode().media_present))
 }
 
 /// The Ethernet group address for an IPv4 multicast group: 01:00:5e and the group's low 23 bits.

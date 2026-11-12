@@ -2,9 +2,11 @@
 //! [`Mmio`] and [`PciConfig`] backend.
 
 use alloc::vec::Vec;
+use core::mem::ManuallyDrop;
 use core::ops::RangeInclusive;
 
 use ferrite_hal::{Mmio, PciAddress, PciConfig, PhysAddr, PlatformError};
+
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
 use uefi::proto::pci::PciIoAddress;
 use uefi::proto::pci::configuration::ResourceRangeType;
@@ -19,7 +21,9 @@ pub fn platform_error(e: &uefi::Error) -> PlatformError {
 
 /// Config and MMIO access through one root bridge.
 pub struct RootBridge {
-    proto: ScopedProtocol<PciRootBridgeIo>,
+    /// Never closed: some firmware does not track a `GetProtocol` open, and closing one there
+    /// fails, which `ScopedProtocol`'s drop turns into a panic.
+    proto: ManuallyDrop<ScopedProtocol<PciRootBridgeIo>>,
     segment: u16,
 }
 
@@ -32,7 +36,7 @@ impl RootBridge {
         // the protocol, which the firmware serialises, so the aliasing is benign.
         let proto = unsafe { boot::open_protocol::<PciRootBridgeIo>(params, OpenProtocolAttributes::GetProtocol) }?;
         let segment = u16::try_from(proto.segment_nr()).map_err(|_| uefi::Error::from(Status::UNSUPPORTED))?;
-        Ok(Self { proto, segment })
+        Ok(Self { proto: ManuallyDrop::new(proto), segment })
     }
 
     #[must_use]
