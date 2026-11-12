@@ -33,10 +33,38 @@ use crate::watch::LinkWatch;
 use crate::{host, pci};
 
 /// Software buffer in front of the OUT endpoint.
-pub const OUT_BYTES: usize = 16 * 1024;
+///
+/// It is carved so it never crosses a 64 KiB boundary, so no TRB cut from it does either.
+pub const OUT_BYTES: usize = 64 * 1024;
+/// Longest OUT TRB.
+///
+/// Four fill the byte ring, so the controller has the next TRB queued while an
+/// event for the previous one is handled, and ring space returns in 16 KiB steps.
+pub const OUT_TRB_MAX: usize = 16 * 1024;
+/// Most OUT TRBs in flight.
+///
+/// Only small writes reach it: each write posted alone becomes a TRB, and each TRB costs one event.
+pub const OUT_MAX_TRBS: usize = 128;
 /// Receive buffers kept posted on the IN endpoint, one packet each.
-pub const IN_SLOTS: usize = 8;
+///
+/// A host burst of 64 packets finds every buffer posted without a poll in between.
+pub const IN_SLOTS: usize = 64;
 const IN_BYTES: usize = IN_SLOTS * MAX_PACKET;
+/// Event slots set aside for port status changes and anything else the controller reports on its own.
+const EVENT_SPARE: usize = 16;
+
+// Every in-flight TRB produces one event and events are acknowledged to the
+// controller only after a drain, so the worst case is every posted TRB's event
+// plus the spare ones. The ring keeps one slot free to tell full from empty.
+const _: () = {
+    assert!(OUT_MAX_TRBS + IN_SLOTS + EVENT_SPARE < RING_TRBS);
+    assert!(OUT_MAX_TRBS < RING_TRBS - 1 && IN_SLOTS < RING_TRBS - 1);
+    // A TRB moves at most 64 KiB, and its length is kept as a u16 tag.
+    assert!(OUT_TRB_MAX <= u16::MAX as usize && OUT_TRB_MAX.is_multiple_of(MAX_PACKET));
+    // The byte ring is one 64 KiB window, so no TRB cut from it crosses a boundary.
+    assert!(OUT_BYTES <= 64 * 1024 && OUT_BYTES.is_power_of_two() && OUT_TRB_MAX <= OUT_BYTES);
+    assert!(IN_BYTES <= 64 * 1024);
+};
 
 const TABLE_PAGES: PageCount = PageCount::new(1);
 const RING_PAGES: PageCount = PageCount::for_bytes(RING_BYTES);
@@ -174,6 +202,8 @@ pub struct Dbc<H: Mmio, C: Clock + Delay, R: DmaRegion> {
     out_ep: Endpoint,
     in_ep: Endpoint,
     out_bytes: ByteRing,
+    /// The last OUT TD ended on a full packet, so the host's read is still open.
+    out_tail_full: bool,
     in_buf: DmaSlice,
     in_next_slot: usize,
     stats: Stats,
@@ -225,6 +255,7 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
             out_ep: Endpoint::new(ProducerRing::new(mem.out_ring), "OUT", DB_OUT),
             in_ep: Endpoint::new(ProducerRing::new(mem.in_ring), "IN", DB_IN),
             out_bytes: ByteRing::new(mem.out_buf),
+            out_tail_full: false,
             in_buf: mem.in_buf,
             in_next_slot: 0,
             stats: Stats::default(),
@@ -515,6 +546,7 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
         self.out_ep.reset();
         self.in_ep.reset();
         self.out_bytes.rewind();
+        self.out_tail_full = false;
         self.in_next_slot = 0;
 
         self.max_burst = self.try_read(dbc::DCCTRL)?.max_burst();
@@ -629,6 +661,7 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
         self.out_ep.reset();
         self.in_ep.reset();
         self.out_bytes.rewind();
+        self.out_tail_full = false;
         self.in_next_slot = 0;
         self.write_context();
         self.phase = Phase::Armed;
@@ -723,15 +756,26 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
         let mut ring_in = false;
 
         if !self.out_ep.halted() {
-            while self.out_ep.ring.free() > 0 {
-                let Some((addr, len)) = self.out_bytes.next_chunk(MAX_PACKET) else {
+            while self.out_ep.ring.pending() < OUT_MAX_TRBS {
+                let Some((addr, len)) = self.out_bytes.next_chunk(OUT_TRB_MAX) else {
                     break;
                 };
                 if !self.out_ep.ring.push(Trb::normal(addr, u17::new(len as u32)), len as u16) {
                     break;
                 }
                 self.out_bytes.mark_sent(len);
+                self.out_tail_full = len.is_multiple_of(MAX_PACKET);
                 ring_out = true;
+            }
+            // The host's read completes only when full or on a short packet. Once everything
+            // posted is done and the last packet was full, a zero-length TD closes the read.
+            if self.out_tail_full && self.out_bytes.unsent() == 0 && self.out_ep.ring.pending() == 0 {
+                let ended = Trb::normal(self.out_bytes.bus(), u17::new(0));
+                if self.out_ep.ring.push(ended, 0) {
+                    self.out_tail_full = false;
+                    self.stats.out_terminators += 1;
+                    ring_out = true;
+                }
             }
         }
         if !self.in_ep.halted() {
@@ -797,7 +841,7 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Drop for Dbc<H, C, R> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use ferrite_testing::Sim;
 
     use super::*;
@@ -808,7 +852,13 @@ mod tests {
         for page in 0..16u32 {
             sim.set_dma_base(0x10_0000 + page * PAGE_SIZE as u32);
             let mut block = DmaBlock::new(sim.dma().alloc_dma32(BLOCK_PAGES).expect("sim allocation")).expect("low");
-            check!(Layout::carve(&mut block).is_ok(), "base page {page}");
+            assert!(let Ok(mem) = Layout::carve(&mut block), "base page {page}");
+            let regions = [mem.table, mem.evt, mem.out_ring, mem.in_ring, mem.out_buf, mem.in_buf];
+            for (i, r) in regions.iter().enumerate() {
+                let (start, end) = (u64::from(r.bus().get()), u64::from(r.bus().get()) + r.len() as u64 - 1);
+                check!(start / 0x1_0000 == end / 0x1_0000, "region {i} crosses 64 KiB at base page {page}");
+            }
+            check!(mem.out_buf.len() == OUT_BYTES && mem.in_buf.len() == IN_BYTES);
         }
     }
 }

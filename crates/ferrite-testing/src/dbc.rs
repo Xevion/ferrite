@@ -17,6 +17,7 @@ const MAX_PORTS: u32 = 4;
 const DEBUG_PORT: u32 = 1;
 
 const DCERSTBA: u64 = 0x10;
+const DCERDP: u64 = 0x18;
 const DCCTRL: u64 = 0x20;
 const DCST: u64 = 0x24;
 const DCPORTSC: u64 = 0x28;
@@ -62,6 +63,12 @@ pub struct DbcModel {
     evt_cycle: bool,
     out: Cursor,
     in_ep: Cursor,
+    /// Most event slots in use at once: written by the controller, not yet acknowledged through ERDP.
+    evt_high_water: u64,
+    /// Events written while the ring had no free slot beyond the one that tells full from empty.
+    evt_overflows: u64,
+    /// Transfer TRBs longer than 64 KiB or whose buffer crosses a 64 KiB boundary.
+    trb_violations: u64,
 }
 
 impl State {
@@ -94,7 +101,13 @@ impl State {
         let erstba = u64::from(self.get(DBC + DCERSTBA)) | (u64::from(self.get(DBC + DCERSTBA + 4)) << 32);
         let ring = self.dma_read64(erstba)?;
         let size = u64::from(self.dma_read(erstba + 8)?);
+        let acked = (u64::from(self.get(DBC + DCERDP)) & !0xf).saturating_sub(ring) / 16;
         let model = self.dbc.as_mut()?;
+        let used = (model.evt_idx + size - acked % size) % size;
+        model.evt_high_water = model.evt_high_water.max(used + 1);
+        if used + 1 >= size {
+            model.evt_overflows += 1;
+        }
         let slot = ring + model.evt_idx * 16;
         let cycle = u32::from(model.evt_cycle);
         model.evt_idx += 1;
@@ -143,6 +156,10 @@ impl State {
             cur.idx += 1;
             let buf = self.dma_read64(at)?;
             let len = self.dma_read(at + 8)? & 0x1_ffff;
+            let crosses = len > 0 && buf / 0x1_0000 != (buf + u64::from(len) - 1) / 0x1_0000;
+            if len > 0x1_0000 || crosses {
+                self.dbc.as_mut()?.trb_violations += 1;
+            }
             return Some((at, buf, len));
         }
         None
@@ -243,6 +260,24 @@ impl Sim {
     #[must_use]
     pub fn dcportsc(&self) -> u32 {
         self.peek(DBC + DCPORTSC)
+    }
+
+    /// Most event ring slots the controller had in use at once since the DbC was created.
+    #[must_use]
+    pub fn event_high_water(&self) -> u64 {
+        self.0.borrow().dbc.as_ref().map_or(0, |m| m.evt_high_water)
+    }
+
+    /// Events the controller wrote with the event ring already full.
+    #[must_use]
+    pub fn event_overflows(&self) -> u64 {
+        self.0.borrow().dbc.as_ref().map_or(0, |m| m.evt_overflows)
+    }
+
+    /// Transfer TRBs the controller met that a real one may refuse: over 64 KiB, or a buffer across a 64 KiB boundary.
+    #[must_use]
+    pub fn trb_violations(&self) -> u64 {
+        self.0.borrow().dbc.as_ref().map_or(0, |m| m.trb_violations)
     }
 
     /// DCE will not clear once set.

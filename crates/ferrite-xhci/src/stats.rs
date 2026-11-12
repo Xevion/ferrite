@@ -29,6 +29,8 @@ pub struct Stats {
     pub out_done: u32,
     /// IN transfer events matched to an in-flight TRB.
     pub in_done: u32,
+    /// Zero-length OUT TDs posted to end the host's read after a full last packet.
+    pub out_terminators: u32,
     /// Transfer events whose TRB pointer matched nothing in flight.
     pub unknown_transfer_events: u32,
     pub transfer_errors: u32,
@@ -67,6 +69,7 @@ impl Default for Stats {
             event_types: [0; TRB_TYPES],
             out_done: 0,
             in_done: 0,
+            out_terminators: 0,
             unknown_transfer_events: 0,
             transfer_errors: 0,
             last_error_cc: 0,

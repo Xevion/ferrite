@@ -203,6 +203,8 @@ fn begin(dbc: &mut OpenDbc, clock: Clock, timeout: Duration, marker: Marker) -> 
 
 fn source(dbc: &mut OpenDbc, clock: Clock) -> Option<SourceResult> {
     let mut frames = FrameSource::new();
+    // Whole frames that fit the free ring space go down in one write, so the driver cuts large TRBs.
+    let mut stage: Vec<u8> = Vec::with_capacity(OUT_BYTES);
     let total = SOURCE_FRAMES as usize * FRAME_LEN;
     if !begin(dbc, clock, FIRST_READY_TIMEOUT, Marker::Source { bytes: total as u64, frame_len: FRAME_LEN as u16 }) {
         return None;
@@ -212,8 +214,12 @@ fn source(dbc: &mut OpenDbc, clock: Clock) -> Option<SourceResult> {
     let sent_before = dbc.stats().bytes_sent;
     let t0 = clock.now();
     while sent < total {
-        if OUT_BYTES - dbc.buffered() >= FRAME_LEN {
-            sent += dbc.write(frames.frame((sent / FRAME_LEN) as u32)).accepted;
+        let fit = ((OUT_BYTES - dbc.buffered()) / FRAME_LEN).min((total - sent) / FRAME_LEN);
+        if fit > 0 {
+            let first = sent / FRAME_LEN;
+            stage.clear();
+            (first..first + fit).for_each(|seq| stage.extend_from_slice(frames.frame(seq as u32)));
+            sent += dbc.write(&stage).accepted;
             blocked = false;
         } else if !blocked {
             refused_frames += 1;

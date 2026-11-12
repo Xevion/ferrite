@@ -239,10 +239,22 @@ impl ByteRing {
         n
     }
 
+    /// Bus address of the first byte of the ring.
+    #[must_use]
+    pub const fn bus(&self) -> BusAddr32 {
+        self.mem.bus()
+    }
+
+    /// Bytes written but not yet handed to a TRB.
+    #[must_use]
+    pub const fn unsent(&self) -> usize {
+        self.wr.wrapping_sub(self.sent)
+    }
+
     /// Next contiguous run of unsent bytes (at most `max`) as (bus address, length).
     #[must_use]
     pub fn next_chunk(&self, max: usize) -> Option<(BusAddr32, usize)> {
-        let unsent = self.wr.wrapping_sub(self.sent);
+        let unsent = self.unsent();
         if unsent == 0 {
             return None;
         }
