@@ -26,11 +26,13 @@ arbitrary-int = { version = "2.2.0", default-features = false }
 bitbybit = "2.0.1"
 cc = "1.11.1"
 clap = { version = "4.6.7", features = ["derive"] }
+corosensei = { version = "0.3.4", default-features = false }
 crc32fast = { version = "1.5.5", default-features = false }
 humantime = "2.4.0"
 jiff = "0.2.43"
 log = "0.4.33"
 nusb = "0.2.9"
+object = { version = "0.41.0", default-features = false, features = ["read_core", "elf", "write_std", "pe"] }
 parking_lot = "0.13.0"
 ratatui = { version = "0.30.2", default-features = false }
 ratatui-core = "0.1.2"

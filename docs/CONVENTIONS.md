@@ -14,8 +14,9 @@
 | `ferrite-wire` | `no_std` + `alloc` | Message formats spoken over the DbC link (the benchmark frames and the loader's `link` protocol), shared by both ends |
 | `ferrite-lkpi` | `no_std` + `alloc` | Linux kernel API shim the Wi-Fi drivers link against; its `stubs` feature holds the generated trace-and-stop stubs |
 | `ferrite-wifi-sys` | `no_std` | Pinned Linux mac80211, cfg80211 and rtw89 C built by `build.rs`, and the tables of its initcalls |
+| `ferrite-wifi-efi` | `no_std`, UEFI app built as ELF | `wifitrace`: the Wi-Fi C on a corosensei task stack under the firmware, run until the first stub |
 | `ferrite-lab` | std | The Wi-Fi C run as a Linux process on the desktop: logger, halt hook with a backtrace, the initcall driver |
-| `ferrite-dev` | std | Desktop tool: `log` (DbC capture), `bench` (dbcbench peer), `run` (one-shot cycle on the laptop), `push` and `loader` (client of the resident loader), `vendor` (Linux snapshot), `stubs` (generates the kernel-symbol stubs) |
+| `ferrite-dev` | std | Desktop tool: `log` (DbC capture), `bench` (dbcbench peer), `run` (one-shot cycle on the laptop), `push` and `loader` (client of the resident loader), `build` (an app's `.efi`, converting ELF-built apps), `vendor` (Linux snapshot), `stubs` (generates the kernel-symbol stubs) |
 
 Planned, created when their milestone starts:
 
@@ -38,6 +39,14 @@ There is no default target. UEFI builds go through aliases in
 `.cargo/config.toml` (`cargo efi-check`, `cargo efi-clippy`, `cargo efi-build`);
 plain `cargo check` and `cargo nextest run` cover the host-buildable crates.
 `just check`, `just lint` and `just test` run both sides.
+
+An app that links the Linux C, which is ELF, is built for
+`x86_64-unknown-none` instead (`cargo efi-elf-check`, `cargo efi-elf-clippy`)
+and says so in its manifest with `[package.metadata.ferrite] target =
+"x86_64-unknown-none"`. `ferrite-dev build <app>` builds either kind and
+converts the ELF into the `.efi`, leaving the ELF beside it for resolving
+addresses; `just stage`, `push` and `run` go through it. That target is soft
+float, so such an app has no SSE.
 
 Dev-profile optimisation is set per package, each with a stated reason; there is
 no blanket `[profile.dev.package."*"]`. Generic and inline code is compiled at

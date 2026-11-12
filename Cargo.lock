@@ -439,6 +439,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
+name = "corosensei"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6886a0c0f263965933c438626e7179139a62b978a33aa18281cbf0cd5a975f34"
+dependencies = [
+ "autocfg",
+ "cfg-if",
+ "scopeguard",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -839,6 +850,7 @@ dependencies = [
  "humantime",
  "jiff",
  "nusb",
+ "object",
  "parking_lot 0.13.0",
  "rstest 0.28.0",
  "rustix",
@@ -935,6 +947,19 @@ dependencies = [
  "rstest 0.28.0",
  "smoltcp",
  "snafu",
+ "uefi",
+]
+
+[[package]]
+name = "ferrite-wifi-efi"
+version = "0.1.0"
+dependencies = [
+ "corosensei",
+ "ferrite-efi",
+ "ferrite-hal",
+ "ferrite-lkpi",
+ "ferrite-wifi-sys",
+ "log",
  "uefi",
 ]
 
@@ -1644,6 +1669,18 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "windows-sys",
+]
+
+[[package]]
+name = "object"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11dbdb66876026054e4ffc8d757d862bdf5df5aebd5c0b95a41f17832a94f7d2"
+dependencies = [
+ "crc32fast",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "memchr",
 ]
 
 [[package]]

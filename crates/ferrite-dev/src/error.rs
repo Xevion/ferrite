@@ -26,6 +26,9 @@ pub enum Error {
     #[snafu(display("benchmark failed"))]
     Bench { source: BenchError },
 
+    #[snafu(display("build failed"))]
+    Build { source: RunError },
+
     #[snafu(display("run failed"))]
     Run { source: RunError },
 

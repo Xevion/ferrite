@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config;
 pub mod connect;
 pub mod conversation;
+pub mod efi_image;
 pub mod efi_status;
 pub mod emit;
 pub mod error;

@@ -11,11 +11,11 @@ use std::time::Duration;
 use snafu::{OptionExt, ResultExt, Snafu};
 
 use crate::config::Config;
+use crate::efi_image::{self, EfiImageError};
 use crate::link::LinkOptions;
-use crate::metadata::{Metadata, MetadataError};
+use crate::metadata::{App, AppTarget, Metadata, MetadataError};
 use crate::runner::{Cmd, CmdOutput, OutputMode};
 
-pub const UEFI_TARGET: &str = "x86_64-unknown-uefi";
 pub const RECOVERY: &str = "If the target is hung: hold the power button until it turns off, then press it once. It boots its default OS by itself.";
 pub const CAPTURE_FILE: &str = "capture.log";
 pub const BENCH_APP: &str = "dbcbench";
@@ -51,6 +51,9 @@ pub enum RunError {
 
     #[snafu(display("cannot find the package of `{app}`"))]
     Package { app: String, source: MetadataError },
+
+    #[snafu(display("cannot turn the ELF of `{app}` into a UEFI image"))]
+    Convert { app: String, source: EfiImageError },
 
     #[snafu(display("timed out after {}s waiting for {waiting_for}", after.as_secs()))]
     Timeout { waiting_for: &'static str, after: Duration },
@@ -176,7 +179,10 @@ pub fn execute(env: &impl Env, config: &Config, plan: &RunPlan) -> Result<RunRes
     Ok(RunResult { run_dir: plan.run_dir.clone(), capture_file, capture_error, collected })
 }
 
-/// Build `app` for the UEFI target and return the path of its `.efi`.
+/// Build `app` for its target and return the path of its `.efi`.
+///
+/// An app built for `x86_64-unknown-none` is converted from the linked ELF, which stays next to the
+/// `.efi` for resolving addresses.
 pub fn build_app(env: &impl Env, app: &str) -> Result<PathBuf, RunError> {
     if !valid_app_name(app) {
         return Err(RunError::BadAppName { app: app.to_owned() });
@@ -184,11 +190,16 @@ pub fn build_app(env: &impl Env, app: &str) -> Result<PathBuf, RunError> {
     env.say(&format!("resolving the package of {app}"));
     let out = checked(env, "cargo metadata", &Commands::metadata(), OutputMode::Collect)?;
     let metadata = Metadata::parse(&out.stdout).context(PackageSnafu { app })?;
-    let package = metadata.package_of_bin(app).context(PackageSnafu { app })?.to_owned();
+    let App { package, target } = metadata.app(app).context(PackageSnafu { app })?;
 
-    env.say(&format!("building {app} ({package})"));
-    checked(env, "build", &Commands::build(app, &package), OutputMode::Passthrough)?;
-    Ok(metadata.target_directory.join(UEFI_TARGET).join("debug").join(format!("{app}.efi")))
+    env.say(&format!("building {app} ({package}, {})", target.triple()));
+    checked(env, "build", &Commands::build(app, package, target), OutputMode::Passthrough)?;
+    let out_dir = metadata.target_directory.join(target.triple()).join("debug");
+    let efi = out_dir.join(format!("{app}.efi"));
+    if target == AppTarget::None {
+        efi_image::convert_file(&out_dir.join(app), &efi).context(ConvertSnafu { app })?;
+    }
+    Ok(efi)
 }
 
 /// Build `app`, install it on the target and trigger the one-shot reboot into it.
@@ -353,8 +364,8 @@ impl<'a> Commands<'a> {
         Cmd::new("cargo", ["metadata", "--format-version", "1", "--no-deps"])
     }
 
-    fn build(app: &str, package: &str) -> Cmd {
-        Cmd::new("cargo", ["build", "--target", UEFI_TARGET, "-p", package, "--bin", app])
+    fn build(app: &str, package: &str, target: AppTarget) -> Cmd {
+        Cmd::new("cargo", ["build", "--target", target.triple(), "-p", package, "--bin", app])
     }
 
     fn upload(&self, efi: &Path) -> Cmd {

@@ -11,11 +11,11 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 
 use snafu::ResultExt;
 
-use crate::cli::{BenchArgs, Cli, Command, LoaderArgs, LogArgs, PushArgs, RunArgs, StubsArgs, VendorArgs};
+use crate::cli::{BenchArgs, BuildArgs, Cli, Command, LoaderArgs, LogArgs, PushArgs, RunArgs, StubsArgs, VendorArgs};
 use crate::config::{self, Config, ConfigError};
 use crate::emit::Emitter;
 use crate::error::{
-    BenchSnafu, Error, LoaderSnafu, LogSnafu, OutputSnafu, PushSnafu, RunSnafu, StubsSnafu, VendorSnafu,
+    BenchSnafu, BuildSnafu, Error, LoaderSnafu, LogSnafu, OutputSnafu, PushSnafu, RunSnafu, StubsSnafu, VendorSnafu,
 };
 use crate::live::Live;
 use crate::loader::{self, LoaderOptions};
@@ -38,6 +38,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Error> {
         },
         Command::Log(args) => log_command(&config, &args),
         Command::Bench(args) => bench_command(&config, &args),
+        Command::Build(args) => build_command(&config, &args),
         Command::Run(args) => run_command(&config, &args),
         Command::Push(args) => push_command(&config, &args),
         Command::Loader(args) => loader_command(&config, &args),
@@ -62,6 +63,18 @@ fn emitter(out: Option<&Path>) -> Result<Emitter, Error> {
         Some(path) => emitter.with_file(path).context(OutputSnafu { path }),
         None => Ok(emitter),
     }
+}
+
+fn build_command(config: &Config, args: &BuildArgs) -> Result<(), Error> {
+    let efi = run::build_app(&Live::new(config), &args.app).context(BuildSnafu)?;
+    match &args.out {
+        Some(out) => {
+            fs::copy(&efi, out).context(OutputSnafu { path: out })?;
+            println!("{} -> {}", efi.display(), out.display());
+        },
+        None => println!("{}", efi.display()),
+    }
+    Ok(())
 }
 
 fn log_command(config: &Config, args: &LogArgs) -> Result<(), Error> {

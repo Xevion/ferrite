@@ -31,6 +31,8 @@ pub enum Command {
     Log(LogArgs),
     /// Be the desktop peer of dbcbench and print desktop and target numbers side by side
     Bench(BenchArgs),
+    /// Build an app for its target into a .efi, and print its path or copy it to --out
+    Build(BuildArgs),
     /// Build an app, boot it once on the target, capture its output and collect its reports
     Run(RunArgs),
     /// Send a .efi to the resident loader, run it there and stream its output
@@ -198,6 +200,16 @@ pub struct VendorArgs {
     /// The ferrite-wifi-sys crate directory, which holds vendor.toml and receives linux/
     #[arg(long, value_name = "DIR", default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../ferrite-wifi-sys"))]
     pub crate_dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct BuildArgs {
+    /// The binary to build, like ferrite-uefi or wifitrace
+    pub app: String,
+
+    /// Copy the .efi here, such as an ESP's bootx64.efi
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

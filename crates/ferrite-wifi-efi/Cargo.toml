@@ -1,0 +1,23 @@
+[package]
+name = "ferrite-wifi-efi"
+description = "The Wi-Fi C under UEFI: runs the driver initcalls on a task stack until the first stub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Built as an ELF and converted to a .efi by ferrite-dev, because the C it links is ELF.
+[package.metadata.ferrite]
+target = "x86_64-unknown-none"
+
+[dependencies]
+corosensei.workspace = true
+ferrite-efi = { workspace = true, features = ["panic-handler"] }
+ferrite-hal.workspace = true
+ferrite-lkpi.workspace = true
+ferrite-wifi-sys.workspace = true
+log.workspace = true
+uefi = { workspace = true, features = ["global_allocator"] }
+
+[lints]
+workspace = true

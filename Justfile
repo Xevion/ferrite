@@ -1,6 +1,5 @@
 set shell := ["bash", "-uc"]
 
-uefi := "x86_64-unknown-uefi"
 ovmf_code := "/usr/share/OVMF/OVMF_CODE_4M.fd"
 ovmf_vars := "/usr/share/OVMF/OVMF_VARS_4M.fd"
 
@@ -22,12 +21,14 @@ default:
 check: vendor
     cargo check --all-targets
     cargo efi-check
+    cargo efi-elf-check
 
 # clippy over the host crates and the UEFI apps, plus unused-dependency check
 lint: vendor
     cargo clippy --all-targets
     cargo clippy -p ferrite-uefi -p ferrite-recon --lib --tests
     cargo efi-clippy
+    cargo efi-elf-clippy
     cargo machete
 
 # run the unit tests on the host
@@ -54,15 +55,15 @@ lab *args: vendor
 vendor *args:
     cargo run -q -p ferrite-dev -- vendor {{ args }}
 
-# build every UEFI app (debug, or `just build release`)
+# build every UEFI app (debug, or `just build release`); the ELF-built ones become a .efi through `just stage`
 build profile="dev": vendor
     cargo efi-build --profile {{ profile }}
+    cargo efi-elf-build --profile {{ profile }}
 
 # build one UEFI app and stage it as the ESP bootloader under ./esp
 stage app="ferrite-uefi": vendor
-    cargo build --target {{ uefi }} --workspace --bin {{ app }}
     mkdir -p esp/efi/boot
-    cp -f target/{{ uefi }}/debug/{{ app }}.efi esp/efi/boot/bootx64.efi
+    cargo run -q -p ferrite-dev -- build {{ app }} --out esp/efi/boot/bootx64.efi
     test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
 
 # boot an app in QEMU: `just qemu`, `just qemu xhciscan serial`, `just qemu ferrite-uefi serial tap`

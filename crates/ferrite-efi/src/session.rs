@@ -92,7 +92,7 @@ fn close_timer(timer: uefi::Event) {
 }
 
 /// Records the panic in the boot log, shows it, then after ten seconds resets (under systemd-boot) or powers off.
-#[cfg(all(target_os = "uefi", feature = "panic-handler"))]
+#[cfg(all(any(target_os = "uefi", target_os = "none"), feature = "panic-handler"))]
 #[panic_handler]
 #[expect(clippy::disallowed_macros, reason = "the panic handler is one of the two sanctioned println homes")]
 #[expect(clippy::disallowed_methods, reason = "session is the one home of the reset, here for the panic path")]
@@ -117,7 +117,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     }
 }
 
-#[cfg(all(target_os = "uefi", feature = "panic-handler"))]
+#[cfg(all(any(target_os = "uefi", target_os = "none"), feature = "panic-handler"))]
 fn boot_services_active() -> bool {
     let Some(table) = uefi::table::system_table_raw() else {
         return false;
