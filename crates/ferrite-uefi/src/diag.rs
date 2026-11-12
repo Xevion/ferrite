@@ -34,15 +34,8 @@ impl Diag {
     /// can't be opened, logging degrades to a no-op and the app runs unchanged.
     #[must_use]
     pub fn open() -> Self {
-        let fs = boot::get_image_file_system(boot::image_handle())
-            .ok()
-            .map(FileSystem::new);
-        let mut diag = Self {
-            fs,
-            log: String::new(),
-            last_net: String::new(),
-            last_keepalive: 0,
-        };
+        let fs = boot::get_image_file_system(boot::image_handle()).ok().map(FileSystem::new);
+        let mut diag = Self { fs, log: String::new(), last_net: String::new(), last_keepalive: 0 };
         diag.event(0, "boot: entry reached, uefi init ok");
         diag
     }

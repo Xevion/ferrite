@@ -90,7 +90,7 @@ jobs:
             libc6-dev-arm64-cross
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target.rust_target }}
+        run: cargo build --release -p ferrite --target ${{ matrix.target.rust_target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target.cross && 'aarch64-linux-gnu-gcc' || '' }}
 

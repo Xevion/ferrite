@@ -682,12 +682,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-efi"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "uefi",
+]
+
+[[package]]
+name = "ferrite-hal"
+version = "0.1.0"
+
+[[package]]
+name = "ferrite-recon"
+version = "0.1.0"
+dependencies = [
+ "ferrite-efi",
+ "ferrite-xhci",
+ "uefi",
+]
+
+[[package]]
 name = "ferrite-uefi"
 version = "0.1.0"
 dependencies = [
  "ratatui",
  "ratatui-core",
  "smoltcp",
+ "uefi",
+]
+
+[[package]]
+name = "ferrite-xhci"
+version = "0.1.0"
+dependencies = [
+ "ferrite-efi",
  "uefi",
 ]
 

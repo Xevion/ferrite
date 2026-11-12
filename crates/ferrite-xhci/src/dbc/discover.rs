@@ -22,17 +22,9 @@ pub struct RootBridge(ScopedProtocol<PciRootBridgeIo>);
 impl RootBridge {
     #[must_use]
     pub fn open(handle: Handle) -> Option<Self> {
-        let params = OpenProtocolParams {
-            handle,
-            agent: boot::image_handle(),
-            controller: None,
-        };
+        let params = OpenProtocolParams { handle, agent: boot::image_handle(), controller: None };
         // SAFETY: GetProtocol does not take ownership; firmware drivers keep their own use.
-        unsafe {
-            boot::open_protocol::<PciRootBridgeIo>(params, OpenProtocolAttributes::GetProtocol)
-        }
-        .ok()
-        .map(Self)
+        unsafe { boot::open_protocol::<PciRootBridgeIo>(params, OpenProtocolAttributes::GetProtocol) }.ok().map(Self)
     }
 
     #[must_use]
@@ -41,9 +33,7 @@ impl RootBridge {
     }
 
     pub fn enumerate(&mut self) -> Vec<PciIoAddress> {
-        self.0
-            .enumerate()
-            .map_or_default(|tree| tree.iter().copied().collect())
+        self.0.enumerate().map_or_default(|tree| tree.iter().copied().collect())
     }
 
     pub fn cfg_read32(&mut self, addr: PciIoAddress, off: u8) -> Option<u32> {
@@ -55,10 +45,7 @@ impl RootBridge {
     }
 
     pub fn cfg_write16(&mut self, addr: PciIoAddress, off: u8, val: u16) -> bool {
-        self.0
-            .pci()
-            .write_one::<u16>(addr.with_register(off), val)
-            .is_ok()
+        self.0.pci().write_one::<u16>(addr.with_register(off), val).is_ok()
     }
 
     pub fn read32(&mut self, phys: u64) -> u32 {
@@ -147,11 +134,7 @@ impl XhciDevice {
 impl fmt::Display for XhciDevice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (b, d, n) = self.bdf();
-        write!(
-            f,
-            "{b:02x}:{d:02x}.{n} {:04x}:{:04x}",
-            self.vendor, self.device
-        )
+        write!(f, "{b:02x}:{d:02x}.{n} {:04x}:{:04x}", self.vendor, self.device)
     }
 }
 
@@ -169,9 +152,7 @@ pub fn find_xhcis() -> Vec<XhciDevice> {
         let segment = rb.segment();
         for addr in rb.enumerate() {
             let addr = addr.with_register(0);
-            let dup = found
-                .iter()
-                .any(|d| d.segment == segment && u64::from(d.addr) == u64::from(addr));
+            let dup = found.iter().any(|d| d.segment == segment && u64::from(d.addr) == u64::from(addr));
             if dup {
                 continue;
             }
@@ -183,12 +164,7 @@ pub fn find_xhcis() -> Vec<XhciDevice> {
     found
 }
 
-fn probe(
-    rb: &mut RootBridge,
-    bridge: Handle,
-    segment: u32,
-    addr: PciIoAddress,
-) -> Option<XhciDevice> {
+fn probe(rb: &mut RootBridge, bridge: Handle, segment: u32, addr: PciIoAddress) -> Option<XhciDevice> {
     let id = rb.cfg_read32(addr, 0x00)?;
     if id & 0xffff == 0xffff {
         return None;
@@ -247,10 +223,9 @@ fn walk_ext_caps(rb: &mut RootBridge, dev: &mut XhciDevice, xecp: u64) {
             XCAP_LEGACY => dev.legacy = Some(off),
             XCAP_SUPPORTED_PROTOCOL if cap >> 24 == 3 => {
                 let ports = rb.read32(off + 8);
-                dev.usb3_ports
-                    .push(((ports & 0xff) as u8, ((ports >> 8) & 0xff) as u8));
-            }
-            _ => {}
+                dev.usb3_ports.push(((ports & 0xff) as u8, ((ports >> 8) & 0xff) as u8));
+            },
+            _ => {},
         }
         let next = u64::from((cap >> 8) & 0xff);
         if next == 0 {

@@ -89,12 +89,8 @@ pub struct DmaBlock {
 
 impl DmaBlock {
     pub fn alloc(pages: usize) -> Result<Self, DmaError> {
-        let ptr = boot::allocate_pages(
-            AllocateType::MaxAddress(MAX_ADDR),
-            MemoryType::BOOT_SERVICES_DATA,
-            pages,
-        )
-        .map_err(|_| DmaError::Alloc)?;
+        let ptr = boot::allocate_pages(AllocateType::MaxAddress(MAX_ADDR), MemoryType::BOOT_SERVICES_DATA, pages)
+            .map_err(|_| DmaError::Alloc)?;
         let phys = ptr.as_ptr() as u64;
         if phys + (pages * PAGE) as u64 - 1 > MAX_ADDR {
             // SAFETY: just allocated with the same page count.
@@ -103,12 +99,7 @@ impl DmaBlock {
         }
         // SAFETY: the allocation spans `pages * PAGE` bytes.
         unsafe { ptr::write_bytes(ptr.as_ptr(), 0, pages * PAGE) };
-        Ok(Self {
-            ptr,
-            phys,
-            pages,
-            used: 0,
-        })
+        Ok(Self { ptr, phys, pages, used: 0 })
     }
 
     #[must_use]

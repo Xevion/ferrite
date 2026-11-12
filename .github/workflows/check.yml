@@ -32,16 +32,16 @@ jobs:
       - name: Check formatting
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            cargo fmt -- --check
+            cargo fmt --all -- --check
           else
-            cargo fmt -- --check || echo "::warning::Formatting issues found (not failing on push)"
+            cargo fmt --all -- --check || echo "::warning::Formatting issues found (not failing on push)"
           fi
 
       - name: Clippy (all features)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy -p ferrite --all-targets --all-features -- -D warnings
 
       - name: Clippy (no default features)
-        run: cargo clippy --all-targets --no-default-features -- -D warnings
+        run: cargo clippy -p ferrite --all-targets --no-default-features -- -D warnings
 
       - name: Install cargo-machete
         uses: taiki-e/install-action@cargo-machete
@@ -69,4 +69,4 @@ jobs:
           tool: cargo-nextest@0.9.132
 
       - name: Run tests
-        run: cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final ${{ matrix.features }}
+        run: cargo nextest run -p ferrite --no-fail-fast --hide-progress-bar --failure-output final ${{ matrix.features }}

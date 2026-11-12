@@ -34,27 +34,13 @@ impl Trb {
     /// Normal TRB (type 1) with IOC, to be queued with its cycle bit set by the ring.
     #[must_use]
     pub const fn normal(buf: u64, len: u32) -> Self {
-        Self {
-            d: [
-                buf as u32,
-                (buf >> 32) as u32,
-                len & 0x1_ffff,
-                (TRB_TYPE_NORMAL << 10) | TRB_IOC,
-            ],
-        }
+        Self { d: [buf as u32, (buf >> 32) as u32, len & 0x1_ffff, (TRB_TYPE_NORMAL << 10) | TRB_IOC] }
     }
 
     /// Link TRB back to `next` with toggle-cycle set and the cycle bit clear.
     #[must_use]
     pub const fn link(next: u64) -> Self {
-        Self {
-            d: [
-                next as u32,
-                (next >> 32) as u32,
-                0,
-                (TRB_TYPE_LINK << 10) | TRB_LINK_TOGGLE,
-            ],
-        }
+        Self { d: [next as u32, (next >> 32) as u32, 0, (TRB_TYPE_LINK << 10) | TRB_LINK_TOGGLE] }
     }
 
     #[must_use]
@@ -195,23 +181,14 @@ impl StringTable {
     #[must_use]
     pub fn packed_lengths(&self) -> u32 {
         let len = |i: usize| u32::from(self.slots[i][0]);
-        (len(Self::SERIAL) << 24)
-            | (len(Self::PRODUCT) << 16)
-            | (len(Self::MANUFACTURER) << 8)
-            | len(Self::STRING0)
+        (len(Self::SERIAL) << 24) | (len(Self::PRODUCT) << 16) | (len(Self::MANUFACTURER) << 8) | len(Self::STRING0)
     }
 }
 
 impl Context {
     /// Full context for a DbC whose strings live at `strings` (a `StringTable`).
     #[must_use]
-    pub fn new(
-        strings: &StringTable,
-        strings_dma: u64,
-        max_burst: u8,
-        out_ring: u64,
-        in_ring: u64,
-    ) -> Self {
+    pub fn new(strings: &StringTable, strings_dma: u64, max_burst: u8, out_ring: u64, in_ring: u64) -> Self {
         Self {
             info: InfoContext {
                 string0: strings_dma + 64 * StringTable::STRING0 as u64,
@@ -260,9 +237,7 @@ mod tests {
 
     #[test]
     fn event_field_extraction() {
-        let trb = Trb {
-            d: [0x1000, 0, (13 << 24) | 24, (32 << 10) | (3 << 16) | 1],
-        };
+        let trb = Trb { d: [0x1000, 0, (13 << 24) | 24, (32 << 10) | (3 << 16) | 1] };
         assert_eq!(trb.trb_type(), TRB_TYPE_TRANSFER_EVENT);
         assert_eq!(trb.completion_code(), CC_SHORT_PACKET);
         assert_eq!(trb.residual(), 24);

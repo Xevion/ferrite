@@ -6,7 +6,6 @@
 //! and keeps the OUT and IN endpoints fed. Nothing here blocks except the
 //! explicit `wait_configured`, and every wait has a deadline.
 
-pub mod clock;
 pub mod discover;
 pub mod dma;
 pub mod regs;
@@ -23,20 +22,20 @@ use core::time::Duration;
 
 use uefi::boot;
 
-use self::clock::Clock;
 use self::discover::{RootBridge, XhciDevice};
 use self::dma::{DmaBlock, DmaError, DmaSlice, PAGE};
 use self::regs::{
-    CTRL_DCE, CTRL_DCR, CTRL_DRC, CTRL_HIT, CTRL_HOT, CTRL_LSE, DB_IN, DB_OUT, DCCP, DCCTRL, DCDB,
-    DCDDI1, DCDDI2, DCERDP, DCERSTBA, DCERSTSZ, DCPORTSC, DCST, HOST_PORT_STRIDE, HOST_PORTSC_BASE,
-    LEGACY_BIOS_OWNED, LEGACY_CTL_EVENTS, LEGACY_CTL_KEEP, LEGACY_OS_OWNED, PORTSC_CCS,
-    PORTSC_CHANGES, PORTSC_PED, PORTSC_PR, PORTSC_PRC, PORTSC_PRESERVE,
+    CTRL_DCE, CTRL_DCR, CTRL_DRC, CTRL_HIT, CTRL_HOT, CTRL_LSE, DB_IN, DB_OUT, DCCP, DCCTRL, DCDB, DCDDI1, DCDDI2,
+    DCERDP, DCERSTBA, DCERSTSZ, DCPORTSC, DCST, HOST_PORT_STRIDE, HOST_PORTSC_BASE, LEGACY_BIOS_OWNED,
+    LEGACY_CTL_EVENTS, LEGACY_CTL_KEEP, LEGACY_OS_OWNED, PORTSC_CCS, PORTSC_CHANGES, PORTSC_PED, PORTSC_PR, PORTSC_PRC,
+    PORTSC_PRESERVE,
 };
 use self::ring::{ByteRing, EventRing, ProducerRing, RING_TRBS};
 use self::trb::{
-    CC_SHORT_PACKET, CC_SUCCESS, Context, ErstEntry, MAX_PACKET, StringTable,
-    TRB_TYPE_PORT_STATUS_EVENT, TRB_TYPE_TRANSFER_EVENT, Trb,
+    CC_SHORT_PACKET, CC_SUCCESS, Context, ErstEntry, MAX_PACKET, StringTable, TRB_TYPE_PORT_STATUS_EVENT,
+    TRB_TYPE_TRANSFER_EVENT, Trb,
 };
+use ferrite_efi::clock::Clock;
 
 pub const MANUFACTURER: &str = "ferrite";
 pub const PRODUCT: &str = "ferrite DbC";
@@ -109,14 +108,9 @@ impl fmt::Display for DbcError {
             Self::Dma(e) => write!(f, "DMA allocation failed: {e:?}"),
             Self::DisableTimeout { ctrl } => write!(f, "DCE would not clear (DCCTRL={ctrl:#010x})"),
             Self::EnableTimeout { ctrl } => write!(f, "DCE would not set (DCCTRL={ctrl:#010x})"),
-            Self::ConfigTimeout {
-                ctrl,
-                status,
-                portsc,
-            } => write!(
-                f,
-                "not configured by host (DCCTRL={ctrl:#010x} DCST={status:#010x} DCPORTSC={portsc:#010x})"
-            ),
+            Self::ConfigTimeout { ctrl, status, portsc } => {
+                write!(f, "not configured by host (DCCTRL={ctrl:#010x} DCST={status:#010x} DCPORTSC={portsc:#010x})")
+            },
             Self::Faulted => f.write_str("DbC faulted"),
         }
     }
@@ -142,12 +136,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            timeout_ms: 10_000,
-            retry_ms: 3_000,
-            port_reset: true,
-            bios_handoff: true,
-        }
+        Self { timeout_ms: 10_000, retry_ms: 3_000, port_reset: true, bios_handoff: true }
     }
 }
 
@@ -249,11 +238,7 @@ impl RegSnapshot {
                 regs::ctrl_max_burst(c),
                 regs::ctrl_dev_addr(c),
             ),
-            format!(
-                "DCST={:#010x} debug_port={}",
-                self.status,
-                regs::status_debug_port(self.status)
-            ),
+            format!("DCST={:#010x} debug_port={}", self.status, regs::status_debug_port(self.status)),
             format!(
                 "DCPORTSC={p:#010x} CCS={} PED={} PR={} link={} speed={} changes={:#x}",
                 flag(p, PORTSC_CCS),
@@ -306,12 +291,7 @@ pub struct Dbc {
 
 impl Dbc {
     /// Program the DbC and set DCE. Returns without waiting for the far host.
-    pub fn open(
-        dev: &XhciDevice,
-        cfg: &Config,
-        clock: Clock,
-        note: &mut dyn FnMut(&str),
-    ) -> Result<Self, DbcError> {
+    pub fn open(dev: &XhciDevice, cfg: &Config, clock: Clock, note: &mut dyn FnMut(&str)) -> Result<Self, DbcError> {
         let regs = dev.dbc.ok_or(DbcError::NoDbc)?;
         let mut bridge = RootBridge::open(dev.bridge).ok_or(DbcError::NoBridge)?;
         prepare_pci(&mut bridge, dev, note);
@@ -363,9 +343,7 @@ impl Dbc {
             dbc.bios_handoff(note);
         }
         if !dbc.set_dce(false) {
-            return Err(DbcError::DisableTimeout {
-                ctrl: dbc.rd(DCCTRL),
-            });
+            return Err(DbcError::DisableTimeout { ctrl: dbc.rd(DCCTRL) });
         }
         dbc.program();
         dbc.enable(note)?;
@@ -441,15 +419,11 @@ impl Dbc {
             match self.state {
                 State::Configured => return Ok(now - start),
                 State::Faulted | State::Disabled => return Err(DbcError::Faulted),
-                State::Armed => {}
+                State::Armed => {},
             }
             if now - start >= u64::from(self.cfg.timeout_ms) {
                 let snap = self.snapshot();
-                return Err(DbcError::ConfigTimeout {
-                    ctrl: snap.ctrl,
-                    status: snap.status,
-                    portsc: snap.portsc,
-                });
+                return Err(DbcError::ConfigTimeout { ctrl: snap.ctrl, status: snap.status, portsc: snap.portsc });
             }
             if now - last_kick >= u64::from(self.cfg.retry_ms) {
                 last_kick = now;
@@ -472,10 +446,7 @@ impl Dbc {
 
         if ctrl == u32::MAX || ctrl & CTRL_DCE == 0 {
             self.state = State::Faulted;
-            note(&format!(
-                "t={}ms DCE lost (DCCTRL={ctrl:#010x}); controller reset?",
-                self.clock.ms()
-            ));
+            note(&format!("t={}ms DCE lost (DCCTRL={ctrl:#010x}); controller reset?", self.clock.ms()));
             return;
         }
 
@@ -503,9 +474,9 @@ impl Dbc {
                 self.timings.configured_ms.get_or_insert(t);
                 self.state = State::Configured;
                 note(&format!("t={t}ms configured by host"));
-            }
+            },
             State::Configured if !running => self.rearm("DCR dropped", note),
-            _ => {}
+            _ => {},
         }
 
         if self.state == State::Configured {
@@ -567,21 +538,14 @@ impl Dbc {
         self.max_burst = regs::ctrl_max_burst(self.rd(DCCTRL));
         self.table.zero();
         self.write_context();
-        let erst = ErstEntry {
-            base: self.evt.dma(),
-            size: RING_TRBS as u32,
-            reserved: 0,
-        };
+        let erst = ErstEntry { base: self.evt.dma(), size: RING_TRBS as u32, reserved: 0 };
         self.table.write(ERST_OFF, erst);
 
         let table = self.table.phys();
         self.bridge_write(DCERSTSZ, 1);
-        self.bridge
-            .write64(self.regs + DCERSTBA, table + ERST_OFF as u64);
-        self.bridge
-            .write64(self.regs + DCERDP, self.evt.dequeue_dma());
-        self.bridge
-            .write64(self.regs + DCCP, table + CTX_OFF as u64);
+        self.bridge.write64(self.regs + DCERSTBA, table + ERST_OFF as u64);
+        self.bridge.write64(self.regs + DCERDP, self.evt.dequeue_dma());
+        self.bridge.write64(self.regs + DCCP, table + CTX_OFF as u64);
         self.bridge_write(DCDDI1, trb::ddi1());
         self.bridge_write(DCDDI2, trb::ddi2());
         fence(Ordering::SeqCst);
@@ -590,13 +554,7 @@ impl Dbc {
     fn write_context(&mut self) {
         let strings = StringTable::new(MANUFACTURER, PRODUCT, SERIAL);
         let strings_dma = self.table.phys() + STR_OFF as u64;
-        let ctx = Context::new(
-            &strings,
-            strings_dma,
-            self.max_burst,
-            self.out.dma(),
-            self.inn.dma(),
-        );
+        let ctx = Context::new(&strings, strings_dma, self.max_burst, self.out.dma(), self.inn.dma());
         self.table.write(CTX_OFF, ctx);
         self.table.write(STR_OFF, strings);
     }
@@ -604,9 +562,7 @@ impl Dbc {
     /// Set DCE, optionally reset the idle USB 3 ports, and enter `Armed`.
     fn enable(&mut self, note: &mut dyn FnMut(&str)) -> Result<(), DbcError> {
         if !self.set_dce(true) {
-            return Err(DbcError::EnableTimeout {
-                ctrl: self.rd(DCCTRL),
-            });
+            return Err(DbcError::EnableTimeout { ctrl: self.rd(DCCTRL) });
         }
         let t = self.clock.ms();
         self.timings.dce_ready_ms.get_or_insert(t);
@@ -626,11 +582,7 @@ impl Dbc {
     /// enumeration stalls or the controller was reset under it.
     fn kick(&mut self, note: &mut dyn FnMut(&str)) {
         self.stats.kicks += 1;
-        note(&format!(
-            "t={}ms still not configured, re-arming (kick {})",
-            self.clock.ms(),
-            self.stats.kicks
-        ));
+        note(&format!("t={}ms still not configured, re-arming (kick {})", self.clock.ms(), self.stats.kicks));
         self.set_dce(false);
         boot::stall(Duration::from_millis(1));
         self.program();
@@ -656,8 +608,7 @@ impl Dbc {
                 let addr = self.host_portsc_addr(port);
                 let val = self.bridge.read32(addr);
                 if val != u32::MAX && val & PORTSC_CCS == 0 {
-                    self.bridge
-                        .write32(addr, (val & PORTSC_PRESERVE) | PORTSC_PR);
+                    self.bridge.write32(addr, (val & PORTSC_PRESERVE) | PORTSC_PR);
                     reset.push((port, val));
                 }
             }
@@ -691,14 +642,10 @@ impl Dbc {
                 let v = self.bridge.read32(legacy);
                 self.bridge.write32(legacy, v & !LEGACY_BIOS_OWNED);
             }
-            note(&format!(
-                "bios handoff: legacy={val:#010x} released={released} after {}ms",
-                self.clock.ms() - t0
-            ));
+            note(&format!("bios handoff: legacy={val:#010x} released={released} after {}ms", self.clock.ms() - t0));
         }
         let ctl = self.bridge.read32(legacy + 4);
-        self.bridge
-            .write32(legacy + 4, (ctl & LEGACY_CTL_KEEP) | LEGACY_CTL_EVENTS);
+        self.bridge.write32(legacy + 4, (ctl & LEGACY_CTL_KEEP) | LEGACY_CTL_EVENTS);
     }
 
     /// Log register changes with a timestamp so a report shows the link timeline.
@@ -714,11 +661,7 @@ impl Dbc {
         note(&format!(
             "t={}ms DCCTRL={ctrl:#010x} DCST={status:#010x} DCPORTSC={portsc:#010x} ({} {} {})",
             self.clock.ms(),
-            if portsc & PORTSC_CCS != 0 {
-                "connected"
-            } else {
-                "disconnected"
-            },
+            if portsc & PORTSC_CCS != 0 { "connected" } else { "disconnected" },
             regs::link_state_name((portsc >> 5) & 0xf),
             regs::speed_name((portsc >> 10) & 0xf),
         ));
@@ -753,11 +696,7 @@ impl Dbc {
         if halted {
             self.stats.halts += 1;
         }
-        note(&format!(
-            "t={}ms {name} endpoint {}",
-            self.clock.ms(),
-            if halted { "halted" } else { "halt cleared" }
-        ));
+        note(&format!("t={}ms {name} endpoint {}", self.clock.ms(), if halted { "halted" } else { "halt cleared" }));
         if !halted && pending > 0 {
             self.bridge_write(DCDB, target << 8);
         }
@@ -771,8 +710,8 @@ impl Dbc {
             self.stats.event_types[(event.trb_type() & 63) as usize] += 1;
             match event.trb_type() {
                 TRB_TYPE_TRANSFER_EVENT => self.on_transfer(&event, rx, note),
-                TRB_TYPE_PORT_STATUS_EVENT => {}
-                _ => {}
+                TRB_TYPE_PORT_STATUS_EVENT => {},
+                _ => {},
             }
         }
         if any {
@@ -810,8 +749,7 @@ impl Dbc {
             {
                 let got = PACKET.saturating_sub(event.residual() as usize);
                 let mut packet = [0u8; PACKET];
-                self.in_buf
-                    .read_into(usize::from(slot) * PACKET, &mut packet[..got]);
+                self.in_buf.read_into(usize::from(slot) * PACKET, &mut packet[..got]);
                 self.stats.bytes_received += got as u64;
                 rx(&packet[..got]);
             }
@@ -873,9 +811,7 @@ impl Drop for Dbc {
 fn prepare_pci(rb: &mut RootBridge, dev: &XhciDevice, note: &mut dyn FnMut(&str)) {
     let cmd = rb.enable_dma(dev.addr).unwrap_or(0);
     let power = rb.power_state(dev.addr);
-    note(&format!(
-        "pci {dev}: command {cmd:#06x} (before) power {power:?}"
-    ));
+    note(&format!("pci {dev}: command {cmd:#06x} (before) power {power:?}"));
     if let Some((pmcsr_off, state)) = power
         && state != 0
         && let Some(pmcsr) = rb.cfg_read16(dev.addr, pmcsr_off)

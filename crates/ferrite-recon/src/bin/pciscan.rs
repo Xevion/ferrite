@@ -71,14 +71,8 @@ fn main() -> Status {
     system::with_stdout(|out| {
         let _ = out.clear();
         let _ = writeln!(out, "ferrite-uefi :: pciscan  -  touching the chip\r");
-        let _ = writeln!(
-            out,
-            "seg  bus:dev.fn  vend:dev   rev  class     subsys      cmd   bar0\r"
-        );
-        let _ = writeln!(
-            out,
-            "-------------------------------------------------------------------------\r"
-        );
+        let _ = writeln!(out, "seg  bus:dev.fn  vend:dev   rev  class     subsys      cmd   bar0\r");
+        let _ = writeln!(out, "-------------------------------------------------------------------------\r");
 
         let mut wifi_found = false;
         for d in &devices {
@@ -88,21 +82,12 @@ fn main() -> Status {
             }
         }
 
-        let _ = writeln!(
-            out,
-            "-------------------------------------------------------------------------\r"
-        );
+        let _ = writeln!(out, "-------------------------------------------------------------------------\r");
         let _ = writeln!(out, "{} PCI function(s) enumerated\r", devices.len());
         if wifi_found {
-            let _ = writeln!(
-                out,
-                "*** Intel wireless NIC present - we can read its registers ***\r"
-            );
+            let _ = writeln!(out, "*** Intel wireless NIC present - we can read its registers ***\r");
         } else {
-            let _ = writeln!(
-                out,
-                "(no Intel wireless NIC here - expected under stock QEMU; use real HW or VFIO)\r"
-            );
+            let _ = writeln!(out, "(no Intel wireless NIC here - expected under stock QEMU; use real HW or VFIO)\r");
         }
         let _ = writeln!(out, "\r\npress a key to exit...\r");
     });
@@ -121,14 +106,10 @@ fn scan() -> Vec<Dev> {
     for handle in handles {
         // Non-exclusive GetProtocol: firmware's own PCI bus driver already holds
         // the root bridge open, so an exclusive open would be denied.
-        let params = OpenProtocolParams {
-            handle,
-            agent: boot::image_handle(),
-            controller: None,
-        };
-        let Ok(mut rb) = (unsafe {
-            boot::open_protocol::<PciRootBridgeIo>(params, OpenProtocolAttributes::GetProtocol)
-        }) else {
+        let params = OpenProtocolParams { handle, agent: boot::image_handle(), controller: None };
+        let Ok(mut rb) =
+            (unsafe { boot::open_protocol::<PciRootBridgeIo>(params, OpenProtocolAttributes::GetProtocol) })
+        else {
             continue;
         };
         let seg = rb.segment_nr();
@@ -146,20 +127,12 @@ fn scan() -> Vec<Dev> {
 }
 
 /// Read a 32-bit dword from a device's PCI configuration space at byte `off`.
-fn cfg_rd(
-    rb: &mut ScopedProtocol<PciRootBridgeIo>,
-    addr: uefi::proto::pci::PciIoAddress,
-    off: u8,
-) -> Option<u32> {
+fn cfg_rd(rb: &mut ScopedProtocol<PciRootBridgeIo>, addr: uefi::proto::pci::PciIoAddress, off: u8) -> Option<u32> {
     rb.pci().read_one::<u32>(addr.with_register(off)).ok()
 }
 
 /// Read one function's config header. Returns `None` for absent functions.
-fn read_dev(
-    rb: &mut ScopedProtocol<PciRootBridgeIo>,
-    seg: u32,
-    addr: uefi::proto::pci::PciIoAddress,
-) -> Option<Dev> {
+fn read_dev(rb: &mut ScopedProtocol<PciRootBridgeIo>, seg: u32, addr: uefi::proto::pci::PciIoAddress) -> Option<Dev> {
     let reg0 = cfg_rd(rb, addr, 0x00)?;
     let vendor = (reg0 & 0xffff) as u16;
     if vendor == 0xffff {
@@ -191,17 +164,12 @@ fn read_dev(
     let wifi_regs = if vendor == INTEL && class == CLASS_NETWORK && !bar0_is_io && bar0 != 0 {
         let cmd = (reg_cmd & 0xffff) as u16;
         if cmd & 0x2 == 0 {
-            let _ = rb
-                .pci()
-                .write_one::<u32>(addr.with_register(0x04), reg_cmd | 0x2);
+            let _ = rb.pci().write_one::<u32>(addr.with_register(0x04), reg_cmd | 0x2);
         }
         let hw_if_config = rb.memory().read_one::<u32>(bar0 + CSR_HW_IF_CONFIG).ok();
         let hw_rev = rb.memory().read_one::<u32>(bar0 + CSR_HW_REV).ok();
         match (hw_if_config, hw_rev) {
-            (Some(hw_if_config), Some(hw_rev)) => Some(WifiRegs {
-                hw_if_config,
-                hw_rev,
-            }),
+            (Some(hw_if_config), Some(hw_rev)) => Some(WifiRegs { hw_if_config, hw_rev }),
             _ => None,
         }
     } else {

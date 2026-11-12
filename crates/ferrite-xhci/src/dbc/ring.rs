@@ -26,15 +26,7 @@ impl ProducerRing {
     /// `trbs` must point at `RING_TRBS` TRBs of DMA memory at bus address `dma`.
     #[must_use]
     pub fn new(trbs: *mut Trb, dma: u64) -> Self {
-        let mut ring = Self {
-            trbs,
-            dma,
-            enq: 0,
-            deq: 0,
-            cycle: true,
-            pending: 0,
-            tags: [0; RING_TRBS],
-        };
+        let mut ring = Self { trbs, dma, enq: 0, deq: 0, cycle: true, pending: 0, tags: [0; RING_TRBS] };
         ring.reset();
         ring
     }
@@ -135,12 +127,7 @@ impl EventRing {
     /// `trbs` must point at `RING_TRBS` TRBs of DMA memory at bus address `dma`.
     #[must_use]
     pub fn new(trbs: *mut Trb, dma: u64) -> Self {
-        let mut ring = Self {
-            trbs,
-            dma,
-            deq: 0,
-            cycle: true,
-        };
+        let mut ring = Self { trbs, dma, deq: 0, cycle: true };
         ring.reset();
         ring
     }
@@ -200,14 +187,7 @@ impl ByteRing {
     #[must_use]
     pub const fn new(buf: *mut u8, dma: u64, cap: usize) -> Self {
         assert!(cap.is_power_of_two());
-        Self {
-            buf,
-            dma,
-            cap,
-            wr: 0,
-            sent: 0,
-            acked: 0,
-        }
+        Self { buf, dma, cap, wr: 0, sent: 0, acked: 0 }
     }
 
     pub const fn reset(&mut self) {
@@ -232,9 +212,7 @@ impl ByteRing {
         let n = data.len().min(self.free());
         for (i, &b) in data[..n].iter().enumerate() {
             // SAFETY: the index is masked into the `cap` byte buffer.
-            unsafe {
-                ptr::write_volatile(self.buf.add(self.wr.wrapping_add(i) & (self.cap - 1)), b)
-            }
+            unsafe { ptr::write_volatile(self.buf.add(self.wr.wrapping_add(i) & (self.cap - 1)), b) }
         }
         self.wr = self.wr.wrapping_add(n);
         n
@@ -356,11 +334,7 @@ mod tests {
         assert_eq!(ring.write(&[0; 20]), 8);
         assert_eq!(ring.write(&[0; 1]), 0);
         ring.mark_sent(3);
-        assert_eq!(
-            ring.write(&[0; 1]),
-            0,
-            "sent but unacked bytes still occupy space"
-        );
+        assert_eq!(ring.write(&[0; 1]), 0, "sent but unacked bytes still occupy space");
         ring.ack(3);
         assert_eq!(ring.write(&[0; 5]), 3);
     }

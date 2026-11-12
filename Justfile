@@ -1,62 +1,103 @@
 set shell := ["bash", "-uc"]
 
-default:
-	just --list
+uefi := "x86_64-unknown-uefi"
+ovmf_code := "/usr/share/OVMF/OVMF_CODE_4M.fd"
+ovmf_vars := "/usr/share/OVMF/OVMF_VARS_4M.fd"
+
+# e1000 has a UNDI driver in OVMF; user-mode net gives a built-in DHCP server
+# (guest 10.0.2.15) and forwards host :8080 to the guest's HTTP :80.
+netdev := "-netdev user,id=net0,hostfwd=tcp::8080-:80 -device e1000,netdev=net0"
 
 alias c := check
 alias t := test
 alias l := lint
 
-# Run all checks (format, lint, unused deps, tests, security audit)
-check *args:
-    tempo check {{args}}
+# list recipes
+default:
+    @just --list
 
-# Run tests (mirrors the tempo/CI test command)
-test *args:
-    cargo nextest run --no-fail-fast --hide-progress-bar --failure-output final {{args}}
+# type-check the host crates and the UEFI apps
+check:
+    cargo check --all-targets
+    cargo efi-check
 
-# Clippy only
+# clippy over the host crates and the UEFI apps, plus unused-dependency check
 lint:
-    tempo lint
+    cargo clippy --all-targets
+    cargo efi-clippy
+    cargo machete
 
-# Format code
+# run the unit tests on the host
+test *args:
+    cargo nextest run {{ args }}
+
 format:
-    tempo fmt
+    cargo fmt --all
+
+# build every UEFI app (debug, or `just build release`)
+build profile="dev":
+    cargo efi-build --profile {{ profile }}
+
+# build one UEFI app and stage it as the ESP bootloader under ./esp
+stage app="ferrite-uefi":
+    cargo build --target {{ uefi }} --workspace --bin {{ app }}
+    mkdir -p esp/efi/boot
+    cp -f target/{{ uefi }}/debug/{{ app }}.efi esp/efi/boot/bootx64.efi
+    test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
+
+# boot an app in QEMU: `just qemu`, `just qemu xhciscan serial`
+qemu app="ferrite-uefi" mode="gui": (stage app)
+    qemu-system-x86_64 \
+        -enable-kvm \
+        -machine q35 \
+        -m 512M \
+        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
+        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
+        -drive format=raw,file=fat:rw:esp \
+        {{ netdev }} \
+        -device qemu-xhci \
+        {{ if mode == "serial" { "-nographic" } else { "-display gtk" } }}
+
+# copy the staged ESP onto a mounted FAT32 USB stick: `just stage-usb /run/media/$USER/FERRITE`
+stage-usb mount app="ferrite-uefi": (stage app)
+    mkdir -p "{{ mount }}/efi/boot"
+    cp -f esp/efi/boot/bootx64.efi "{{ mount }}/efi/boot/bootx64.efi"
+    @echo "staged {{ app }} -> {{ mount }}/efi/boot/bootx64.efi"
 
 # Security audit
 audit:
     tempo check security
 
 # Build release binary (output: ./target/release/ferrite)
-build:
-    cargo build --release
+build-linux:
+    cargo build -p ferrite --release
 
 # Build and run with dev profile (use sudo-run for release)
 run *args:
-    cargo run -- {{args}}
+    cargo run -p ferrite -- {{args}}
 
 # Build then run as root (avoids sudo needing to find cargo)
 sudo-run *args:
-    cargo build --release -q
+    cargo build -p ferrite --release -q
     sudo ./target/release/ferrite {{args}}
 
 # Profile with samply — opens Firefox Profiler for visual/interactive analysis.
 # No sudo needed up to ~4G (RLIMIT_MEMLOCK). Open the printed URL in Firefox or Chrome.
 profile *args:
-    cargo build --profile profiling -q
+    cargo build -p ferrite --profile profiling -q
     samply record --no-open -- ./target/profiling/ferrite {{args}}
 
 # Profile with perf (frame-pointer unwinding) — leaves perf.data for CLI analysis.
 # Walking-ones/checkerboard test data produces false [unknown] frames — this is expected.
 # Use `just profile-report`, `just profile-svg`, or `just profile-annotate` after this.
 profile-perf size="1G" passes="1":
-    cargo build --profile profiling -q
+    cargo build -p ferrite --profile profiling -q
     perf record -g -F 997 -o perf.data -- ./target/profiling/ferrite --size {{size}} --passes {{passes}} --tui never
 
 # Profile with DWARF callchain unwinding — cleaner call chains, ~5-10x larger perf.data.
 # Use when frame-pointer unwinding loses callers (e.g. verify_avx512's caller shows as [unknown]).
 profile-perf-deep size="1G" passes="1":
-    cargo build --profile profiling -q
+    cargo build -p ferrite --profile profiling -q
     perf record --call-graph dwarf -F 997 -o perf.data -- ./target/profiling/ferrite --size {{size}} --passes {{passes}} --tui never
 
 # Print hot-path summary filtered to ferrite symbols (hides unresolved kernel/test-data noise)
@@ -73,7 +114,7 @@ profile-svg:
 
 # Run mutation testing (requires cargo-mutants)
 mutants:
-    cargo mutants --profile mutant --test-tool nextest
+    cargo mutants --package ferrite --profile mutant --test-tool nextest
 
 # Run tests with coverage (requires cargo-llvm-cov + nightly)
 coverage:
@@ -105,145 +146,3 @@ bench-compare name="main":
 # Run instruction-count benchmarks via Gungraun (requires valgrind + cargo install gungraun-runner)
 bench-ci:
     cargo bench -p ferrite --features bench --bench instructions
-
-ovmf_code := "/usr/share/OVMF/OVMF_CODE_4M.fd"
-ovmf_vars := "/usr/share/OVMF/OVMF_VARS_4M.fd"
-efi := "target/x86_64-unknown-uefi/debug/ferrite-uefi.efi"
-display := "gtk"
-# e1000 has a UNDI driver in OVMF; user-mode net gives a built-in DHCP server
-# (guest 10.0.2.15) and forwards host :8080 to the guest's HTTP :80.
-netdev := "-netdev user,id=net0,hostfwd=tcp::8080-:80 -device e1000,netdev=net0"
-
-
-# type-check without producing a binary
-uefi-check:
-    cargo check -p ferrite-uefi --target x86_64-unknown-uefi
-
-# run the shared lib's unit tests on the host
-uefi-test:
-    cargo test -p ferrite-uefi --lib --target x86_64-unknown-linux-gnu
-
-# build the .efi (debug)
-uefi-build:
-    cargo build -p ferrite-uefi --target x86_64-unknown-uefi
-
-# build the optimized .efi
-build-release:
-    cargo build -p ferrite-uefi --target x86_64-unknown-uefi --release
-
-# assemble the virtual EFI system partition under ./esp
-esp: uefi-build
-    mkdir -p esp/efi/boot
-    cp -f {{ efi }} esp/efi/boot/bootx64.efi
-    # writable copy of the NVRAM store; created once, then reused
-    test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
-
-# boot the spike in QEMU with a graphical display (headful)
-qemu: esp
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -machine q35 \
-        -m 512M \
-        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
-        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
-        -drive format=raw,file=fat:rw:esp \
-        {{ netdev }} \
-        -display {{ display }}
-
-# boot headless with the console mirrored to your terminal via serial
-qemu-serial: esp
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -machine q35 \
-        -m 512M \
-        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
-        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
-        -drive format=raw,file=fat:rw:esp \
-        {{ netdev }} \
-        -nographic
-
-# stage an arbitrary bin (e.g. pciscan) as the ESP bootloader
-stage bin:
-    cargo build -p ferrite-uefi --target x86_64-unknown-uefi --bin {{ bin }}
-    mkdir -p esp/efi/boot
-    cp -f target/x86_64-unknown-uefi/debug/{{ bin }}.efi esp/efi/boot/bootx64.efi
-    test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
-
-# boot the PCI "touch the chip" scanner in a graphical window
-pciscan: (stage "pciscan")
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -machine q35 \
-        -m 512M \
-        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
-        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
-        -drive format=raw,file=fat:rw:esp \
-        {{ netdev }} \
-        -display {{ display }}
-
-# boot the PCI scanner headless, console over serial
-pciscan-serial: (stage "pciscan")
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -machine q35 \
-        -m 512M \
-        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
-        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
-        -drive format=raw,file=fat:rw:esp \
-        {{ netdev }} \
-        -nographic
-
-# boot the xHCI USB-controller recon tool in a graphical window
-xhciscan: (stage "xhciscan")
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -machine q35 \
-        -m 512M \
-        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
-        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
-        -drive format=raw,file=fat:rw:esp \
-        -device qemu-xhci \
-        -display {{ display }}
-
-# boot the xHCI recon tool headless, console over serial
-xhciscan-serial: (stage "xhciscan")
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -machine q35 \
-        -m 512M \
-        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
-        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
-        -drive format=raw,file=fat:rw:esp \
-        -device qemu-xhci \
-        -nographic
-
-# boot the xHCI Debug Capability bring-up app in a graphical window
-dbcping: (stage "dbcping")
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -machine q35 \
-        -m 512M \
-        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
-        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
-        -drive format=raw,file=fat:rw:esp \
-        -device qemu-xhci \
-        -display {{ display }}
-
-# boot the DbC bring-up app headless, console over serial
-dbcping-serial: (stage "dbcping")
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -machine q35 \
-        -m 512M \
-        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
-        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
-        -drive format=raw,file=fat:rw:esp \
-        -device qemu-xhci \
-        -nographic
-
-# copy the built ESP tree onto a mounted FAT32 USB (pass the mount point)
-# e.g. `just stage-usb /run/media/$USER/FERRITE`
-stage-usb mount: esp
-    mkdir -p "{{ mount }}/efi/boot"
-    cp -f esp/efi/boot/bootx64.efi "{{ mount }}/efi/boot/bootx64.efi"
-    @echo "staged bootx64.efi -> {{ mount }}/efi/boot/"

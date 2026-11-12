@@ -1,12 +1,94 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# The UEFI app only builds for its own target; see the Justfile.
-default-members = ["crates/ferrite-linux"]
+# Host-buildable crates. The UEFI binaries are built through the `efi-*`
+# aliases in .cargo/config.toml, which pass `--target x86_64-unknown-uefi`.
+default-members = ["crates/ferrite-hal", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-linux"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+ferrite-efi = { path = "crates/ferrite-efi" }
+ferrite-hal = { path = "crates/ferrite-hal" }
+ferrite-xhci = { path = "crates/ferrite-xhci" }
+
+arbitrary-int = { version = "2.2.0", default-features = false }
+bitbybit = "2.0.1"
+log = "0.4.33"
+ratatui = { version = "0.30.2", default-features = false }
+ratatui-core = "0.1.2"
+smoltcp = { version = "0.13.1", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-dhcpv4",
+    "socket-dhcpv4",
+    "socket-udp",
+    "socket-tcp",
+    "multicast",
+] }
+snafu = { version = "0.9.2", default-features = false, features = ["rust_1_81"] }
+strum = { version = "0.28.0", default-features = false, features = ["derive"] }
+uefi = { version = "0.38.0", features = ["alloc"] }
+
+assert2 = "0.4.1"
+proptest = "1.12.0"
+rstest = "0.28.0"
+
+[workspace.lints.rust]
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+redundant_lifetimes = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+bare_urls = "deny"
+unescaped_backticks = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+allow_attributes_without_reason = "warn"
+undocumented_unsafe_blocks = "warn"
+
+# Register, descriptor and address arithmetic narrows by design at fixed widths.
+cast_possible_truncation = "allow"
+
+# `#[must_use]` goes on by hand where a dropped result is a bug.
+must_use_candidate = "allow"
+
+# The typed snafu enum is the documentation.
+missing_errors_doc = "allow"
+
+# Noisy, and it fights builders that later gain a body.
+missing_const_for_fn = "allow"
+
+# Own code: opt-level 0 gives huge stack frames on the small firmware stack and
+# makes the memory sweep crawl; 1 costs little compile time.
+[profile.dev]
+opt-level = 1
+
+# Parses, checksums and copies every frame; rarely rebuilt.
+[profile.dev.package.smoltcp]
+opt-level = 2
+
+# Diffs the whole screen buffer every frame.
+[profile.dev.package.ratatui-core]
+opt-level = 2
 
 [profile.release]
-codegen-units = 1
 opt-level = 3
+lto = "fat"
+codegen-units = 1
 
 # Full optimization + debug symbols for perf/flamegraph. lto=false keeps build
 # times reasonable; strip="none" ensures symbols survive to the profiler.
@@ -23,6 +105,3 @@ inherits = "dev"
 incremental = false
 debug = 0
 codegen-units = 256
-
-[profile.release.package.ferrite-uefi]
-opt-level = "s"

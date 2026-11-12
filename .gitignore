@@ -1,7 +1,6 @@
 /target
 /coverage
 Justfile.local
-.cargo/config.toml
 profile.json.gz
 mutants.out
 mutants.out.old

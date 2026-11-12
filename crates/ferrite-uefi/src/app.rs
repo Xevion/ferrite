@@ -38,26 +38,14 @@ impl<'a> App<'a> {
                 let s = net.status();
                 diag.event(0, &format!("net: SNP up, {}", net_summary(&s)));
                 (Some(net), None)
-            }
+            },
             Err(e) => {
                 let reason = status_reason(e.status());
-                diag.event(
-                    0,
-                    &format!("net: SNP setup failed: {reason} [{:?}]", e.status()),
-                );
+                diag.event(0, &format!("net: SNP setup failed: {reason} [{:?}]", e.status()));
                 (None, Some(reason))
-            }
+            },
         };
-        Self {
-            quit: false,
-            input,
-            terminal,
-            net,
-            net_err,
-            sweep: Sweep::new(SWEEP_BYTES),
-            diag,
-            uptime_ms: 0,
-        }
+        Self { quit: false, input, terminal, net, net_err, sweep: Sweep::new(SWEEP_BYTES), diag, uptime_ms: 0 }
     }
 
     pub fn run(&mut self) {
@@ -69,12 +57,8 @@ impl<'a> App<'a> {
                 net.set_page(http_page(net.status(), &sweep));
                 net.poll(TICK_MS);
             }
-            let net_line = self
-                .net
-                .as_ref()
-                .map_or_else(|| String::from("net: no NIC"), |n| net_summary(&n.status()));
-            self.diag
-                .tick(self.uptime_ms, &net_line, &sweep_line(&sweep));
+            let net_line = self.net.as_ref().map_or_else(|| String::from("net: no NIC"), |n| net_summary(&n.status()));
+            self.diag.tick(self.uptime_ms, &net_line, &sweep_line(&sweep));
             self.draw(&sweep);
             self.poll_input();
             boot::stall(Duration::from_millis(TICK_MS));
@@ -87,7 +71,7 @@ impl<'a> App<'a> {
             match key {
                 Key::Printable(c) if matches!(char::from(c), 'q' | 'Q') => self.quit = true,
                 Key::Special(ScanCode::ESCAPE) => self.quit = true,
-                _ => {}
+                _ => {},
             }
         }
     }
@@ -95,18 +79,11 @@ impl<'a> App<'a> {
     fn draw(&mut self, sweep: &SweepStatus) {
         let status = self.net.as_ref().map(Net::status);
         let net_err = self.net_err;
-        self.terminal
-            .draw(|frame| render(frame, sweep, status, net_err))
-            .unwrap();
+        self.terminal.draw(|frame| render(frame, sweep, status, net_err)).unwrap();
     }
 }
 
-fn render(
-    frame: &mut Frame,
-    sweep: &SweepStatus,
-    status: Option<NetStatus>,
-    net_err: Option<&str>,
-) {
+fn render(frame: &mut Frame, sweep: &SweepStatus, status: Option<NetStatus>, net_err: Option<&str>) {
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
@@ -131,10 +108,7 @@ fn render(
             "bare-metal memory tester - spike",
             Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            "ratatui on UEFI, no OS underneath",
-            Style::new().fg(Color::DarkGray),
-        )),
+        Line::from(Span::styled("ratatui on UEFI, no OS underneath", Style::new().fg(Color::DarkGray))),
     ])
     .alignment(Alignment::Center);
     frame.render_widget(banner, rows[0]);
@@ -143,17 +117,10 @@ fn render(
 
     let phase = if sweep.verifying { "verify" } else { "write" };
     let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" memory sweep "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" memory sweep "))
         .gauge_style(Style::new().fg(Color::Green).bg(Color::Black))
         .percent(sweep.percent)
-        .label(format!(
-            "{:#04x} {} {}%",
-            sweep.pattern, phase, sweep.percent
-        ));
+        .label(format!("{:#04x} {} {}%", sweep.pattern, phase, sweep.percent));
     frame.render_widget(gauge, rows[2]);
 
     frame.render_widget(sweep_summary(sweep), rows[3]);
@@ -172,19 +139,13 @@ fn sweep_summary(sweep: &SweepStatus) -> Paragraph<'static> {
     let mib = sweep.bytes / (1 << 20);
     let mut spans = vec![
         Span::styled(format!(" {mib} MiB "), Style::new().fg(Color::DarkGray)),
-        Span::styled(
-            format!("pass {}  ", sweep.passes),
-            Style::new().fg(Color::White),
-        ),
+        Span::styled(format!("pass {}  ", sweep.passes), Style::new().fg(Color::White)),
     ];
     if sweep.faults == 0 {
         spans.push(Span::styled("no faults", Style::new().fg(Color::Green)));
     } else {
         let detail = sweep.first_fault.map_or_else(String::new, |f| {
-            format!(
-                " (first @ {:#x}: exp {:#04x} got {:#04x})",
-                f.offset, f.expected, f.actual
-            )
+            format!(" (first @ {:#x}: exp {:#04x} got {:#04x})", f.offset, f.expected, f.actual)
         });
         spans.push(Span::styled(
             format!("{} FAULTS{detail}", sweep.faults),
@@ -201,22 +162,14 @@ fn network_panel(status: Option<NetStatus>, net_err: Option<&str>) -> Paragraph<
         None => {
             let reason = net_err.unwrap_or("no NIC found");
             lines.push(info_line("nic", reason, Color::Red));
-            lines.push(info_line(
-                "hint",
-                "OVMF may lack a network stack; add -device e1000",
-                Color::DarkGray,
-            ));
-        }
+            lines.push(info_line("hint", "OVMF may lack a network stack; add -device e1000", Color::DarkGray));
+        },
         Some(s) => {
             let mac = format!(
                 "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 s.mac[0], s.mac[1], s.mac[2], s.mac[3], s.mac[4], s.mac[5]
             );
-            let (link, link_color) = if s.link_up {
-                ("up", Color::Green)
-            } else {
-                ("down", Color::Red)
-            };
+            let (link, link_color) = if s.link_up { ("up", Color::Green) } else { ("down", Color::Red) };
             lines.push(info_line("mac", &mac, Color::White));
             lines.push(info_line("link", link, link_color));
 
@@ -226,12 +179,10 @@ fn network_panel(status: Option<NetStatus>, net_err: Option<&str>) -> Paragraph<
             }
             lines.push(info_line("gateway", &opt_addr(s.gateway), Color::White));
             lines.push(info_line("dns", &opt_addr(s.dns), Color::White));
-        }
+        },
     }
 
-    Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" network "))
-        .wrap(Wrap { trim: true })
+    Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" network ")).wrap(Wrap { trim: true })
 }
 
 fn opt_addr(addr: Option<smoltcp::wire::Ipv4Address>) -> String {
@@ -240,9 +191,7 @@ fn opt_addr(addr: Option<smoltcp::wire::Ipv4Address>) -> String {
 
 /// One-line network summary for the diagnostic log.
 fn net_summary(s: &NetStatus) -> String {
-    let ip = s
-        .address
-        .map_or_else(|| String::from("none"), |c| format!("{c}"));
+    let ip = s.address.map_or_else(|| String::from("none"), |c| format!("{c}"));
     format!(
         "link={} ip={} gw={} dns={} mdns={} http={}",
         if s.link_up { "up" } else { "down" },
@@ -267,20 +216,14 @@ fn sweep_line(s: &SweepStatus) -> String {
 }
 
 fn http_page(status: NetStatus, sweep: &SweepStatus) -> String {
-    let ip = status
-        .address
-        .map_or_else(|| String::from("(none)"), |c| format!("{c}"));
+    let ip = status.address.map_or_else(|| String::from("(none)"), |c| format!("{c}"));
     let mac = format!(
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         status.mac[0], status.mac[1], status.mac[2], status.mac[3], status.mac[4], status.mac[5]
     );
     let phase = if sweep.verifying { "verify" } else { "write" };
     let mib = sweep.bytes / (1 << 20);
-    let verdict = if sweep.faults == 0 {
-        String::from("no faults")
-    } else {
-        format!("{} FAULTS", sweep.faults)
-    };
+    let verdict = if sweep.faults == 0 { String::from("no faults") } else { format!("{} FAULTS", sweep.faults) };
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <title>ferrite-uefi</title></head><body style=\"font-family:monospace\">\
@@ -306,10 +249,7 @@ const fn status_reason(status: uefi::Status) -> &'static str {
 
 fn info_line(key: &str, value: &str, value_color: Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("{key:>8}  "),
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(format!("{key:>8}  "), Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(String::from(value), Style::new().fg(value_color)),
     ])
 }

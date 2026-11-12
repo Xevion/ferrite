@@ -1,18 +1,20 @@
 [package]
 name = "ferrite-uefi"
-version = "0.1.0"
-edition = "2024"
-description = "UEFI/bootloader spike for ferrite: ratatui UI on bare metal, skipping the OS"
-license = "MIT OR Apache-2.0"
-publish = false
+description = "Bare-metal memory sweep with a ratatui UI and a status page served over the machine's own NIC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
-ratatui-core = "0.1"
-ratatui = { version = "0.30", default-features = false }
-uefi = { version = "0.38", features = ["alloc", "logger"] }
-smoltcp = { version = "0.13.1", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-dhcpv4", "socket-udp", "socket-tcp", "multicast"] }
+ratatui.workspace = true
+ratatui-core.workspace = true
+smoltcp.workspace = true
+uefi.workspace = true
 
-# The allocator and panic handler would collide with std's when the lib is
-# built for the host to run unit tests, so they only apply to the UEFI target.
+# The allocator and panic handler would collide with std's on a host build.
 [target.'cfg(target_os = "uefi")'.dependencies]
-uefi = { version = "0.38", features = ["global_allocator", "panic_handler"] }
+uefi = { workspace = true, features = ["global_allocator", "panic_handler"] }
+
+[lints]
+workspace = true

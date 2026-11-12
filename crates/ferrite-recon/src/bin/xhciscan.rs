@@ -31,7 +31,8 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use ferrite_uefi::session::{self, Report};
+use ferrite_efi::bootlog::{BootLog, Echo};
+use ferrite_efi::session;
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
 use uefi::prelude::*;
 use uefi::proto::pci::PciIoAddress;
@@ -52,7 +53,7 @@ const XCAP_DEBUG_CAPABILITY: u8 = 0x0a;
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
-    let mut report = Report::open("xhciscan");
+    let mut report = BootLog::open("xhciscan", Echo::Console);
     for line in build_report() {
         report.line(&line);
     }
@@ -63,12 +64,8 @@ fn main() -> Status {
 /// Enumerate every xHCI controller and produce a human-readable report.
 fn build_report() -> Vec<String> {
     let mut r = Vec::new();
-    r.push(String::from(
-        "ferrite-uefi :: xhciscan  -  USB host controller recon",
-    ));
-    r.push(String::from(
-        "-------------------------------------------------------------------",
-    ));
+    r.push(String::from("ferrite-uefi :: xhciscan  -  USB host controller recon"));
+    r.push(String::from("-------------------------------------------------------------------"));
 
     let Ok(handles) = boot::find_handles::<PciRootBridgeIo>() else {
         r.push(String::from("no PCI root bridge protocol available"));
@@ -77,14 +74,10 @@ fn build_report() -> Vec<String> {
 
     let mut found = 0;
     for handle in handles {
-        let params = OpenProtocolParams {
-            handle,
-            agent: boot::image_handle(),
-            controller: None,
-        };
-        let Ok(mut rb) = (unsafe {
-            boot::open_protocol::<PciRootBridgeIo>(params, OpenProtocolAttributes::GetProtocol)
-        }) else {
+        let params = OpenProtocolParams { handle, agent: boot::image_handle(), controller: None };
+        let Ok(mut rb) =
+            (unsafe { boot::open_protocol::<PciRootBridgeIo>(params, OpenProtocolAttributes::GetProtocol) })
+        else {
             continue;
         };
         let Ok(tree) = rb.enumerate() else { continue };
@@ -101,9 +94,7 @@ fn build_report() -> Vec<String> {
     }
 
     if found == 0 {
-        r.push(String::from(
-            "no xHCI controller found (add `-device qemu-xhci` in QEMU)",
-        ));
+        r.push(String::from("no xHCI controller found (add `-device qemu-xhci` in QEMU)"));
     } else {
         r.push(String::new());
         r.push(format!("{found} xHCI controller(s) reported"));
@@ -128,18 +119,11 @@ fn is_xhci(rb: &mut ScopedProtocol<PciRootBridgeIo>, addr: PciIoAddress) -> bool
 }
 
 /// Read the controller's capability registers, port states, and extended caps.
-fn report_controller(
-    rb: &mut ScopedProtocol<PciRootBridgeIo>,
-    addr: PciIoAddress,
-    r: &mut Vec<String>,
-) {
+fn report_controller(rb: &mut ScopedProtocol<PciRootBridgeIo>, addr: PciIoAddress, r: &mut Vec<String>) {
     let reg0 = cfg_rd(rb, addr, 0x00).unwrap_or(0);
     let vendor = (reg0 & 0xffff) as u16;
     let device = (reg0 >> 16) as u16;
-    r.push(format!(
-        "xHCI at {:02x}:{:02x}.{}  {:04x}:{:04x}",
-        addr.bus, addr.dev, addr.fun, vendor, device
-    ));
+    r.push(format!("xHCI at {:02x}:{:02x}.{}  {:04x}:{:04x}", addr.bus, addr.dev, addr.fun, vendor, device));
 
     // BAR0 is the xHCI MMIO base (a 64-bit memory BAR on real parts).
     let bar0_lo = cfg_rd(rb, addr, 0x10).unwrap_or(0);
@@ -150,9 +134,7 @@ fn report_controller(
         u64::from(bar0_lo & 0xffff_fff0)
     };
     if base == 0 {
-        r.push(String::from(
-            "  BAR0 is zero - controller not memory-mapped",
-        ));
+        r.push(String::from("  BAR0 is zero - controller not memory-mapped"));
         return;
     }
     r.push(format!("  MMIO base (BAR0): {base:#012x}"));
@@ -169,9 +151,7 @@ fn report_controller(
 
     // Ensure Memory Space decode is enabled before reading MMIO.
     if reg_cmd & 0x2 == 0 {
-        let _ = rb
-            .pci()
-            .write_one::<u32>(addr.with_register(0x04), reg_cmd | 0x2);
+        let _ = rb.pci().write_one::<u32>(addr.with_register(0x04), reg_cmd | 0x2);
     }
 
     // Capability registers (base-relative).
@@ -232,12 +212,7 @@ fn report_controller(
 }
 
 /// Traverse the xHCI extended-capability linked list.
-fn report_ext_caps(
-    rb: &mut ScopedProtocol<PciRootBridgeIo>,
-    base: u64,
-    xecp_dwords: u32,
-    r: &mut Vec<String>,
-) {
+fn report_ext_caps(rb: &mut ScopedProtocol<PciRootBridgeIo>, base: u64, xecp_dwords: u32, r: &mut Vec<String>) {
     if xecp_dwords == 0 {
         r.push(String::from("  extended caps: none"));
         return;
@@ -257,11 +232,9 @@ fn report_ext_caps(
         match id {
             XCAP_DEBUG_CAPABILITY => {
                 dbc_found = true;
-                r.push(format!(
-                    "  ext cap @ {off:#x}: id 0x0a DEBUG CAPABILITY (DbC) <== USB-serial channel!"
-                ));
+                r.push(format!("  ext cap @ {off:#x}: id 0x0a DEBUG CAPABILITY (DbC) <== USB-serial channel!"));
                 report_dbc_regs(rb, off, r);
-            }
+            },
             XCAP_SUPPORTED_PROTOCOL => {
                 // Bytes: name string at +4 ("USB "), major/minor rev in cap dword.
                 let rev_minor = (cap >> 16) & 0xff;
@@ -277,10 +250,10 @@ fn report_ext_caps(
                     rev_major,
                     rev_minor
                 ));
-            }
+            },
             other => {
                 r.push(format!("  ext cap @ {off:#x}: id {other:#04x}"));
-            }
+            },
         }
 
         if next == 0 {

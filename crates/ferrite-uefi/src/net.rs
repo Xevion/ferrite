@@ -15,9 +15,7 @@ use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::{dhcpv4, tcp, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{
-    EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr,
-};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr};
 use uefi::boot::{self, ScopedProtocol};
 use uefi::proto::network::snp::{NetworkState, ReceiveFlags, SimpleNetwork};
 
@@ -79,9 +77,7 @@ impl Net {
         // DHCP offers arrive as broadcast; mDNS as multicast to 224.0.0.251.
         // Add that group's MAC to the hardware filter (firmware computes it) so
         // the NIC actually delivers those frames, alongside broadcast/unicast.
-        let mdns_mac = snp
-            .mcast_ip_to_mac(false, core::net::Ipv4Addr::new(224, 0, 0, 251).into())
-            .ok();
+        let mdns_mac = snp.mcast_ip_to_mac(false, core::net::Ipv4Addr::new(224, 0, 0, 251).into()).ok();
         let mcast_filters = mdns_mac.as_ref().map(core::slice::from_ref);
         let _ = snp.receive_filters(
             ReceiveFlags::UNICAST | ReceiveFlags::BROADCAST | ReceiveFlags::MULTICAST,
@@ -96,11 +92,7 @@ impl Net {
         let link_up = bool::from(mode.media_present) || !bool::from(mode.media_present_supported);
         let mtu = (mode.max_packet_size as usize).clamp(1514, FRAME_CAP);
 
-        let status = NetStatus {
-            mac,
-            link_up,
-            ..Default::default()
-        };
+        let status = NetStatus { mac, link_up, ..Default::default() };
 
         let mut device = SnpDevice { snp: &snp, mtu };
         let config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
@@ -111,10 +103,8 @@ impl Net {
         let mut sockets = SocketSet::new(vec![]);
         let dhcp = sockets.add(dhcpv4::Socket::new());
 
-        let http = sockets.add(tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0u8; 2048]),
-            tcp::SocketBuffer::new(vec![0u8; 4096]),
-        ));
+        let http = sockets
+            .add(tcp::Socket::new(tcp::SocketBuffer::new(vec![0u8; 2048]), tcp::SocketBuffer::new(vec![0u8; 4096])));
 
         let mut mdns_sock = udp::Socket::new(
             udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0u8; 1500]),
@@ -155,29 +145,23 @@ impl Net {
 
         // Re-sample link state; on real NICs the media can come up after init.
         let mode = self.snp.mode();
-        self.status.link_up =
-            bool::from(mode.media_present) || !bool::from(mode.media_present_supported);
+        self.status.link_up = bool::from(mode.media_present) || !bool::from(mode.media_present_supported);
 
-        let mut device = SnpDevice {
-            snp: &self.snp,
-            mtu: self.mtu,
-        };
+        let mut device = SnpDevice { snp: &self.snp, mtu: self.mtu };
         self.iface.poll(now, &mut device, &mut self.sockets);
 
         // The DHCP `Config` borrows the socket's receive buffer (its `packet`
         // field), so extract the Copy values we need and let that borrow end
         // before mutating other fields of `self`.
         let lease = match self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).poll() {
-            Some(dhcpv4::Event::Configured(c)) => {
-                Some(Some((c.address, c.router, c.dns_servers.first().copied())))
-            }
+            Some(dhcpv4::Event::Configured(c)) => Some(Some((c.address, c.router, c.dns_servers.first().copied()))),
             Some(dhcpv4::Event::Deconfigured) => Some(None),
             None => None,
         };
         match lease {
             Some(Some((address, router, dns))) => self.apply_lease(address, router, dns),
             Some(None) => self.clear_lease(),
-            None => {}
+            None => {},
         }
 
         self.serve_http();
@@ -236,12 +220,7 @@ impl Net {
         }
     }
 
-    fn apply_lease(
-        &mut self,
-        address: Ipv4Cidr,
-        router: Option<Ipv4Address>,
-        dns: Option<Ipv4Address>,
-    ) {
+    fn apply_lease(&mut self, address: Ipv4Cidr, router: Option<Ipv4Address>, dns: Option<Ipv4Address>) {
         self.iface.update_ip_addrs(|addrs| {
             addrs.clear();
             let _ = addrs.push(IpCidr::Ipv4(address));
@@ -291,7 +270,7 @@ impl Device for SnpDevice<'_> {
             Ok(len) => {
                 frame.truncate(len);
                 Some((SnpRxToken { frame }, SnpTxToken { snp: self.snp }))
-            }
+            },
             // Empty queue is the common case; anything else we simply drop.
             Err(_) => None,
         }

@@ -139,11 +139,7 @@ fn rgb_to_fg(r: u8, g: u8, b: u8) -> UefiColor {
 }
 
 fn bg_from_luma(r: u8, g: u8, b: u8) -> UefiColor {
-    if u16::from(r) + u16::from(g) + u16::from(b) > 384 {
-        UefiColor::LightGray
-    } else {
-        UefiColor::Black
-    }
+    if u16::from(r) + u16::from(g) + u16::from(b) > 384 { UefiColor::LightGray } else { UefiColor::Black }
 }
 
 impl Backend for UefiBackend<'_> {
@@ -154,23 +150,12 @@ impl Backend for UefiBackend<'_> {
     }
 
     fn window_size(&mut self) -> Result<backend::WindowSize, Self::Error> {
-        Ok(WindowSize {
-            columns_rows: self.size()?,
-            pixels: Size::ZERO,
-        })
+        Ok(WindowSize { columns_rows: self.size()?, pixels: Size::ZERO })
     }
 
     fn size(&self) -> Result<Size, Self::Error> {
-        let mode = self
-            .output
-            .current_mode()
-            .ok()
-            .flatten()
-            .expect("text output always has a current mode");
-        Ok(Size {
-            width: mode.columns() as u16,
-            height: mode.rows() as u16,
-        })
+        let mode = self.output.current_mode().ok().flatten().expect("text output always has a current mode");
+        Ok(Size { width: mode.columns() as u16, height: mode.rows() as u16 })
     }
 
     fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
@@ -188,9 +173,7 @@ impl Backend for UefiBackend<'_> {
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
         let pos = position.into();
-        let _ = self
-            .output
-            .set_cursor_position(pos.x as usize, pos.y as usize);
+        let _ = self.output.set_cursor_position(pos.x as usize, pos.y as usize);
         Ok(())
     }
 
@@ -215,11 +198,7 @@ impl Backend for UefiBackend<'_> {
         let mut run_bg = Color::Reset;
 
         for (x, y, cell) in content {
-            let contiguous = !run.is_empty()
-                && y == run_row
-                && x == next_x
-                && cell.fg == run_fg
-                && cell.bg == run_bg;
+            let contiguous = !run.is_empty() && y == run_row && x == next_x && cell.fg == run_fg && cell.bg == run_bg;
 
             if !contiguous {
                 self.flush_run(&run, run_start, run_fg, run_bg);
@@ -254,9 +233,7 @@ impl UefiBackend<'_> {
         if run.is_empty() {
             return;
         }
-        let _ = self
-            .output
-            .set_cursor_position(start.x as usize, start.y as usize);
+        let _ = self.output.set_cursor_position(start.x as usize, start.y as usize);
         let _ = self.output.set_color(fg_color(fg), bg_color(bg));
         // `Output` implements `core::fmt::Write`; ignore write faults (e.g. a
         // glyph the firmware font lacks) rather than aborting the frame.

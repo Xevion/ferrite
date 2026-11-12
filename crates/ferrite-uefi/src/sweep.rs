@@ -83,7 +83,7 @@ impl Sweep {
                     // Volatile so the store cannot be elided as dead.
                     unsafe { ptr::write_volatile(base.add(i), pattern) };
                 }
-            }
+            },
             Phase::Verify => {
                 for i in self.offset..end {
                     // SAFETY: as above; volatile read forces an actual load from
@@ -92,15 +92,11 @@ impl Sweep {
                     if got != pattern {
                         self.faults += 1;
                         if self.first_fault.is_none() {
-                            self.first_fault = Some(Fault {
-                                offset: i,
-                                expected: pattern,
-                                actual: got,
-                            });
+                            self.first_fault = Some(Fault { offset: i, expected: pattern, actual: got });
                         }
                     }
                 }
-            }
+            },
         }
 
         self.offset = end;
@@ -115,7 +111,7 @@ impl Sweep {
                         self.pattern_idx = 0;
                         self.passes += 1;
                     }
-                }
+                },
             }
         }
     }

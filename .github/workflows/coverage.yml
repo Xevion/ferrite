@@ -43,7 +43,7 @@ jobs:
           tool: cargo-nextest@0.9.132
 
       - name: Run tests with coverage
-        run: cargo llvm-cov nextest --profile ci --no-fail-fast --hide-progress-bar --failure-output final
+        run: cargo llvm-cov nextest -p ferrite --profile ci --no-fail-fast --hide-progress-bar --failure-output final
         env:
           RUSTFLAGS: --cfg coverage_nightly
 

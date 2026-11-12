@@ -1,0 +1,12 @@
+[package]
+name = "ferrite-hal"
+description = "Platform traits (PCI config, MMIO, DMA, clock) and address types shared by the drivers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
