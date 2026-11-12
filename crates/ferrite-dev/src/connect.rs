@@ -147,9 +147,24 @@ impl<'a> Connector<'a> {
         }
     }
 
+    /// Re-enable the port when due, unless the kernel already has a device on it: toggling then
+    /// would restart an enumeration that is about to succeed.
     fn kick_if_due(&mut self, emitter: &mut Emitter) {
-        if self.last_kick.elapsed() >= self.kick_every {
-            self.kick(emitter);
+        if self.last_kick.elapsed() < self.kick_every {
+            return;
+        }
+        match self
+            .config
+            .port_path
+            .as_deref()
+            .and_then(|port| fs::read_to_string(port.join("state")).ok())
+            .map(|text| text.trim().to_owned())
+        {
+            Some(state) if device_attached(&state) => {
+                emitter.line(&format!("--- port state is {state}, so a device is attaching; not re-enabling ---"));
+                self.last_kick = Instant::now();
+            },
+            _ => self.kick(emitter),
         }
     }
 
@@ -174,6 +189,11 @@ impl<'a> Connector<'a> {
     }
 }
 
+/// Whether a port `state` value (`not attached` or a USB device state) names a device on the port.
+fn device_attached(state: &str) -> bool {
+    matches!(state, "attached" | "powered" | "default" | "addressed" | "configured" | "suspended")
+}
+
 fn toggle(port: &Path) -> Result<(), KickError> {
     let disable = port.join("disable");
     fs::write(&disable, "1").context(WriteSnafu { path: &disable })?;
@@ -186,6 +206,7 @@ mod tests {
     use std::fs;
 
     use assert2::{assert, check};
+    use rstest::rstest;
     use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 
     use super::*;
@@ -214,6 +235,24 @@ mod tests {
         assert!(let Ok(Waited::TimedOut) = waited);
         check!(out.text().contains("T --- port re-enabled (state was: disabled) ---\n"), "{}", out.text());
         check!(fs::read_to_string(dir.join("disable")).ok().as_deref() == Some("0"), "ends enabled");
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[rstest]
+    #[case::enumerating("default", false)]
+    #[case::addressed("addressed", false)]
+    #[case::empty_port("not attached", true)]
+    fn the_port_is_left_alone_while_a_device_is_attaching(#[case] state: &str, #[case] kicked: bool) {
+        let dir = scratch(&format!("attaching-{}", state.replace(' ', "-")));
+        fs::write(dir.join("state"), format!("{state}\n")).expect("state");
+        let config = Config { port_path: Some(dir.clone()), ..Config::default() };
+        let (opener, _) = Scripted::new(Vec::new());
+        let out = Shared::default();
+        let mut connector = Connector::new(&config).kick_every(Duration::ZERO).usb(opener);
+        let deadline = Instant::now() + Duration::from_millis(300);
+        assert!(let Ok(Waited::TimedOut) = connector.wait(&mut emitter(&out), Some(deadline), &AtomicBool::new(false)));
+        check!(dir.join("disable").exists() == kicked, "{}", out.text());
+        check!(out.text().contains("a device is attaching; not re-enabling") == !kicked);
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 

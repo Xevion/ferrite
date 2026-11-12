@@ -25,6 +25,12 @@ pub const POLL_EVERY: Duration = Duration::from_secs(2);
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(10);
 const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 const CONNECT_TIMEOUT_SECS: &str = "3";
+/// ssh gives up on a silent server after this many 2 s keepalives, which a vanishing network needs
+/// because `ConnectTimeout` stops applying once the connection is up.
+const KEEPALIVE: [&str; 4] = ["-o", "ServerAliveInterval=2", "-o", "ServerAliveCountMax=2"];
+/// No probe or reboot command gets longer than this, whatever the connection does.
+const PROBE_LIMIT: Duration = Duration::from_secs(15);
+const REBOOT_LIMIT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Snafu)]
 pub enum RunError {
@@ -35,7 +41,7 @@ pub enum RunError {
     Spawn { cmd: Cmd, source: io::Error },
 
     #[snafu(display("{step} failed ({status}): `{cmd}`{}", detail(stderr)))]
-    Failed { step: &'static str, cmd: Cmd, status: String, stderr: String },
+    Failed { step: &'static str, cmd: Box<Cmd>, status: String, stderr: String },
 
     #[snafu(display("no ssh host answered: {hosts}"))]
     Unreachable { hosts: String },
@@ -223,9 +229,9 @@ fn reboot_cycle(
         return Err(RunError::NoBootId { cmd: first.cmd.clone() });
     }
     env.say(&format!("rebooting {} into {app} (boot id {})", first.host, first.boot_id));
-    let cmd = Commands::new(config, app, &first.host).deploy_app("run");
+    let cmd = Commands::new(config, app, &first.host).reboot();
     let out = run_cmd(env, &cmd, OutputMode::Collect)?;
-    if !out.success && out.code != Some(255) {
+    if !out.success && out.code != Some(255) && !out.timed_out {
         return Err(failure("run", cmd, &out));
     }
     wait_for_reboot(env, config, app, &first.boot_id, timeout)
@@ -286,7 +292,7 @@ fn checked(env: &impl Env, step: &'static str, cmd: &Cmd, mode: OutputMode) -> R
 
 fn failure(step: &'static str, cmd: Cmd, out: &CmdOutput) -> RunError {
     let status = out.code.map_or_else(|| "killed by a signal".to_owned(), |code| format!("exit {code}"));
-    RunError::Failed { step, cmd, status, stderr: out.stderr.clone() }
+    RunError::Failed { step, cmd: Box::new(cmd), status, stderr: out.stderr.clone() }
 }
 
 /// Every command line `execute` can issue, for one host.
@@ -353,9 +359,16 @@ impl<'a> Commands<'a> {
         cmd
     }
 
+    /// The one-shot reboot. Its connection dies with the machine, so it must not wait on it.
+    fn reboot(&self) -> Cmd {
+        self.ssh(&KEEPALIVE, &["sudo", "-n", self.config.helper.as_str(), "run", self.app]).with_limit(REBOOT_LIMIT)
+    }
+
     fn boot_id(&self) -> Cmd {
         let timeout = format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}");
-        self.ssh(&["-o", &timeout], &["cat", BOOT_ID_PATH])
+        let mut extra = vec!["-o", &timeout];
+        extra.extend(KEEPALIVE);
+        self.ssh(&extra, &["cat", BOOT_ID_PATH]).with_limit(PROBE_LIMIT)
     }
 
     /// Remove the previous runs' files from the user-owned staging output. The stage directory
@@ -401,6 +414,9 @@ pub fn pick_report<'a>(names: &'a [String], app: &str) -> Option<&'a str> {
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
 
     use assert2::{assert, check};
     use rstest::rstest;
@@ -411,6 +427,7 @@ mod tests {
         {"name": "ferrite-recon", "targets": [{"name": "dbcping", "kind": ["bin"]}, {"name": "dbcbench", "kind": ["bin"]}]}]}"#;
 
     const DEPLOY: &str = "ssh -o BatchMode=yes target sudo -n /usr/local/sbin/ferrite-esp";
+    const REBOOT: &str = "ssh -o BatchMode=yes -o ServerAliveInterval=2 -o ServerAliveCountMax=2 target sudo -n /usr/local/sbin/ferrite-esp run dbcping";
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
@@ -436,6 +453,10 @@ mod tests {
         run_exit: i32,
         /// Hosts whose boot id reads fail with ssh's connection error, until the run command.
         down: RefCell<Vec<&'static str>>,
+        /// Whether the run command brings the down hosts back, as a reboot does.
+        heal_on_run: bool,
+        /// A capture that never finishes by itself, like a benchmark that waits for a device.
+        hanging_capture: bool,
     }
 
     impl Fake {
@@ -447,6 +468,8 @@ mod tests {
                 fail: None,
                 run_exit: 0,
                 down: RefCell::default(),
+                heal_on_run: true,
+                hanging_capture: false,
             }
         }
 
@@ -471,11 +494,19 @@ mod tests {
         }
     }
 
-    struct FakeCapture(Events);
+    /// A capture; a hanging one keeps running on its own thread until it is stopped.
+    struct FakeCapture {
+        events: Events,
+        hang: Option<(Arc<AtomicBool>, thread::JoinHandle<()>)>,
+    }
 
     impl Capture for FakeCapture {
         fn stop(self: Box<Self>) -> Option<String> {
-            self.0.borrow_mut().push(Event::CaptureStop);
+            if let Some((release, thread)) = self.hang {
+                release.store(true, Ordering::Relaxed);
+                thread.join().expect("the hanging capture thread");
+            }
+            self.events.borrow_mut().push(Event::CaptureStop);
             None
         }
     }
@@ -485,7 +516,13 @@ mod tests {
             let text = cmd.to_string();
             self.events.borrow_mut().push(Event::Run(text.clone()));
             let reply = |success: bool, code: i32, stdout: &str, stderr: &str| {
-                Ok(CmdOutput { success, code: Some(code), stdout: stdout.into(), stderr: stderr.into() })
+                Ok(CmdOutput {
+                    success,
+                    code: Some(code),
+                    stdout: stdout.into(),
+                    stderr: stderr.into(),
+                    ..CmdOutput::default()
+                })
             };
             if self.fail.is_some_and(|needle| text.contains(needle)) {
                 return reply(false, 1, "", "boom\n");
@@ -494,7 +531,9 @@ mod tests {
                 return reply(true, 0, METADATA, "");
             }
             if text.ends_with("ferrite-esp run dbcping") {
-                self.down.borrow_mut().clear();
+                if self.heal_on_run {
+                    self.down.borrow_mut().clear();
+                }
                 return reply(self.run_exit == 0, self.run_exit, "", "");
             }
             if text.ends_with(BOOT_ID_PATH) {
@@ -522,7 +561,17 @@ mod tests {
 
         fn start_capture(&self, plan: &CapturePlan) -> io::Result<Box<dyn Capture>> {
             self.events.borrow_mut().push(Event::CaptureStart(plan.clone()));
-            Ok(Box::new(FakeCapture(Rc::clone(&self.events))))
+            let hang = self.hanging_capture.then(|| {
+                let release = Arc::new(AtomicBool::new(false));
+                let flag = Arc::clone(&release);
+                let thread = thread::spawn(move || {
+                    while !flag.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                });
+                (release, thread)
+            });
+            Ok(Box::new(FakeCapture { events: Rc::clone(&self.events), hang }))
         }
     }
 
@@ -542,7 +591,7 @@ mod tests {
         let fake = Fake::new(&[BEFORE, BEFORE, None, None, AFTER]);
         assert!(let Ok(result) = execute(&fake, &Config::default(), &plan("dbcping")));
 
-        let probe = "ssh -o BatchMode=yes -o ConnectTimeout=3 target cat /proc/sys/kernel/random/boot_id".to_owned();
+        let probe = "ssh -o BatchMode=yes -o ConnectTimeout=3 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 target cat /proc/sys/kernel/random/boot_id".to_owned();
         check!(
             fake.commands()
                 == [
@@ -553,7 +602,7 @@ mod tests {
                         .into(),
                     format!("{DEPLOY} clean-reports"),
                     format!("{DEPLOY} install dbcping"),
-                    format!("{DEPLOY} run dbcping"),
+                    REBOOT.to_owned(),
                     probe.clone(),
                     probe.clone(),
                     probe.clone(),
@@ -738,8 +787,16 @@ mod tests {
         format!("ssh -o BatchMode=yes -o HostKeyAlias=target-key {host} {tail}")
     }
 
+    fn reboot_via(host: &str) -> String {
+        format!(
+            "ssh -o BatchMode=yes -o HostKeyAlias=target-key -o ServerAliveInterval=2 -o ServerAliveCountMax=2 {host} sudo -n /usr/local/sbin/ferrite-esp run dbcping"
+        )
+    }
+
     fn probe_of(host: &str) -> String {
-        format!("ssh -o BatchMode=yes -o HostKeyAlias=target-key -o ConnectTimeout=3 {host} cat {BOOT_ID_PATH}")
+        format!(
+            "ssh -o BatchMode=yes -o HostKeyAlias=target-key -o ConnectTimeout=3 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 {host} cat {BOOT_ID_PATH}"
+        )
     }
 
     const SETUP: [&str; 2] = [
@@ -758,7 +815,7 @@ mod tests {
             format!("scp -q -o BatchMode=yes -o HostKeyAlias=target-key /w/target/x86_64-unknown-uefi/debug/dbcping.efi {LAN}:ferrite-stage/dbcping.efi"),
             via(LAN, &format!("{helper} clean-reports")),
             via(LAN, &format!("{helper} install dbcping")),
-            via(LAN, &format!("{helper} run dbcping")),
+            reboot_via(LAN),
             probe_of(LAN),
             via(LAN, "rm -f -- ferrite-stage/out/*"),
             via(LAN, &format!("{helper} collect")),
@@ -786,7 +843,7 @@ mod tests {
             "scp -q -o BatchMode=yes -o HostKeyAlias=target-key /w/target/x86_64-unknown-uefi/debug/dbcping.efi target:ferrite-stage/dbcping.efi".to_owned(),
             via("target", &format!("{helper} clean-reports")),
             via("target", &format!("{helper} install dbcping")),
-            via("target", &format!("{helper} run dbcping")),
+            reboot_via("target"),
             probe_of(LAN),
             via(LAN, "rm -f -- ferrite-stage/out/*"),
             via(LAN, &format!("{helper} collect")),
@@ -794,6 +851,42 @@ mod tests {
         ]);
         check!(fake.commands() == want);
         check!(fake.said().iter().any(|m| m == "using ssh host target (boot id aaaa-1111)"));
+    }
+
+    #[test]
+    fn every_poll_tries_the_next_host_after_a_failed_one() {
+        let mut fake = Fake::new(&[BEFORE, BEFORE, AFTER]);
+        fake.heal_on_run = false;
+        fake.down.borrow_mut().push(LAN);
+        assert!(let Ok(_) = execute(&fake, &two_hosts(), &plan("dbcping")));
+        let probes: Vec<String> = fake.commands().into_iter().filter(|c| c.ends_with(BOOT_ID_PATH)).collect();
+        check!(probes == [probe_of(LAN), probe_of("target")].into_iter().cycle().take(6).collect::<Vec<_>>());
+        check!(fake.said().iter().any(|m| m.ends_with("answering on target")));
+    }
+
+    #[test]
+    fn a_capture_that_never_ends_does_not_hold_up_the_boot_id_wait() {
+        let mut fake = Fake::new(&[BEFORE, None, None, AFTER]);
+        fake.hanging_capture = true;
+        assert!(let Ok(result) = execute(&fake, &Config::default(), &plan("dbcping")));
+        check!(result.collected);
+        let events = fake.events.borrow();
+        let said = |text: &str| events.iter().position(|e| matches!(e, Event::Say(m) if m.contains(text)));
+        let stopped = events.iter().position(|e| *e == Event::CaptureStop);
+        check!(said("went down").is_some() && said("waiting for target to come back").is_some());
+        check!(said("is back after").is_some() && said("is back after") < stopped);
+    }
+
+    #[test]
+    fn the_commands_that_outlive_the_network_are_bounded() {
+        let config = Config::default();
+        let commands = Commands::new(&config, "dbcping", "target");
+        let (probe, reboot) = (commands.boot_id(), commands.reboot());
+        check!(probe.limit == Some(PROBE_LIMIT) && reboot.limit == Some(REBOOT_LIMIT));
+        check!(
+            [&probe, &reboot].iter().all(|c| c.to_string().contains("ServerAliveInterval=2 -o ServerAliveCountMax=2"))
+        );
+        check!(commands.deploy("collect").limit.is_none());
     }
 
     #[test]
