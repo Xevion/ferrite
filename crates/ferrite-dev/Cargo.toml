@@ -1,0 +1,26 @@
+[package]
+name = "ferrite-dev"
+description = "Desktop tool: DbC log capture, the benchmark peer and the remote target run cycle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+ferrite-wire.workspace = true
+humantime.workspace = true
+jiff.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snafu = { workspace = true, features = ["std"] }
+toml.workspace = true
+
+[dev-dependencies]
+assert2.workspace = true
+parking_lot.workspace = true
+rstest.workspace = true
+
+[lints]
+workspace = true

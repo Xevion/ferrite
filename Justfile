@@ -38,6 +38,10 @@ test *args:
 format:
     cargo fmt --all
 
+# desktop dev tool: `just dev log`, `just dev bench`, `just dev run dbcping`
+dev *args:
+    cargo run -q -p ferrite-dev -- {{ args }}
+
 # build every UEFI app (debug, or `just build release`)
 build profile="dev":
     cargo efi-build --profile {{ profile }}
