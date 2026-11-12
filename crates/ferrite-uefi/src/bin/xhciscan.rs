@@ -1,13 +1,21 @@
-//! `xhciscan`: find the xHCI USB host controller, map its MMIO, and enumerate
-//! what we can actually *do* with its ports from bare metal. This is the recon
-//! for host-to-host USB communication:
+//! `xhciscan`: find xHCI USB host controllers, map their MMIO, and report what
+//! we can do with their ports from bare metal. This is the recon for
+//! host-to-host USB communication:
 //!
+//!   - PCI command bits and power state as the firmware left them.
 //!   - Does the controller support **Port Power Control** (HCCPARAMS1.PPC)? If so,
-//!     the `PORTSC.PP` bit lets us toggle VBUS on a port from software, a
-//!     one-bit transmit line over any cable, no device role needed.
-//!   - Is the **Debug Capability (DbC)** present in the extended-capability list?
-//!     That's the real bidirectional USB-serial channel (needs a crossover cable).
+//!     the `PORTSC.PP` bit toggles VBUS on a port from software, a one-bit
+//!     transmit line over any cable.
+//!   - Is the **Debug Capability (DbC)** present, and what do its live control,
+//!     status and port registers say? DbC is the bidirectional USB serial channel.
 //!   - Per-port live state: connected? powered? link state? speed?
+//!
+//! Every xHCI on every root bridge is reported, because a laptop can have more
+//! than one (e.g. a PCH controller plus a Thunderbolt one) and only some of
+//! them expose a usable DbC port. The report is also written to
+//! `\EFI\ferrite\xhciscan.txt` on the boot volume. With no keypress it gives up
+//! after a timeout: launched by systemd-boot it reboots (so a one-shot run lands
+//! back in the default OS), otherwise it returns to the firmware.
 //!
 //! Runs on real hardware and under QEMU (`-device qemu-xhci`). Register layout
 //! per the xHCI 1.2 spec.
@@ -24,10 +32,20 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
+use uefi::boot::{
+    self, EventType, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol, TimerTrigger, Tpl,
+};
+use uefi::fs::FileSystem;
 use uefi::prelude::*;
 use uefi::proto::pci::PciIoAddress;
 use uefi::proto::pci::root_bridge::PciRootBridgeIo;
+use uefi::runtime::{self, ResetType, VariableVendor};
+use uefi::{CStr16, cstr16, guid};
+
+const REPORT_DIR: &CStr16 = cstr16!("\\EFI\\ferrite");
+const REPORT_PATH: &CStr16 = cstr16!("\\EFI\\ferrite\\xhciscan.txt");
+/// How long to keep the report on screen before exiting back to the boot manager.
+const EXIT_AFTER_SECS: u64 = 20;
 
 /// PCI class/subclass/prog-if for an xHCI (USB 3) host controller.
 const XHCI_CLASS: u8 = 0x0c;
@@ -42,18 +60,45 @@ const XCAP_DEBUG_CAPABILITY: u8 = 0x0a;
 fn main() -> Status {
     uefi::helpers::init().unwrap();
     let report = build_report();
+    let saved = save_report(&report);
     system::with_stdout(|out| {
         let _ = out.clear();
         for line in &report {
             let _ = writeln!(out, "{line}\r");
         }
-        let _ = writeln!(out, "\r\npress a key to exit...\r");
+        let _ = writeln!(
+            out,
+            "\r\nreport file: {}\r\npress a key to exit (auto-exit in {EXIT_AFTER_SECS}s)...\r",
+            if saved {
+                "\\EFI\\ferrite\\xhciscan.txt"
+            } else {
+                "NOT written"
+            }
+        );
     });
-    wait_for_key();
+    // An unattended one-shot run reboots instead of returning, so the machine
+    // lands back in its default OS rather than at a boot-loader prompt.
+    if !wait_for_key_or_timeout(EXIT_AFTER_SECS) && launched_by_systemd_boot() {
+        runtime::reset(ResetType::COLD, Status::SUCCESS, None);
+    }
     Status::SUCCESS
 }
 
-/// Locate the first xHCI controller and produce a human-readable report.
+/// Write the report to the boot volume. Failure only loses the file copy.
+fn save_report(report: &[String]) -> bool {
+    let Ok(sfs) = boot::get_image_file_system(boot::image_handle()) else {
+        return false;
+    };
+    let mut fs = FileSystem::new(sfs);
+    let mut text = String::new();
+    for line in report {
+        text.push_str(line);
+        text.push('\n');
+    }
+    fs.create_dir_all(REPORT_DIR).is_ok() && fs.write(REPORT_PATH, text.as_bytes()).is_ok()
+}
+
+/// Enumerate every xHCI controller and produce a human-readable report.
 fn build_report() -> Vec<String> {
     let mut r = Vec::new();
     r.push(String::from(
@@ -68,6 +113,7 @@ fn build_report() -> Vec<String> {
         return r;
     };
 
+    let mut found = 0;
     for handle in handles {
         let params = OpenProtocolParams {
             handle,
@@ -83,15 +129,23 @@ fn build_report() -> Vec<String> {
         let addrs: Vec<_> = tree.iter().copied().collect();
         for addr in addrs {
             if is_xhci(&mut rb, addr) {
+                if found > 0 {
+                    r.push(String::new());
+                }
+                found += 1;
                 report_controller(&mut rb, addr, &mut r);
-                return r; // first controller is enough for the demo
             }
         }
     }
 
-    r.push(String::from(
-        "no xHCI controller found (add `-device qemu-xhci` in QEMU)",
-    ));
+    if found == 0 {
+        r.push(String::from(
+            "no xHCI controller found (add `-device qemu-xhci` in QEMU)",
+        ));
+    } else {
+        r.push(String::new());
+        r.push(format!("{found} xHCI controller(s) reported"));
+    }
     r
 }
 
@@ -141,8 +195,17 @@ fn report_controller(
     }
     r.push(format!("  MMIO base (BAR0): {base:#012x}"));
 
-    // Ensure Memory Space decode is enabled before reading MMIO.
+    // Command register as the firmware left it, before we touch anything.
     let reg_cmd = cfg_rd(rb, addr, 0x04).unwrap_or(0);
+    r.push(format!(
+        "  PCI command {:#06x}: memory={} bus-master={}   power state: {}",
+        reg_cmd & 0xffff,
+        yes_no(reg_cmd & 0x2 != 0),
+        yes_no(reg_cmd & 0x4 != 0),
+        power_state(rb, addr),
+    ));
+
+    // Ensure Memory Space decode is enabled before reading MMIO.
     if reg_cmd & 0x2 == 0 {
         let _ = rb
             .pci()
@@ -235,6 +298,7 @@ fn report_ext_caps(
                 r.push(format!(
                     "  ext cap @ {off:#x}: id 0x0a DEBUG CAPABILITY (DbC) <== USB-serial channel!"
                 ));
+                report_dbc_regs(rb, off, r);
             }
             XCAP_SUPPORTED_PROTOCOL => {
                 // Bytes: name string at +4 ("USB "), major/minor rev in cap dword.
@@ -272,6 +336,52 @@ fn report_ext_caps(
             "=> not exposed here (QEMU's model omits it; real HW should have it)"
         }
     ));
+}
+
+/// Dump the live DbC control/status/port registers (xHCI spec section 7.6.8).
+fn report_dbc_regs(rb: &mut ScopedProtocol<PciRootBridgeIo>, dcid: u64, r: &mut Vec<String>) {
+    let ctrl = mrd(rb, dcid + 0x20).unwrap_or(0);
+    let st = mrd(rb, dcid + 0x24).unwrap_or(0);
+    let portsc = mrd(rb, dcid + 0x28).unwrap_or(0);
+    r.push(format!(
+        "    DCCTRL={ctrl:#010x} enabled(DCE)={} configured(DCR)={}   DCST={st:#010x} debug port={}",
+        yes_no(ctrl & (1 << 31) != 0),
+        yes_no(ctrl & 0x1 != 0),
+        (st >> 24) & 0xff,
+    ));
+    r.push(format!(
+        "    DCPORTSC={portsc:#010x} connected={} enabled={} link={} speed={}",
+        yes_no(portsc & 0x1 != 0),
+        yes_no(portsc & 0x2 != 0),
+        link_state((portsc >> 5) & 0xf),
+        speed_name((portsc >> 10) & 0xf),
+    ));
+}
+
+/// D-state from the PCI power-management capability, if the device has one.
+fn power_state(rb: &mut ScopedProtocol<PciRootBridgeIo>, addr: PciIoAddress) -> &'static str {
+    let status = cfg_rd(rb, addr, 0x04).unwrap_or(0) >> 16;
+    if status & 0x10 == 0 {
+        return "no PM cap";
+    }
+    let mut ptr = (cfg_rd(rb, addr, 0x34).unwrap_or(0) & 0xfc) as u8;
+    for _ in 0..48 {
+        if ptr == 0 {
+            break;
+        }
+        let cap = cfg_rd(rb, addr, ptr).unwrap_or(0);
+        if cap & 0xff == 0x01 {
+            let pmcsr = cfg_rd(rb, addr, ptr + 4).unwrap_or(0);
+            return match pmcsr & 0x3 {
+                0 => "D0",
+                1 => "D1",
+                2 => "D2",
+                _ => "D3hot",
+            };
+        }
+        ptr = ((cap >> 8) & 0xfc) as u8;
+    }
+    "no PM cap"
 }
 
 fn cfg_rd(rb: &mut ScopedProtocol<PciRootBridgeIo>, addr: PciIoAddress, off: u8) -> Option<u32> {
@@ -322,10 +432,36 @@ const fn speed_name(s: u32) -> &'static str {
     }
 }
 
-fn wait_for_key() {
-    system::with_stdin(|input| {
-        if let Ok(event) = input.wait_for_key_event() {
-            let _ = boot::wait_for_event(&mut [event]);
+/// True when systemd-boot chainloaded us: it publishes `LoaderInfo` before
+/// starting an entry, and nothing else sets that variable.
+fn launched_by_systemd_boot() -> bool {
+    let vendor = VariableVendor(guid!("4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"));
+    runtime::variable_exists(cstr16!("LoaderInfo"), &vendor).unwrap_or(false)
+}
+
+/// Wait for a keypress, but give up after `secs` so unattended runs still exit.
+/// Returns whether a key was pressed.
+fn wait_for_key_or_timeout(secs: u64) -> bool {
+    let stall = || boot::stall(core::time::Duration::from_secs(secs));
+    let timer = unsafe { boot::create_event(EventType::TIMER, Tpl::APPLICATION, None, None) };
+    let Ok(timer) = timer else {
+        stall();
+        return false;
+    };
+    if boot::set_timer(
+        &timer,
+        TimerTrigger::Relative(core::time::Duration::from_secs(secs)),
+    )
+    .is_err()
+    {
+        stall();
+        return false;
+    }
+    match system::with_stdin(|input| input.wait_for_key_event().ok()) {
+        Some(key) => matches!(boot::wait_for_event(&mut [key, timer]), Ok(0)),
+        None => {
+            let _ = boot::wait_for_event(&mut [timer]);
+            false
         }
-    });
+    }
 }
