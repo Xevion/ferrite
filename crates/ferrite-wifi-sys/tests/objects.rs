@@ -28,10 +28,17 @@ fn llvm(tool: &str, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("LLVM tool output is UTF-8")
 }
 
+/// Relocations of the code and data. The debug sections the lab build adds carry relocations of their own
+/// kinds, which the UEFI build does not have, so they are left out.
 fn relocation_counts() -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
-    for kind in llvm("llvm-readelf", &["-r"]).lines().filter_map(|line| line.split_whitespace().nth(2)) {
-        if kind.starts_with("R_") {
+    let mut in_debug_section = false;
+    for line in llvm("llvm-readelf", &["-r"]).lines() {
+        if let Some(section) = line.strip_prefix("Relocation section '") {
+            in_debug_section = section.starts_with(".rela.debug_");
+        } else if !in_debug_section
+            && let Some(kind) = line.split_whitespace().nth(2).filter(|kind| kind.starts_with("R_"))
+        {
             *counts.entry(kind.to_owned()).or_insert(0) += 1;
         }
     }

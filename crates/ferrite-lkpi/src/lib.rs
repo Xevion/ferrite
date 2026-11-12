@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+mod arch;
 mod halt;
 #[cfg(feature = "stubs")]
 mod stubs;

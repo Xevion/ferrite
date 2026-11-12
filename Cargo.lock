@@ -870,6 +870,16 @@ name = "ferrite-hal"
 version = "0.1.0"
 
 [[package]]
+name = "ferrite-lab"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "ferrite-lkpi",
+ "ferrite-wifi-sys",
+ "log",
+]
+
+[[package]]
 name = "ferrite-lkpi"
 version = "0.1.0"
 dependencies = [

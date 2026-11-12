@@ -1053,36 +1053,6 @@ pub unsafe extern "sysv64" fn kvfree_call_rcu() -> ! {
     trace_and_stop(c"kvfree_call_rcu")
 }
 
-/// `void lx_bug(const char *, int)`, declared in `asm/bug.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn lx_bug() -> ! {
-    trace_and_stop(c"lx_bug")
-}
-
-/// `void lx_irq_disable(void)`, declared in `asm/irqflags.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn lx_irq_disable() -> ! {
-    trace_and_stop(c"lx_irq_disable")
-}
-
-/// `void lx_irq_enable(void)`, declared in `asm/irqflags.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn lx_irq_enable() -> ! {
-    trace_and_stop(c"lx_irq_enable")
-}
-
-/// `void lx_irq_restore(unsigned long)`, declared in `asm/irqflags.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn lx_irq_restore() -> ! {
-    trace_and_stop(c"lx_irq_restore")
-}
-
-/// `unsigned long lx_irq_save(void)`, declared in `asm/irqflags.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn lx_irq_save() -> ! {
-    trace_and_stop(c"lx_irq_save")
-}
-
 /// `int lx_strcmp(const char *, const char *)`, declared in `asm/string_64.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn lx_strcmp() -> ! {
@@ -1093,12 +1063,6 @@ pub unsafe extern "sysv64" fn lx_strcmp() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn lx_timer_delete() -> ! {
     trace_and_stop(c"lx_timer_delete")
-}
-
-/// `void lx_warn(const char *, int)`, declared in `asm/bug.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn lx_warn() -> ! {
-    trace_and_stop(c"lx_warn")
 }
 
 /// `void *memchr_inv(const void *, int, size_t)`, declared in `linux/string.h`.

@@ -6,6 +6,8 @@
 //! Hand-written and generated C in `glue/` (the kernel symbols the shim defines in C) is compiled with the
 //! same flags into the same archive, after the passes below and so without the rename.
 //!
+//! On a Linux target the C is also built with unwind tables and debug info, for the lab's backtraces.
+//!
 //! Two passes run over each object before archiving: the symbols of `libc-collisions.txt` are renamed so
 //! they cannot bind to the host libc, and the initcall and exitcall pointers the shadow `linux/init.h`
 //! emits are collected into ordered tables (`lx_initcalls`, `lx_exitcalls`) compiled into the archive.
@@ -29,6 +31,10 @@ const LEVELS: [&str; 17] =
     ["early", "0", "1", "1s", "2", "2s", "3", "3s", "4", "4s", "5", "5s", "rootfs", "6", "6s", "7", "7s"];
 const INITCALL_PREFIX: &str = "__lx_initcall_";
 const EXITCALL_PREFIX: &str = "__lx_exitcall_";
+
+/// What the lab, the Linux process this C runs in, adds so a backtrace can walk through C frames and name
+/// them. The target OS selects it: the lab is the only Linux build, and the UEFI build has no use for it.
+const LAB_FLAGS: [&str; 3] = ["-g", "-fno-omit-frame-pointer", "-fasynchronous-unwind-tables"];
 
 /// The C always targets bare `x86_64`: `x86_64-unknown-uefi` is LLP64 with the MS ABI, which the kernel
 /// headers do not support.
@@ -259,7 +265,10 @@ fn main() {
         ));
     }
 
-    let flags = global_flags(&read(&crate_dir.join("cflags.txt")));
+    let mut flags = global_flags(&read(&crate_dir.join("cflags.txt")));
+    if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "linux") {
+        flags.extend(LAB_FLAGS.map(str::to_owned));
+    }
     let sources = source_list(&read(&crate_dir.join("source.list")));
     let flags_text = read(&snapshot.join("kbuild-flags.txt"));
     let per_file = file_flags(&flags_text);
@@ -319,4 +328,6 @@ fn main() {
 
     let archive = builder(&clang, &llvm, &[], &[]).create_archive(ARCHIVE, &objects);
     println!("cargo:rustc-env=FERRITE_WIFI_ARCHIVE={}", archive.display());
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static={ARCHIVE}");
 }

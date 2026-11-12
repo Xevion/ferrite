@@ -46,6 +46,10 @@ dev *args:
 stubs *args: vendor
     cargo run -q -p ferrite-dev -- stubs {{ args }}
 
+# run the Wi-Fi C as a Linux process until it hits a kernel symbol nothing implements yet
+lab *args: vendor
+    cargo run -q -p ferrite-lab -- {{ args }}
+
 # fetch the pinned Linux release and regenerate the untracked snapshot ferrite-wifi-sys compiles; `just vendor --force` redoes it
 vendor *args:
     cargo run -q -p ferrite-dev -- vendor {{ args }}
