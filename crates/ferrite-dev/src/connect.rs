@@ -22,6 +22,8 @@ use crate::usb::{UsbError, UsbOpener, permission_help};
 pub const KICK_EVERY: Duration = Duration::from_secs(6);
 const KICK_PAUSE: Duration = Duration::from_millis(300);
 const POLL_EVERY: Duration = Duration::from_millis(200);
+/// udev applies the `uaccess` ACL a moment after the device node appears, so an early open is denied.
+const DENIED_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Snafu)]
 pub enum ConnectError {
@@ -48,6 +50,8 @@ pub struct Connector<'a> {
     port_unset_noted: bool,
     last_open_error: Option<String>,
     usb: Option<Box<dyn UsbOpener>>,
+    denied_grace: Duration,
+    denied_since: Option<Instant>,
 }
 
 impl<'a> Connector<'a> {
@@ -59,6 +63,8 @@ impl<'a> Connector<'a> {
             port_unset_noted: false,
             last_open_error: None,
             usb: None,
+            denied_grace: DENIED_GRACE,
+            denied_since: None,
         }
     }
 
@@ -68,7 +74,14 @@ impl<'a> Connector<'a> {
         self
     }
 
-    /// Try the USB device first. A permission error drops back to the tty for the rest of the wait.
+    #[must_use]
+    pub const fn denied_grace(mut self, grace: Duration) -> Self {
+        self.denied_grace = grace;
+        self
+    }
+
+    /// Try the USB device first. A permission error that outlasts the grace period drops back to the
+    /// tty for the rest of the wait.
     #[must_use]
     pub fn usb(mut self, opener: impl UsbOpener + 'static) -> Self {
         self.usb = Some(Box::new(opener));
@@ -103,6 +116,9 @@ impl<'a> Connector<'a> {
                         return Ok(Waited::Connected(link));
                     },
                     Err(UsbError::Absent) => self.kick_if_due(emitter),
+                    Err(UsbError::Denied { .. })
+                        if *self.denied_since.get_or_insert_with(Instant::now) + self.denied_grace > Instant::now() => {
+                    },
                     Err(UsbError::Denied { node }) => {
                         for line in permission_help(&node) {
                             if line.starts_with("---") {
@@ -335,7 +351,7 @@ mod tests {
         let denied = UsbError::Denied { node: "/dev/bus/usb/003/012".into() };
         let (opener, calls) = Scripted::new(vec![Err(denied), Ok(usb_link())]);
         let out = Shared::default();
-        let mut connector = Connector::new(&config).usb(opener);
+        let mut connector = Connector::new(&config).denied_grace(Duration::ZERO).usb(opener);
         let waited = connector.wait(&mut emitter(&out), None, &AtomicBool::new(false));
         assert!(let Ok(Waited::Connected(link)) = waited);
         check!(link.transport() == Transport::Tty);
@@ -349,6 +365,20 @@ mod tests {
         );
         check!(text.contains("T --- falling back to the tty transport ---\n"));
         check!(text.ends_with("T --- link up ---\n"));
+    }
+
+    #[test]
+    fn a_permission_error_while_udev_catches_up_is_retried_on_usb() {
+        let (config, _master) = pty_config();
+        let denied = || Err(UsbError::Denied { node: "/dev/bus/usb/003/012".into() });
+        let (opener, calls) = Scripted::new(vec![denied(), denied(), Ok(usb_link())]);
+        let out = Shared::default();
+        let mut connector = Connector::new(&config).usb(opener);
+        let waited = connector.wait(&mut emitter(&out), None, &AtomicBool::new(false));
+        assert!(let Ok(Waited::Connected(link)) = waited);
+        check!(link.transport() == Transport::Usb);
+        check!(calls.get() == 3);
+        check!(!out.text().contains("permission denied"), "{}", out.text());
     }
 
     #[test]
