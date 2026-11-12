@@ -5,6 +5,8 @@ use alloc::format;
 use core::time::Duration;
 
 use ferrite_efi::clock::Clock;
+use ferrite_efi::link::Link as LoaderLink;
+use ferrite_efi::watchdog::Keepalive;
 use ferrite_hal::{Clock as _, Instant};
 use ratatui::Terminal;
 use uefi::Event;
@@ -24,6 +26,10 @@ const SWEEP_SLICE: Duration = Duration::from_millis(1);
 const MIN_CHUNK_BYTES: usize = 64 << 10;
 const MAX_CHUNK_BYTES: usize = 4 << 20;
 const START_CHUNK_BYTES: usize = 256 << 10;
+/// Under the loader the firmware watchdog is armed for `WATCHDOG` and re-armed every
+/// `WATCHDOG_REARM`, so a long sweep never trips it and a hung loop does.
+const WATCHDOG: Duration = Duration::from_secs(60);
+const WATCHDOG_REARM: Duration = Duration::from_secs(5);
 
 /// Sleeps until a timeout or a keypress, for when there is no sweep to run.
 struct Waiter {
@@ -68,6 +74,9 @@ pub struct App<'a> {
     waiter: Option<Waiter>,
     last_view: Option<View>,
     draw_failures: u32,
+    /// The loader's link, when this app was started by the loader.
+    loader: Option<LoaderLink>,
+    watchdog: Option<Keepalive>,
 }
 
 impl<'a> App<'a> {
@@ -85,6 +94,8 @@ impl<'a> App<'a> {
             },
         };
         let waiter = Waiter::new(input).inspect_err(|e| log::warn!("ui: no wait events, stalling instead: {e}")).ok();
+        let loader = LoaderLink::locate();
+        let watchdog = loader.map(|_| Keepalive::new(WATCHDOG, WATCHDOG_REARM, clock.now()));
         Ok(Self {
             input,
             terminal,
@@ -97,6 +108,8 @@ impl<'a> App<'a> {
             waiter,
             last_view: None,
             draw_failures: 0,
+            loader,
+            watchdog,
         })
     }
 
@@ -104,14 +117,25 @@ impl<'a> App<'a> {
         self.clock.now()
     }
 
-    /// Run until `q` or `Esc`.
+    /// Run until `q` or `Esc` on the console, or until the desktop asks the loader's app to stop
+    /// (a `Stop` message or a `q` typed in `ferrite-dev push`). Logs a sweep summary on the way out.
     pub fn run(&mut self) {
         let mut next_frame = Instant::default();
         loop {
             let now = self.now();
+            if let Some(watchdog) = self.watchdog.as_mut() {
+                watchdog.tick(now);
+            }
             let sweep = self.sweep.status();
             let net_wait = self.net.as_mut().map_or(FRAME_INTERVAL, |net| net.poll(now, &sweep));
-            if self.quit_requested() {
+            if self.quit_requested() || self.desktop_stop_requested() {
+                log::info!(
+                    "sweep: stopping after {} passes over {} bytes ({} bytes tested), {} errors",
+                    sweep.passes,
+                    sweep.bytes,
+                    sweep.passes.saturating_mul(sweep.bytes as u64),
+                    sweep.faults
+                );
                 return;
             }
             let net = self.net.as_ref().map(Net::status);
@@ -133,6 +157,21 @@ impl<'a> App<'a> {
             };
         }
         quit
+    }
+
+    /// A `Stop` from the desktop, or a `q` typed there: the same quit key as the console's.
+    fn desktop_stop_requested(&self) -> bool {
+        let Some(link) = self.loader else {
+            return false;
+        };
+        let mut asked = link.stop_requested();
+        let mut typed = [0; 64];
+        while let Ok(n) = link.read(&mut typed)
+            && n > 0
+        {
+            asked |= typed[..n].iter().any(|b| matches!(b, b'q' | b'Q'));
+        }
+        asked
     }
 
     /// Sweep until `deadline` (at least one chunk), or wait on the timer and key

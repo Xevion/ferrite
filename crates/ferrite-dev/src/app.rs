@@ -97,6 +97,7 @@ fn push_command(config: &Config, args: &PushArgs) -> Result<(), Error> {
         wait: args.wait,
         boot: args.boot.then_some(args.boot_timeout),
         reboot: args.reboot,
+        stop_after: args.stop_after,
         out: args.out.clone(),
         link: args.link.options(),
     };

@@ -13,7 +13,7 @@ use snafu::{ResultExt, Snafu};
 
 use crate::config::Config;
 use crate::connect::{ConnectError, Connector, Waited};
-use crate::conversation::{Conversation, ConversationError, Effect, Outcome, Stage};
+use crate::conversation::{Conversation, ConversationError, Effect, Interrupted, Outcome, Stage};
 use crate::emit::Emitter;
 use crate::link::{Link, LinkOptions, Transport};
 use crate::tty::is_idle;
@@ -72,14 +72,14 @@ impl Console {
     pub fn show(&mut self, effect: Effect) {
         match effect {
             Effect::Ready(info) => {
-                self.emitter.line(&format!("--- loader ready: {} (protocol {}) ---", info.build, info.proto));
+                self.emitter.line(&format!(
+                    "--- loader ready: {} (protocol {}, {}) ---",
+                    info.build, info.proto, info.identity
+                ));
             },
             Effect::Accepted => self.emitter.line("--- push accepted ---"),
             Effect::Started(name) => self.emitter.line(&format!("--- started {name} ---")),
-            Effect::Output { stream: Stream::Log, bytes } => {
-                // One record per message and no newline of its own; a record may hold several lines.
-                String::from_utf8_lossy(&bytes).lines().for_each(|line| self.emitter.line(line));
-            },
+            Effect::Output { stream: Stream::Log, bytes } => self.emitter.record(&bytes),
             Effect::Output { stream: Stream::Data, bytes } => {
                 if let Err(e) = self.data.write_all(&bytes).and_then(|()| self.data.flush()) {
                     self.emitter.line(&format!("--- cannot write the data stream to stdout: {e} ---"));
@@ -168,6 +168,9 @@ pub fn converse(
 }
 
 /// Play `machine` over one connection until it has a result or the link is lost.
+///
+/// `stop` is an interrupt. While an app runs the machine decides what it means (the first one asks
+/// the app to stop and is consumed here); at any other point it ends the run.
 pub fn drive(
     machine: &mut Conversation,
     link: &mut Link,
@@ -180,7 +183,8 @@ pub fn drive(
     let mut frame = Vec::new();
     let mut buf = vec![0; MAX_PAYLOAD];
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if stop.swap(false, Ordering::Relaxed) && machine.interrupt() != Interrupted::Asked {
+            console.show_all(machine.take_effects());
             return Err(SessionError::Stopped);
         }
         machine.tick(Instant::now());
@@ -322,10 +326,11 @@ pub fn reboot(
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::Arc;
     use std::sync::mpsc;
 
     use assert2::{assert, check};
-    use ferrite_wire::link::{Event, Exited, PROTO, PUSH_CHUNK, PushKind, ShortStr};
+    use ferrite_wire::link::{Event, Exited, Identity, PROTO, PUSH_CHUNK, PushKind, ShortStr};
 
     use super::*;
     use crate::conversation::{Goal, PushPlan, Timeouts};
@@ -338,8 +343,15 @@ mod tests {
         ShortStr::new(text).expect("short enough")
     }
 
+    const OLD: Identity = Identity { boot: 1, instance: 0xAAAA };
+    const NEW: Identity = Identity { boot: 1, instance: 0xBBBB };
+
     fn ready() -> Message {
-        Message::Ready { proto: PROTO, build: short("fake loader") }
+        ready_as(OLD)
+    }
+
+    fn ready_as(identity: Identity) -> Message {
+        Message::Ready { proto: PROTO, identity, build: short("fake loader") }
     }
 
     fn timeouts() -> Timeouts {
@@ -432,7 +444,10 @@ mod tests {
         check!(info.build.as_str() == "fake loader");
         check!(received.borrow().iter().filter(|m| matches!(m, Message::Hello { .. })).count() >= 3);
         check!(
-            harness.log.text().contains("T --- loader ready: fake loader (protocol 1) ---\n"),
+            harness
+                .log
+                .text()
+                .contains("T --- loader ready: fake loader (protocol 2, boot 1, instance 000000000000aaaa) ---\n"),
             "{}",
             harness.log.text()
         );
@@ -440,7 +455,8 @@ mod tests {
 
     #[test]
     fn a_loader_of_another_protocol_is_refused_without_a_push() {
-        let (link, received) = fake_loader(|_| vec![Message::Ready { proto: PROTO + 1, build: short("future") }]);
+        let (link, received) =
+            fake_loader(|_| vec![Message::Ready { proto: PROTO + 1, identity: OLD, build: short("future") }]);
         let mut machine = push_machine(PushKind::App, image(10));
         assert!(let Ok(Drive::Finished) = Harness::new().drive(&mut machine, link, None));
         check!(machine.take_result() == Some(Err(ConversationError::ProtoMismatch { ours: PROTO, theirs: PROTO + 1 })));
@@ -530,11 +546,50 @@ mod tests {
 
     #[test]
     fn a_loader_push_is_done_when_the_new_loader_says_ready() {
-        let behave = accepting(|_| Vec::new(), vec![Message::Started { name: short("app.efi") }, ready()]);
+        let behave = accepting(|_| Vec::new(), vec![Message::Started { name: short("app.efi") }, ready_as(NEW)]);
         let (link, _) = fake_loader(behave);
         let mut machine = push_machine(PushKind::Loader, image(10));
         assert!(let Ok(Drive::Finished) = Harness::new().drive(&mut machine, link, None));
-        assert!(let Some(Ok(Outcome::Replaced(_))) = machine.take_result());
+        assert!(let Some(Ok(Outcome::Replaced(info))) = machine.take_result());
+        check!(info.identity == NEW);
+    }
+
+    #[test]
+    fn an_interrupt_before_the_app_runs_ends_the_run() {
+        let mut machine = push_machine(PushKind::App, image(10));
+        let mut harness = Harness::new();
+        let mut link = Link::new(Transport::Usb, "fake", FakeLink::new());
+        let stop = AtomicBool::new(true);
+        let driven = drive(&mut machine, &mut link, &mut harness.console, None, &|| true, &stop);
+        assert!(let Err(SessionError::Stopped) = driven);
+    }
+
+    #[test]
+    fn an_interrupt_while_the_app_runs_sends_stop_once_and_the_run_ends_with_its_exit() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let ctrl_c = Arc::clone(&stop);
+        let mut app = accepting(
+            |msg| match msg {
+                Message::Stop => vec![Message::Exited(Exited::new(0, Duration::from_millis(40)))],
+                _ => Vec::new(),
+            },
+            vec![Message::Started { name: short("app.efi") }],
+        );
+        // Ctrl-C arrives as the push completes, so the machine sees it once the app is running.
+        let (link, received) = fake_loader(move |msg| {
+            if matches!(msg, Message::PushEnd) {
+                ctrl_c.store(true, Ordering::Relaxed);
+            }
+            app(msg)
+        });
+        let mut machine = push_machine(PushKind::App, image(10));
+        let mut harness = Harness::new();
+        let mut link = Link::new(Transport::Usb, "fake", link);
+        let driven = drive(&mut machine, &mut link, &mut harness.console, None, &|| true, &stop);
+        assert!(let Ok(Drive::Finished) = driven);
+        assert!(let Some(Ok(Outcome::Exited(_))) = machine.take_result());
+        check!(received.borrow().iter().filter(|m| matches!(m, Message::Stop)).count() == 1);
+        check!(harness.log.text().contains("interrupted: asking the app to stop"), "{}", harness.log.text());
     }
 
     #[test]

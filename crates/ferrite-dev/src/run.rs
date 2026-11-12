@@ -139,24 +139,12 @@ pub fn valid_app_name(app: &str) -> bool {
 
 pub fn execute(env: &impl Env, config: &Config, plan: &RunPlan) -> Result<RunResult, RunError> {
     let app = plan.app.as_str();
-    if !valid_app_name(app) {
-        return Err(RunError::BadAppName { app: app.to_owned() });
-    }
-
-    env.say(&format!("resolving the package of {app}"));
-    let cmd = Commands::metadata();
-    let out = checked(env, "cargo metadata", &cmd, OutputMode::Collect)?;
-    let metadata = Metadata::parse(&out.stdout).context(PackageSnafu { app })?;
-    let package = metadata.package_of_bin(app).context(PackageSnafu { app })?.to_owned();
-
-    env.say(&format!("building {app} ({package})"));
-    checked(env, "build", &Commands::build(app, &package), OutputMode::Passthrough)?;
+    let efi = build_app(env, app)?;
 
     let first = reach(env, config, app)?;
     env.say(&format!("using ssh host {} (boot id {})", first.host, first.boot_id));
     let commands = Commands::new(config, app, &first.host);
 
-    let efi = metadata.target_directory.join(UEFI_TARGET).join("debug").join(format!("{app}.efi"));
     env.say(&format!("staging {} on {}", efi.display(), first.host));
     checked(env, "scp of the app", &commands.upload(&efi), OutputMode::Collect)?;
     checked(env, "clean-reports", &commands.deploy("clean-reports"), OutputMode::Collect)?;

@@ -7,7 +7,7 @@ use snafu::Snafu;
 use uefi::Status;
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams};
 
-use super::{LinkProtocol, REVISION};
+use super::{LinkProtocol, MIN_REVISION};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 pub enum Error {
@@ -43,8 +43,8 @@ impl Link {
         core::mem::forget(scoped);
         // SAFETY: `proto` was just obtained from the firmware and points at a live table.
         let revision = unsafe { proto.as_ref() }.revision;
-        if revision != REVISION {
-            log::warn!("link protocol revision {revision}, this build speaks {REVISION}");
+        if revision < MIN_REVISION {
+            log::warn!("link protocol revision {revision}, this build needs at least {MIN_REVISION}");
             return None;
         }
         Some(Self { proto })
@@ -78,6 +78,20 @@ impl Link {
             Status::SUCCESS => Ok(len.min(buf.len())),
             status => Err(Error::Firmware { status }),
         }
+    }
+
+    /// The desktop asked the running app to finish. False when the loader is too old to carry the
+    /// request. The answer stays true until the app ends, so every caller sees it.
+    #[must_use]
+    pub fn stop_requested(&self) -> bool {
+        let table = self.table();
+        if table.revision < 2 {
+            return false;
+        }
+        let mut requested = 0u8;
+        // SAFETY: the table is revision 2 or later, so the function exists; `requested` is a valid slot.
+        let status = unsafe { (table.stop_requested)(table, &raw mut requested) };
+        status == Status::SUCCESS && requested != 0
     }
 
     /// Service the DbC now, for a loop that has been busy for a while.

@@ -3,8 +3,9 @@
 //!
 //! The loader owns the DbC and offers it to the apps it starts through the link protocol (see
 //! `ferrite_efi::link`). Before each run it arms the firmware watchdog, so an app that hangs
-//! resets the machine into the default OS. A pushed image of kind loader replaces this loader:
-//! the DbC is released, the new image started, and the link taken up again if it returns.
+//! resets the machine into the default OS, and while idle it keeps a shorter one armed, so a hang
+//! in the loader does too. A pushed image of kind loader replaces this loader: the DbC is
+//! released, the new image started, and the link taken up again if it returns.
 //!
 //! Its log is `\EFI\ferrite\ferrite-loader.txt`.
 
@@ -23,11 +24,11 @@ use ferrite_efi::bootlog::{BootLog, Echo};
 use ferrite_efi::clock::Clock;
 use ferrite_efi::link::provider::{Provider, Retained};
 use ferrite_efi::xhci::OpenDbc;
-use ferrite_efi::{link, logger, session};
+use ferrite_efi::{entropy, link, logger, session, watchdog};
 use ferrite_hal::{Clock as _, Instant};
 use ferrite_recon::bringup::{self, Link};
 use ferrite_recon::display::Chain;
-use ferrite_wire::link::{Message, ShortStr};
+use ferrite_wire::link::{Identity, Message, ShortStr};
 use ferrite_xhci::Config;
 use log::LevelFilter;
 use uefi::prelude::*;
@@ -54,19 +55,24 @@ fn main() -> Status {
         log::error!("a loader already owns the link; push a replacement with kind loader instead");
         return Status::ALREADY_STARTED;
     }
-    image::disarm();
+    watchdog::disarm();
 
     let cfg = Config { timeout: CONFIGURE_TIMEOUT, ..Config::default() };
     let Some(Link { dbc, .. }) = bringup::bring_up(clock, start, &cfg) else {
         return give_up("no DbC was configured");
     };
-    run(dbc, clock, start, &cfg)
+    run(dbc, entropy::random_u64(), clock, start, &cfg)
 }
 
-/// Serve, hand over to a replacement loader when one is pushed, and take the link up again if it returns.
-fn run(mut dbc: OpenDbc, clock: Clock, start: Instant, cfg: &Config) -> Status {
+/// Serve, hand over to a replacement loader when one is pushed, and take the link up again if it
+/// returns. `instance` identifies this start in every `Ready`; the boot count grows each time the
+/// link is served again.
+fn run(mut dbc: OpenDbc, instance: u64, clock: Clock, start: Instant, cfg: &Config) -> Status {
+    let mut boot = 0u32;
     loop {
-        let mut provider = match Provider::install(dbc, ShortStr::new(BUILD).unwrap_or_default()) {
+        boot = boot.saturating_add(1);
+        let identity = Identity { boot, instance };
+        let mut provider = match Provider::install(dbc, ShortStr::new(BUILD).unwrap_or_default(), identity) {
             Ok(provider) => provider,
             Err(e) => return give_up(&format!("the link did not install: {}", Chain(&e))),
         };
@@ -82,9 +88,9 @@ fn run(mut dbc: OpenDbc, clock: Clock, start: Instant, cfg: &Config) -> Status {
                     image::unload(chain.child);
                     provider = kept;
                     logger::attach_link();
-                    let text = format!("{} not started: the link would not uninstall", chain.name);
-                    if let Err(e) = provider.send(&Message::Fault { text }) {
-                        log::warn!("fault not sent: {e}");
+                    let reason = format!("{} not started: the link would not uninstall", chain.name);
+                    if let Err(e) = provider.send(&Message::PushRejected { reason }) {
+                        log::warn!("rejection not sent: {e}");
                     }
                 },
             }
@@ -92,12 +98,15 @@ fn run(mut dbc: OpenDbc, clock: Clock, start: Instant, cfg: &Config) -> Status {
 
         // Dropping the DbC clears DCE, so the replacement finds the controller idle.
         drop(released);
-        if let Err(e) = image::arm(chain.watchdog_secs) {
+        // The idle watchdog is no longer re-armed, so it must not be left to expire if arming for
+        // the replacement fails below.
+        watchdog::disarm();
+        if let Err(e) = watchdog::arm(chain.watchdog) {
             log::warn!("watchdog not armed for the replacement: {e}");
         }
-        log::info!("starting replacement loader {} (watchdog {} s)", chain.name, chain.watchdog_secs);
+        log::info!("starting replacement loader {} (watchdog {} s)", chain.name, chain.watchdog.as_secs());
         let result = boot::start_image(chain.child);
-        image::disarm();
+        watchdog::disarm();
         log::warn!(
             "replacement loader returned {}; taking the link up again",
             result.err().map_or(Status::SUCCESS, |e| e.status())

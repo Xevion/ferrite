@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `ferrite-hal` | `no_std` | Platform traits (MMIO, PCI config, DMA, clock, delay) and the address, unit and index types every driver shares |
 | `ferrite-xhci` | `no_std` + `alloc` | xHCI Debug Capability driver, written only against `ferrite-hal` |
-| `ferrite-efi` | `no_std` + `uefi` | UEFI backends for the HAL traits, the boot-volume log, the `log` sink, unattended exit, the link protocol the loader shares with its apps |
+| `ferrite-efi` | `no_std` + `uefi` | UEFI backends for the HAL traits, the boot-volume log, the `log` sink, unattended exit, the firmware watchdog, random identifiers, the link protocol the loader shares with its apps |
 | `ferrite-testing` | std | Host-only test doubles: mock HAL, simulated DbC register file |
 | `ferrite-uefi` | `no_std`, UEFI app | Memory sweep, ratatui UI, SNP + smoltcp networking, mDNS, HTTP status page |
 | `ferrite-recon` | `no_std`, UEFI apps | `pciscan`, `xhciscan`, `dbcping`, `dbcbench` |
@@ -104,6 +104,7 @@ an `#[expect(clippy::disallowed_*)]`; everything else goes through it.
 | `_rdtsc` | `ferrite_efi::clock` |
 | `uefi::boot::stall` | the UEFI `Delay` impl; loops wait on events |
 | `uefi::runtime::reset` | `ferrite_efi::session` |
+| `uefi::boot::set_watchdog_timer` | `ferrite_efi::watchdog` |
 | `uefi::boot::exit_boot_services` | none |
 | `FileSystem::write` (truncating rewrite) | none; files go through `BootLog` |
 | `uefi::println` / `print` | `BootLog`'s console echo and the panic handler |

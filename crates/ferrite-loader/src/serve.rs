@@ -9,8 +9,9 @@ use ferrite_efi::bootlog::BootLog;
 use ferrite_efi::clock::Clock;
 use ferrite_efi::link::hub::{Mode, Transport};
 use ferrite_efi::link::provider::Provider;
-use ferrite_efi::link::receive::{Image, Receiver};
+use ferrite_efi::link::receive::{Image, Receiver, Reject};
 use ferrite_efi::logger;
+use ferrite_efi::watchdog::{self, Keepalive};
 use ferrite_hal::{Clock as _, Instant};
 use ferrite_wire::link::{Exited, Message, PushBegin, PushKind, ShortStr};
 use uefi::{Handle, Status, boot};
@@ -21,12 +22,16 @@ use crate::image;
 const STATUS_EVERY: Duration = Duration::from_millis(250);
 /// How long a replacement loader's `Started` gets to leave before the link is torn down.
 const HANDOVER_FLUSH: Duration = Duration::from_millis(500);
+/// The watchdog the loader keeps armed while it is idle, so a hang inside it resets the machine.
+const IDLE_WATCHDOG: Duration = Duration::from_secs(60);
+/// How often the idle watchdog is re-armed; well inside [`IDLE_WATCHDOG`].
+const IDLE_REARM: Duration = Duration::from_secs(5);
 
 /// A replacement loader, loaded and ready to start once the link is released.
 pub struct Chain {
     pub child: Handle,
     pub name: ShortStr,
-    pub watchdog_secs: u32,
+    pub watchdog: Duration,
 }
 
 struct LastRun {
@@ -42,11 +47,14 @@ struct Server<'a, T: Transport> {
     last: Option<LastRun>,
     shown: Option<&'static str>,
     next_status: Instant,
+    keepalive: Keepalive,
 }
 
 /// Serve the desktop until it pushes a replacement loader.
 pub fn serve<T: Transport>(provider: &Provider<T>, clock: Clock) -> Chain {
-    let mut server = Server { provider, clock, push: None, last: None, shown: None, next_status: clock.now() };
+    let now = clock.now();
+    let keepalive = Keepalive::new(IDLE_WATCHDOG, IDLE_REARM, now);
+    let mut server = Server { provider, clock, push: None, last: None, shown: None, next_status: now, keepalive };
     loop {
         provider.pump();
         while let Some(command) = provider.next_command() {
@@ -80,11 +88,6 @@ impl<T: Transport> Server<'_, T> {
         log::warn!("push rejected: {reason}");
         self.push = None;
         self.send(&Message::PushRejected { reason: reason.to_string() });
-    }
-
-    fn fault(&self, text: impl Display) {
-        log::error!("{text}");
-        self.send(&Message::Fault { text: text.to_string() });
     }
 
     fn begin(&mut self, begin: PushBegin) {
@@ -138,7 +141,10 @@ impl<T: Transport> Server<'_, T> {
                 None
             },
             PushKind::Loader => self.prepare_chain(image),
-            PushKind::Unknown(_) => None,
+            PushKind::Unknown(raw) => {
+                self.reject(Reject::Kind { raw });
+                None
+            },
         }
     }
 
@@ -149,9 +155,9 @@ impl<T: Transport> Server<'_, T> {
             Err(e) => return self.reject(format!("the firmware refused the image: {e}")),
         };
         drop(bytes);
-        if let Err(e) = image::arm(begin.watchdog_secs) {
+        if let Err(e) = watchdog::arm(begin.watchdog()) {
             image::unload(child);
-            return self.fault(format!("{} not started: the watchdog did not arm: {e}", begin.name));
+            return self.reject(format!("{} not started: the watchdog did not arm: {e}", begin.name));
         }
 
         log::info!("starting {} with a {} s watchdog", begin.name, begin.watchdog_secs);
@@ -161,7 +167,7 @@ impl<T: Transport> Server<'_, T> {
         let result = boot::start_image(child);
         let elapsed = self.clock.elapsed(started);
         self.provider.set_mode(Mode::Idle);
-        image::disarm();
+        self.keepalive.arm_now(self.clock.now());
 
         let status = result.err().map_or(Status::SUCCESS, |e| e.status());
         // These two mean the image never ran, so the firmware has not unloaded it.
@@ -190,13 +196,16 @@ impl<T: Transport> Server<'_, T> {
         while self.provider.pending() > 0 && self.clock.elapsed(begun) < HANDOVER_FLUSH {
             self.provider.pump();
         }
-        Some(Chain { child, name: begin.name, watchdog_secs: begin.watchdog_secs })
+        let watchdog = begin.watchdog();
+        Some(Chain { child, name: begin.name, watchdog })
     }
 
-    /// Between messages: save the log now and then, and report a link state change.
+    /// Between messages: keep the watchdog armed, save the log now and then, and report a link
+    /// state change.
     fn idle(&mut self) {
         logger::with(BootLog::poll);
         let now = self.clock.now();
+        self.keepalive.tick(now);
         if now < self.next_status {
             return;
         }

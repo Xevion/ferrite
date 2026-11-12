@@ -1,12 +1,9 @@
-//! Loading pushed images, and the watchdog that bounds a run.
+//! Loading pushed images.
 
 use ferrite_efi::link::receive::MAX_IMAGE;
 use uefi::boot::{self, LoadImageSource};
 use uefi::proto::device_path::{DevicePath, LoadedImageDevicePath};
 use uefi::{Handle, Status};
-
-/// Identifies the loader's watchdog arming to the firmware; codes above 0xffff are ours.
-const WATCHDOG_CODE: u64 = 0x4645_5252;
 
 const _: () = assert!(MAX_IMAGE <= u32::MAX as u64);
 
@@ -26,20 +23,6 @@ pub fn load(bytes: &[u8]) -> uefi::Result<Handle> {
 pub fn unload(image: Handle) {
     if let Err(e) = boot::unload_image(image) {
         log::debug!("unloading an image failed: {e}");
-    }
-}
-
-/// Reset the machine if nothing disarms the watchdog within `secs`. `0` is refused by the caller
-/// before it gets here, since to the firmware it means off.
-pub fn arm(secs: u32) -> uefi::Result {
-    let secs = usize::try_from(secs).map_err(|_| uefi::Error::from(Status::INVALID_PARAMETER))?;
-    boot::set_watchdog_timer(secs, WATCHDOG_CODE, None)
-}
-
-/// Turn the watchdog off between runs and at startup, where the firmware may have left its own armed.
-pub fn disarm() {
-    if let Err(e) = boot::set_watchdog_timer(0, WATCHDOG_CODE, None) {
-        log::warn!("disarming the watchdog failed: {e}");
     }
 }
 

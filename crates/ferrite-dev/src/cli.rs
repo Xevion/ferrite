@@ -161,6 +161,10 @@ pub struct PushArgs {
     #[arg(long, conflicts_with = "loader")]
     pub reboot: bool,
 
+    /// Ask the app to stop once it has run this long (like 90s or 5m); Ctrl-C asks too, and a second leaves it running
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration, conflicts_with = "loader")]
+    pub stop_after: Option<Duration>,
+
     /// Also write the app's log lines to this file
     #[arg(long, value_name = "FILE")]
     pub out: Option<PathBuf>,
@@ -304,6 +308,11 @@ mod tests {
 
         check!(Cli::try_parse_from(["ferrite-dev", "push", "a.efi", "--boot-timeout", "5m"]).is_err());
         check!(Cli::try_parse_from(["ferrite-dev", "push", "a.efi", "--loader", "--reboot"]).is_err());
+
+        assert!(let Ok(cli) = Cli::try_parse_from(["ferrite-dev", "push", "ferrite-uefi", "--stop-after", "90s"]));
+        assert!(let Command::Push(args) = cli.command);
+        check!(args.stop_after == Some(Duration::from_secs(90)));
+        check!(Cli::try_parse_from(["ferrite-dev", "push", "a.efi", "--loader", "--stop-after", "5s"]).is_err());
     }
 
     #[test]

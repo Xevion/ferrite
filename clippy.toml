@@ -9,6 +9,7 @@ disallowed-methods = [
     { path = "core::arch::x86_64::_rdtsc", reason = "read time through ferrite_efi::clock::Clock (the hal Clock trait)" },
     { path = "uefi::boot::stall", reason = "busy-waits the whole app; wait on an event, or use the hal Delay trait for short device waits" },
     { path = "uefi::runtime::reset", reason = "resets go through ferrite_efi::session, which decides between returning to the default OS and powering off" },
+    { path = "uefi::boot::set_watchdog_timer", reason = "arming the firmware watchdog goes through ferrite_efi::watchdog, which keeps its code and the zero-means-off rule in one place" },
     { path = "uefi::boot::exit_boot_services", reason = "the apps run on boot services for their whole life" },
     { path = "uefi::fs::FileSystem::write", reason = "truncates and rewrites the whole file; log through ferrite_efi::bootlog::BootLog" },
 ]

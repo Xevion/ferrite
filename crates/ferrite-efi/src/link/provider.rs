@@ -17,7 +17,7 @@ use core::ptr::NonNull;
 use core::slice;
 use core::time::Duration;
 
-use ferrite_wire::link::{Message, ShortStr, Stream};
+use ferrite_wire::link::{Identity, Message, ShortStr, Stream};
 use ferrite_xhci::State as DbcState;
 use snafu::{ResultExt, Snafu};
 use uefi::boot::{self, EventType, TimerTrigger, Tpl, TplGuard};
@@ -134,6 +134,10 @@ impl<T: Transport> State<T> {
     fn read(&self, buf: &mut [u8]) -> usize {
         self.with_hub(|hub| hub.read_input(buf)).unwrap_or(0)
     }
+
+    fn stop_requested(&self) -> bool {
+        self.with_hub(|hub| hub.stop_requested()).unwrap_or(false)
+    }
 }
 
 /// The state behind a protocol table.
@@ -192,6 +196,19 @@ unsafe extern "efiapi" fn proto_read<T: Transport>(
     };
     // SAFETY: `len` is non-null and the caller guarantees it is writable.
     unsafe { len.write(got) };
+    Status::SUCCESS
+}
+
+unsafe extern "efiapi" fn proto_stop_requested<T: Transport>(this: *const LinkProtocol, requested: *mut u8) -> Status {
+    // SAFETY: as `proto_write`.
+    let Some(state) = (unsafe { state_of::<T>(this) }) else {
+        return Status::INVALID_PARAMETER;
+    };
+    if requested.is_null() {
+        return Status::INVALID_PARAMETER;
+    }
+    // SAFETY: `requested` is non-null and the caller guarantees it is writable.
+    unsafe { requested.write(u8::from(state.stop_requested())) };
     Status::SUCCESS
 }
 
@@ -255,10 +272,11 @@ impl<T: Transport> fmt::Debug for Provider<T> {
 }
 
 impl<T: Transport> Provider<T> {
-    /// Take over `transport`, install the protocol and start the timer. `build` is announced in `Ready`.
+    /// Take over `transport`, install the protocol and start the timer. `build` and `identity` are
+    /// announced in `Ready`.
     ///
     /// On failure the transport is dropped with everything else.
-    pub fn install(transport: T, build: ShortStr) -> Result<Self, InstallError> {
+    pub fn install(transport: T, build: ShortStr, identity: Identity) -> Result<Self, InstallError> {
         let instance = Box::new(Instance::<T> {
             proto: LinkProtocol {
                 revision: REVISION,
@@ -266,8 +284,9 @@ impl<T: Transport> Provider<T> {
                 read: proto_read::<T>,
                 poll: proto_poll::<T>,
                 context: core::ptr::null(),
+                stop_requested: proto_stop_requested::<T>,
             },
-            state: State { hub: RefCell::new(Hub::new(transport, build)), parked: RefCell::new(Vec::new()) },
+            state: State { hub: RefCell::new(Hub::new(transport, build, identity)), parked: RefCell::new(Vec::new()) },
         });
         let inst = NonNull::from(Box::leak(instance));
         // SAFETY: `inst` is the only reference to the leaked instance until it is installed.

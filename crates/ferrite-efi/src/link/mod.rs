@@ -18,6 +18,13 @@
 //! | `write(this, stream, buf, len)` | Frames `len` bytes as `Output` on `stream` (0 log, 1 data) and queues them for the desktop. `SUCCESS` when all of it was queued, `OUT_OF_RESOURCES` when the queue is full (nothing was queued), `INVALID_PARAMETER` for an unknown stream or a null `buf` with `len` > 0 |
 //! | `read(this, buf, cap, len)` | Stores up to `cap` bytes the desktop sent as `Input` in `buf` and their count in `*len`; `SUCCESS` with 0 when nothing is waiting |
 //! | `poll(this)` | Services the DbC now; always `SUCCESS` |
+//! | `stop_requested(this, requested)` | Revision 2. Stores 1 in `*requested` once the desktop sent `Stop` for the running app, else 0; asking does not clear it, and it clears when the app ends |
+//!
+//! `Stop` is not part of `read`, whose contract is a byte stream: folding a control event into it
+//! would either put a marker into the data or give existing callers a status they never handled.
+//! A separate function is additive. Revision 2 appends it after the opaque field, so every
+//! revision 1 offset is unchanged, and a client calls it only when the table's `revision` says it
+//! is there ([`Link::locate`] accepts any revision from [`MIN_REVISION`] up).
 //!
 //! # Priority levels and the timer
 //!
@@ -50,7 +57,10 @@ pub use client::{Error, Link, is_present};
 pub use ferrite_wire::link::Stream;
 
 pub const GUID: Guid = guid!("e0591406-fec2-4e04-aebe-4890533243d2");
-pub const REVISION: u32 = 1;
+/// Revision of the table the provider installs.
+pub const REVISION: u32 = 2;
+/// The oldest revision a client can use.
+pub const MIN_REVISION: u32 = 1;
 
 /// The function table the loader installs. Apps use [`Link`] rather than calling it directly.
 #[repr(C)]
@@ -63,4 +73,6 @@ pub struct LinkProtocol {
     pub poll: unsafe extern "efiapi" fn(this: *const Self) -> Status,
     /// The provider's state; opaque to every client.
     context: *const c_void,
+    /// Present from revision 2.
+    pub stop_requested: unsafe extern "efiapi" fn(this: *const Self, requested: *mut u8) -> Status,
 }

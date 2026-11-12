@@ -35,6 +35,8 @@ pub struct PushOptions {
     pub boot: Option<Duration>,
     /// Reset the target into its default OS once the app has exited.
     pub reboot: bool,
+    /// Ask the app to stop once it has run this long.
+    pub stop_after: Option<Duration>,
     pub out: Option<PathBuf>,
     pub link: LinkOptions,
 }
@@ -154,6 +156,9 @@ pub fn run(config: &Config, options: &PushOptions, stop: &AtomicBool) -> Result<
     ));
 
     let mut machine = Conversation::new(Goal::Push(Box::new(plan)), Timeouts::with_ready(options.wait), Instant::now());
+    if let Some(after) = options.stop_after {
+        machine = machine.with_stop_after(after);
+    }
     let mut dialer = Dialer::new(config, options.link);
     let input = forward_stdin();
     let mut conversed = session::converse(&mut machine, &mut dialer, &mut console, input.as_ref(), stop);

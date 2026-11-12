@@ -10,7 +10,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ferrite_wire::link::{
-    CRC_LEN, Decoder, EncodeError, Event, HEADER_LEN, MAX_OUTPUT, Message, PROTO, ShortStr, Stream, encode,
+    CRC_LEN, Decoder, EncodeError, Event, HEADER_LEN, Identity, MAX_OUTPUT, Message, PROTO, ShortStr, Stream, encode,
     encode_output,
 };
 use snafu::Snafu;
@@ -43,7 +43,7 @@ pub trait Transport {
 pub enum Mode {
     /// No app is running: pushes and aborts go to the loader's own code.
     Idle,
-    /// An app is running: input goes to it and a new push is refused.
+    /// An app is running: input and `Stop` go to it and a new push is refused.
     Running,
 }
 
@@ -74,6 +74,7 @@ pub enum SendError {
 pub struct Hub<T> {
     transport: T,
     build: ShortStr,
+    identity: Identity,
     decoder: Decoder,
     out: VecDeque<u8>,
     scratch: Vec<u8>,
@@ -83,15 +84,17 @@ pub struct Hub<T> {
     mode: Mode,
     was_up: bool,
     reboot: bool,
+    stop: bool,
     stats: HubStats,
 }
 
 impl<T: Transport> Hub<T> {
-    /// `build` is announced in every `Ready`.
-    pub fn new(transport: T, build: ShortStr) -> Self {
+    /// `build` and `identity` are announced in every `Ready`.
+    pub fn new(transport: T, build: ShortStr, identity: Identity) -> Self {
         Self {
             transport,
             build,
+            identity,
             decoder: Decoder::new(),
             out: VecDeque::new(),
             scratch: Vec::new(),
@@ -101,6 +104,7 @@ impl<T: Transport> Hub<T> {
             mode: Mode::Idle,
             was_up: false,
             reboot: false,
+            stop: false,
             stats: HubStats::default(),
         }
     }
@@ -121,12 +125,19 @@ impl<T: Transport> Hub<T> {
         self.mode
     }
 
-    /// Switching clears whatever input was waiting.
+    /// Switching clears whatever input was waiting and any pending `Stop`.
     pub fn set_mode(&mut self, mode: Mode) {
         if self.mode != mode {
             self.mode = mode;
             self.inbox.clear();
+            self.stop = false;
         }
+    }
+
+    /// The desktop asked the running app to finish. Stays set until the mode changes, so every
+    /// look at it gives the same answer.
+    pub const fn stop_requested(&self) -> bool {
+        self.stop
     }
 
     /// The desktop asked for a reset. Sticky: the caller acts on it.
@@ -219,7 +230,7 @@ impl<T: Transport> Hub<T> {
     }
 
     fn announce(&mut self) {
-        let ready = Message::Ready { proto: PROTO, build: self.build.clone() };
+        let ready = Message::Ready { proto: PROTO, identity: self.identity, build: self.build.clone() };
         // A full queue already holds far more than the desktop will read; the next Hello asks again.
         let _ = self.queue(&ready);
     }
@@ -254,6 +265,10 @@ impl<T: Transport> Hub<T> {
         match msg {
             Message::Hello { .. } => self.announce(),
             Message::Reboot => self.reboot = true,
+            Message::Stop => match self.mode {
+                Mode::Running => self.stop = true,
+                Mode::Idle => self.stats.ignored += 1,
+            },
             Message::Input { bytes } => self.deliver_input(&bytes),
             Message::Unknown { code, len } => {
                 let text = format!("unknown message type {code:#04x} ({len} bytes)");
@@ -357,7 +372,7 @@ mod tests {
     }
 
     fn hub() -> Hub<Script> {
-        Hub::new(Script { up: true, ..Script::default() }, ShortStr::new("test build").expect("short"))
+        Hub::new(Script { up: true, ..Script::default() }, ShortStr::new("test build").expect("short"), IDENTITY)
     }
 
     fn deliver(hub: &mut Hub<Script>, msgs: &[Message]) {
@@ -389,8 +404,10 @@ mod tests {
         })
     }
 
+    const IDENTITY: Identity = Identity { boot: 2, instance: 0xABCD };
+
     fn ready() -> Message {
-        Message::Ready { proto: PROTO, build: ShortStr::new("test build").expect("short") }
+        Message::Ready { proto: PROTO, identity: IDENTITY, build: ShortStr::new("test build").expect("short") }
     }
 
     #[test]
@@ -407,10 +424,10 @@ mod tests {
         hub.pump();
         check!(sent(&mut hub) == vec![ready()], "a reconfigure announces again");
 
-        deliver(&mut hub, &[Message::Hello { proto: 1 }]);
+        deliver(&mut hub, &[Message::Hello { proto: PROTO }]);
         check!(sent(&mut hub) == vec![ready()]);
         hub.set_mode(Mode::Running);
-        deliver(&mut hub, &[Message::Hello { proto: 1 }]);
+        deliver(&mut hub, &[Message::Hello { proto: PROTO }]);
         check!(sent(&mut hub) == vec![ready()], "also while an app runs");
     }
 
@@ -462,6 +479,32 @@ mod tests {
         hub.set_mode(Mode::Idle);
         hub.set_mode(Mode::Running);
         check!(hub.read_input(&mut [0; 4]) == 0);
+    }
+
+    #[test]
+    fn stop_reaches_a_running_app_and_stays_until_the_run_ends() {
+        let mut hub = hub();
+        check!(!hub.stop_requested());
+        hub.set_mode(Mode::Running);
+        deliver(&mut hub, &[Message::Input { bytes: b"x".to_vec() }, Message::Stop]);
+        check!(hub.stop_requested());
+        check!(hub.stop_requested(), "looking does not consume it");
+        check!(hub.next_command() == None, "it is not a command for the loader");
+        let mut buf = [0; 4];
+        check!(hub.read_input(&mut buf) == 1, "input is still delivered in order with it");
+
+        hub.set_mode(Mode::Idle);
+        check!(!hub.stop_requested(), "the next run does not inherit it");
+    }
+
+    #[test]
+    fn stop_with_no_app_running_is_ignored_and_does_not_arm_the_next_run() {
+        let mut hub = hub();
+        deliver(&mut hub, &[Message::Stop]);
+        check!(!hub.stop_requested());
+        check!(hub.stats().ignored == 1);
+        hub.set_mode(Mode::Running);
+        check!(!hub.stop_requested());
     }
 
     #[test]

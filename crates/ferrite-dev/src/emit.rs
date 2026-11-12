@@ -47,6 +47,12 @@ impl Emitter {
         self.write(line.as_bytes());
     }
 
+    /// One log record from the target, one stamped line per line of text it holds. The record
+    /// carries no newline of its own; the line ending is added here.
+    pub fn record(&mut self, bytes: &[u8]) {
+        String::from_utf8_lossy(bytes).lines().for_each(|line| self.line(line));
+    }
+
     /// One line exactly as given.
     pub fn plain(&mut self, text: &str) {
         self.write(format!("{text}\n").as_bytes());
@@ -120,6 +126,10 @@ pub mod tests {
     impl Shared {
         pub fn text(&self) -> String {
             String::from_utf8_lossy(&self.0.lock()).into_owned()
+        }
+
+        pub fn bytes(&self) -> Vec<u8> {
+            self.0.lock().clone()
         }
     }
 

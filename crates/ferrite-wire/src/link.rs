@@ -37,12 +37,13 @@
 //! | `0x05` | [`Message::Input`] | the bytes |
 //! | `0x06` | [`Message::Abort`] | empty |
 //! | `0x07` | [`Message::Reboot`] | empty |
+//! | `0x08` | [`Message::Stop`] | empty |
 //!
 //! Loader to desktop:
 //!
 //! | Code | Message | Payload |
 //! | --- | --- | --- |
-//! | `0x81` | [`Message::Ready`] | `proto: u16`, `build` (short) |
+//! | `0x81` | [`Message::Ready`] | `proto: u16`, `boot: u32`, `instance: u64`, `build` (short) |
 //! | `0x82` | [`Message::PushAccepted`] | empty |
 //! | `0x83` | [`Message::PushRejected`] | `reason`, UTF-8 |
 //! | `0x84` | [`Message::Started`] | `name` (short) |
@@ -63,12 +64,40 @@
 //! - An accepted `App` push runs: `Started`, any number of `Output`, then `Exited`. The loader arms
 //!   the firmware watchdog for `watchdog_secs` first; `0` is refused. When it expires the machine
 //!   resets and the link drops.
-//! - While an app runs, `Input` reaches the app's read side and `Reboot` resets the machine; a
-//!   `PushBegin` is refused as busy.
+//! - While an app runs, `Input` reaches the app's read side, `Stop` asks the app to finish and
+//!   `Reboot` resets the machine; a `PushBegin` is refused as busy. `Stop` is a request: an app that
+//!   never looks for it is not interrupted, and its end is still `Exited` or the watchdog.
 //! - A `Loader` push replaces the running loader: after `Started` the link drops while the new
 //!   loader brings it up, and the new loader's `Ready` is the next message.
-//! - `Fault` reports something the loader could not do (a malformed message, a watchdog that would
-//!   not arm); the text is for a human.
+//!
+//! # Identity
+//!
+//! [`Message::Ready`] carries an [`Identity`]: `instance` is random per loader start and `boot`
+//! counts how many times that instance has begun serving the link (1 for the first; a replacement
+//! loader that returns makes the old one serve again as 2). Nothing persists across a reset. A
+//! desktop remembers the identity from its first `Ready` and from it can tell a loader that
+//! replaced the old one (new `instance`), an old loader that resumed (same `instance`, higher
+//! `boot`) and a late answer to an earlier `Hello` (both the same), which it ignores.
+//!
+//! # How a push ends
+//!
+//! Every push ends in exactly one terminal message:
+//!
+//! - `Exited` when the app ran to its end;
+//! - `PushRejected` for any failure that stops the image from running, at whatever stage: a bad
+//!   announcement, a chunk or CRC mismatch, a firmware that will not load the image, a watchdog
+//!   that will not arm, a loader that cannot hand over. It can arrive after `PushEnd` and, for a
+//!   `Loader` push, after `Started`;
+//! - the replacement's `Ready`, for a `Loader` push.
+//!
+//! `Fault` is never terminal. It reports something the loader could not do that leaves the push as
+//! it was (a malformed or unknown message); the text is for a human.
+//!
+//! # Log records
+//!
+//! One [`Stream::Log`] `Output` is exactly one log record, with no trailing newline. The desktop
+//! appends the newline when it shows the record. [`Stream::Data`] is opaque bytes that the desktop
+//! passes through unchanged.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -79,7 +108,7 @@ use core::time::Duration;
 use snafu::{Snafu, ensure};
 
 /// Version carried by [`Message::Hello`] and [`Message::Ready`].
-pub const PROTO: u16 = 1;
+pub const PROTO: u16 = 2;
 
 /// First bytes of every frame.
 pub const SYNC: [u8; 2] = [0xFE, 0x4C];
@@ -156,6 +185,7 @@ pub enum MessageType {
     Input,
     Abort,
     Reboot,
+    Stop,
     Ready,
     PushAccepted,
     PushRejected,
@@ -177,6 +207,7 @@ impl MessageType {
             Self::Input => 0x05,
             Self::Abort => 0x06,
             Self::Reboot => 0x07,
+            Self::Stop => 0x08,
             Self::Ready => 0x81,
             Self::PushAccepted => 0x82,
             Self::PushRejected => 0x83,
@@ -199,6 +230,7 @@ impl From<u8> for MessageType {
             0x05 => Self::Input,
             0x06 => Self::Abort,
             0x07 => Self::Reboot,
+            0x08 => Self::Stop,
             0x81 => Self::Ready,
             0x82 => Self::PushAccepted,
             0x83 => Self::PushRejected,
@@ -245,7 +277,7 @@ impl From<u8> for PushKind {
 /// Which stream an [`Message::Output`] belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stream {
-    /// Text the app logged, one record per message.
+    /// Text the app logged: one record per message, without a newline.
     Log,
     /// Whatever the app chooses to send.
     Data,
@@ -270,6 +302,21 @@ impl From<u8> for Stream {
             1 => Self::Data,
             other => Self::Unknown(other),
         }
+    }
+}
+
+/// Which loader start a [`Message::Ready`] comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Identity {
+    /// How many times this loader instance has begun serving the link, from 1.
+    pub boot: u32,
+    /// Random per loader start; a different value is a different loader.
+    pub instance: u64,
+}
+
+impl fmt::Display for Identity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "boot {}, instance {:016x}", self.boot, self.instance)
     }
 }
 
@@ -331,8 +378,11 @@ pub enum Message {
     },
     Abort,
     Reboot,
+    /// Ask the running app to finish. Sticky until the app ends.
+    Stop,
     Ready {
         proto: u16,
+        identity: Identity,
         build: ShortStr,
     },
     PushAccepted,
@@ -368,6 +418,7 @@ impl Message {
             Self::Input { .. } => MessageType::Input,
             Self::Abort => MessageType::Abort,
             Self::Reboot => MessageType::Reboot,
+            Self::Stop => MessageType::Stop,
             Self::Ready { .. } => MessageType::Ready,
             Self::PushAccepted => MessageType::PushAccepted,
             Self::PushRejected { .. } => MessageType::PushRejected,
@@ -385,9 +436,9 @@ impl Message {
             Self::Hello { .. } => 2,
             Self::PushBegin(begin) => 1 + 8 + 4 + 4 + 1 + begin.name.len(),
             Self::PushData { bytes, .. } => 8 + bytes.len(),
-            Self::PushEnd | Self::Abort | Self::Reboot | Self::PushAccepted => 0,
+            Self::PushEnd | Self::Abort | Self::Reboot | Self::Stop | Self::PushAccepted => 0,
             Self::Input { bytes } => bytes.len(),
-            Self::Ready { build, .. } => 2 + 1 + build.len(),
+            Self::Ready { build, .. } => 2 + 4 + 8 + 1 + build.len(),
             Self::PushRejected { reason } => reason.len(),
             Self::Started { name } => 1 + name.len(),
             Self::Output { bytes, .. } => 1 + bytes.len(),
@@ -416,10 +467,12 @@ impl Message {
                 out.extend_from_slice(&offset.to_le_bytes());
                 out.extend_from_slice(bytes);
             },
-            Self::PushEnd | Self::Abort | Self::Reboot | Self::PushAccepted | Self::Unknown { .. } => {},
+            Self::PushEnd | Self::Abort | Self::Reboot | Self::Stop | Self::PushAccepted | Self::Unknown { .. } => {},
             Self::Input { bytes } => out.extend_from_slice(bytes),
-            Self::Ready { proto, build } => {
+            Self::Ready { proto, identity, build } => {
                 out.extend_from_slice(&proto.to_le_bytes());
+                out.extend_from_slice(&identity.boot.to_le_bytes());
+                out.extend_from_slice(&identity.instance.to_le_bytes());
                 short(out, build);
             },
             Self::PushRejected { reason } => out.extend_from_slice(reason.as_bytes()),
@@ -570,7 +623,12 @@ fn decode_payload(ty: MessageType, payload: &[u8]) -> Result<Message, PayloadErr
         MessageType::Input => Message::Input { bytes: r.rest().to_vec() },
         MessageType::Abort => Message::Abort,
         MessageType::Reboot => Message::Reboot,
-        MessageType::Ready => Message::Ready { proto: r.u16()?, build: r.short()? },
+        MessageType::Stop => Message::Stop,
+        MessageType::Ready => Message::Ready {
+            proto: r.u16()?,
+            identity: Identity { boot: r.u32()?, instance: r.u64()? },
+            build: r.short()?,
+        },
         MessageType::PushAccepted => Message::PushAccepted,
         MessageType::PushRejected => Message::PushRejected { reason: r.rest_text()? },
         MessageType::Started => Message::Started { name: r.short()? },
@@ -736,7 +794,7 @@ mod tests {
     /// Pinned bytes: a change here breaks the deployed other end of the link.
     fn golden() -> Vec<(&'static str, Message, &'static str)> {
         vec![
-            ("hello", Message::Hello { proto: 1 }, "fe4c010200000001008044c86f"),
+            ("hello", Message::Hello { proto: 2 }, "fe4c010200000002004317e544"),
             (
                 "push_begin",
                 Message::PushBegin(begin()),
@@ -762,10 +820,15 @@ mod tests {
             ("input", Message::Input { bytes: b"ls\n".to_vec() }, "fe4c05030000006c730aff3a20b9"),
             ("abort", Message::Abort, "fe4c0600000000bd026249"),
             ("reboot", Message::Reboot, "fe4c07000000000d2b0274"),
+            ("stop", Message::Stop, "fe4c0800000000dcbc52f6"),
             (
                 "ready",
-                Message::Ready { proto: 1, build: short("ferrite-loader 0.1.0") },
-                "fe4c8117000000010014666572726974652d6c6f6164657220302e312e309a78e2df",
+                Message::Ready {
+                    proto: 2,
+                    identity: Identity { boot: 3, instance: 0x0123_4567_89AB_CDEF },
+                    build: short("ferrite-loader 0.1.0"),
+                },
+                "fe4c8123000000020003000000efcdab896745230114666572726974652d6c6f6164657220302e312e3015748ac3",
             ),
             ("push_accepted", Message::PushAccepted, "fe4c8200000000ef14040d"),
             (
@@ -955,6 +1018,7 @@ mod tests {
     #[case::hello_trailing(MessageType::Hello, &[1, 0, 0], PayloadError::Length { len: 3 })]
     #[case::empty_message_with_payload(MessageType::PushEnd, &[0], PayloadError::Length { len: 1 })]
     #[case::exited_short(MessageType::Exited, &[0; 11], PayloadError::Length { len: 11 })]
+    #[case::ready_without_identity(MessageType::Ready, &[2, 0, 0], PayloadError::Length { len: 3 })]
     #[case::name_overruns_payload(MessageType::Started, &[5, b'a'], PayloadError::Length { len: 2 })]
     #[case::fault_not_utf8(MessageType::Fault, &[0xFF, 0xFE], PayloadError::NotUtf8)]
     #[case::name_not_utf8(MessageType::Started, &[1, 0xFF], PayloadError::NotUtf8)]

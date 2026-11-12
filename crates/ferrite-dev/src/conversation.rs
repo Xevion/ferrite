@@ -2,13 +2,14 @@
 //!
 //! The driver feeds it decoder events, the current time and link losses, and asks it which message
 //! to send next. Everything it wants shown to the user comes out as [`Effect`]s. The rules it
-//! follows are the ones in `ferrite_wire::link`, checked against the loader's hub.
+//! follows are the ones in `ferrite_wire::link`, checked against the loader's hub. Among them: a
+//! push ends only in `Exited`, `PushRejected` or a replacement's `Ready`, and `Fault` never ends it.
 
 use std::fmt;
 use std::mem;
 use std::time::{Duration, Instant};
 
-use ferrite_wire::link::{Event, Exited, Message, PROTO, PUSH_CHUNK, PushBegin, PushKind, ShortStr, Stream};
+use ferrite_wire::link::{Event, Exited, Identity, Message, PROTO, PUSH_CHUNK, PushBegin, PushKind, ShortStr, Stream};
 use snafu::Snafu;
 
 pub const HELLO_EVERY: Duration = Duration::from_millis(250);
@@ -94,7 +95,19 @@ impl fmt::Display for Stage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadyInfo {
     pub proto: u16,
+    pub identity: Identity,
     pub build: ShortStr,
+}
+
+/// What the desktop does about an interrupt (Ctrl-C).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interrupted {
+    /// `Stop` is on its way to the running app; the conversation carries on until it exits.
+    Asked,
+    /// The app was already asked: leave it running and end the conversation.
+    Leave,
+    /// Nothing to ask: end the conversation.
+    Exit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,8 +128,8 @@ pub enum ConversationError {
     #[snafu(display("the loader rejected the push{}: {reason}", if *after_end { " after the whole image was sent" } else { "" }))]
     Rejected { reason: String, after_end: bool },
 
-    #[snafu(display("the loader reported a fault: {text}"))]
-    Faulted { text: String },
+    #[snafu(display("the replacement loader returned and the old one is serving again ({identity})"))]
+    ReplacementReturned { identity: Identity },
 
     #[snafu(display("timed out after {:.1}s waiting for {waiting_for}", after.as_secs_f32()))]
     Timeout { waiting_for: Stage, after: Duration },
@@ -153,6 +166,21 @@ pub struct Conversation {
     effects: Vec<Effect>,
     result: Option<Result<Outcome, ConversationError>>,
     greeting_timed_out: bool,
+    /// Who answered the greeting, to tell a replacement loader from the old one.
+    loader: Option<Identity>,
+    /// When the loader last said anything while the app ran.
+    heard: Instant,
+    stop_after: Option<Duration>,
+    stop: StopState,
+}
+
+/// Whether the running app has been asked to stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopState {
+    NotAsked,
+    /// To be sent with the next message.
+    Pending,
+    Sent,
 }
 
 impl Conversation {
@@ -169,6 +197,38 @@ impl Conversation {
             effects: Vec::new(),
             result: None,
             greeting_timed_out: false,
+            loader: None,
+            heard: now,
+            stop_after: None,
+            stop: StopState::NotAsked,
+        }
+    }
+
+    /// Send `Stop` once the app has run this long.
+    #[must_use]
+    pub const fn with_stop_after(mut self, after: Duration) -> Self {
+        self.stop_after = Some(after);
+        self
+    }
+
+    /// The user interrupted. While an app runs the first interrupt asks it to stop and a second
+    /// gives up on it; at any other point there is nothing to ask and the run ends.
+    pub fn interrupt(&mut self) -> Interrupted {
+        match (self.stage, self.stop) {
+            (Stage::Running, StopState::NotAsked) => {
+                self.stop = StopState::Pending;
+                self.effects.push(Effect::Note(
+                    "interrupted: asking the app to stop (interrupt again to leave it running)".into(),
+                ));
+                Interrupted::Asked
+            },
+            (Stage::Running, StopState::Pending | StopState::Sent) => {
+                self.effects.push(Effect::Note(
+                    "interrupted again: leaving the app running on the target; its watchdog or `ferrite-dev loader reboot` ends it".into(),
+                ));
+                Interrupted::Leave
+            },
+            _ => Interrupted::Exit,
         }
     }
 
@@ -197,7 +257,7 @@ impl Conversation {
         let limit = match self.stage {
             Stage::Greeting => self.timeouts.ready,
             Stage::AwaitAccept | Stage::AwaitStart => self.timeouts.reply,
-            Stage::Running => self.watchdog() + self.timeouts.grace,
+            Stage::Running => return Some(self.heard + self.watchdog() + self.timeouts.grace),
             Stage::AwaitReplacement => self.timeouts.replacement,
             Stage::Sending | Stage::Finished => return None,
         };
@@ -218,6 +278,7 @@ impl Conversation {
     fn enter(&mut self, stage: Stage, now: Instant) {
         self.stage = stage;
         self.entered = now;
+        self.heard = now;
     }
 
     fn finish(&mut self, result: Result<Outcome, ConversationError>) {
@@ -305,7 +366,18 @@ impl Conversation {
                     Some(Message::PushEnd)
                 }
             },
-            Stage::AwaitStart | Stage::Running | Stage::Finished => None,
+            Stage::Running => {
+                let due = self.stop_after.is_some_and(|after| now >= self.entered + after);
+                if due && self.stop == StopState::NotAsked {
+                    self.stop = StopState::Pending;
+                    self.effects.push(Effect::Note("--stop-after reached: asking the app to stop".into()));
+                }
+                (self.stop == StopState::Pending).then(|| {
+                    self.stop = StopState::Sent;
+                    Message::Stop
+                })
+            },
+            Stage::AwaitStart | Stage::Finished => None,
         }
     }
 
@@ -323,17 +395,17 @@ impl Conversation {
     }
 
     fn on_message(&mut self, msg: Message, now: Instant) {
+        if self.stage == Stage::Running {
+            self.heard = now;
+        }
         match (msg, self.stage) {
             (Message::Output { stream, bytes }, _) => self.effects.push(Effect::Output { stream, bytes }),
-            (Message::Fault { text }, stage) => {
-                self.effects.push(Effect::Fault(text.clone()));
-                if matches!(stage, Stage::AwaitStart | Stage::AwaitReplacement) {
-                    self.finish(Err(ConversationError::Faulted { text }));
-                }
+            (Message::Fault { text }, _) => self.effects.push(Effect::Fault(text)),
+            (Message::Ready { proto, identity, build }, Stage::Greeting) => {
+                self.ready(ReadyInfo { proto, identity, build }, now);
             },
-            (Message::Ready { proto, build }, Stage::Greeting) => self.ready(ReadyInfo { proto, build }, now),
-            (Message::Ready { proto, build }, Stage::AwaitReplacement) => {
-                self.finish(Ok(Outcome::Replaced(ReadyInfo { proto, build })));
+            (Message::Ready { proto, identity, build }, Stage::AwaitReplacement) => {
+                self.replacement_ready(ReadyInfo { proto, identity, build });
             },
             // Each Hello is answered, so replies to the repeats arrive after the first Ready.
             (Message::Ready { .. }, Stage::AwaitAccept) => {},
@@ -341,8 +413,12 @@ impl Conversation {
                 self.effects.push(Effect::Accepted);
                 self.enter(Stage::Sending, now);
             },
-            (Message::PushRejected { reason }, stage @ (Stage::AwaitAccept | Stage::Sending | Stage::AwaitStart)) => {
-                self.finish(Err(ConversationError::Rejected { reason, after_end: stage == Stage::AwaitStart }));
+            (
+                Message::PushRejected { reason },
+                stage @ (Stage::AwaitAccept | Stage::Sending | Stage::AwaitStart | Stage::AwaitReplacement),
+            ) => {
+                let after_end = matches!(stage, Stage::AwaitStart | Stage::AwaitReplacement);
+                self.finish(Err(ConversationError::Rejected { reason, after_end }));
             },
             (Message::Started { name }, Stage::AwaitStart) => {
                 self.effects.push(Effect::Started(name));
@@ -363,10 +439,27 @@ impl Conversation {
             return;
         }
         self.effects.push(Effect::Ready(info.clone()));
+        self.loader = Some(info.identity);
         self.next_hello = None;
         match self.goal {
             Goal::Handshake => self.finish(Ok(Outcome::Ready(info))),
             Goal::Push(_) => self.enter(Stage::AwaitAccept, now),
+        }
+    }
+
+    /// A `Ready` while a replacement is awaited: only a loader with another instance ID is it.
+    fn replacement_ready(&mut self, info: ReadyInfo) {
+        if info.proto != PROTO {
+            self.finish(Err(ConversationError::ProtoMismatch { ours: PROTO, theirs: info.proto }));
+            return;
+        }
+        match self.loader {
+            Some(old) if old.instance == info.identity.instance => {
+                if info.identity.boot > old.boot {
+                    self.finish(Err(ConversationError::ReplacementReturned { identity: info.identity }));
+                }
+            },
+            _ => self.finish(Ok(Outcome::Replaced(info))),
         }
     }
 }
@@ -384,8 +477,15 @@ mod tests {
         ShortStr::new(text).expect("short enough")
     }
 
+    const OLD: Identity = Identity { boot: 1, instance: 0xAAAA };
+    const NEW: Identity = Identity { boot: 1, instance: 0xBBBB };
+
     fn ready(proto: u16) -> Message {
-        Message::Ready { proto, build: short("ferrite-loader test") }
+        ready_as(proto, OLD)
+    }
+
+    fn ready_as(proto: u16, identity: Identity) -> Message {
+        Message::Ready { proto, identity, build: short("ferrite-loader test") }
     }
 
     fn plan(kind: PushKind, len: usize) -> PushPlan {
@@ -575,9 +675,45 @@ mod tests {
 
         check!(rig.machine.link_lost(rig.now), "the link dropping is expected here");
         check!(rig.say() == [Message::Hello { proto: PROTO }], "greets the new loader once the link is back");
-        rig.hear(ready(PROTO));
+        rig.hear(ready_as(PROTO, NEW));
         assert!(let Some(Ok(Outcome::Replaced(info))) = rig.machine.take_result());
-        check!(info.proto == PROTO);
+        check!((info.proto, info.identity) == (PROTO, NEW));
+    }
+
+    #[test]
+    fn only_a_ready_with_a_new_instance_completes_a_loader_push() {
+        let mut rig = Rig::push(PushKind::Loader, 10);
+        rig.push_it_all();
+        rig.hear(Message::Started { name: short("app.efi") });
+
+        rig.hear(ready(PROTO));
+        check!(rig.machine.take_result().is_none(), "a late answer from the old loader is ignored");
+        check!(rig.machine.stage() == Stage::AwaitReplacement);
+
+        rig.hear(ready_as(PROTO, NEW));
+        assert!(let Some(Ok(Outcome::Replaced(info))) = rig.machine.take_result());
+        check!(info.identity.instance == NEW.instance);
+    }
+
+    #[test]
+    fn a_replacement_that_returned_is_reported_not_mistaken_for_success() {
+        let mut rig = Rig::push(PushKind::Loader, 10);
+        rig.push_it_all();
+        rig.hear(Message::Started { name: short("app.efi") });
+        let resumed = Identity { boot: OLD.boot + 1, ..OLD };
+        rig.hear(ready_as(PROTO, resumed));
+        check!(rig.machine.take_result() == Some(Err(ConversationError::ReplacementReturned { identity: resumed })));
+    }
+
+    #[test]
+    fn a_replacement_of_another_protocol_is_refused() {
+        let mut rig = Rig::push(PushKind::Loader, 10);
+        rig.push_it_all();
+        rig.hear(Message::Started { name: short("app.efi") });
+        rig.hear(ready_as(PROTO + 1, NEW));
+        check!(
+            rig.machine.take_result() == Some(Err(ConversationError::ProtoMismatch { ours: PROTO, theirs: PROTO + 1 }))
+        );
     }
 
     #[test]
@@ -586,7 +722,7 @@ mod tests {
         rig.push_it_all();
         check!(rig.machine.link_lost(rig.now));
         check!(rig.machine.stage() == Stage::AwaitReplacement);
-        rig.hear(ready(PROTO));
+        rig.hear(ready_as(PROTO, NEW));
         assert!(let Some(Ok(Outcome::Replaced(_))) = rig.machine.take_result());
     }
 
@@ -607,20 +743,117 @@ mod tests {
     }
 
     #[test]
-    fn a_fault_before_started_ends_the_push_but_one_while_running_is_only_shown() {
-        let mut rig = Rig::push(PushKind::App, 10);
-        rig.push_it_all();
-        rig.hear(Message::Fault { text: "watchdog did not arm".into() });
-        check!(
-            rig.machine.take_result() == Some(Err(ConversationError::Faulted { text: "watchdog did not arm".into() }))
-        );
+    fn a_fault_is_only_shown_and_a_rejection_after_the_end_or_the_handover_is_what_ends_a_push() {
+        for stage_reached in [Stage::AwaitStart, Stage::Running, Stage::AwaitReplacement] {
+            let kind = if stage_reached == Stage::AwaitReplacement { PushKind::Loader } else { PushKind::App };
+            let mut rig = Rig::push(kind, 10);
+            rig.push_it_all();
+            if stage_reached != Stage::AwaitStart {
+                rig.hear(Message::Started { name: short("app.efi") });
+            }
+            check!(rig.machine.stage() == stage_reached);
+            rig.hear(Message::Fault { text: "malformed Input".into() });
+            check!(rig.machine.take_result().is_none(), "{stage_reached:?}");
+            check!(rig.machine.take_effects().contains(&Effect::Fault("malformed Input".into())));
+        }
 
+        let mut rig = Rig::push(PushKind::Loader, 10);
+        rig.push_it_all();
+        rig.hear(Message::Started { name: short("app.efi") });
+        rig.hear(Message::PushRejected { reason: "app.efi not started: the link would not uninstall".into() });
+        assert!(let Some(Err(ConversationError::Rejected { after_end: true, .. })) = rig.machine.take_result());
+    }
+
+    fn running() -> Rig {
         let mut rig = Rig::push(PushKind::App, 10);
         rig.push_it_all();
         rig.hear(Message::Started { name: short("app.efi") });
-        rig.hear(Message::Fault { text: "malformed Input".into() });
-        check!(rig.machine.take_result().is_none());
-        check!(rig.machine.take_effects().contains(&Effect::Fault("malformed Input".into())));
+        check!(rig.machine.stage() == Stage::Running);
+        rig
+    }
+
+    #[test]
+    fn stop_after_sends_stop_once_when_the_app_has_run_that_long() {
+        let mut rig = running();
+        rig.machine = rig.machine.with_stop_after(Duration::from_secs(90));
+        rig.advance(Duration::from_secs(89));
+        check!(rig.say().is_empty());
+        rig.advance(Duration::from_secs(1));
+        check!(rig.say() == [Message::Stop]);
+        rig.advance(Duration::from_secs(60));
+        check!(rig.say().is_empty(), "Stop goes out once");
+
+        rig.hear(Message::Exited(Exited::new(0, Duration::from_secs(91))));
+        assert!(let Some(Ok(Outcome::Exited(exited))) = rig.machine.take_result());
+        check!(exited.status == 0);
+    }
+
+    #[test]
+    fn stop_after_counts_from_started_not_from_the_start_of_the_push() {
+        let mut rig = Rig::push(PushKind::App, 10);
+        rig.machine = rig.machine.with_stop_after(Duration::from_secs(10));
+        rig.push_it_all();
+        rig.advance(Duration::from_secs(12));
+        check!(rig.say().is_empty(), "the app has not started");
+        rig.hear(Message::Started { name: short("app.efi") });
+        rig.advance(Duration::from_secs(9));
+        check!(rig.say().is_empty());
+        rig.advance(Duration::from_secs(1));
+        check!(rig.say() == [Message::Stop]);
+    }
+
+    #[test]
+    fn the_first_interrupt_asks_the_app_to_stop_and_the_second_leaves_it_running() {
+        let mut rig = running();
+        check!(rig.machine.interrupt() == Interrupted::Asked);
+        check!(rig.say() == [Message::Stop]);
+        check!(rig.say().is_empty());
+        check!(!rig.machine.is_finished(), "still waiting for the app's own exit");
+
+        check!(rig.machine.interrupt() == Interrupted::Leave);
+        let notes: Vec<_> = rig
+            .machine
+            .take_effects()
+            .into_iter()
+            .filter_map(|e| if let Effect::Note(text) = e { Some(text) } else { None })
+            .collect();
+        check!(notes.iter().any(|n| n.contains("leaving the app running")), "{notes:?}");
+        check!(rig.say().is_empty(), "no second Stop");
+    }
+
+    #[test]
+    fn an_interrupt_after_an_asked_stop_does_not_repeat_it_when_stop_after_comes_due() {
+        let mut rig = running();
+        rig.machine = rig.machine.with_stop_after(Duration::from_secs(5));
+        check!(rig.machine.interrupt() == Interrupted::Asked);
+        rig.advance(Duration::from_secs(6));
+        check!(rig.say() == [Message::Stop]);
+    }
+
+    #[test]
+    fn an_interrupt_with_no_app_running_just_ends_the_run() {
+        let mut rig = Rig::push(PushKind::App, 10);
+        check!(rig.machine.interrupt() == Interrupted::Exit, "greeting");
+        rig.greet();
+        check!(rig.machine.interrupt() == Interrupted::Exit, "waiting for the push to be accepted");
+
+        let mut rig = Rig::push(PushKind::Loader, 10);
+        rig.push_it_all();
+        rig.hear(Message::Started { name: short("app.efi") });
+        check!(rig.machine.interrupt() == Interrupted::Exit, "waiting for a replacement loader");
+    }
+
+    #[test]
+    fn a_running_app_that_keeps_talking_is_not_timed_out_at_its_watchdog() {
+        let mut rig = running();
+        rig.advance(WATCHDOG_GRACE + Duration::from_secs(50));
+        rig.hear(Message::Output { stream: Stream::Log, bytes: b"alive".to_vec() });
+        rig.advance(WATCHDOG_GRACE + Duration::from_secs(59));
+        rig.machine.tick(rig.now);
+        check!(rig.machine.take_result().is_none(), "the deadline moved with the last word from the loader");
+        rig.advance(Duration::from_secs(1));
+        rig.machine.tick(rig.now);
+        assert!(let Some(Err(ConversationError::Timeout { waiting_for: Stage::Running, .. })) = rig.machine.take_result());
     }
 
     #[test]
