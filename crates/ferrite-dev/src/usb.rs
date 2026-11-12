@@ -115,31 +115,41 @@ pub trait Inbound: Read {
 
 /// The writing half of a [`Duplex`].
 pub trait Outbound: Write {
-    /// Hand buffered bytes to the host controller without waiting for them to be sent.
-    fn submit(&mut self);
+    /// Hand the burst written so far to the host controller without waiting for it, ending it with a
+    /// short or zero-length packet so the device completes its transfer. Full transfers in the
+    /// middle of a stream are submitted by `write` itself, without that terminator.
+    fn submit_end(&mut self);
     /// Send what is buffered and wait for it, for a bounded time.
     fn quiesce(&mut self);
 }
 
 /// Both endpoints as one `Read + Write` link.
 ///
-/// Writes are buffered into large transfers, and anything left over goes out before the next
-/// read waits, which is what a request and its reply need. A read that returns no bytes is
+/// Writes are buffered into large transfers, and a burst that is still open goes out, terminated,
+/// before the next read waits or on flush, which is what a request and its reply need. A read that returns no bytes is
 /// reported as idle, never as a closed link.
 pub struct Duplex<R: Inbound, W: Outbound> {
     reader: R,
     writer: W,
+    /// Bytes were written since the last burst was ended.
+    open_burst: bool,
 }
 
 impl<R: Inbound, W: Outbound> Duplex<R, W> {
     pub const fn new(reader: R, writer: W) -> Self {
-        Self { reader, writer }
+        Self { reader, writer, open_burst: false }
+    }
+
+    fn end_burst(&mut self) {
+        if std::mem::take(&mut self.open_burst) {
+            self.writer.submit_end();
+        }
     }
 }
 
 impl<R: Inbound, W: Outbound> Read for Duplex<R, W> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.writer.submit();
+        self.end_burst();
         match self.reader.read(buf) {
             // The device ends a burst with a zero-length packet: a terminator, not the end of the link.
             Ok(0) if !buf.is_empty() => Err(io::ErrorKind::TimedOut.into()),
@@ -150,11 +160,13 @@ impl<R: Inbound, W: Outbound> Read for Duplex<R, W> {
 
 impl<R: Inbound, W: Outbound> Write for Duplex<R, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.writer.write(buf).map_err(link_error)
+        let written = self.writer.write(buf).map_err(link_error)?;
+        self.open_burst |= written > 0;
+        Ok(written)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.writer.submit();
+        self.end_burst();
         Ok(())
     }
 }
@@ -193,8 +205,8 @@ impl Inbound for EndpointRead<Bulk> {
 }
 
 impl Outbound for EndpointWrite<Bulk> {
-    fn submit(&mut self) {
-        Self::submit(self);
+    fn submit_end(&mut self) {
+        Self::submit_end(self);
     }
 
     fn quiesce(&mut self) {
@@ -441,6 +453,10 @@ mod tests {
         }
     }
 
+    const PACKET: usize = 1024;
+    const TRANSFER: usize = 64 * 1024;
+
+    /// Buffers into 64 KiB transfers and submits a full one by itself, as nusb's writer does.
     struct FakeOut {
         log: Log,
         buffered: usize,
@@ -448,8 +464,13 @@ mod tests {
 
     impl Write for FakeOut {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.buffered += buf.len();
-            Ok(buf.len())
+            let n = buf.len().min(TRANSFER - self.buffered);
+            self.buffered += n;
+            if self.buffered == TRANSFER {
+                self.buffered = 0;
+                self.log.borrow_mut().push("full".into());
+            }
+            Ok(n)
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -458,9 +479,13 @@ mod tests {
     }
 
     impl Outbound for FakeOut {
-        fn submit(&mut self) {
-            if std::mem::take(&mut self.buffered) > 0 {
-                self.log.borrow_mut().push("submit".into());
+        fn submit_end(&mut self) {
+            let sent = std::mem::take(&mut self.buffered);
+            if sent > 0 {
+                self.log.borrow_mut().push(format!("send {sent}"));
+            }
+            if sent.is_multiple_of(PACKET) {
+                self.log.borrow_mut().push("zlp".into());
             }
         }
 
@@ -490,17 +515,33 @@ mod tests {
         )
     }
 
-    #[test]
-    fn buffered_writes_go_out_before_the_next_read_waits() {
+    #[rstest]
+    #[case::short(5, &["send 5", "read"])]
+    #[case::one_packet(PACKET, &["send 1024", "zlp", "read"])]
+    #[case::whole_transfer(TRANSFER, &["full", "zlp", "read"])]
+    #[case::transfer_and_a_few_bytes(TRANSFER + 5, &["full", "send 5", "read"])]
+    #[case::transfer_and_a_packet(TRANSFER + PACKET, &["full", "send 1024", "zlp", "read"])]
+    fn a_burst_ends_with_a_short_or_zero_length_packet_before_the_next_read(#[case] len: usize, #[case] want: &[&str]) {
         let log = Log::default();
         let mut link = duplex(&log, None);
-        assert!(let Ok(()) = link.write_all(b"probe"));
-        check!(log.borrow().is_empty(), "a write alone sends nothing");
+        assert!(let Ok(()) = link.write_all(&vec![7; len]));
+        check!(log.borrow().iter().all(|e| e != "read" && e != "zlp"), "a write alone ends nothing");
         let mut buf = [0; 8];
         check!(link.read(&mut buf).ok() == Some(5));
-        check!(*log.borrow() == ["submit", "read"]);
-        check!(link.read(&mut buf).is_err());
-        check!(*log.borrow() == ["submit", "read", "read"], "nothing buffered, nothing submitted");
+        check!(*log.borrow() == want);
+    }
+
+    #[test]
+    fn nothing_is_submitted_when_nothing_was_written_and_a_flushed_burst_is_not_ended_twice() {
+        let log = Log::default();
+        let mut link = duplex(&log, None);
+        let mut buf = [0; 8];
+        drop(link.read(&mut buf));
+        check!(*log.borrow() == ["read"], "an idle read sends no zero-length packet");
+        assert!(let Ok(()) = link.write_all(b"abc"));
+        assert!(let Ok(()) = link.flush());
+        drop(link.read(&mut buf));
+        check!(*log.borrow() == ["read", "send 3", "read"]);
     }
 
     #[rstest]

@@ -83,7 +83,7 @@ pub struct LinkArgs {
     #[arg(long, value_name = "SIZE", default_value_t = DEFAULT_IN_SIZE, value_parser = parse_size)]
     pub usb_in_size: usize,
 
-    /// USB transport: OUT transfers kept in flight
+    /// USB transport: OUT transfers kept in flight; 8 x 64 KiB was enough on the target, 32 measured the same
     #[arg(long, value_name = "N", default_value_t = DEFAULT_OUT_TRANSFERS, value_parser = parse_count)]
     pub usb_out_transfers: usize,
 
