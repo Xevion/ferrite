@@ -7,7 +7,7 @@ use uefi::runtime::{self, ResetType, VariableVendor};
 use uefi::{Status, cstr16, guid, system};
 
 use crate::bootlog::BootLog;
-use crate::clock;
+use crate::{clock, link, logger};
 
 /// A systemd-boot run is normally driven remotely, so nobody is waiting to read the screen.
 const UNATTENDED_WAIT: Duration = Duration::from_secs(3);
@@ -16,8 +16,15 @@ const UNATTENDED_WAIT: Duration = Duration::from_secs(3);
 ///
 /// With no key, a run launched by systemd-boot cold-resets so the machine lands
 /// back in its default OS; otherwise this returns and the caller exits to the firmware.
+/// Under the loader (its link protocol is installed) it saves the report and returns at
+/// once, so the loader gets control back.
 #[expect(clippy::disallowed_methods, reason = "session is the one home of the reset")]
 pub fn finish(report: &mut BootLog, wait: Duration) {
+    if link::is_present() {
+        let path = if report.flush() { report.display_path() } else { "NOT written" };
+        log::info!("report file: {path}");
+        return;
+    }
     let unattended = launched_by_systemd_boot();
     let wait = if unattended { wait.min(UNATTENDED_WAIT) } else { wait };
     let saved = report.flush();
@@ -27,6 +34,16 @@ pub fn finish(report: &mut BootLog, wait: Duration) {
     if !wait_for_key_or_timeout(wait) && unattended {
         runtime::reset(ResetType::COLD, Status::SUCCESS, None);
     }
+}
+
+/// Cold-reset now, after saving the log: the loader's answer to a reboot request.
+///
+/// The machine lands in the default OS, because the one-shot boot entry that started the loader
+/// was spent when it started.
+#[expect(clippy::disallowed_methods, reason = "session is the one home of the reset")]
+pub fn reboot() -> ! {
+    let _ = logger::with(BootLog::flush);
+    runtime::reset(ResetType::COLD, Status::SUCCESS, None)
 }
 
 /// True when systemd-boot chainloaded us: it publishes `LoaderInfo` before
@@ -85,7 +102,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     static PANICKING: AtomicBool = AtomicBool::new(false);
 
     if !PANICKING.swap(true, Ordering::Relaxed) {
-        if !crate::logger::record_panic(info) {
+        if !logger::record_panic(info) {
             uefi::println!("[PANIC]: {info}");
         }
         if boot_services_active() {

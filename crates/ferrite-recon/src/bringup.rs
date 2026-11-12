@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use ferrite_efi::clock::Clock;
 use ferrite_efi::dma::iommu_handle_count;
+use ferrite_efi::link;
 use ferrite_efi::xhci::{self, Controller, OpenDbc};
 use ferrite_hal::{Clock as _, Instant, PciAddress};
 use ferrite_xhci::{Config, State, XhciDevice};
@@ -76,6 +77,17 @@ fn describe(dev: &XhciDevice) {
         HexOrNone(dev.legacy()),
         Ranges(dev.usb3_ports()),
     );
+}
+
+/// Whether the resident loader owns the DbC, which an app that opens it itself must not touch.
+///
+/// Logs the refusal, so the caller only has to return.
+pub fn owned_by_loader(app: &str) -> bool {
+    let owned = link::is_present();
+    if owned {
+        log::error!("{app} opens the DbC itself, but the loader owns it; run {app} without the loader");
+    }
+    owned
 }
 
 /// A configured DbC, and the controller listing if the link came up before it ran.

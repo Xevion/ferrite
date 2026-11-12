@@ -808,7 +808,9 @@ name = "ferrite-efi"
 version = "0.1.0"
 dependencies = [
  "assert2",
+ "crc32fast",
  "ferrite-hal",
+ "ferrite-wire",
  "ferrite-xhci",
  "log",
  "rstest 0.28.0",
@@ -819,6 +821,19 @@ dependencies = [
 [[package]]
 name = "ferrite-hal"
 version = "0.1.0"
+
+[[package]]
+name = "ferrite-loader"
+version = "0.1.0"
+dependencies = [
+ "ferrite-efi",
+ "ferrite-hal",
+ "ferrite-recon",
+ "ferrite-wire",
+ "ferrite-xhci",
+ "log",
+ "uefi",
+]
 
 [[package]]
 name = "ferrite-recon"
@@ -864,6 +879,7 @@ dependencies = [
  "assert2",
  "crc32fast",
  "rstest 0.28.0",
+ "snafu",
 ]
 
 [[package]]

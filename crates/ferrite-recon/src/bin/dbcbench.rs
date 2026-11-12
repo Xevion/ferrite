@@ -132,6 +132,10 @@ fn main() -> Status {
     let clock = logger::with(|log| log.clock()).unwrap_or_else(Clock::start);
     let start = clock.now();
     log::info!("ferrite-uefi :: dbcbench - DbC throughput and latency");
+    if bringup::owned_by_loader("dbcbench") {
+        logger::with(|log| session::finish(log, EXIT_AFTER));
+        return Status::UNSUPPORTED;
+    }
 
     let link =
         bringup::bring_up(clock, start, &Config { in_trb: InTrbSize::Kib16, ..Config::default() }).map(|mut link| {

@@ -11,7 +11,9 @@ publish.workspace = true
 panic-handler = []
 
 [dependencies]
+crc32fast.workspace = true
 ferrite-hal.workspace = true
+ferrite-wire.workspace = true
 ferrite-xhci.workspace = true
 log.workspace = true
 snafu.workspace = true

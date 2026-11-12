@@ -6,18 +6,18 @@
 | --- | --- | --- |
 | `ferrite-hal` | `no_std` | Platform traits (MMIO, PCI config, DMA, clock, delay) and the address, unit and index types every driver shares |
 | `ferrite-xhci` | `no_std` + `alloc` | xHCI Debug Capability driver, written only against `ferrite-hal` |
-| `ferrite-efi` | `no_std` + `uefi` | UEFI backends for the HAL traits, the boot-volume log, the `log` sink, unattended exit |
+| `ferrite-efi` | `no_std` + `uefi` | UEFI backends for the HAL traits, the boot-volume log, the `log` sink, unattended exit, the link protocol the loader shares with its apps |
 | `ferrite-testing` | std | Host-only test doubles: mock HAL, simulated DbC register file |
 | `ferrite-uefi` | `no_std`, UEFI app | Memory sweep, ratatui UI, SNP + smoltcp networking, mDNS, HTTP status page |
 | `ferrite-recon` | `no_std`, UEFI apps | `pciscan`, `xhciscan`, `dbcping`, `dbcbench` |
-| `ferrite-wire` | `no_std` + `alloc` | Message formats spoken over the DbC link (today the benchmark frames and handshake), shared by both ends |
+| `ferrite-loader` | `no_std`, UEFI app | Resident loader: keeps the DbC up, receives pushed `.efi` images and runs them under a watchdog |
+| `ferrite-wire` | `no_std` + `alloc` | Message formats spoken over the DbC link (the benchmark frames and the loader's `link` protocol), shared by both ends |
 | `ferrite-dev` | std | Desktop tool: `log` (DbC capture), `bench` (dbcbench peer), `run` (one-shot cycle on the laptop); later `push` for the loader |
 
 Planned, created when their milestone starts:
 
 | Crate | Mode | Contents |
 | --- | --- | --- |
-| `ferrite-loader` | `no_std`, UEFI app | Resident loader: receives a new `.efi` over DbC and starts it |
 | `ferrite-lkpi` | `no_std` + `alloc` | Linux kernel API shim the Wi-Fi drivers link against |
 | `ferrite-wifi-sys` | `no_std` | Pinned Linux driver C built by `build.rs`, plus bindings |
 | `ferrite-wifi` | `no_std` + `alloc` | WPA2-PSK and the station state machine |

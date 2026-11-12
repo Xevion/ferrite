@@ -14,6 +14,7 @@ publish = false
 [workspace.dependencies]
 ferrite-efi = { path = "crates/ferrite-efi" }
 ferrite-hal = { path = "crates/ferrite-hal" }
+ferrite-recon = { path = "crates/ferrite-recon" }
 ferrite-testing = { path = "crates/ferrite-testing" }
 ferrite-wire = { path = "crates/ferrite-wire" }
 ferrite-xhci = { path = "crates/ferrite-xhci" }

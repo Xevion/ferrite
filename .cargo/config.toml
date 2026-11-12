@@ -1,4 +1,4 @@
 [alias]
-efi-build = "build --target x86_64-unknown-uefi -p ferrite-uefi -p ferrite-recon"
-efi-check = "check --target x86_64-unknown-uefi -p ferrite-uefi -p ferrite-recon"
-efi-clippy = "clippy --target x86_64-unknown-uefi -p ferrite-uefi -p ferrite-recon"
+efi-build = "build --target x86_64-unknown-uefi -p ferrite-uefi -p ferrite-recon -p ferrite-loader"
+efi-check = "check --target x86_64-unknown-uefi -p ferrite-uefi -p ferrite-recon -p ferrite-loader"
+efi-clippy = "clippy --target x86_64-unknown-uefi -p ferrite-uefi -p ferrite-recon -p ferrite-loader"

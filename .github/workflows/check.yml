@@ -79,6 +79,7 @@ jobs:
     env:
       HOST: >-
         --workspace --exclude ferrite --exclude ferrite-uefi --exclude ferrite-recon
+        --exclude ferrite-loader
     steps:
       - uses: actions/checkout@v7
 

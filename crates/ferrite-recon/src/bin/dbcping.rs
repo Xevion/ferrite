@@ -48,6 +48,10 @@ fn main() -> Status {
     let clock = logger::with(|log| log.clock()).unwrap_or_else(Clock::start);
     let start = clock.now();
     log::info!("ferrite-uefi :: dbcping - xHCI Debug Capability bring-up");
+    if bringup::owned_by_loader("dbcping") {
+        logger::with(|log| session::finish(log, EXIT_AFTER));
+        return Status::UNSUPPORTED;
+    }
 
     let link = bringup::bring_up(clock, start, &Config::default()).map(|mut link| {
         ping(&mut link, clock);

@@ -8,13 +8,14 @@ use core::ptr::NonNull;
 
 use ferrite_hal::{PciAddress, PhysAddr};
 use ferrite_xhci::{Config, Dbc, RegSnapshot, XhciDevice, XhciFunction};
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use uefi::boot::{self, EventType, Tpl};
 use uefi::proto::pci::root_bridge::PciRootBridgeIo;
 use uefi::{Event, Handle};
 
 use crate::clock::Clock;
 use crate::dma::{BootPages, BootServicesDma};
+use crate::link;
 use crate::pci::RootBridge;
 
 /// The DbC driver on the UEFI backends.
@@ -40,6 +41,9 @@ pub enum Error {
 
     #[snafu(display("registering the ExitBootServices hook failed"))]
     ExitHook { source: uefi::Error },
+
+    #[snafu(display("a loader already owns the DbC and apps must use its link"))]
+    LinkOwned,
 }
 
 /// An xHCI function and the root bridge it sits behind.
@@ -126,7 +130,10 @@ pub fn find_xhci(addr: PciAddress) -> Result<Option<Controller>, Error> {
 }
 
 /// Bring the controller up for DMA, probe it and open its DbC.
+///
+/// Refused while a loader's link is installed: two drivers on one DbC would corrupt both.
 pub fn open(ctrl: &Controller, cfg: &Config, clock: Clock) -> Result<OpenDbc, Error> {
+    ensure!(!link::is_present(), LinkOwnedSnafu);
     let mut rb = RootBridge::open(ctrl.bridge).context(OpenBridgeSnafu)?;
     let mut function = ctrl.function.clone();
     if !function.decoding() {

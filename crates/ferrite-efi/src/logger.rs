@@ -1,4 +1,4 @@
-//! The `log` sink for every app: records go to the [`BootLog`].
+//! The `log` sink for every app: records go to the [`BootLog`] and, under the loader, to its link.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -11,6 +11,7 @@ use log::{Level, LevelFilter, Log, Metadata, Record};
 
 use crate::bootlog::BootLog;
 use crate::clock::Clock;
+use crate::link::{Link, Stream};
 
 /// Records kept while the log is borrowed; further ones are dropped.
 const MAX_DEFERRED: usize = 64;
@@ -24,6 +25,7 @@ struct Sink {
     log: RefCell<Option<BootLog>>,
     clock: Cell<Option<Clock>>,
     deferred: RefCell<Vec<Deferred>>,
+    link: Cell<Option<Link>>,
 }
 
 // SAFETY: UEFI boot services run single-threaded on the BSP, so the cells are never shared across threads.
@@ -32,7 +34,8 @@ unsafe impl Sync for Sink {}
 #[expect(clippy::non_send_fields_in_send_ty, reason = "the log trait requires Send and nothing is ever sent")]
 unsafe impl Send for Sink {}
 
-static SINK: Sink = Sink { log: RefCell::new(None), clock: Cell::new(None), deferred: RefCell::new(Vec::new()) };
+static SINK: Sink =
+    Sink { log: RefCell::new(None), clock: Cell::new(None), deferred: RefCell::new(Vec::new()), link: Cell::new(None) };
 
 impl Sink {
     fn format(&self, level: Level, args: fmt::Arguments<'_>) -> String {
@@ -49,9 +52,13 @@ impl Sink {
     }
 
     /// Write straight to the log, or park the line if the log is already borrowed (a record logged
-    /// from inside a save or a `with` closure), to be written on the next release.
+    /// from inside a save or a `with` closure), to be written on the next release. The link gets
+    /// the record at once either way; a full link queue loses it from the link only.
     fn emit(&self, level: Level, args: fmt::Arguments<'_>) {
         let line = self.format(level, args);
+        if let Some(link) = self.link.get() {
+            let _ = link.write(Stream::Log, line.as_bytes());
+        }
         let urgent = level == Level::Error;
         let Ok(mut slot) = self.log.try_borrow_mut() else {
             self.defer(Deferred { line, urgent });
@@ -105,12 +112,26 @@ impl Log for Sink {
 }
 
 /// Install the sink and adopt the log's clock for timestamps. Call once, right after `uefi::helpers::init`.
+///
+/// When a loader's link is installed, every record is also sent through it.
 pub fn init(log: BootLog, level: LevelFilter) {
     SINK.clock.set(Some(log.clock()));
+    attach_link();
     *SINK.log.borrow_mut() = Some(log);
     if log::set_logger(&SINK).is_ok() {
         log::set_max_level(level);
     }
+}
+
+/// Start sending records through the loader's link if one is installed now. The loader calls this
+/// after installing its own link.
+pub fn attach_link() {
+    SINK.link.set(Link::locate());
+}
+
+/// Stop sending records through the link, before its protocol is uninstalled.
+pub fn detach_link() {
+    SINK.link.set(None);
 }
 
 /// Run `f` on the installed log, or return `None` before `init` or while it is borrowed.

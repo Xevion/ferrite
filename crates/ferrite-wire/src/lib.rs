@@ -8,3 +8,4 @@ extern crate alloc;
 extern crate std;
 
 pub mod bench;
+pub mod link;
