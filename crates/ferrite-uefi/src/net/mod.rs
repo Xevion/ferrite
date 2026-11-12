@@ -18,6 +18,7 @@ use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr};
 use snafu::{OptionExt as _, ResultExt as _, Snafu};
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams};
+use uefi::proto::network::EfiMacAddr;
 use uefi::proto::network::snp::{NetworkState, ReceiveFlags, SimpleNetwork};
 use uefi::proto::rng::Rng;
 use uefi::{Handle, Status};
@@ -401,39 +402,55 @@ fn media_present(handle: Handle) -> bool {
     snp.is_ok_and(|snp| bool::from(snp.mode().media_present))
 }
 
+/// The Ethernet group address for an IPv4 multicast group: 01:00:5e and the group's low 23 bits.
+fn ipv4_group_mac(group: Ipv4Address) -> EfiMacAddr {
+    let [_, b, c, d] = group.octets();
+    let mut mac = EfiMacAddr([0; 32]);
+    mac.0[..6].copy_from_slice(&[0x01, 0x00, 0x5E, b & 0x7F, c, d]);
+    mac
+}
+
 /// Enable unicast and broadcast, plus the best multicast mode the NIC supports:
 /// the mDNS group in the hardware filter, else all multicast, else promiscuous.
+/// MULTICAST is tried even when the mode reports no filter slots, because
+/// iPXE's SNP never fills in that count and accepts any filter list.
 fn configure_filters(handle: Handle, snp: &SimpleNetwork) -> Result<(), NetError> {
     let mode = snp.mode();
     let supported = ReceiveFlags::from_bits_truncate(mode.receive_filter_mask);
     let base = (ReceiveFlags::UNICAST | ReceiveFlags::BROADCAST) & supported;
-    let group_mac = snp.mcast_ip_to_mac(false, core::net::Ipv4Addr::new(224, 0, 0, 251).into());
-    let group = group_mac.as_ref().ok().filter(|_| mode.max_mcast_filter_count > 0).map(core::slice::from_ref);
+    let group = [ipv4_group_mac(MDNS_ADDR)];
+    log::debug!(
+        "net: receive filters supported {supported:?}, {} multicast slots, currently {:?}",
+        mode.max_mcast_filter_count,
+        ReceiveFlags::from_bits_truncate(mode.receive_filter_setting)
+    );
 
     let candidates = [
-        (ReceiveFlags::MULTICAST, group),
+        (ReceiveFlags::MULTICAST, Some(&group[..])),
         (ReceiveFlags::PROMISCUOUS_MULTICAST, None),
         (ReceiveFlags::PROMISCUOUS, None),
         (ReceiveFlags::empty(), None),
     ];
     let mut last_err = None;
     for (multicast, filters) in candidates {
-        let usable = supported.contains(multicast) && (multicast != ReceiveFlags::MULTICAST || filters.is_some());
-        if !usable {
+        if !supported.contains(multicast) {
+            log::debug!("net: receive filter {multicast:?} not supported, skipped");
             continue;
         }
         let enable = base | multicast;
         match snp.receive_filters(enable, supported - enable, false, filters) {
             Ok(()) if multicast.is_empty() => {
-                log::warn!("net: no multicast receive mode accepted (supported {supported:?}), mDNS disabled");
+                log::warn!(
+                    "net: no multicast receive mode accepted, mDNS works only if the NIC passes multicast anyway"
+                );
                 return Ok(());
             },
             Ok(()) => {
-                log::debug!("net: receive filters {enable:?} (supported {supported:?})");
+                log::debug!("net: receive filters set to {enable:?}");
                 return Ok(());
             },
             Err(e) => {
-                log::debug!("net: receive filters {enable:?} refused: {e}");
+                log::debug!("net: receive filters {enable:?} refused with {:?}", e.status());
                 last_err = Some(e);
             },
         }
@@ -446,9 +463,14 @@ fn configure_filters(handle: Handle, snp: &SimpleNetwork) -> Result<(), NetError
 fn random_seed() -> u64 {
     rng_seed().unwrap_or_else(|| {
         log::debug!("net: no RNG protocol, seeding from the TSC");
-        // SAFETY: RDTSC has no preconditions on x86_64.
-        unsafe { core::arch::x86_64::_rdtsc() }
+        tsc_seed()
     })
+}
+
+#[expect(clippy::disallowed_methods, reason = "the raw TSC is used as entropy, not as a time source")]
+fn tsc_seed() -> u64 {
+    // SAFETY: RDTSC has no preconditions on x86_64.
+    unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 fn rng_seed() -> Option<u64> {
@@ -457,4 +479,17 @@ fn rng_seed() -> Option<u64> {
     let mut seed = [0; 8];
     rng.get_rng(None, &mut seed).ok()?;
     Some(u64::from_ne_bytes(seed))
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::*;
+
+    #[test]
+    fn group_mac_keeps_the_low_23_bits() {
+        check!(ipv4_group_mac(MDNS_ADDR).0[..6] == [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB]);
+        check!(ipv4_group_mac(Ipv4Address::new(239, 255, 255, 250)).0[..6] == [0x01, 0x00, 0x5E, 0x7F, 0xFF, 0xFA]);
+    }
 }

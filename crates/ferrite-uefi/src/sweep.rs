@@ -110,6 +110,7 @@ impl Sweep {
 
     /// Process up to `chunk_bytes` (at least one word) of the current phase,
     /// moving to the next phase, pattern or pass at the end of the buffer.
+    #[expect(clippy::disallowed_methods, reason = "a RAM test must touch every word with real loads and stores")]
     pub fn step(&mut self, chunk_bytes: usize) {
         let len = self.buf.len();
         if len == 0 {

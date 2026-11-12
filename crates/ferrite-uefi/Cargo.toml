@@ -11,7 +11,8 @@ ferrite-efi.workspace = true
 log.workspace = true
 ratatui.workspace = true
 ratatui-core.workspace = true
-smoltcp.workspace = true
+# Answers ping, as a liveness check.
+smoltcp = { workspace = true, features = ["auto-icmp-echo-reply"] }
 snafu.workspace = true
 uefi.workspace = true
 

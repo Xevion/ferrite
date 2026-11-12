@@ -134,13 +134,16 @@ impl<'a> App<'a> {
         quit
     }
 
-    /// Sweep until `deadline` (at least one chunk), or sleep when there is nothing to sweep.
+    /// Sweep until `deadline` (at least one chunk), or wait on the timer and key
+    /// events when there is nothing to sweep. Without events the loop just spins.
     fn idle_until(&mut self, deadline: Duration) {
         if !self.sweep.has_work() {
             let timeout = deadline.saturating_sub(self.now());
-            let waited = self.waiter.as_mut().map(|w| w.wait(timeout));
-            if !matches!(waited, Some(Ok(()))) {
-                boot::stall(timeout);
+            if let Some(waiter) = self.waiter.as_mut()
+                && let Err(e) = waiter.wait(timeout)
+            {
+                log::warn!("ui: waiting on events failed, polling instead: {e}");
+                self.waiter = None;
             }
             return;
         }

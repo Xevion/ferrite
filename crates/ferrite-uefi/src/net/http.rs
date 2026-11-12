@@ -209,7 +209,8 @@ fn advance(conn: &mut Conn, sock: &mut tcp::Socket<'_>, page: &mut impl FnMut() 
         }
         match route(&conn.request) {
             Some(route) => conn.stage = Stage::Sending { response: response(route, &mut *page), sent: 0 },
-            None if !sock.may_recv() => {
+            // The client sent FIN without a complete request.
+            None if sock.state() == tcp::State::CloseWait => {
                 sock.close();
                 conn.stage = Stage::Closing;
             },
@@ -277,5 +278,53 @@ mod tests {
         check!(
             ok == "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 9\r\nConnection: close\r\n\r\n<p>hi</p>"
         );
+    }
+
+    /// A smoltcp client on the same loopback interface; returns the bytes it read and responses served.
+    fn exchange(request: &[u8]) -> (Vec<u8>, u32) {
+        use smoltcp::iface::{Config, Interface};
+        use smoltcp::phy::{Loopback, Medium};
+        use smoltcp::time::Instant;
+        use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
+
+        let mut device = Loopback::new(Medium::Ethernet);
+        let config = Config::new(HardwareAddress::Ethernet(EthernetAddress([0x02, 0, 0, 0, 0, 1])));
+        let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+        iface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)).unwrap());
+        let mut sockets = SocketSet::new(vec![]);
+        let mut http = HttpServer::new(&mut sockets);
+        let client =
+            sockets.add(tcp::Socket::new(tcp::SocketBuffer::new(vec![0; 4096]), tcp::SocketBuffer::new(vec![0; 4096])));
+
+        let (mut reply, mut served, mut sent) = (Vec::new(), 0, false);
+        for ms in 0..500_u32 {
+            iface.poll(Instant::from_millis(ms), &mut device, &mut sockets);
+            served += http.poll(&mut sockets, Duration::from_millis(ms.into()), || String::from("<p>page</p>"));
+            let sock = sockets.get_mut::<tcp::Socket<'_>>(client);
+            if ms == 1 {
+                sock.connect(iface.context(), (IpAddress::v4(127, 0, 0, 1), HTTP_PORT), 49_152).unwrap();
+            }
+            if !sent && sock.may_send() {
+                sent = sock.send_slice(request).unwrap() == request.len();
+            }
+            if sock.can_recv() {
+                sock.recv(|buf| {
+                    reply.extend_from_slice(buf);
+                    (buf.len(), ())
+                })
+                .unwrap();
+            }
+        }
+        (reply, served)
+    }
+
+    #[rstest]
+    #[case::get(b"GET / HTTP/1.1\r\nHost: ferrite.local\r\n\r\n", "HTTP/1.0 200 OK\r\n")]
+    #[case::favicon(b"GET /favicon.ico HTTP/1.1\r\n\r\n", "HTTP/1.0 404 Not Found\r\n")]
+    #[case::post(b"POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n", "HTTP/1.0 405 Method Not Allowed\r\n")]
+    fn serves_over_tcp(#[case] request: &[u8], #[case] status_line: &str) {
+        let (reply, served) = exchange(request);
+        check!(served == 1);
+        check!(String::from_utf8_lossy(&reply).starts_with(status_line));
     }
 }

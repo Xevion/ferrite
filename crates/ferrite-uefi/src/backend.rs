@@ -17,7 +17,7 @@ use ratatui_core::layout::{Position, Size};
 use ratatui_core::style::{Color, Modifier};
 use snafu::{ResultExt as _, Snafu};
 use uefi::proto::console::text::{Color as UefiColor, Output};
-use uefi::{CStr16, Char16};
+use uefi::{CStr16, Char16, Status};
 
 /// Columns and rows of text mode 0, which every console must support.
 const MODE0_SIZE: Size = Size { width: 80, height: 25 };
@@ -73,6 +73,8 @@ pub struct UefiBackend<'a> {
     attr: Option<Attr>,
     /// Where the console's cursor is known to be.
     cursor: Option<Position>,
+    /// The console rejected `EnableCursor` once; OVMF's does.
+    cursor_toggle_unsupported: bool,
     /// Console width, read once: the text mode is not changed while we run.
     width: u16,
     /// UCS-2 text of the current run.
@@ -81,7 +83,14 @@ pub struct UefiBackend<'a> {
 
 impl<'a> UefiBackend<'a> {
     pub fn new(output: &'a mut Output) -> Self {
-        let mut backend = Self { output, attr: None, cursor: None, width: MODE0_SIZE.width, text: Vec::new() };
+        let mut backend = Self {
+            output,
+            attr: None,
+            cursor: None,
+            cursor_toggle_unsupported: false,
+            width: MODE0_SIZE.width,
+            text: Vec::new(),
+        };
         backend.width = backend.console_size().map_or(MODE0_SIZE.width, |s| s.width);
         backend
     }
@@ -131,7 +140,23 @@ impl<'a> UefiBackend<'a> {
             .set_color(UefiColor::LightGray, UefiColor::Black)
             .context(BackendSnafu { op: ConsoleOp::SetColor })?;
         self.output.clear().context(BackendSnafu { op: ConsoleOp::Clear })?;
-        self.output.enable_cursor(true).context(BackendSnafu { op: ConsoleOp::EnableCursor })
+        self.set_cursor_visible(true)
+    }
+
+    /// Show or hide the cursor where the console supports it. UNSUPPORTED is
+    /// not an error: failing here would abort the frame before ratatui commits it.
+    fn set_cursor_visible(&mut self, visible: bool) -> Result<(), BackendError> {
+        if self.cursor_toggle_unsupported {
+            return Ok(());
+        }
+        match self.output.enable_cursor(visible) {
+            Err(e) if e.status() == Status::UNSUPPORTED => {
+                self.cursor_toggle_unsupported = true;
+                log::debug!("ui: console cannot show or hide the cursor");
+                Ok(())
+            },
+            result => result.context(BackendSnafu { op: ConsoleOp::EnableCursor }),
+        }
     }
 }
 
@@ -307,10 +332,10 @@ impl Backend for UefiBackend<'_> {
     }
 
     fn hide_cursor(&mut self) -> Result<(), Self::Error> {
-        self.output.enable_cursor(false).context(BackendSnafu { op: ConsoleOp::EnableCursor })
+        self.set_cursor_visible(false)
     }
 
     fn show_cursor(&mut self) -> Result<(), Self::Error> {
-        self.output.enable_cursor(true).context(BackendSnafu { op: ConsoleOp::EnableCursor })
+        self.set_cursor_visible(true)
     }
 }
