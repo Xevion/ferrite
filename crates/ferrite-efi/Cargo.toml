@@ -6,9 +6,17 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Records panics in the boot log and shuts down; apps enabling this must not enable uefi's own `panic_handler`.
+panic-handler = []
+
 [dependencies]
 log.workspace = true
 uefi.workspace = true
+
+[dev-dependencies]
+assert2.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

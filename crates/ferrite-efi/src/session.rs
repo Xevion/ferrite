@@ -8,9 +8,10 @@ use uefi::{Status, cstr16, guid, println, system};
 
 use crate::bootlog::BootLog;
 
-/// Show where the report went and wait up to `secs` for a key. With no key, a
-/// run launched by systemd-boot cold-resets so the machine lands back in its
-/// default OS; otherwise this returns and the caller exits to the firmware.
+/// Show where the report went and wait up to `secs` for a key.
+///
+/// With no key, a run launched by systemd-boot cold-resets so the machine lands
+/// back in its default OS; otherwise this returns and the caller exits to the firmware.
 pub fn finish(report: &mut BootLog, secs: u64) {
     let saved = report.flush();
     println!(
@@ -30,23 +31,66 @@ pub fn launched_by_systemd_boot() -> bool {
     runtime::variable_exists(cstr16!("LoaderInfo"), &vendor).unwrap_or(false)
 }
 
-/// Wait for a keypress, giving up after `secs`. Returns whether a key was pressed.
+/// Wait for a keypress, giving up after `secs`. Returns false only when the
+/// full timeout elapsed; a key or a firmware error while waiting returns true,
+/// so a failure never triggers the unattended reset.
 pub fn wait_for_key_or_timeout(secs: u64) -> bool {
-    let stall = || boot::stall(Duration::from_secs(secs));
+    let timeout = Duration::from_secs(secs);
+    // SAFETY: no notify function is registered, so no callback can run after the event is closed or boot services exit.
     let timer = unsafe { boot::create_event(EventType::TIMER, Tpl::APPLICATION, None, None) };
     let Ok(timer) = timer else {
-        stall();
+        boot::stall(timeout);
         return false;
     };
-    if boot::set_timer(&timer, TimerTrigger::Relative(Duration::from_secs(secs))).is_err() {
-        stall();
+    if boot::set_timer(&timer, TimerTrigger::Relative(timeout)).is_err() {
+        let _ = boot::close_event(timer);
+        boot::stall(timeout);
         return false;
     }
-    match system::with_stdin(|input| input.wait_for_key_event().ok()) {
-        Some(key) => matches!(boot::wait_for_event(&mut [key, timer]), Ok(0)),
-        None => {
-            let _ = boot::wait_for_event(&mut [timer]);
-            false
-        },
+    let (interrupted, timer) = if let Some(key) = system::with_stdin(|input| input.wait_for_key_event().ok()) {
+        let mut events = [key, timer];
+        let woken = boot::wait_for_event(&mut events);
+        let [_, timer] = events;
+        (!matches!(woken, Ok(1)), timer)
+    } else {
+        let mut events = [timer];
+        let woken = boot::wait_for_event(&mut events);
+        let [timer] = events;
+        (woken.is_err(), timer)
+    };
+    let _ = boot::close_event(timer);
+    interrupted
+}
+
+/// Records the panic in the boot log, shows it, then after ten seconds resets (under systemd-boot) or powers off.
+#[cfg(all(target_os = "uefi", feature = "panic-handler"))]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static PANICKING: AtomicBool = AtomicBool::new(false);
+
+    if !PANICKING.swap(true, Ordering::Relaxed) {
+        if !crate::logger::record_panic(info) {
+            println!("[PANIC]: {info}");
+        }
+        if boot_services_active() {
+            boot::stall(Duration::from_secs(10));
+        }
+        // Under systemd-boot the one-shot entry is spent, so a cold reset lands back in the default OS.
+        let kind = if launched_by_systemd_boot() { ResetType::COLD } else { ResetType::SHUTDOWN };
+        runtime::reset(kind, Status::ABORTED, None);
     }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(all(target_os = "uefi", feature = "panic-handler"))]
+fn boot_services_active() -> bool {
+    let Some(table) = uefi::table::system_table_raw() else {
+        return false;
+    };
+    // SAFETY: the pointer is valid once the firmware has handed the system table to the crate.
+    !unsafe { table.as_ref() }.boot_services.is_null()
 }
