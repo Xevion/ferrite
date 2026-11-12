@@ -70,3 +70,37 @@ jobs:
 
       - name: Run tests
         run: cargo nextest run -p ferrite --no-fail-fast --hide-progress-bar --failure-output final ${{ matrix.features }}
+
+  # Every crate that builds without the Linux snapshot.
+  workspace:
+    name: Workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HOST: >-
+        --workspace --exclude ferrite --exclude ferrite-uefi --exclude ferrite-recon
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-unknown-uefi
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.132
+
+      - name: Clippy (host crates)
+        run: cargo clippy --locked $HOST --all-targets -- -D warnings
+
+      - name: Clippy (UEFI apps)
+        run: cargo efi-clippy --locked -- -D warnings
+
+      - name: Tests
+        run: |
+          cargo nextest run --locked $HOST --no-fail-fast --hide-progress-bar --failure-output final
+          cargo nextest run --locked -p ferrite-uefi -p ferrite-recon --lib --no-fail-fast --hide-progress-bar --failure-output final
