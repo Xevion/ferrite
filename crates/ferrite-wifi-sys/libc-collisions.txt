@@ -1,0 +1,9 @@
+# Kernel imports that a host libc also exports with different behaviour or ABI. `llvm-objcopy
+# --redefine-syms` renames each in every object, so the kernel's call binds to the shim's lx_ version
+# instead. The memory functions (memcpy, memset, memcmp, bcmp, memmove, strlen) are not listed: the libc
+# ones do the same job.
+snprintf lx_snprintf
+sprintf lx_sprintf
+sscanf lx_sscanf
+strcmp lx_strcmp
+timer_delete lx_timer_delete

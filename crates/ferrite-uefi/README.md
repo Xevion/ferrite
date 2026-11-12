@@ -13,8 +13,9 @@ suite before (or instead of) booting an operating system.
 - [x] Incremental pattern sweep over a test buffer, with fault tracking, shown in the UI
 - [x] Headless diagnostics log on the boot volume (`\EFI\ferrite\ferrite-uefi.txt`)
 - [x] Recon apps: `pciscan` (PCI and Wi-Fi registers), `xhciscan` (USB controllers and DbC), `dbcping` and `dbcbench` (DbC link)
-- [x] USB debug serial (xHCI DbC) driver, verified on real hardware with `dbcping`; `dbcbench` has not been run on hardware yet
-- [ ] DbC log output from the main app
+- [x] USB debug serial (xHCI DbC) driver, verified on real hardware with `dbcping` and `dbcbench` (326 MB/s target to desktop, 189 MB/s back)
+- [x] Resident loader: the desktop pushes `.efi` images over DbC and gets live logs and exit status back, with no reboot between runs
+- [x] DbC log output from the main app, through the loader
 - [ ] Wi-Fi via real Linux drivers on a Rust shim
 - [ ] DNS-SD service enumeration (PTR/SRV/TXT) on top of the mDNS responder
 - [ ] GOP framebuffer backend for a truecolor UI
