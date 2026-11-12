@@ -1,0 +1,31 @@
+# Unwrap and expect stay legal in tests; elsewhere a panic on a headless box is a dead run.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# Each banned item has one sanctioned home, which carries `#[expect(clippy::disallowed_*, reason = "...")]`.
+disallowed-methods = [
+    { path = "core::ptr::read_volatile", reason = "DMA memory is touched only through the DMA slice and ring types" },
+    { path = "core::ptr::write_volatile", reason = "DMA memory is touched only through the DMA slice and ring types" },
+    { path = "core::arch::x86_64::_rdtsc", reason = "read time through ferrite_efi::clock::Clock (the hal Clock trait)" },
+    { path = "uefi::boot::stall", reason = "busy-waits the whole app; wait on an event, or use the hal Delay trait for short device waits" },
+    { path = "uefi::runtime::reset", reason = "resets go through ferrite_efi::session, which decides between returning to the default OS and powering off" },
+    { path = "uefi::boot::exit_boot_services", reason = "the apps run on boot services for their whole life" },
+    { path = "uefi::fs::FileSystem::write", reason = "truncates and rewrites the whole file; log through ferrite_efi::bootlog::BootLog" },
+]
+
+disallowed-macros = [
+    { path = "uefi::println", reason = "bypasses the boot log and corrupts the ratatui screen; use the log macros" },
+    { path = "uefi::print", reason = "bypasses the boot log and corrupts the ratatui screen; use the log macros" },
+    { path = "std::assert_eq", reason = "use assert2::check!(a == b) or assert!(a == b), which print both sides" },
+    { path = "std::assert_ne", reason = "use assert2::check!(a != b) or assert!(a != b)" },
+]
+
+# For the host-only std crates (test doubles, later the desktop tools and the VFIO harness).
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "use parking_lot::Mutex, which does not poison" },
+    { path = "std::sync::RwLock", reason = "use parking_lot::RwLock, which does not poison" },
+    { path = "std::collections::HashMap", reason = "randomly seeded, so iteration order varies per run; use rustc_hash::FxHashMap, or BTreeMap where order matters" },
+    { path = "std::collections::HashSet", reason = "randomly seeded, so iteration order varies per run; use rustc_hash::FxHashSet, or BTreeSet where order matters" },
+]
+
+doc-valid-idents = ["DbC", "xHCI", "xHC", "UEFI", "OVMF", "EDK2", "SnpDxe", "TRBs", ".."]

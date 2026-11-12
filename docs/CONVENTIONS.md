@@ -91,5 +91,21 @@ happened. Hardware behaviour is checked on real hardware.
 
 ## Lints
 
-`[workspace.lints]` with clippy `pedantic` and `nursery`. Exceptions are
-`#[expect(lint, reason = "...")]`, never `#[allow]`.
+`[workspace.lints]` with clippy `pedantic` and `nursery`, plus `unwrap_used` and
+`expect_used` outside tests. Exceptions are `#[expect(lint, reason = "...")]`,
+never `#[allow]`.
+
+`clippy.toml` bans operations that must have exactly one home. The home carries
+an `#[expect(clippy::disallowed_*)]`; everything else goes through it.
+
+| Banned | Home |
+| --- | --- |
+| `read_volatile` / `write_volatile` | the DMA slice type, the sweep's word accesses, the ExitBootServices hook that clears DCE (no protocol calls are allowed there) |
+| `_rdtsc` | `ferrite_efi::clock` |
+| `uefi::boot::stall` | the UEFI `Delay` impl; loops wait on events |
+| `uefi::runtime::reset` | `ferrite_efi::session` |
+| `uefi::boot::exit_boot_services` | none |
+| `FileSystem::write` (truncating rewrite) | none; files go through `BootLog` |
+| `uefi::println` / `print` | `BootLog`'s console echo and the panic handler |
+| `assert_eq` / `assert_ne` | none; assert2's `check!` / `assert!` |
+| std `Mutex`, `RwLock`, `HashMap`, `HashSet` | none; parking_lot and rustc_hash in the std crates |
