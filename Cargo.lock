@@ -789,9 +789,9 @@ name = "ferrite-recon"
 version = "0.1.0"
 dependencies = [
  "assert2",
- "crc32fast",
  "ferrite-efi",
  "ferrite-hal",
+ "ferrite-wire",
  "ferrite-xhci",
  "log",
  "rstest 0.28.0",
@@ -818,6 +818,15 @@ dependencies = [
  "smoltcp",
  "snafu",
  "uefi",
+]
+
+[[package]]
+name = "ferrite-wire"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "crc32fast",
+ "rstest 0.28.0",
 ]
 
 [[package]]

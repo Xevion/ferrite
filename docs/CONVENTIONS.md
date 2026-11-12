@@ -9,13 +9,13 @@
 | `ferrite-efi` | `no_std` + `uefi` | UEFI backends for the HAL traits, the boot-volume log, the `log` sink, unattended exit |
 | `ferrite-testing` | std | Host-only test doubles: mock HAL, simulated DbC register file |
 | `ferrite-uefi` | `no_std`, UEFI app | Memory sweep, ratatui UI, SNP + smoltcp networking, mDNS, HTTP status page |
-| `ferrite-recon` | `no_std`, UEFI apps | `pciscan`, `xhciscan`, `dbcping` |
+| `ferrite-recon` | `no_std`, UEFI apps | `pciscan`, `xhciscan`, `dbcping`, `dbcbench` |
+| `ferrite-wire` | `no_std` + `alloc` | Message formats spoken over the DbC link (today the benchmark frames and handshake), shared by both ends |
 
 Planned, created when their milestone starts:
 
 | Crate | Mode | Contents |
 | --- | --- | --- |
-| `ferrite-wire` | `no_std` + `alloc` | Framing for the DbC link and the loader message set, shared by both ends |
 | `ferrite-loader` | `no_std`, UEFI app | Resident loader: receives a new `.efi` over DbC and starts it |
 | `ferrite-dev` | std | Desktop tool: DbC log reader, `.efi` push client |
 | `ferrite-lkpi` | `no_std` + `alloc` | Linux kernel API shim the Wi-Fi drivers link against |

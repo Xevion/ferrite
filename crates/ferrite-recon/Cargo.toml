@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-crc32fast.workspace = true
+ferrite-wire.workspace = true
 ferrite-efi.workspace = true
 ferrite-hal.workspace = true
 ferrite-xhci.workspace = true

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 # Host-buildable crates. The UEFI binaries are built through the `efi-*`
 # aliases in .cargo/config.toml, which pass `--target x86_64-unknown-uefi`.
-default-members = ["crates/ferrite-hal", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-linux"]
+default-members = ["crates/ferrite-hal", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-wire", "crates/ferrite-linux"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,7 @@ publish = false
 ferrite-efi = { path = "crates/ferrite-efi" }
 ferrite-hal = { path = "crates/ferrite-hal" }
 ferrite-testing = { path = "crates/ferrite-testing" }
+ferrite-wire = { path = "crates/ferrite-wire" }
 ferrite-xhci = { path = "crates/ferrite-xhci" }
 
 arbitrary-int = { version = "2.2.0", default-features = false }

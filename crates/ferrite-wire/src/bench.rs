@@ -305,7 +305,7 @@ mod tests {
 
     use super::*;
 
-    /// The same vectors are asserted by the desktop tool's `--selftest`.
+    /// Pinned bytes: a change here breaks the deployed other end of the link.
     #[rstest]
     #[case::first(0, "4642444300000000f20302724b76")]
     #[case::second(1, "4642444301000000f2039d4f7912")]

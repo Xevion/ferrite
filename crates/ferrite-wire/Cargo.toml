@@ -1,0 +1,17 @@
+[package]
+name = "ferrite-wire"
+description = "Message formats spoken over the DbC link, shared by the UEFI apps and the desktop tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crc32fast.workspace = true
+
+[dev-dependencies]
+assert2.workspace = true
+rstest.workspace = true
+
+[lints]
+workspace = true
