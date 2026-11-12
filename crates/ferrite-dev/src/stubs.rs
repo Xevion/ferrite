@@ -272,6 +272,7 @@ fn header_union(options: &StubsOptions, inputs: &Inputs) -> Result<Vec<Include>,
         let dir = source.rsplit_once('/').map_or(".", |(dir, _)| dir);
         let mut clang = Command::new(options.llvm.join("clang"));
         clang.current_dir(&options.wifi_dir).args(&inputs.flags).args(unit).arg(format!("-Ilinux/{dir}"));
+        clang.arg(format!("-Ilinux/generated/{dir}"));
         clang.args(["-E", "-H", "-o", "/dev/null"]).arg(format!("linux/{source}"));
         let output = run_tool(&mut clang, &format!("list the includes of {source}"))?;
         Ok(include::direct_includes(&String::from_utf8_lossy(&output.stderr)).into_iter().map(str::to_owned).collect())

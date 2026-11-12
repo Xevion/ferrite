@@ -15,8 +15,9 @@ pub enum Class {
     Function,
     /// A variadic function: a C stub, which Rust cannot define.
     Variadic,
-    /// A variable: zeroed storage in C.
-    Data,
+    /// A variable: zeroed storage in C, in the read-only region when the C type is `const` itself. An array
+    /// declared without a length (`char[]`) is given one element.
+    Data { read_only: bool, open_array: bool },
     /// A function only a cut file defines, the one named. A Rust stub like any function.
     Seam { cut: String },
     /// Supplied by the host, so never defined here.
@@ -32,7 +33,7 @@ impl Class {
         match self {
             Self::Function => Self::LABELS[0],
             Self::Variadic => Self::LABELS[1],
-            Self::Data => Self::LABELS[2],
+            Self::Data { .. } => Self::LABELS[2],
             Self::Seam { .. } => Self::LABELS[3],
             Self::Host => Self::LABELS[4],
             Self::Unknown => Self::LABELS[5],
@@ -68,6 +69,16 @@ impl Context<'_> {
     }
 }
 
+/// Whether a variable of the clang type `qual_type` is itself `const`: an array by its element type, a
+/// pointer by a `const` after its last `*`, anything else by a `const` anywhere.
+fn is_read_only(qual_type: &str) -> bool {
+    let element = qual_type.split('[').next().unwrap_or(qual_type).trim();
+    match element.rsplit_once('*') {
+        Some((_, after)) => after.split_whitespace().any(|word| word == "const"),
+        None => element.split_whitespace().any(|word| word == "const"),
+    }
+}
+
 pub fn classify(symbol: &str, decl: Option<&Decl>, ctx: &Context<'_>) -> Import {
     let bare = |class| Import { symbol: symbol.to_owned(), class, prototype: String::new(), header: None };
     if HOST.contains(&symbol) {
@@ -76,7 +87,10 @@ pub fn classify(symbol: &str, decl: Option<&Decl>, ctx: &Context<'_>) -> Import 
     let Some(decl) = decl else { return bare(Class::Unknown) };
     let header = Some(Include::resolve(&decl.file, ctx.roots));
     let (class, prototype) = match decl.kind {
-        DeclKind::Data => (Class::Data, String::new()),
+        DeclKind::Data => {
+            let (read_only, open_array) = (is_read_only(&decl.qual_type), decl.qual_type.trim_end().ends_with("[]"));
+            (Class::Data { read_only, open_array }, String::new())
+        },
         DeclKind::Function { variadic: true } => (Class::Variadic, prototype(symbol, &decl.qual_type)),
         DeclKind::Function { variadic: false } => {
             let class = ctx.seams.get(symbol).map_or(Class::Function, |cut| Class::Seam { cut: cut.clone() });
@@ -119,9 +133,20 @@ mod tests {
 
             let data = decl(DeclKind::Data, "volatile unsigned long", "linux/include/linux/jiffies.h");
             let got = classify("jiffies", Some(&data), ctx);
-            check!(got.class == Class::Data);
+            check!(got.class == Class::Data { read_only: false, open_array: false });
             check!(got.prototype.is_empty());
         });
+    }
+
+    #[rstest::rstest]
+    #[case::plain("volatile unsigned long", false)]
+    #[case::const_struct("const struct kernel_param_ops", true)]
+    #[case::const_array("const unsigned long[65][1]", true)]
+    #[case::array_of_const_pointers("const char *const[32]", true)]
+    #[case::array_of_pointers_to_const("const char *[32]", false)]
+    #[case::pointer_to_const("const struct x *", false)]
+    fn read_only_follows_the_object_not_what_it_points_at(#[case] qual_type: &str, #[case] read_only: bool) {
+        check!(is_read_only(qual_type) == read_only);
     }
 
     #[test]

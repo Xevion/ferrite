@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 ferrite-lkpi.workspace = true
 ferrite-wifi-sys.workspace = true
+libc.workspace = true
 log.workspace = true
 
 [dev-dependencies]

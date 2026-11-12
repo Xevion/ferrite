@@ -20,10 +20,14 @@ const ALLOWED_RELOCATIONS: [&str; 5] =
     ["R_X86_64_64", "R_X86_64_PC32", "R_X86_64_PLT32", "R_X86_64_GOTPCRELX", "R_X86_64_REX_GOTPCRELX"];
 
 fn llvm(tool: &str, args: &[&str]) -> String {
+    llvm_on(tool, args, ARCHIVE)
+}
+
+fn llvm_on(tool: &str, args: &[&str], file: &str) -> String {
     let dir = std::env::var_os("FERRITE_LLVM")
         .filter(|v| !v.is_empty())
         .map_or_else(|| PathBuf::from(DEFAULT_LLVM), PathBuf::from);
-    let output = Command::new(dir.join(tool)).args(args).arg(ARCHIVE).output().expect("run the LLVM tool");
+    let output = Command::new(dir.join(tool)).args(args).arg(file).output().expect("run the LLVM tool");
     assert!(output.status.success(), "{tool} failed: {}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8(output.stdout).expect("LLVM tool output is UTF-8")
 }
@@ -136,16 +140,17 @@ fn nothing_traps_and_no_bug_table_remains() {
 }
 
 #[test]
-fn the_initcalls_are_exactly_the_four_expected() {
+fn the_wireless_initcalls_and_exitcalls_are_all_present() {
     let in_archive = |prefix: &str| -> BTreeSet<String> {
         defined_symbols().into_iter().filter_map(|s| s.strip_prefix(prefix).map(str::to_owned)).collect()
     };
-    let strings = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<BTreeSet<_>>();
-    check!(
-        in_archive("__lx_initcall_")
-            == strings(&["4_ieee80211_init", "5_cfg80211_init", "6_rtw89_8852ce_driver_init", "7_regulatory_init_db"])
-    );
-    check!(in_archive("__lx_exitcall_") == strings(&["ieee80211_exit", "cfg80211_exit", "rtw89_8852ce_driver_exit"]));
+    let (inits, exits) = (in_archive("__lx_initcall_"), in_archive("__lx_exitcall_"));
+    for call in ["4_ieee80211_init", "5_cfg80211_init", "6_rtw89_8852ce_driver_init", "7_regulatory_init_db"] {
+        check!(inits.contains(call), "missing initcall {call}");
+    }
+    for call in ["ieee80211_exit", "cfg80211_exit", "rtw89_8852ce_driver_exit"] {
+        check!(exits.contains(call), "missing exitcall {call}");
+    }
 }
 
 #[test]
@@ -155,22 +160,71 @@ fn the_tables_list_initcalls_in_level_order_and_exitcalls_in_reverse() {
         let body = table.split_once(section).map_or("", |(_, rest)| rest).split("};").next().unwrap_or_default();
         body.lines().filter(|l| l.starts_with("\t{")).map(|l| l.trim().to_owned()).collect()
     };
+    let field = |entry: &str, n: usize| entry.split('"').nth(n).unwrap_or_default().to_owned();
     let inits = entries("lx_initcalls[] = {");
-    let levels: Vec<_> = inits.iter().filter_map(|l| l.split('"').nth(1)).collect();
-    check!(levels == ["4", "5", "6", "7"]);
+    let rank = |level: &str| {
+        ["early", "0", "1", "1s", "2", "2s", "3", "3s", "4", "4s", "5", "5s", "rootfs", "6", "6s", "7", "7s"]
+            .iter()
+            .position(|l| *l == level)
+    };
+    let levels: Vec<_> = inits.iter().map(|l| rank(&field(l, 1))).collect();
+    check!(levels.iter().all(Option::is_some));
+    check!(levels.is_sorted());
+    let order = |entries: &[String], n: usize, names: &[&str]| -> Vec<usize> {
+        names.iter().filter_map(|name| entries.iter().position(|e| field(e, n) == *name)).collect()
+    };
+    let wireless = ["ieee80211_init", "cfg80211_init", "rtw89_8852ce_driver_init", "regulatory_init_db"];
+    check!(order(&inits, 3, &wireless).is_sorted());
     let exits = entries("lx_exitcalls[] = {");
-    let names: Vec<_> = exits.iter().filter_map(|l| l.split('"').nth(1)).collect();
-    check!(names == ["rtw89_8852ce_driver_exit", "cfg80211_exit", "ieee80211_exit"]);
+    let exit_order = order(&exits, 1, &["rtw89_8852ce_driver_exit", "cfg80211_exit", "ieee80211_exit"]);
+    check!(exit_order.len() == 3 && exit_order.is_sorted());
+}
+
+/// Memory functions the archive may import from libc by name, since the libc versions do the same job. It
+/// never defines one: a definition would replace libc's for the whole lab process.
+const SHARED_WITH_LIBC: [&str; 3] = ["memcpy", "memmove", "memset"];
+
+/// The host libc: what the C compiler reports, else the usual Debian and Ubuntu locations.
+fn host_libc() -> String {
+    let reported = Command::new("cc").arg("-print-file-name=libc.so.6").output().ok().filter(|o| o.status.success());
+    let from_cc = reported.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
+    let fixed = ["/lib/x86_64-linux-gnu/libc.so.6", "/usr/lib/x86_64-linux-gnu/libc.so.6", "/usr/lib64/libc.so.6"];
+    from_cc
+        .into_iter()
+        .chain(fixed.map(str::to_owned))
+        .find(|path| std::path::Path::new(path).is_absolute() && std::path::Path::new(path).exists())
+        .expect("no host libc.so.6 found: `cc -print-file-name=libc.so.6` and the usual paths all failed")
+}
+
+/// The names libc exports dynamically, without their symbol versions.
+fn libc_exports() -> BTreeSet<String> {
+    llvm_on("llvm-nm", &["-D", "--defined-only"], &host_libc())
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(2))
+        .map(|name| name.split('@').next().unwrap_or(name).to_owned())
+        .collect()
 }
 
 #[test]
-fn libc_colliding_names_are_renamed_and_never_defined() {
+fn the_archive_shares_no_name_with_libc_beyond_the_memory_functions() {
+    let exports = libc_exports();
+    check!(exports.contains("malloc"), "the libc export list was not parsed");
+    let defined = defined_symbols();
+    let shared = |name: &String| SHARED_WITH_LIBC.contains(&name.as_str()) && !defined.contains(name);
+    let clashes: Vec<_> =
+        defined.union(&undefined_symbols()).filter(|name| exports.contains(*name) && !shared(name)).cloned().collect();
+    check!(clashes.is_empty(), "names libc also exports, to add to libc-collisions.txt: {clashes:?}");
+}
+
+#[test]
+fn renamed_libc_names_are_neither_imported_nor_defined() {
     let (defined, undefined) = (defined_symbols(), undefined_symbols());
-    check!(collisions().len() == 5, "libc-collisions.txt was not parsed");
+    check!(!collisions().is_empty(), "libc-collisions.txt was not parsed");
     for (libc, shim) in collisions() {
+        check!(!SHARED_WITH_LIBC.contains(&libc), "{libc} is renamed but also allowed to be shared");
         check!(!undefined.contains(libc), "{libc} is still imported");
-        check!(undefined.contains(shim), "{shim} is not imported");
         check!(!defined.contains(libc), "the archive defines {libc}");
+        check!(defined.contains(shim) || undefined.contains(shim), "{shim} is neither defined nor imported");
     }
 }
 

@@ -3,86 +3,44 @@
 
 extern void lx_stub_hit(const char *name) __attribute__((noreturn));
 
-/* `void __warn_printk(const char *, ...)`, declared in `asm-generic/bug.h`. */
-void __warn_printk(void)
-{
-	lx_stub_hit("__warn_printk");
-}
-
-/* `void _dev_err(const struct device *, const char *, ...)`, declared in `linux/dev_printk.h`. */
-void _dev_err(void)
-{
-	lx_stub_hit("_dev_err");
-}
-
-/* `void _dev_info(const struct device *, const char *, ...)`, declared in `linux/dev_printk.h`. */
-void _dev_info(void)
-{
-	lx_stub_hit("_dev_info");
-}
-
-/* `void _dev_printk(const char *, const struct device *, const char *, ...)`, declared in `linux/dev_printk.h`. */
-void _dev_printk(void)
-{
-	lx_stub_hit("_dev_printk");
-}
-
-/* `void _dev_warn(const struct device *, const char *, ...)`, declared in `linux/dev_printk.h`. */
-void _dev_warn(void)
-{
-	lx_stub_hit("_dev_warn");
-}
-
 /* `int _printk(const char *, ...)`, declared in `linux/printk.h`. */
 void _printk(void)
 {
 	lx_stub_hit("_printk");
 }
 
-/* `struct workqueue_struct *alloc_workqueue_noprof(const char *, unsigned int, int, ...)`, declared in `linux/workqueue.h`. */
-void alloc_workqueue_noprof(void)
+/* `int _printk_deferred(const char *, ...)`, declared in `linux/printk.h`. */
+void _printk_deferred(void)
 {
-	lx_stub_hit("alloc_workqueue_noprof");
+	lx_stub_hit("_printk_deferred");
 }
 
-/* `int dev_set_name(struct device *, const char *, ...)`, declared in `linux/device.h`. */
-void dev_set_name(void)
+/* `int add_uevent_var(struct kobj_uevent_env *, const char *, ...)`, declared in `linux/kobject.h`. */
+void add_uevent_var(void)
 {
-	lx_stub_hit("dev_set_name");
+	lx_stub_hit("add_uevent_var");
 }
 
-/* `int lx_snprintf(char *restrict, unsigned long, const char *restrict, ...)`, declared in `linux/sprintf.h`. */
-void lx_snprintf(void)
+/* `int seq_buf_printf(struct seq_buf *, const char *, ...)`, declared in `linux/seq_buf.h`. */
+void seq_buf_printf(void)
 {
-	lx_stub_hit("lx_snprintf");
+	lx_stub_hit("seq_buf_printf");
 }
 
-/* `int lx_sprintf(char *restrict, const char *restrict, ...)`, declared in `linux/sprintf.h`. */
-void lx_sprintf(void)
+/* `void seq_printf(struct seq_file *, const char *, ...)`, declared in `linux/seq_file.h`. */
+void seq_printf(void)
 {
-	lx_stub_hit("lx_sprintf");
+	lx_stub_hit("seq_printf");
 }
 
-/* `int lx_sscanf(const char *restrict, const char *restrict, ...)`, declared in `linux/sprintf.h`. */
-void lx_sscanf(void)
+/* `int sysfs_emit(char *, const char *, ...)`, declared in `linux/sysfs.h`. */
+void sysfs_emit(void)
 {
-	lx_stub_hit("lx_sscanf");
+	lx_stub_hit("sysfs_emit");
 }
 
-/* `void netdev_err(const struct net_device *, const char *, ...)`, declared in `net/net_debug.h`. */
-void netdev_err(void)
+/* `int sysfs_emit_at(char *, int, const char *, ...)`, declared in `linux/sysfs.h`. */
+void sysfs_emit_at(void)
 {
-	lx_stub_hit("netdev_err");
-}
-
-/* `void netdev_info(const struct net_device *, const char *, ...)`, declared in `net/net_debug.h`. */
-void netdev_info(void)
-{
-	lx_stub_hit("netdev_info");
-}
-
-/* `int scnprintf(char *, size_t, const char *, ...)`, declared in `linux/sprintf.h`. */
-void scnprintf(void)
-{
-	lx_stub_hit("scnprintf");
+	lx_stub_hit("sysfs_emit_at");
 }

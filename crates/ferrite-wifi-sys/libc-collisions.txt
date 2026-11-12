@@ -1,9 +1,33 @@
-# Kernel imports that a host libc also exports with different behaviour or ABI. `llvm-objcopy
-# --redefine-syms` renames each in every object, so the kernel's call binds to the shim's lx_ version
-# instead. The memory functions (memcpy, memset, memcmp, bcmp, memmove, strlen) are not listed: the libc
-# ones do the same job.
+# Names the archive defines or imports that glibc also exports. `llvm-objcopy --redefine-syms` renames each in
+# every object, definitions included, so the kernel's copy is `lx_<name>` and neither side binds to the other's.
+# Only memcpy, memmove and memset stay: the archive imports them by name and the libc ones do the same job.
+bcmp lx_bcmp
+bsearch lx_bsearch
+memchr lx_memchr
+memcmp lx_memcmp
 snprintf lx_snprintf
 sprintf lx_sprintf
 sscanf lx_sscanf
+stpcpy lx_stpcpy
+strcasecmp lx_strcasecmp
+strcat lx_strcat
+strchr lx_strchr
+strchrnul lx_strchrnul
 strcmp lx_strcmp
+strcpy lx_strcpy
+strcspn lx_strcspn
+strlen lx_strlen
+strncasecmp lx_strncasecmp
+strncat lx_strncat
+strncmp lx_strncmp
+strncpy lx_strncpy
+strnlen lx_strnlen
+strpbrk lx_strpbrk
+strrchr lx_strrchr
+strsep lx_strsep
+strspn lx_strspn
+strstr lx_strstr
 timer_delete lx_timer_delete
+vsnprintf lx_vsnprintf
+vsprintf lx_vsprintf
+vsscanf lx_vsscanf

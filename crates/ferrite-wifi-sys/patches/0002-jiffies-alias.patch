@@ -1,0 +1,10 @@
+--- a/kernel/time/timer.c
++++ b/kernel/time/timer.c
+@@ -60,5 +60,8 @@
+ __visible u64 jiffies_64 __cacheline_aligned_in_smp = INITIAL_JIFFIES;
+ 
++/* On 64 bits the kernel's linker script makes jiffies the same object as jiffies_64. */
++extern typeof(jiffies) jiffies __attribute__((alias("jiffies_64")));
++
+ EXPORT_SYMBOL(jiffies_64);
+ 

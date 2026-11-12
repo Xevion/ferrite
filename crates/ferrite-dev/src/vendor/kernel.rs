@@ -62,7 +62,7 @@ pub fn apply_patches(tree: &Tree, patches: &[PathBuf]) -> Result<(), VendorError
 }
 
 /// Write the config, check that it kept the options we need, and generate the headers Kbuild makes in
-/// `prepare0`. That target stops before building objtool, which would need libelf.
+/// `prepare0`, then the CRC table header. That target stops before building objtool, which would need libelf.
 pub fn configure(tree: &Tree, config: &ConfigSpec) -> Result<(), VendorError> {
     fs::create_dir_all(&tree.obj).context(IoSnafu { what: "create", path: &tree.obj })?;
     exec(&mut tree.make(&["tinyconfig"]), "make tinyconfig")?;
@@ -84,5 +84,20 @@ pub fn configure(tree: &Tree, config: &ConfigSpec) -> Result<(), VendorError> {
     if !unmet.is_empty() {
         return ConfigSnafu { unmet }.fail();
     }
-    exec(&mut tree.make(&["prepare0"]), "make prepare0").map(drop)
+    exec(&mut tree.make(&["prepare0"]), "make prepare0")?;
+    generate_crc32_table(tree)
+}
+
+/// `lib/crc/crc32table.h`, which Kbuild makes only while building `crc32-main.o` (and that needs objtool).
+/// The generator is built and run here with the same compiler.
+fn generate_crc32_table(tree: &Tree) -> Result<(), VendorError> {
+    let out_dir = tree.obj.join("lib/crc");
+    fs::create_dir_all(&out_dir).context(IoSnafu { what: "create", path: &out_dir })?;
+    let generator = out_dir.join("gen_crc32table");
+    let mut compile = Command::new(tree.llvm.join("clang"));
+    compile.arg("-I").arg(&out_dir).arg("-o").arg(&generator).arg(tree.src.join("lib/crc/gen_crc32table.c"));
+    exec(&mut compile, "compile gen_crc32table")?;
+    let table = exec(&mut Command::new(&generator), "run gen_crc32table")?;
+    let header = out_dir.join("crc32table.h");
+    fs::write(&header, table).context(IoSnafu { what: "write", path: &header })
 }

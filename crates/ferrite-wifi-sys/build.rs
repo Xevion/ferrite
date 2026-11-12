@@ -26,6 +26,9 @@ mod vendor_inputs;
 const DEFAULT_LLVM: &str = "/usr/lib/llvm-21/bin";
 const ARCHIVE: &str = "ferrite_wifi_c";
 
+/// Objtool annotation sections, which the kernel's linker script discards; their relocations would not link.
+const DISCARD: &str = "--remove-section=.discard.*";
+
 /// Initcall levels in the order the kernel runs them. `console_initcall` is not among them.
 const LEVELS: [&str; 17] =
     ["early", "0", "1", "1s", "2", "2s", "3", "3s", "4", "4s", "5", "5s", "rootfs", "6", "6s", "7", "7s"];
@@ -138,6 +141,20 @@ fn calls(slot: usize, symbols: &[String]) -> (Vec<Call>, Vec<Call>) {
     (inits, exits)
 }
 
+/// Calls whose pointer symbol more than one object defines, as `symbol: source, source`. An archive link
+/// takes the first and may never pull the other member, so one module's call would be lost without a word.
+fn duplicates(calls: &[Call], sources: &[String]) -> Vec<String> {
+    let mut by_symbol: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for call in calls {
+        by_symbol.entry(&call.symbol).or_default().push(sources.get(call.slot).map_or("?", String::as_str));
+    }
+    by_symbol
+        .into_iter()
+        .filter(|(_, owners)| owners.len() > 1)
+        .map(|(symbol, owners)| format!("{symbol}: {}", owners.join(", ")))
+        .collect()
+}
+
 /// The tables as C. Initcalls run in level order, and within a level in link order. Exitcalls run in the
 /// reverse of their object's first initcall, so a module is torn down before what it was set up after;
 /// an object with no initcall is torn down last.
@@ -166,6 +183,21 @@ fn call_tables(mut inits: Vec<Call>, mut exits: Vec<Call>) -> String {
         inits.len(),
         exits.len(),
     )
+}
+
+/// The C of the call tables over every compiled object, refusing a call that two files define.
+fn checked_call_tables(compiled: &[(usize, PathBuf, Vec<String>)], sources: &[String]) -> String {
+    let (mut inits, mut exits) = (Vec::new(), Vec::new());
+    for (slot, _, symbols) in compiled {
+        let (init, exit) = calls(*slot, symbols);
+        inits.extend(init);
+        exits.extend(exit);
+    }
+    let clashes: Vec<String> = duplicates(&inits, sources).into_iter().chain(duplicates(&exits, sources)).collect();
+    if !clashes.is_empty() {
+        fail(&format!("initcalls or exitcalls of the same name in several files: {}", clashes.join("; ")));
+    }
+    call_tables(inits, exits)
 }
 
 /// A `cc` build set up for the kernel's flags and nothing else; `extra` follows the global ones.
@@ -287,14 +319,14 @@ fn main() {
                 fail(&format!("{source} is in source.list but not in the snapshot; run `just vendor`"));
             };
             let dir = source.rsplit_once('/').map_or(".", |(dir, _)| dir);
-            let include = format!("-Ilinux/{dir}");
+            let (include, generated) = (format!("-Ilinux/{dir}"), format!("-Ilinux/generated/{dir}"));
             let mut extra: Vec<&str> = kbuild.clone();
-            extra.push(&include);
+            extra.extend([include.as_str(), generated.as_str()]);
             let mut build = builder(&clang, &llvm, &flags, &extra);
             build.file(format!("linux/{source}"));
             let object =
                 build.compile_intermediates().pop().unwrap_or_else(|| fail(&format!("{source} produced no object")));
-            run_llvm(&llvm, "llvm-objcopy", &[rename.as_ref(), object.as_os_str()]);
+            run_llvm(&llvm, "llvm-objcopy", &[rename.as_ref(), DISCARD.as_ref(), object.as_os_str()]);
             let symbols = defined_symbols(&llvm, &object);
             done.push((slot, object, symbols));
         }
@@ -308,17 +340,12 @@ fn main() {
             .collect()
     });
     compiled.sort_by_key(|(slot, ..)| *slot);
-    let (mut inits, mut exits) = (Vec::new(), Vec::new());
-    for (slot, _, symbols) in &compiled {
-        let (init, exit) = calls(*slot, symbols);
-        inits.extend(init);
-        exits.extend(exit);
-    }
+    let tables = checked_call_tables(&compiled, &sources);
     let mut objects: Vec<PathBuf> = compiled.into_iter().map(|(_, object, _)| object).collect();
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap_or_else(|| fail("OUT_DIR is not set")));
     let table = out_dir.join("initcalls.c");
-    fs::write(&table, call_tables(inits, exits))
+    fs::write(&table, tables)
         .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", table.display())));
     let mut build = builder(&clang, &llvm, &flags, &[]);
     build.file(&table);

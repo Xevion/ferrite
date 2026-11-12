@@ -1,4 +1,4 @@
-//! The trimmed snapshot: the listed `.c` files, every header they include, and what the build needs to
+//! The trimmed snapshot: the listed `.c` and `.S` files, every header they include, and what the build needs to
 //! know about them.
 //!
 //! Headers are found by asking clang which files each source reads, so the snapshot holds exactly what
@@ -34,19 +34,30 @@ pub struct Unit {
     pub flags: Vec<String>,
 }
 
+/// Kbuild's assembler flag: assembly sources are preprocessed with `__ASSEMBLY__` defined so headers
+/// hide their C declarations.
+const ASSEMBLY_DEFINE: &str = "-D__ASSEMBLY__";
+
+fn is_assembly(source: &str) -> bool {
+    Path::new(source).extension().is_some_and(|ext| matches!(ext.to_str(), Some("S")))
+}
+
 /// Units for every listed file: Kbuild's own flags where Kbuild builds it, else those of a standalone object.
 pub fn units(listed: &[String], kbuild: &[KbuildFile]) -> Vec<Unit> {
     listed
         .iter()
         .map(|source| {
-            let flags = kbuild.iter().find(|f| &f.source == source).map_or_else(
+            let mut flags = kbuild.iter().find(|f| &f.source == source).map_or_else(
                 || {
                     let (dir, name) = source.rsplit_once('/').unwrap_or((".", source));
-                    let stem = name.trim_end_matches(".c");
+                    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
                     kbuild_defines(dir, stem, stem)
                 },
                 |f| f.flags.clone(),
             );
+            if is_assembly(source) {
+                flags.push(ASSEMBLY_DEFINE.to_owned());
+            }
             Unit { source: source.clone(), flags }
         })
         .collect()
@@ -105,7 +116,9 @@ pub fn closure(view: &Path, llvm: &Path, cflags: &[String], units: &[Unit]) -> R
                 while let Some(unit) = units.get(next.fetch_add(1, Ordering::Relaxed)) {
                     let mut clang = Command::new(llvm.join("clang"));
                     clang.current_dir(view).args(cflags).args(&unit.flags);
-                    clang.arg(format!("-I{SNAPSHOT_DIR}/{}", parent_of(&unit.source)));
+                    let dir = parent_of(&unit.source);
+                    clang.arg(format!("-I{SNAPSHOT_DIR}/{dir}"));
+                    clang.arg(format!("-I{SNAPSHOT_DIR}/{GENERATED_DIR}/{dir}"));
                     clang.arg("-MM").arg(format!("{SNAPSHOT_DIR}/{}", unit.source));
                     if tx.send((unit, exec(&mut clang, &format!("scan the includes of {}", unit.source)))).is_err() {
                         return;
@@ -210,5 +223,14 @@ mod tests {
         let got = units(&["net/a/x.c".to_owned(), "lib/vsprintf.c".to_owned()], &kbuild);
         check!(got[0].flags == ["-DDEBUG"]);
         check!(got[1].flags.contains(&"-DKBUILD_MODFILE=\"lib/vsprintf\"".to_owned()));
+        check!(!got[1].flags.contains(&ASSEMBLY_DEFINE.to_owned()));
+    }
+
+    #[test]
+    fn assembly_sources_are_named_without_their_extension_and_get_the_assembler_define() {
+        let got = units(&["arch/x86/lib/hweight.S".to_owned()], &[]);
+        check!(got[0].flags.contains(&"-DKBUILD_BASENAME=\"hweight\"".to_owned()));
+        check!(got[0].flags.contains(&"-DKBUILD_MODFILE=\"arch/x86/lib/hweight\"".to_owned()));
+        check!(got[0].flags.last().map(String::as_str) == Some(ASSEMBLY_DEFINE));
     }
 }

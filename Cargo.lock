@@ -888,6 +888,7 @@ dependencies = [
  "assert2",
  "ferrite-lkpi",
  "ferrite-wifi-sys",
+ "libc",
  "log",
 ]
 

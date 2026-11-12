@@ -47,9 +47,19 @@ pub fn include_roots(flags: &[String]) -> Vec<String> {
     flags.iter().filter_map(|flag| flag.strip_prefix("-I")).map(clean).collect()
 }
 
-/// The headers a source includes itself, from `clang -E -H` output, in the order it includes them.
+/// Private headers that only parse after the `.c` that includes them has defined what they call.
+const NOT_SELF_CONTAINED: [&str; 1] = ["kernel/locking/ww_mutex.h"];
+
+/// The headers a source includes itself, from `clang -E -H` output, in the order it includes them. A `.c`
+/// file included by a unity-build source is code, not a header, and is left out with `NOT_SELF_CONTAINED`.
 pub fn direct_includes(stderr: &str) -> Vec<&str> {
-    stderr.lines().filter_map(|line| line.strip_prefix(". ")).map(str::trim).collect()
+    stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix(". "))
+        .map(str::trim)
+        .filter(|path| !Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("c")))
+        .filter(|path| !NOT_SELF_CONTAINED.iter().any(|private| path.ends_with(private)))
+        .collect()
 }
 
 /// Every header once, in the order a first reader of `sources` meets it. Each header follows whatever the

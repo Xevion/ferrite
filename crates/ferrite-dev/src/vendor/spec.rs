@@ -65,15 +65,15 @@ impl Spec {
     }
 }
 
-/// The `.c` files to compile, as paths relative to the Linux root. Blank lines and `#` comments are skipped.
+/// The `.c` and `.S` files to compile, as paths relative to the Linux root. Blank lines and `#` comments are skipped.
 pub fn parse_source_list(text: &str) -> Result<Vec<String>, VendorError> {
     let mut files: Vec<String> = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
         let path = Path::new(line);
         ensure!(
-            path.extension().is_some_and(|ext| ext == "c")
+            path.extension().is_some_and(|ext| matches!(ext.to_str(), Some("c" | "S")))
                 && path.components().all(|c| matches!(c, Component::Normal(_))),
-            InvalidSnafu { what: "source.list", reason: format!("`{line}` is not a relative path to a .c file") }
+            InvalidSnafu { what: "source.list", reason: format!("`{line}` is not a relative path to a .c or .S file") }
         );
         ensure!(
             !files.iter().any(|f| f == line),
@@ -157,7 +157,7 @@ mod tests {
         assert!(let Ok(expectations) = spec.config.expectations());
         check!(expectations.len() == spec.config.expect_set.len() + spec.config.expect_unset.len());
         assert!(let Ok(files) = parse_source_list(TRACKED_LIST));
-        check!(files.iter().all(|f| spec.kbuild.dirs.iter().any(|d| f.starts_with(&format!("{d}/")))));
+        check!(spec.kbuild.dirs.iter().all(|d| files.iter().any(|f| f.starts_with(&format!("{d}/")))));
         check!(spec.kbuild.cut.iter().all(|f| !files.contains(f)));
         check!(parse_cflags(TRACKED_FLAGS).contains(&"-O2".to_owned()));
     }
@@ -166,6 +166,7 @@ mod tests {
     #[case::absolute("/etc/passwd.c")]
     #[case::climbs("net/../../x.c")]
     #[case::not_c("net/mac80211/main.h")]
+    #[case::lowercase_s("arch/x86/lib/x.s")]
     fn bad_source_lines_are_rejected(#[case] line: &str) {
         check!(parse_source_list(line).is_err());
     }

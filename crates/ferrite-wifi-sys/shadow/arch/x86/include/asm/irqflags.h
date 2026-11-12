@@ -11,9 +11,9 @@
  *   void lx_irq_enable(void)              unmask
  *   unsigned long lx_irq_flags(void)      the current state, unchanged
  *
- * A state word has bit 0 set when masked. The other bits belong to the shim
- * (the UEFI one keeps the TPL it must return to). The lab shim does nothing and
- * reports 0.
+ * A state word has bit 0 set when masked. Masking is a software flag on every
+ * platform and never raises the firmware TPL: firmware notifies run no Linux
+ * code, and a TPL carried across task switches would restore out of order.
  */
 #ifndef _LX_SHADOW_ASM_IRQFLAGS_H
 #define _LX_SHADOW_ASM_IRQFLAGS_H

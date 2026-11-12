@@ -1,6 +1,7 @@
 //! The Wi-Fi stack as a Linux process: the pinned Linux C linked against `ferrite-lkpi`, run until the
-//! first kernel symbol nothing implements yet.
+//! first kernel symbol nothing implements yet: a stub function, or a variable whose storage faults.
 
+mod fence;
 mod logger;
 
 use std::backtrace::Backtrace;
@@ -25,6 +26,10 @@ fn halt(stub: &CStr) -> ! {
 fn main() -> ExitCode {
     logger::init(LevelFilter::Info);
     if let Err(error) = ferrite_lkpi::set_halt_hook(halt) {
+        log::error!("{error}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(error) = fence::install() {
         log::error!("{error}");
         return ExitCode::FAILURE;
     }
