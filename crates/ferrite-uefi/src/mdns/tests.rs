@@ -18,6 +18,10 @@ const OURS_UPPER: &[u8] = b"\x07FeRRiTe\x05LOCAL\x00";
 const OTHER: &[u8] = b"\x05other\x05local\x00";
 const LEGACY_PORT: u16 = 49152;
 
+fn at(ms: u64) -> Instant {
+    Instant::from_epoch(Duration::from_millis(ms))
+}
+
 fn header(id: u16, flags: u16, qdcount: u16) -> Vec<u8> {
     let mut pkt = Vec::new();
     for field in [id, flags, qdcount, 0, 0, 0] {
@@ -48,6 +52,13 @@ fn a_then_compressed_aaaa() -> Vec<u8> {
     pkt
 }
 
+/// `labels` labels of 63 bytes each, which passes 255 bytes on the wire from the fourth.
+fn long_name(labels: usize) -> Vec<u8> {
+    let mut name: Vec<u8> = (0..labels).flat_map(|_| core::iter::once(63).chain([b'a'; 63])).collect();
+    name.push(0);
+    name
+}
+
 fn a_query() -> Vec<u8> {
     query(&[(OURS, TYPE_A, CLASS_IN)])
 }
@@ -59,7 +70,7 @@ fn with_qdcount(mut pkt: Vec<u8>, qdcount: u16) -> Vec<u8> {
 
 fn handle(pkt: &[u8], src_port: u16) -> (Result<Handled, ParseError>, Vec<u8>) {
     let mut out = Vec::new();
-    let result = Responder::new().handle(pkt, src_port, Duration::ZERO, Some(IP), &mut out);
+    let result = Responder::new().handle(pkt, src_port, at(0), Some(IP), &mut out);
     (result, out)
 }
 
@@ -104,6 +115,9 @@ fn nsec_record() -> Vec<u8> {
 #[case::self_pointer(query(&[(&[0xC0, 12], TYPE_A, CLASS_IN)]), MDNS_PORT, Err(ParseError::ForwardPointer { at: 12 }))]
 #[case::qdcount_past_end_after_match(with_qdcount(a_query(), 3), MDNS_PORT, Ok(Handled::Reply(Destination::Multicast)))]
 #[case::qdcount_past_end_no_match(with_qdcount(header(0, 0, 0), 1), MDNS_PORT, Err(ParseError::TruncatedName { at: 12 }))]
+#[case::no_questions(header(0, 0, 0), MDNS_PORT, Ok(Handled::NoAnswer))]
+#[case::name_too_long(query(&[(&long_name(5), TYPE_A, CLASS_IN)]), MDNS_PORT, Err(ParseError::NameTooLong { at: 12 }))]
+#[case::pointer_cut_in_half(with_qdcount(header(0, 0, 0), 1).into_iter().chain([0xC0]).collect(), MDNS_PORT, Err(ParseError::TruncatedName { at: 12 }))]
 fn handle_outcomes(#[case] pkt: Vec<u8>, #[case] src_port: u16, #[case] expected: Result<Handled, ParseError>) {
     check!(handle(&pkt, src_port).0 == expected);
 }
@@ -166,17 +180,17 @@ fn legacy_unicast_echoes_id_and_question() {
 fn multicast_replies_are_rate_limited_per_record() {
     let mut responder = Responder::new();
     let mut out = Vec::new();
-    let mut at = |pkt: &[u8], ms| responder.handle(pkt, MDNS_PORT, Duration::from_millis(ms), Some(IP), &mut out);
+    let mut ask = |pkt: &[u8], ms| responder.handle(pkt, MDNS_PORT, at(ms), Some(IP), &mut out);
     let aaaa = query(&[(OURS, TYPE_AAAA, CLASS_IN)]);
-    check!(at(&a_query(), 0) == Ok(Handled::Reply(Destination::Multicast)));
-    check!(at(&a_query(), 999) == Ok(Handled::RateLimited));
-    check!(at(&aaaa, 999) == Ok(Handled::Reply(Destination::Multicast)));
-    check!(at(&a_query(), 1_000) == Ok(Handled::Reply(Destination::Multicast)));
+    check!(ask(&a_query(), 0) == Ok(Handled::Reply(Destination::Multicast)));
+    check!(ask(&a_query(), 999) == Ok(Handled::RateLimited));
+    check!(ask(&aaaa, 999) == Ok(Handled::Reply(Destination::Multicast)));
+    check!(ask(&a_query(), 1_000) == Ok(Handled::Reply(Destination::Multicast)));
 }
 
 #[test]
 fn no_address_means_no_answer() {
-    let result = Responder::new().handle(&a_query(), MDNS_PORT, Duration::ZERO, None, &mut Vec::new());
+    let result = Responder::new().handle(&a_query(), MDNS_PORT, at(0), None, &mut Vec::new());
     check!(result == Ok(Handled::NoAnswer));
 }
 
@@ -184,12 +198,10 @@ fn no_address_means_no_answer() {
 fn announcements_repeat_once_a_second_then_stop() {
     let mut responder = Responder::new();
     let mut out = Vec::new();
-    check!(!responder.announcement(Duration::ZERO, IP, &mut out));
-    responder.schedule_announcements(Duration::from_secs(5));
-    let sent: Vec<bool> = [5_000, 5_500, 6_000, 9_000]
-        .into_iter()
-        .map(|ms| responder.announcement(Duration::from_millis(ms), IP, &mut out))
-        .collect();
+    check!(!responder.announcement(at(0), IP, &mut out));
+    responder.schedule_announcements(at(5_000));
+    let sent: Vec<bool> =
+        [5_000, 5_500, 6_000, 9_000].into_iter().map(|ms| responder.announcement(at(ms), IP, &mut out)).collect();
     check!(sent == [true, false, true, false]);
     let mut expected = header(0, FLAGS_RESPONSE, 0);
     expected[7] = 1;

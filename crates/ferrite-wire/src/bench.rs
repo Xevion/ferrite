@@ -67,22 +67,23 @@ impl Marker {
             return None;
         }
         let phase = words.next()?;
-        let mut number = || words.next()?.parse::<u64>().ok();
-        let marker = match phase {
-            "source" => match number() {
-                Some(bytes) => Self::Source { bytes, frame_len: u16::try_from(number()?).ok()? },
-                None => Self::SourceDone,
+        // `done` or the phase's first number; anything else is not a marker.
+        let first = words.next();
+        let number = |word: Option<&str>| word?.parse::<u64>().ok();
+        let marker = match (phase, first) {
+            ("source", Some("done")) => Self::SourceDone,
+            ("source", bytes) => {
+                Self::Source { bytes: number(bytes)?, frame_len: u16::try_from(number(words.next())?).ok()? }
             },
-            "sink" => match number() {
-                Some(secs) => Self::Sink { secs: u32::try_from(secs).ok()? },
-                None => Self::SinkDone,
+            ("sink", Some("done")) => Self::SinkDone,
+            ("sink", secs) => Self::Sink { secs: u32::try_from(number(secs)?).ok()? },
+            ("echo", Some("done")) => Self::EchoDone,
+            ("echo", secs) => Self::Echo {
+                secs: u32::try_from(number(secs)?).ok()?,
+                size: u16::try_from(number(words.next())?).ok()?,
             },
-            "echo" => match number() {
-                Some(secs) => Self::Echo { secs: u32::try_from(secs).ok()?, size: u16::try_from(number()?).ok()? },
-                None => Self::EchoDone,
-            },
-            "micro" => Self::Micro,
-            "done" => Self::Done,
+            ("micro", None) => Self::Micro,
+            ("done", None) => Self::Done,
             _ => return None,
         };
         words.next().is_none().then_some(marker)
@@ -331,6 +332,10 @@ mod tests {
     #[case::missing_size("BENCH echo 10", None)]
     #[case::oversized_frame("BENCH source 1 70000", None)]
     #[case::trailing_word("BENCH sink 10 now", None)]
+    #[case::source_without_numbers("BENCH source", None)]
+    #[case::sink_with_garbage("BENCH sink soon", None)]
+    #[case::echo_done_with_extra("BENCH echo done 5", None)]
+    #[case::micro_with_extra("BENCH micro 1", None)]
     #[case::other_text("hello", None)]
     fn marker_lines_parse(#[case] line: &str, #[case] want: Option<Marker>) {
         check!(Marker::parse(line) == want);

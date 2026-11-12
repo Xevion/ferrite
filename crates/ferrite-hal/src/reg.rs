@@ -8,7 +8,7 @@
 use core::fmt;
 use core::marker::PhantomData;
 
-use crate::{BusAddr32, Mmio, PhysAddr, PlatformError};
+use crate::{BusAddr, BusAddr32, Mmio, PhysAddr, PlatformError};
 
 /// A register's decoded value, convertible to and from the raw dword.
 pub trait RegValue: Copy {
@@ -189,10 +189,10 @@ pub trait MmioExt: Mmio {
     }
 
     /// Both halves of a 64-bit register, low dword first.
-    fn read_dma_ptr(&mut self, base: PhysAddr, reg: DmaPtrReg) -> u64 {
+    fn read_dma_ptr(&mut self, base: PhysAddr, reg: DmaPtrReg) -> BusAddr {
         let addr = reg.addr(base);
         let lo = u64::from(self.read32(addr));
-        lo | (u64::from(self.read32(addr.offset(4))) << 32)
+        BusAddr::new(lo | (u64::from(self.read32(addr.offset(4))) << 32))
     }
 
     /// Low dword first, then a zero high dword: never torn, since the high half never changes.

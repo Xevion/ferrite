@@ -829,6 +829,7 @@ version = "0.1.0"
 dependencies = [
  "assert2",
  "ferrite-efi",
+ "ferrite-hal",
  "log",
  "ratatui",
  "ratatui-core",

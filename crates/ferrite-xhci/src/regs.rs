@@ -43,6 +43,8 @@ pub mod xcap {
     use super::{ExtCapHeader, LegCtlSts, LegSup, ProtocolPorts, ReadOnly, ReadWrite, Reg, Rw1c};
 
     pub const HEADER: Reg<ExtCapHeader, ReadOnly> = Reg::new(0x00);
+    /// Supported Protocol: the protocol name as four ASCII bytes, `"USB "`.
+    pub const PROTOCOL_NAME: Reg<u32, ReadOnly> = Reg::new(0x04);
     /// Supported Protocol: the root ports it covers.
     pub const PROTOCOL_PORTS: Reg<ProtocolPorts, ReadOnly> = Reg::new(0x08);
     /// USB Legacy Support: BIOS and OS ownership semaphores.
@@ -171,6 +173,14 @@ pub struct DcSt {
     sbr: bool,
     #[bit(0, r)]
     event_ring_not_empty: bool,
+}
+
+impl DcSt {
+    /// The value with the event-ring-not-empty bit cleared, since that bit flips on every transfer.
+    #[must_use]
+    pub const fn without_event_pending(self) -> Self {
+        Self::new_with_raw_value(self.raw_value() & !1)
+    }
 }
 
 /// DCDB: DbC doorbell.
@@ -329,9 +339,13 @@ impl PortSc {
     }
 }
 
-/// CAPLENGTH: offset of the operational registers.
+/// CAPLENGTH, with HCIVERSION in its upper half.
 #[bitfield(u32, default = 0, debug)]
 pub struct CapLength {
+    /// Interface version as BCD, `0x0110` for 1.1.
+    #[bits(16..=31, r)]
+    hci_version: u16,
+    /// Offset of the operational registers.
     #[bits(0..=7, r)]
     length: u8,
 }
@@ -349,6 +363,9 @@ pub struct HccParams1 {
     /// First extended capability, in dwords from the MMIO base; 0 when there is none.
     #[bits(16..=31, r)]
     xecp: u16,
+    /// Port Power Control: software can switch each root port's power through PORTSC.PP.
+    #[bit(3, r)]
+    port_power_control: bool,
 }
 
 /// The first dword of every extended capability.
@@ -357,6 +374,9 @@ pub struct ExtCapHeader {
     /// Supported Protocol only: major revision (3 for USB 3).
     #[bits(24..=31, r)]
     major_revision: u8,
+    /// Supported Protocol only: minor revision as BCD (`0x10` for USB 3.1).
+    #[bits(16..=23, r)]
+    minor_revision: u8,
     /// Dwords to the next capability; 0 ends the list.
     #[bits(8..=15, r)]
     next: u8,

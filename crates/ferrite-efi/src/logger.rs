@@ -4,7 +4,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
+use core::time::Duration;
 
+use ferrite_hal::Clock as _;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
 use crate::bootlog::BootLog;
@@ -34,14 +36,15 @@ static SINK: Sink = Sink { log: RefCell::new(None), clock: Cell::new(None), defe
 
 impl Sink {
     fn format(&self, level: Level, args: fmt::Arguments<'_>) -> String {
-        let ms = self.clock.get().map_or(0, |clock| clock.ms());
+        let at = self.clock.get().map_or(Duration::ZERO, |clock| clock.now().since_epoch());
         let tag = match level {
             Level::Error => "ERROR ",
             Level::Warn => "WARN ",
             _ => "",
         };
         let mut line = String::new();
-        let _ = write!(line, "[{:>5}.{:03}] {tag}{args}", ms / 1000, ms % 1000);
+        // Formatting into a String only fails if a Display impl does, which then shows as a cut line.
+        let _ = write!(line, "[{:>5}.{:03}] {tag}{args}", at.as_secs(), at.subsec_millis());
         line
     }
 

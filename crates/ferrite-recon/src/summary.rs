@@ -27,7 +27,7 @@ pub fn report(dbc: &mut OpenDbc, start: Instant) {
         Since { start, at: t.connected },
         Since { start, at: t.configured },
     );
-    let s = dbc.stats().clone();
+    let s = dbc.stats();
     log::info!(
         "events {} (out_done {} in_done {} errors {} last_cc {} unknown {}) port_changes {} halts {} rearms {} kicks {}",
         s.events,

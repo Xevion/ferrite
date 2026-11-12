@@ -159,14 +159,26 @@ impl DmaSlice {
         unsafe { ptr::write_volatile(dst.as_ptr(), val) }
     }
 
-    /// Copy `out.len()` bytes from byte offset `off` into `out`.
+    /// Copy `src` to byte offset `off`, for a buffer the device reads only after a later doorbell.
     ///
     /// # Panics
     /// If the range is out of bounds.
-    pub fn read_into(&self, off: usize, out: &mut [u8]) {
-        for (i, b) in out.iter_mut().enumerate() {
-            *b = self.read(off + i);
-        }
+    pub fn copy_from(&self, off: usize, src: &[u8]) {
+        assert!(off.checked_add(src.len()).is_some_and(|end| end <= self.len), "DMA copy out of bounds");
+        // SAFETY: in bounds per the check above, and `src` is ordinary memory, so disjoint. The device
+        // reads these bytes only after a TRB naming them is posted behind a fence, so nothing races the copy.
+        unsafe { ptr::copy_nonoverlapping(src.as_ptr(), self.ptr.as_ptr().add(off), src.len()) }
+    }
+
+    /// Copy `out.len()` bytes from byte offset `off`, for a buffer the device has finished writing.
+    ///
+    /// # Panics
+    /// If the range is out of bounds.
+    pub fn copy_to(&self, off: usize, out: &mut [u8]) {
+        assert!(off.checked_add(out.len()).is_some_and(|end| end <= self.len), "DMA copy out of bounds");
+        // SAFETY: in bounds per the check above, and `out` is ordinary memory. The caller saw this
+        // buffer's completion and has not posted it again, so the device is not writing it.
+        unsafe { ptr::copy_nonoverlapping(self.ptr.as_ptr().add(off), out.as_mut_ptr(), out.len()) }
     }
 }
 

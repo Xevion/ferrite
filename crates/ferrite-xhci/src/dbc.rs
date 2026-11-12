@@ -25,7 +25,7 @@ use crate::error::{
     AllocSnafu, DisabledSnafu, DmaError, DmaSnafu, Error, IommuPresentSnafu, MmioSnafu, NoDbcSnafu,
     RegisterTimeoutSnafu,
 };
-use crate::regs::{CompletionCode, DB_IN, DB_OUT, DcCtrl, ErstSz, PortSc, TrbType, dbc, host_portsc};
+use crate::regs::{Code, CompletionCode, DB_IN, DB_OUT, DcCtrl, DcSt, ErstSz, PortSc, TrbType, dbc, host_portsc};
 use crate::ring::{ByteRing, EventRing, ProducerRing, RING_BYTES, RING_TRBS};
 use crate::stats::{RegSnapshot, Stats, Timings};
 use crate::trb::{Context, ErstEntry, MAX_PACKET, StringTable, Trb, ddi1, ddi2};
@@ -148,7 +148,7 @@ impl fmt::Display for Layout {
 /// The last DCST and DCPORTSC read, and whether they need reading again.
 struct Seen {
     ctrl: DcCtrl,
-    status: crate::regs::DcSt,
+    status: DcSt,
     portsc: PortSc,
     read_at: Option<Instant>,
     port_dirty: bool,
@@ -232,7 +232,7 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
             watch: LinkWatch::new(),
             seen: Seen {
                 ctrl: DcCtrl::DEFAULT,
-                status: crate::regs::DcSt::DEFAULT,
+                status: DcSt::DEFAULT,
                 portsc: PortSc::DEFAULT,
                 read_at: None,
                 port_dirty: true,
@@ -617,6 +617,13 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
     /// Back to `Armed` after the host dropped the device: restart both rings
     /// from their initial state, requeue unacknowledged OUT bytes and rewrite
     /// the endpoint contexts.
+    ///
+    /// A transfer event names its TRB only by address, so an event for slot k of
+    /// the old rings looks like one for slot k of the new rings. Callers return
+    /// before draining, and nothing is posted while `Armed`, so events already in
+    /// the ring are drained against empty rings in a later poll before `service`
+    /// posts again. Only an event the controller writes after it was configured
+    /// again could still retire new work.
     fn rearm(&mut self, why: &str) {
         self.stats.rearms += 1;
         self.out_ep.reset();
@@ -673,7 +680,7 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
             log::warn!(
                 "t={}ms transfer event error cc={} ep_id={} ptr={ptr:#x}",
                 ms(self.clock.now()),
-                crate::regs::Code(status.completion_code()),
+                Code(status.completion_code()),
                 event.control().endpoint_id(),
             );
         }
@@ -696,7 +703,7 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
             if ok && let Some(slot) = slot {
                 let got = MAX_PACKET.saturating_sub(status.residual().value() as usize);
                 let mut packet = [0u8; MAX_PACKET];
-                self.in_buf.read_into(usize::from(slot) * MAX_PACKET, &mut packet[..got]);
+                self.in_buf.copy_to(usize::from(slot) * MAX_PACKET, &mut packet[..got]);
                 self.stats.bytes_received += got as u64;
                 rx(&packet[..got]);
             }

@@ -8,6 +8,7 @@
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use ferrite_hal::Instant;
 use smoltcp::wire::Ipv4Address;
 use snafu::{OptionExt as _, Snafu, ensure};
 
@@ -312,16 +313,21 @@ struct ReplyShape<'p> {
 /// pending announcements.
 #[derive(Debug, Default)]
 pub struct Responder {
-    last_a: Option<Duration>,
-    last_nsec: Option<Duration>,
+    last_a: Option<Instant>,
+    last_nsec: Option<Instant>,
     announcements_left: u8,
-    next_announcement: Duration,
+    next_announcement: Instant,
 }
 
 impl Responder {
     #[must_use]
     pub const fn new() -> Self {
-        Self { last_a: None, last_nsec: None, announcements_left: 0, next_announcement: Duration::ZERO }
+        Self {
+            last_a: None,
+            last_nsec: None,
+            announcements_left: 0,
+            next_announcement: Instant::from_epoch(Duration::ZERO),
+        }
     }
 
     /// Answer `pkt`, received from `src_port` at `now`, writing any reply into `out`.
@@ -329,7 +335,7 @@ impl Responder {
         &mut self,
         pkt: &[u8],
         src_port: u16,
-        now: Duration,
+        now: Instant,
         ip: Option<Ipv4Address>,
         out: &mut Vec<u8>,
     ) -> Result<Handled, ParseError> {
@@ -379,26 +385,26 @@ impl Responder {
     }
 
     /// Queue announcements of a new or changed address, the first one due at `now`.
-    pub fn schedule_announcements(&mut self, now: Duration) {
+    pub fn schedule_announcements(&mut self, now: Instant) {
         self.announcements_left = ANNOUNCE_COUNT;
         self.next_announcement = now;
     }
 
     /// If an announcement is due, write it into `out` for multicast and return `true`.
-    pub fn announcement(&mut self, now: Duration, ip: Ipv4Address, out: &mut Vec<u8>) -> bool {
+    pub fn announcement(&mut self, now: Instant, ip: Ipv4Address, out: &mut Vec<u8>) -> bool {
         if self.announcements_left == 0 || now < self.next_announcement {
             return false;
         }
         self.announcements_left -= 1;
-        self.next_announcement = now.saturating_add(ANNOUNCE_INTERVAL);
+        self.next_announcement = now + ANNOUNCE_INTERVAL;
         self.last_a = Some(now);
         write_reply(out, &mdns_shape(true, false), ip);
         true
     }
 }
 
-fn may_multicast(last: Option<Duration>, now: Duration) -> bool {
-    last.is_none_or(|last| now.saturating_sub(last) >= MULTICAST_INTERVAL)
+fn may_multicast(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now - last >= MULTICAST_INTERVAL)
 }
 
 const fn mdns_shape(a: bool, nsec: bool) -> ReplyShape<'static> {

@@ -2,8 +2,7 @@
 //! reaches, then talk over it.
 //!
 //! The Thunderbolt controller at 3b:00.0 is opened first so DCE is set as early as
-//! possible; the controller listing and register dump happen between polls while the far
-//! host trains the link. Once configured it sends `ferrite dbcping: hello N` once a second
+//! possible; the controller listing happens while the far host trains the link. Once configured it sends `ferrite dbcping: hello N` once a second
 //! for 30 s and echoes any received bytes back as `rx: ...`.
 //!
 //! Everything is also written to `\EFI\ferrite\dbcping.txt`. With no keypress it gives up
@@ -32,7 +31,7 @@ use log::LevelFilter;
 use uefi::prelude::*;
 
 /// How long to keep the result on screen before exiting.
-const EXIT_AFTER_SECS: u64 = 10;
+const EXIT_AFTER: Duration = Duration::from_secs(10);
 /// How long to send hello lines once the link is up.
 const PING: Duration = Duration::from_secs(30);
 const HELLO_EVERY: Duration = Duration::from_secs(1);
@@ -58,7 +57,7 @@ fn main() -> Status {
 
     // An unattended run cold-resets inside `finish`, which also clears DbC, so the link
     // stays enabled until then. Dropping it afterwards clears DCE before the memory goes.
-    logger::with(|log| session::finish(log, EXIT_AFTER_SECS));
+    logger::with(|log| session::finish(log, EXIT_AFTER));
     drop(link);
     Status::SUCCESS
 }
@@ -66,6 +65,7 @@ fn main() -> Status {
 /// Send a hello line each second and echo whatever arrives, for [`PING`].
 fn ping(link: &mut Link, clock: Clock) {
     let Link { dbc, survey } = link;
+    survey.finish();
     let begin = clock.now();
     let mut next_hello = begin;
     let mut next_key = begin;
@@ -96,9 +96,6 @@ fn ping(link: &mut Link, clock: Clock) {
             next_hello = next_hello + HELLO_EVERY;
             hello(dbc, hellos, now - begin);
             logger::with(BootLog::poll);
-        }
-        if survey.pending() {
-            survey.step(dbc);
         }
     }
 }

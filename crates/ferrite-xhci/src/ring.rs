@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{Ordering, fence};
 
-use ferrite_hal::BusAddr32;
+use ferrite_hal::{BusAddr, BusAddr32};
 
 use crate::dma::DmaSlice;
 use crate::trb::Trb;
@@ -115,7 +115,7 @@ impl ProducerRing {
     /// Retire every in-flight TRB up to and including the one at bus address
     /// `ptr`, passing each tag to `retire` oldest first. Returns how many were
     /// retired, or `None` (retiring nothing) when `ptr` is not an in-flight TRB.
-    pub fn complete_to(&mut self, ptr: u64, mut retire: impl FnMut(u16)) -> Option<usize> {
+    pub fn complete_to(&mut self, ptr: BusAddr, mut retire: impl FnMut(u16)) -> Option<usize> {
         let idx = self.in_flight_distance(ptr)?;
         for _ in 0..=idx {
             retire(self.complete()?);
@@ -124,8 +124,8 @@ impl ProducerRing {
     }
 
     /// Position of `ptr` counted from the oldest in-flight TRB.
-    fn in_flight_distance(&self, ptr: u64) -> Option<usize> {
-        let off = ptr.checked_sub(u64::from(self.dma().get()))?;
+    fn in_flight_distance(&self, ptr: BusAddr) -> Option<usize> {
+        let off = ptr.get().checked_sub(u64::from(self.dma().get()))?;
         if !off.is_multiple_of(TRB_BYTES as u64) {
             return None;
         }
@@ -231,9 +231,10 @@ impl ByteRing {
     /// Copy as much of `data` as fits; returns the number of bytes taken.
     pub fn write(&mut self, data: &[u8]) -> usize {
         let n = data.len().min(self.free());
-        for (i, &b) in data[..n].iter().enumerate() {
-            self.mem.write(self.wr.wrapping_add(i) & (self.cap - 1), b);
-        }
+        let off = self.wr & (self.cap - 1);
+        let (head, tail) = data[..n].split_at(n.min(self.cap - off));
+        self.mem.copy_from(off, head);
+        self.mem.copy_from(0, tail);
         self.wr = self.wr.wrapping_add(n);
         n
     }
@@ -290,8 +291,8 @@ mod tests {
         Trb::normal(bus(addr), u17::new(8))
     }
 
-    fn at(i: usize) -> u64 {
-        BASE + (i * TRB_BYTES) as u64
+    fn at(i: usize) -> BusAddr {
+        BusAddr::new(BASE + (i * TRB_BYTES) as u64)
     }
 
     #[test]
@@ -314,7 +315,7 @@ mod tests {
 
         assert!(ring.push(normal(0xa000), 7));
         check!(!mem[0].cycle(), "second lap writes cycle 0");
-        check!(mem[0].pointer() == 0xa000);
+        check!(mem[0].pointer() == BusAddr::new(0xa000));
     }
 
     #[test]
@@ -332,7 +333,7 @@ mod tests {
             check!(mem[..USABLE].iter().all(|t| t.cycle() == lap_cycle), "lap {lap} cycle");
             check!(mem[USABLE].cycle() == lap_cycle, "lap {lap} link cycle");
             check!(mem[USABLE].control().toggle_cycle(), "link keeps toggle-cycle on lap {lap}");
-            check!(mem[USABLE].pointer() == BASE);
+            check!(mem[USABLE].pointer() == BusAddr::new(BASE));
         }
         check!(ring.pending() == 0);
     }
@@ -381,7 +382,8 @@ mod tests {
         check!(ring.complete_to(at(1), |_| {}) == Some(2));
 
         let mut touched = false;
-        for ptr in [at(0), at(1), at(4), at(USABLE), at(RING_TRBS), BASE - 16, at(2) + 8, 0] {
+        let raw = |addr: u64| BusAddr::new(addr);
+        for ptr in [at(0), at(1), at(4), at(USABLE), at(RING_TRBS), raw(BASE - 16), raw(at(2).get() + 8), raw(0)] {
             check!(ring.complete_to(ptr, |_| touched = true) == None, "ptr {ptr:#x}");
         }
         check!(!touched);

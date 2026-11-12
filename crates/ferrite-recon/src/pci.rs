@@ -2,6 +2,7 @@
 
 use core::fmt;
 
+use ferrite_hal::PhysAddr;
 use ferrite_xhci::pci::{PowerState, bar_is_64bit};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,15 +121,10 @@ impl Bar {
         }
     }
 
-    /// Whether the base is a memory address a MMIO read can use.
+    /// The base as a memory address a MMIO read can use; `None` for an I/O or unassigned BAR.
     #[must_use]
-    pub const fn is_mmio(self) -> bool {
-        !matches!(self.kind, BarKind::Io) && self.base != 0
-    }
-
-    #[must_use]
-    pub const fn is_64bit(self) -> bool {
-        matches!(self.kind, BarKind::Mem64)
+    pub const fn mmio(self) -> Option<PhysAddr> {
+        if matches!(self.kind, BarKind::Io) || self.base == 0 { None } else { Some(PhysAddr::new(self.base)) }
     }
 }
 
@@ -163,9 +159,9 @@ mod tests {
 
     #[test]
     fn unassigned_and_io_bars_are_not_mmio() {
-        check!(!Bar::decode(0, 0).is_mmio());
-        check!(!Bar::decode(0xe001, 0).is_mmio());
-        check!(Bar::decode(0xfe20_0000, 0).is_mmio());
+        check!(Bar::decode(0, 0).mmio() == None);
+        check!(Bar::decode(0xe001, 0).mmio() == None);
+        check!(Bar::decode(0xfe20_0000, 0).mmio() == Some(PhysAddr::new(0xfe20_0000)));
     }
 
     #[test]

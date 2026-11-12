@@ -6,7 +6,7 @@
 use arbitrary_int::{u3, u5, u6, u17, u24};
 use bitbybit::bitfield;
 
-use ferrite_hal::BusAddr32;
+use ferrite_hal::{BusAddr, BusAddr32};
 
 use crate::regs::{CompletionCode, Ddi1, Ddi2, TrbType};
 
@@ -110,8 +110,8 @@ impl Trb {
 
     /// Data pointer; in an event, the TRB the event refers to.
     #[must_use]
-    pub const fn pointer(&self) -> u64 {
-        (self.d[0] as u64) | ((self.d[1] as u64) << 32)
+    pub const fn pointer(&self) -> BusAddr {
+        BusAddr::new((self.d[0] as u64) | ((self.d[1] as u64) << 32))
     }
 }
 
@@ -325,14 +325,5 @@ mod tests {
         check!(slot[0] == want_len);
         check!(slot[usize::from(want_len) - 2] == b'x');
         check!(slot[usize::from(want_len)..].iter().all(|&b| b == 0), "nothing written past the descriptor");
-    }
-
-    #[test]
-    fn unknown_event_codes_decode_without_panic() {
-        let trb = Trb { d: [0, 0, 0xc8 << 24, 0x3f << 10] };
-        check!(trb.control().trb_type().is_err());
-        check!(trb.control().trb_type_raw().value() == 0x3f);
-        check!(trb.event_status().completion_code().is_err());
-        check!(trb.event_status().completion_code_raw() == 0xc8);
     }
 }

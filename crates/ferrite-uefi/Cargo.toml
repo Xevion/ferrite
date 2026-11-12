@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 ferrite-efi.workspace = true
+ferrite-hal.workspace = true
 log.workspace = true
 ratatui.workspace = true
 ratatui-core.workspace = true

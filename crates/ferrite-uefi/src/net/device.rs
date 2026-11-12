@@ -9,8 +9,8 @@ use alloc::boxed::Box;
 use alloc::vec;
 use core::time::Duration;
 
+use ferrite_hal::Instant;
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::time::Instant;
 use uefi::Status;
 use uefi::boot::ScopedProtocol;
 use uefi::proto::network::snp::{NetworkState, SimpleNetwork};
@@ -29,7 +29,7 @@ const MAX_RECYCLE_PER_POLL: usize = 4 * TX_SLOTS;
 pub struct TxPool {
     bufs: Box<[[u8; FRAME_CAP]]>,
     /// When each slot was handed to the firmware, if it has not come back yet.
-    sent_at: [Option<Duration>; TX_SLOTS],
+    sent_at: [Option<Instant>; TX_SLOTS],
 }
 
 impl TxPool {
@@ -51,7 +51,7 @@ impl TxPool {
         &mut self.bufs[slot][..len.min(FRAME_CAP)]
     }
 
-    pub fn mark_sent(&mut self, slot: usize, now: Duration) {
+    pub fn mark_sent(&mut self, slot: usize, now: Instant) {
         self.sent_at[slot] = Some(now);
     }
 
@@ -65,10 +65,10 @@ impl TxPool {
     }
 
     /// Free every slot held for at least `max_age`. Returns how many were freed.
-    pub fn reclaim_stale(&mut self, now: Duration, max_age: Duration) -> usize {
+    pub fn reclaim_stale(&mut self, now: Instant, max_age: Duration) -> usize {
         let mut freed = 0;
         for sent in &mut self.sent_at {
-            if sent.is_some_and(|at| now.saturating_sub(at) >= max_age) {
+            if sent.is_some_and(|at| now - at >= max_age) {
                 *sent = None;
                 freed += 1;
             }
@@ -99,7 +99,7 @@ pub struct SnpDevice {
     initial_state: NetworkState,
     rx: Box<[u8; FRAME_CAP]>,
     tx: TxPool,
-    now: Duration,
+    now: Instant,
     pub stats: DeviceStats,
 }
 
@@ -110,7 +110,7 @@ impl SnpDevice {
             initial_state,
             rx: Box::new([0; FRAME_CAP]),
             tx: TxPool::new(),
-            now: Duration::ZERO,
+            now: Instant::default(),
             stats: DeviceStats::default(),
         }
     }
@@ -121,7 +121,7 @@ impl SnpDevice {
 
     /// Take back every transmit buffer the firmware has finished with. The
     /// `GetStatus` call this makes also refreshes `media_present` on EDK2's `SnpDxe`.
-    pub fn reclaim(&mut self, now: Duration) {
+    pub fn reclaim(&mut self, now: Instant) {
         self.now = now;
         for _ in 0..MAX_RECYCLE_PER_POLL {
             match self.snp.get_recycled_transmit_buffer_status() {
@@ -197,7 +197,7 @@ impl Device for SnpDevice {
     where
         Self: 'a;
 
-    fn receive(&mut self, _now: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(&mut self, _now: smoltcp::time::Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         // Without a slot for the reply, leave the frame queued in the firmware.
         let slot = self.tx_slot()?;
         match self.snp.receive(&mut self.rx[..], None, None, None, None) {
@@ -222,7 +222,7 @@ impl Device for SnpDevice {
         }
     }
 
-    fn transmit(&mut self, _now: Instant) -> Option<Self::TxToken<'_>> {
+    fn transmit(&mut self, _now: smoltcp::time::Instant) -> Option<Self::TxToken<'_>> {
         let slot = self.tx_slot()?;
         Some(SnpTxToken {
             snp: &self.snp,
@@ -258,7 +258,7 @@ pub struct SnpTxToken<'a> {
     snp: &'a SimpleNetwork,
     pool: &'a mut TxPool,
     slot: usize,
-    now: Duration,
+    now: Instant,
     tx_errors: &'a mut u32,
 }
 
@@ -284,8 +284,8 @@ mod tests {
 
     use super::*;
 
-    const fn ms(ms: u64) -> Duration {
-        Duration::from_millis(ms)
+    const fn ms(ms: u64) -> Instant {
+        Instant::from_epoch(Duration::from_millis(ms))
     }
 
     #[test]

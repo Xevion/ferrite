@@ -16,6 +16,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use ferrite_efi::bootlog::{BootLog, Echo};
 use ferrite_efi::pci::RootBridge;
@@ -29,7 +30,7 @@ use uefi::prelude::*;
 use uefi::proto::pci::root_bridge::PciRootBridgeIo;
 
 /// How long to keep the report on screen before exiting.
-const EXIT_AFTER_SECS: u64 = 20;
+const EXIT_AFTER: Duration = Duration::from_secs(20);
 
 /// Subsystem vendor and device ID.
 const SUBSYSTEM: u8 = 0x2c;
@@ -78,7 +79,7 @@ fn main() -> Status {
         log::warn!("uefi helpers init failed: {e}");
     }
     report();
-    logger::with(|log| session::finish(log, EXIT_AFTER_SECS));
+    logger::with(|log| session::finish(log, EXIT_AFTER));
     Status::SUCCESS
 }
 
@@ -150,17 +151,18 @@ fn read_function(rb: &mut RootBridge, addr: PciAddress) -> Result<Option<Functio
     let bar0 = Bar::decode(lo, hi);
 
     let mut function = Function { addr, vendor, device, revision, class, subsystem, command, bar0, csr: None };
-    if function.is_intel_network() && bar0.is_mmio() {
-        function.csr = Some(read_csr(rb, command, bar0));
+    if function.is_intel_network()
+        && let Some(base) = bar0.mmio()
+    {
+        function.csr = Some(read_csr(rb, command, base));
     }
     Ok(Some(function))
 }
 
-fn read_csr(rb: &mut RootBridge, command: u16, bar0: Bar) -> Csr {
+fn read_csr(rb: &mut RootBridge, command: u16, base: PhysAddr) -> Csr {
     if command & CMD_MEMORY == 0 {
         return Csr::DecodeOff;
     }
-    let base = PhysAddr::new(bar0.base);
     let regs = rb.try_read(base, CSR_HW_REV).and_then(|rev| Ok((rev, rb.try_read(base, CSR_HW_IF_CONFIG)?)));
     match regs {
         Ok((hw_rev, hw_if_config)) => Csr::Read { hw_rev, hw_if_config },

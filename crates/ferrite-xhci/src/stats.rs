@@ -3,7 +3,7 @@
 use core::fmt;
 
 use arbitrary_int::u6;
-use ferrite_hal::{Instant, Mmio, MmioExt, PhysAddr};
+use ferrite_hal::{BusAddr, Instant, Mmio, MmioExt, PhysAddr};
 
 use crate::regs::{Code, DcCtrl, DcSt, Ddi1, Ddi2, ErstSz, PortSc, TrbType, dbc};
 
@@ -92,9 +92,9 @@ pub struct RegSnapshot {
     pub status: DcSt,
     pub portsc: PortSc,
     pub erstsz: ErstSz,
-    pub erstba: u64,
-    pub erdp: u64,
-    pub dccp: u64,
+    pub erstba: BusAddr,
+    pub erdp: BusAddr,
+    pub dccp: BusAddr,
     pub ddi1: Ddi1,
     pub ddi2: Ddi2,
 }

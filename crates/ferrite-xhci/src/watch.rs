@@ -23,14 +23,18 @@ impl LinkWatch {
         self.last = None;
     }
 
-    pub fn observe(&mut self, now: Instant, ctrl: DcCtrl, status: DcSt, portsc: PortSc) {
-        let seen = (ctrl, status, portsc);
+    /// Log the registers if the link state changed since the last call. Returns whether it did.
+    ///
+    /// DCST's event-ring-not-empty bit is left out of the comparison: it flips on
+    /// every transfer and says nothing about the link.
+    pub fn observe(&mut self, now: Instant, ctrl: DcCtrl, status: DcSt, portsc: PortSc) -> bool {
+        let seen = (ctrl, status.without_event_pending(), portsc);
         if self.last == Some(seen) {
-            return;
+            return false;
         }
         self.last = Some(seen);
         if self.budget == 0 {
-            return;
+            return false;
         }
         self.budget -= 1;
         log::debug!(
@@ -43,5 +47,25 @@ impl LinkWatch {
             portsc.link(),
             portsc.speed_code(),
         );
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::*;
+
+    #[test]
+    fn event_ring_bit_alone_is_not_a_change() {
+        let mut watch = LinkWatch::new();
+        let ctrl = DcCtrl::new_with_raw_value(0x8a00_0003);
+        let portsc = PortSc::new_with_raw_value(0x0000_1203);
+        let t = Instant::default();
+        check!(watch.observe(t, ctrl, DcSt::new_with_raw_value(0x0300_0000), portsc));
+        check!(!watch.observe(t, ctrl, DcSt::new_with_raw_value(0x0300_0001), portsc));
+        check!(!watch.observe(t, ctrl, DcSt::new_with_raw_value(0x0300_0000), portsc));
+        check!(watch.observe(t, ctrl, DcSt::new_with_raw_value(0x0000_0000), portsc), "debug port lost");
     }
 }

@@ -1,5 +1,5 @@
 //! DbC bring-up shared by the DbC apps: the preferred controller first, with the slow
-//! survey work done between polls while the far host trains the link.
+//! controller listing done while the far host trains the link.
 
 use alloc::vec::Vec;
 
@@ -15,72 +15,55 @@ use crate::summary;
 /// Controller tried first: the Thunderbolt xHCI on the X1 Carbon.
 pub const PREFERRED: PciAddress = PciAddress::new(0, 0x3b, 0, 0);
 
-/// Slow reporting work, done one chore at a time so polling is never starved for long.
+/// The listing of every xHCI on the machine, deferred so it runs while the link trains.
 #[derive(Default)]
 pub struct Survey {
-    next: u8,
-    listed: bool,
-    devices: Vec<(Controller, XhciDevice)>,
+    devices: Option<Vec<(Controller, XhciDevice)>>,
 }
 
-const CHORES: u8 = 3;
-
 impl Survey {
-    #[must_use]
-    pub const fn pending(&self) -> bool {
-        self.next < CHORES
-    }
-
-    /// Run the next chore, if any. Call between polls.
-    pub fn step(&mut self, dbc: &mut OpenDbc) {
-        match self.next {
-            0 => match iommu_handle_count() {
-                Ok(n) => log::info!("IOMMU protocol handles: {n}"),
-                Err(e) => log::warn!("IOMMU protocol lookup failed: {e}"),
-            },
-            1 => log::debug!("registers at arm:\n{}", dbc.snapshot()),
-            2 => self.list(),
-            _ => return,
-        }
-        self.next += 1;
+    /// List and describe every xHCI, the first time only. It scans every bus, so it is slow.
+    pub fn finish(&mut self) {
+        self.devices();
     }
 
     /// Every xHCI on the machine, listing them first if that has not happened yet.
     pub fn devices(&mut self) -> &[(Controller, XhciDevice)] {
-        self.list();
-        &self.devices
+        self.devices.get_or_insert_with(list)
     }
+}
 
-    fn list(&mut self) {
-        if self.listed {
-            return;
-        }
-        self.listed = true;
-        let scan = match xhci::find_xhcis() {
-            Ok(scan) => scan,
-            Err(e) => {
-                log::error!("PCI scan failed: {}", Chain(&e));
-                return;
-            },
-        };
-        for failure in &scan.failures {
-            log::warn!("PCI scan incomplete: {}", Chain(failure));
-        }
-        for ctrl in scan.controllers {
-            match ctrl.probe() {
-                Ok(dev) => self.devices.push((ctrl, dev)),
-                Err(e) => log::warn!("{}: probe failed: {}", ctrl.function.addr(), Chain(&e)),
-            }
-        }
-        self.devices.sort_by_key(|(_, d)| (d.dbc_regs().is_none(), d.addr() != PREFERRED));
-        log::info!("{} xHCI controller(s)", self.devices.len());
-        for (_, dev) in &self.devices {
-            describe(dev);
-        }
-        if self.devices.iter().all(|(_, d)| d.dbc_regs().is_none()) {
-            log::info!("no xHCI with a Debug Capability (QEMU's qemu-xhci has none)");
-        }
+fn list() -> Vec<(Controller, XhciDevice)> {
+    let scan = match xhci::find_xhcis() {
+        Ok(scan) => scan,
+        Err(e) => {
+            log::error!("PCI scan failed: {}", Chain(&e));
+            return Vec::new();
+        },
+    };
+    for failure in &scan.failures {
+        log::warn!("PCI scan incomplete: {}", Chain(failure));
     }
+    let mut devices: Vec<_> = scan
+        .controllers
+        .into_iter()
+        .filter_map(|ctrl| match ctrl.probe() {
+            Ok(dev) => Some((ctrl, dev)),
+            Err(e) => {
+                log::warn!("{}: probe failed: {}", ctrl.function.addr(), Chain(&e));
+                None
+            },
+        })
+        .collect();
+    devices.sort_by_key(|(_, d)| (d.dbc_regs().is_none(), d.addr() != PREFERRED));
+    log::info!("{} xHCI controller(s)", devices.len());
+    for (_, dev) in &devices {
+        describe(dev);
+    }
+    if devices.iter().all(|(_, d)| d.dbc_regs().is_none()) {
+        log::info!("no xHCI with a Debug Capability (QEMU's qemu-xhci has none)");
+    }
+    devices
 }
 
 fn describe(dev: &XhciDevice) {
@@ -95,7 +78,7 @@ fn describe(dev: &XhciDevice) {
     );
 }
 
-/// A configured DbC and the survey work still owed.
+/// A configured DbC, and the controller listing if the link came up before it ran.
 pub struct Link {
     pub dbc: OpenDbc,
     pub survey: Survey,
@@ -139,13 +122,20 @@ pub fn bring_up(clock: Clock, start: Instant, cfg: &Config) -> Option<Link> {
     None
 }
 
-/// Do the pending survey work between polls while the link trains, then wait out the
-/// rest of the configuration deadline. On failure the DbC is disabled and dropped.
+/// List the controllers if the link is still training, then wait out the configuration
+/// deadline. On failure the DbC is disabled and dropped.
+///
+/// The listing runs before `wait_configured`, whose deadline and re-arm schedule start
+/// when it returns, so a slow scan delays the first re-arm but cannot skip it.
 fn settle(mut dbc: OpenDbc, survey: &mut Survey, clock: Clock, start: Instant) -> Option<OpenDbc> {
     let opened = clock.now();
-    while dbc.state() == State::Armed && survey.pending() {
-        dbc.poll(|_| {});
-        survey.step(&mut dbc);
+    match iommu_handle_count() {
+        Ok(n) => log::info!("IOMMU protocol handles: {n}"),
+        Err(e) => log::warn!("IOMMU protocol lookup failed: {e}"),
+    }
+    dbc.poll(|_| {});
+    if dbc.state() == State::Armed {
+        survey.finish();
     }
     match dbc.wait_configured() {
         Ok(_) => {

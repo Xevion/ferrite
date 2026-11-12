@@ -9,6 +9,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use ferrite_hal::Instant;
 use smoltcp::iface::{SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
 
@@ -124,7 +125,7 @@ struct Conn {
     handle: SocketHandle,
     request: Vec<u8>,
     stage: Stage,
-    accepted: Option<Duration>,
+    accepted: Option<Instant>,
 }
 
 impl Conn {
@@ -162,7 +163,7 @@ impl HttpServer {
     }
 
     /// Advance every connection. Returns how many responses were completed.
-    pub fn poll(&mut self, sockets: &mut SocketSet<'_>, now: Duration, mut page: impl FnMut() -> String) -> u32 {
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>, now: Instant, mut page: impl FnMut() -> String) -> u32 {
         let mut completed = 0;
         for conn in &mut self.conns {
             let sock = sockets.get_mut::<tcp::Socket<'_>>(conn.handle);
@@ -181,7 +182,7 @@ impl HttpServer {
                 continue;
             }
             let accepted = *conn.accepted.get_or_insert(now);
-            if now.saturating_sub(accepted) >= CONNECTION_DEADLINE {
+            if now - accepted >= CONNECTION_DEADLINE {
                 log::debug!("http: aborting connection from {:?} open {CONNECTION_DEADLINE:?}", sock.remote_endpoint());
                 sock.abort();
                 conn.reset();
@@ -201,11 +202,14 @@ fn advance(conn: &mut Conn, sock: &mut tcp::Socket<'_>, page: &mut impl FnMut() 
         if sock.can_recv() {
             let room = REQUEST_CAP - conn.request.len();
             let request = &mut conn.request;
-            let _ = sock.recv(|buf| {
+            let received = sock.recv(|buf| {
                 let take = buf.len().min(room);
                 request.extend_from_slice(&buf[..take]);
                 (take, ())
             });
+            if let Err(e) = received {
+                log::debug!("http: receive failed: {e:?}");
+            }
         }
         match route(&conn.request) {
             Some(route) => conn.stage = Stage::Sending { response: response(route, &mut *page), sent: 0 },
@@ -280,42 +284,79 @@ mod tests {
         );
     }
 
-    /// A smoltcp client on the same loopback interface; returns the bytes it read and responses served.
-    fn exchange(request: &[u8]) -> (Vec<u8>, u32) {
-        use smoltcp::iface::{Config, Interface};
-        use smoltcp::phy::{Loopback, Medium};
-        use smoltcp::time::Instant;
-        use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
+    /// The server and one client socket on a smoltcp loopback interface, stepped a millisecond at a time.
+    struct Loopback {
+        device: smoltcp::phy::Loopback,
+        iface: smoltcp::iface::Interface,
+        sockets: SocketSet<'static>,
+        http: HttpServer,
+        client: SocketHandle,
+        ms: u64,
+        served: u32,
+        reply: Vec<u8>,
+    }
 
-        let mut device = Loopback::new(Medium::Ethernet);
-        let config = Config::new(HardwareAddress::Ethernet(EthernetAddress([0x02, 0, 0, 0, 0, 1])));
-        let mut iface = Interface::new(config, &mut device, Instant::ZERO);
-        iface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)).unwrap());
-        let mut sockets = SocketSet::new(vec![]);
-        let mut http = HttpServer::new(&mut sockets);
-        let client =
-            sockets.add(tcp::Socket::new(tcp::SocketBuffer::new(vec![0; 4096]), tcp::SocketBuffer::new(vec![0; 4096])));
+    impl Loopback {
+        fn new() -> Self {
+            use smoltcp::iface::{Config, Interface};
+            use smoltcp::phy::Medium;
+            use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
-        let (mut reply, mut served, mut sent) = (Vec::new(), 0, false);
-        for ms in 0..500_u32 {
-            iface.poll(Instant::from_millis(ms), &mut device, &mut sockets);
-            served += http.poll(&mut sockets, Duration::from_millis(ms.into()), || String::from("<p>page</p>"));
-            let sock = sockets.get_mut::<tcp::Socket<'_>>(client);
-            if ms == 1 {
-                sock.connect(iface.context(), (IpAddress::v4(127, 0, 0, 1), HTTP_PORT), 49_152).unwrap();
-            }
-            if !sent && sock.may_send() {
-                sent = sock.send_slice(request).unwrap() == request.len();
-            }
-            if sock.can_recv() {
-                sock.recv(|buf| {
-                    reply.extend_from_slice(buf);
-                    (buf.len(), ())
-                })
+            let mut device = smoltcp::phy::Loopback::new(Medium::Ethernet);
+            let config = Config::new(HardwareAddress::Ethernet(EthernetAddress([0x02, 0, 0, 0, 0, 1])));
+            let mut iface = Interface::new(config, &mut device, smoltcp::time::Instant::ZERO);
+            iface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)).unwrap());
+            let mut sockets = SocketSet::new(vec![]);
+            let http = HttpServer::new(&mut sockets);
+            let client = sockets
+                .add(tcp::Socket::new(tcp::SocketBuffer::new(vec![0; 4096]), tcp::SocketBuffer::new(vec![0; 4096])));
+            Self { device, iface, sockets, http, client, ms: 0, served: 0, reply: Vec::new() }
+        }
+
+        fn client(&mut self) -> &mut tcp::Socket<'static> {
+            self.sockets.get_mut(self.client)
+        }
+
+        fn connect(&mut self, local_port: u16) {
+            self.reply.clear();
+            let sock = self.sockets.get_mut::<tcp::Socket<'_>>(self.client);
+            sock.connect(self.iface.context(), (smoltcp::wire::IpAddress::v4(127, 0, 0, 1), HTTP_PORT), local_port)
                 .unwrap();
+            self.run_until(tcp::Socket::may_send, 100);
+        }
+
+        /// Step until `done` holds for the client socket, at most `limit` milliseconds.
+        fn run_until(&mut self, mut done: impl FnMut(&tcp::Socket<'static>) -> bool, limit: u64) {
+            for _ in 0..limit {
+                self.ms += 1;
+                self.iface.poll(
+                    smoltcp::time::Instant::from_millis(self.ms.cast_signed()),
+                    &mut self.device,
+                    &mut self.sockets,
+                );
+                let now = Instant::from_epoch(Duration::from_millis(self.ms));
+                self.served += self.http.poll(&mut self.sockets, now, || String::from("<p>page</p>"));
+                let sock = self.sockets.get_mut::<tcp::Socket<'static>>(self.client);
+                if sock.can_recv() {
+                    sock.recv(|buf| {
+                        self.reply.extend_from_slice(buf);
+                        (buf.len(), ())
+                    })
+                    .unwrap();
+                }
+                if done(sock) {
+                    return;
+                }
             }
         }
-        (reply, served)
+
+        fn run(&mut self, ms: u64) {
+            self.run_until(|_| false, ms);
+        }
+
+        fn request(&mut self, request: &[u8]) {
+            check!(self.client().send_slice(request).unwrap() == request.len());
+        }
     }
 
     #[rstest]
@@ -323,8 +364,39 @@ mod tests {
     #[case::favicon(b"GET /favicon.ico HTTP/1.1\r\n\r\n", "HTTP/1.0 404 Not Found\r\n")]
     #[case::post(b"POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n", "HTTP/1.0 405 Method Not Allowed\r\n")]
     fn serves_over_tcp(#[case] request: &[u8], #[case] status_line: &str) {
-        let (reply, served) = exchange(request);
-        check!(served == 1);
-        check!(String::from_utf8_lossy(&reply).starts_with(status_line));
+        let mut net = Loopback::new();
+        net.connect(49_152);
+        net.request(request);
+        net.run(500);
+        check!(net.served == 1);
+        check!(String::from_utf8_lossy(&net.reply).starts_with(status_line));
+    }
+
+    #[test]
+    fn a_client_closing_mid_request_gets_no_response() {
+        let mut net = Loopback::new();
+        net.connect(49_152);
+        net.request(b"GET / HTTP/1.1\r\nHost: x\r\n");
+        net.client().close();
+        net.run(500);
+        check!(net.served == 0);
+        check!(net.reply.is_empty());
+        check!(matches!(net.client().state(), tcp::State::TimeWait | tcp::State::Closed), "the server closed too");
+    }
+
+    #[test]
+    fn an_idle_connection_is_aborted_at_the_deadline_and_the_socket_listens_again() {
+        let mut net = Loopback::new();
+        net.connect(49_152);
+        let accepted = net.ms;
+        net.run_until(|sock| !sock.is_open(), CONNECTION_DEADLINE.as_millis() as u64 + 100);
+        check!(!net.client().is_open(), "reset by the server");
+        check!(net.ms - accepted >= CONNECTION_DEADLINE.as_millis() as u64 - 10);
+        check!(net.served == 0);
+
+        net.connect(49_153);
+        net.request(b"GET / HTTP/1.1\r\n\r\n");
+        net.run(500);
+        check!(net.served == 1);
     }
 }

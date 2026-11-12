@@ -8,7 +8,6 @@ extern crate alloc;
 extern crate std;
 
 pub mod bringup;
-pub mod caps;
 pub mod display;
 pub mod pci;
 pub mod summary;

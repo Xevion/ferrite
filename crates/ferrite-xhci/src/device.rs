@@ -5,10 +5,10 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::num::NonZeroU8;
 
-use ferrite_hal::{Mmio, MmioExt, PciAddress, PciConfig, PhysAddr, Reg, RegValue};
+use ferrite_hal::{Mmio, MmioExt, PciAddress, PciConfig, PhysAddr, ReadOnly, Reg, RegValue};
 use snafu::{OptionExt, ResultExt, ensure};
 
-use crate::error::{Error, MmioSnafu, NoControllerSnafu, NoMmioSnafu, NotDecodingSnafu};
+use crate::error::{Error, InvalidPortSnafu, MmioSnafu, NoControllerSnafu, NoMmioSnafu, NotDecodingSnafu};
 use crate::pci::{self, PowerState};
 use crate::regs::{ExtCapHeader, ProtocolPorts, cap, xcap};
 
@@ -17,11 +17,16 @@ const EXT_CAP_WALK_LIMIT: usize = 64;
 /// Supported Protocol major revision for USB 3.
 const USB3_MAJOR: u8 = 3;
 
-/// A 1-based root port number known to lie inside a validated port range.
+/// A 1-based root port number inside the controller's `1..=MaxPorts`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PortNumber(NonZeroU8);
 
 impl PortNumber {
+    /// Validate `port` against the controller's `MaxPorts`.
+    pub fn new(port: u8, max_ports: u8) -> Result<Self, Error> {
+        NonZeroU8::new(port).filter(|_| port <= max_ports).map(Self).context(InvalidPortSnafu { port, max_ports })
+    }
+
     #[must_use]
     pub const fn get(self) -> u8 {
         self.0.get()
@@ -32,6 +37,41 @@ impl fmt::Display for PortNumber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// One entry of the extended capability list.
+#[derive(Clone, Copy, Debug)]
+pub struct ExtCap {
+    /// Address of the capability's first dword.
+    pub at: PhysAddr,
+    pub header: ExtCapHeader,
+}
+
+/// The extended capability list of the controller whose MMIO starts at `mmio`. Reads only.
+///
+/// The walk ends at the last entry. It also stops, with a warning, at an all-ones
+/// header (the function stopped answering) and after 64 entries (a looping list).
+pub fn ext_caps<H: Mmio>(hal: &mut H, mmio: PhysAddr) -> Result<Vec<ExtCap>, Error> {
+    let mut caps = Vec::new();
+    let xecp = read(hal, mmio, cap::HCCPARAMS1)?.xecp();
+    if xecp == 0 {
+        return Ok(caps);
+    }
+    let mut at = mmio.offset(u64::from(xecp) * 4);
+    for _ in 0..EXT_CAP_WALK_LIMIT {
+        let header = read(hal, at, xcap::HEADER)?;
+        if header.to_raw() == u32::MAX {
+            log::warn!("extended capability at {at} reads as all ones; list cut short");
+            return Ok(caps);
+        }
+        caps.push(ExtCap { at, header });
+        if header.next() == 0 {
+            return Ok(caps);
+        }
+        at = at.offset(u64::from(header.next()) * 4);
+    }
+    log::warn!("extended capability list of {mmio} did not end within {EXT_CAP_WALK_LIMIT} entries");
+    Ok(caps)
 }
 
 /// Root ports a Supported Protocol capability covers, checked against `MaxPorts`.
@@ -163,7 +203,6 @@ impl XhciDevice {
         let caplength = read(hal, mmio, cap::CAPLENGTH)?;
         ensure!(caplength.to_raw() != u32::MAX, NoControllerSnafu { addr: mmio });
         let max_ports = read(hal, mmio, cap::HCSPARAMS1)?.max_ports();
-        let xecp = read(hal, mmio, cap::HCCPARAMS1)?.xecp();
         let mut dev = Self {
             pci,
             cap_length: caplength.length(),
@@ -172,54 +211,34 @@ impl XhciDevice {
             legacy: None,
             usb3_ports: Vec::new(),
         };
-        if xecp != 0 {
-            dev.walk_ext_caps(hal, mmio.offset(u64::from(xecp) * 4))?;
+        for cap in ext_caps(hal, mmio)? {
+            dev.note_cap(hal, cap)?;
         }
         Ok(dev)
     }
 
-    fn walk_ext_caps<H: Mmio>(&mut self, hal: &mut H, first: PhysAddr) -> Result<(), Error> {
-        let mut at = first;
-        for _ in 0..EXT_CAP_WALK_LIMIT {
-            let header = read(hal, at, xcap::HEADER)?;
-            if header.to_raw() == u32::MAX {
-                log::warn!("{}: extended capability at {at} reads as all ones; list cut short", self.pci.addr);
-                return Ok(());
-            }
-            self.note_cap(hal, at, header)?;
-            if header.next() == 0 {
-                return Ok(());
-            }
-            at = at.offset(u64::from(header.next()) * 4);
-        }
-        log::warn!("{}: extended capability list did not end within {EXT_CAP_WALK_LIMIT} entries", self.pci.addr);
-        Ok(())
-    }
-
-    fn note_cap<H: Mmio>(&mut self, hal: &mut H, at: PhysAddr, header: ExtCapHeader) -> Result<(), Error> {
+    fn note_cap<H: Mmio>(&mut self, hal: &mut H, cap: ExtCap) -> Result<(), Error> {
+        let ExtCap { at, header } = cap;
         match header.id() {
             xcap::ID_DEBUG => self.dbc_regs = Some(at),
             xcap::ID_LEGACY => self.legacy = Some(at),
             xcap::ID_SUPPORTED_PROTOCOL if header.major_revision() == USB3_MAJOR => {
                 let ports = read(hal, at, xcap::PROTOCOL_PORTS)?;
+                let (first, count) = (ports.offset(), ports.count());
                 match PortRange::validate(ports, self.max_ports) {
                     Some(range) => {
-                        if u16::from(ports.offset()) + u16::from(ports.count()) - 1 > u16::from(self.max_ports) {
+                        if u16::from(first) + u16::from(count) - 1 > u16::from(self.max_ports) {
                             log::warn!(
-                                "{}: USB 3 ports {}+{} run past MaxPorts {}; clamped to {range}",
+                                "{}: USB 3 ports {first}+{count} run past MaxPorts {}; clamped to {range}",
                                 self.pci.addr,
-                                ports.offset(),
-                                ports.count(),
                                 self.max_ports
                             );
                         }
                         self.usb3_ports.push(range);
                     },
                     None => log::warn!(
-                        "{}: ignoring USB 3 port range {}+{} (MaxPorts {})",
+                        "{}: ignoring USB 3 port range {first}+{count} (MaxPorts {})",
                         self.pci.addr,
-                        ports.offset(),
-                        ports.count(),
                         self.max_ports
                     ),
                 }
@@ -280,7 +299,12 @@ impl XhciDevice {
     /// `port` as a [`PortNumber`] if it lies in one of the USB 3 ranges.
     #[must_use]
     pub fn usb3_port(&self, port: u8) -> Option<PortNumber> {
-        self.usb3_ports.iter().find(|r| r.contains(port)).and_then(|r| r.ports().find(|p| p.get() == port))
+        NonZeroU8::new(port).filter(|_| self.usb3_ports.iter().any(|r| r.contains(port))).map(PortNumber)
+    }
+
+    /// Every root port, USB 2 and USB 3 alike.
+    pub fn ports(&self) -> impl Iterator<Item = PortNumber> + use<> {
+        (1..=self.max_ports).filter_map(NonZeroU8::new).map(PortNumber)
     }
 
     /// Base of the operational registers.
@@ -296,7 +320,7 @@ impl fmt::Display for XhciDevice {
     }
 }
 
-fn read<H: Mmio, T: RegValue>(hal: &mut H, base: PhysAddr, reg: Reg<T, ferrite_hal::ReadOnly>) -> Result<T, Error> {
+fn read<H: Mmio, T: RegValue>(hal: &mut H, base: PhysAddr, reg: Reg<T, ReadOnly>) -> Result<T, Error> {
     hal.try_read(base, reg).context(MmioSnafu { op: "read", addr: reg.addr(base) })
 }
 
@@ -347,6 +371,7 @@ mod tests {
         assert!(let [range] = dev.usb3_ports());
         check!((range.first().get(), range.last().get()) == (1, 2));
         check!(dev.op_base() == PhysAddr::new(MMIO + 0x20));
+        check!(dev.ports().map(PortNumber::get).collect::<Vec<_>>() == [1, 2, 3, 4], "USB 2 ports too");
     }
 
     #[rstest]
@@ -360,6 +385,15 @@ mod tests {
         let dev = XhciDevice::probe(&mut sim.hal(), func).expect("probe");
         let got: Vec<_> = dev.usb3_ports().iter().map(|r| (r.first().get(), r.last().get())).collect();
         check!(got == want.into_iter().collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    #[case::zero(0, false)]
+    #[case::first(1, true)]
+    #[case::last(4, true)]
+    #[case::past_max_ports(5, false)]
+    fn port_numbers_lie_inside_max_ports(#[case] port: u8, #[case] valid: bool) {
+        check!(PortNumber::new(port, 4).is_ok() == valid);
     }
 
     #[test]

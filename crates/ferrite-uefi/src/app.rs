@@ -5,6 +5,7 @@ use alloc::format;
 use core::time::Duration;
 
 use ferrite_efi::clock::Clock;
+use ferrite_hal::{Clock as _, Instant};
 use ratatui::Terminal;
 use uefi::Event;
 use uefi::boot::{self, EventType, TimerTrigger, Tpl};
@@ -73,7 +74,7 @@ impl<'a> App<'a> {
     pub fn new(input: &'a mut Input, output: &'a mut Output) -> Result<Self, BackendError> {
         let terminal = Terminal::new(UefiBackend::new(output))?;
         let clock = Clock::start();
-        let (net, net_err) = match Net::setup(Duration::from_millis(clock.ms())) {
+        let (net, net_err) = match Net::setup(clock.now()) {
             Ok(net) => {
                 log::debug!("net: SNP up, {}", net.status());
                 (Some(net), None)
@@ -99,13 +100,13 @@ impl<'a> App<'a> {
         })
     }
 
-    fn now(&self) -> Duration {
-        Duration::from_millis(self.clock.ms())
+    fn now(&self) -> Instant {
+        self.clock.now()
     }
 
     /// Run until `q` or `Esc`.
     pub fn run(&mut self) {
-        let mut next_frame = Duration::ZERO;
+        let mut next_frame = Instant::default();
         loop {
             let now = self.now();
             let sweep = self.sweep.status();
@@ -116,10 +117,10 @@ impl<'a> App<'a> {
             let net = self.net.as_ref().map(Net::status);
             if now >= next_frame {
                 self.draw(View { sweep, net, net_err: self.net_err });
-                next_frame = now.saturating_add(FRAME_INTERVAL);
+                next_frame = now + FRAME_INTERVAL;
             }
             self.diag.tick(now, net.as_ref(), &sweep);
-            self.idle_until(now.saturating_add(net_wait).min(next_frame));
+            self.idle_until((now + net_wait).min(next_frame));
         }
     }
 
@@ -136,9 +137,9 @@ impl<'a> App<'a> {
 
     /// Sweep until `deadline` (at least one chunk), or wait on the timer and key
     /// events when there is nothing to sweep. Without events the loop just spins.
-    fn idle_until(&mut self, deadline: Duration) {
+    fn idle_until(&mut self, deadline: Instant) {
         if !self.sweep.has_work() {
-            let timeout = deadline.saturating_sub(self.now());
+            let timeout = deadline - self.now();
             if let Some(waiter) = self.waiter.as_mut()
                 && let Err(e) = waiter.wait(timeout)
             {
@@ -151,7 +152,7 @@ impl<'a> App<'a> {
             let start = self.now();
             self.sweep.step(self.chunk_bytes);
             let end = self.now();
-            let took = end.saturating_sub(start);
+            let took = end - start;
             if took < SWEEP_SLICE {
                 self.chunk_bytes = (self.chunk_bytes * 2).min(MAX_CHUNK_BYTES);
             } else if took > SWEEP_SLICE * 2 {

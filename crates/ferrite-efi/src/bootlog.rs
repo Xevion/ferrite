@@ -2,11 +2,13 @@
 
 use alloc::format;
 use alloc::string::String;
+use core::time::Duration;
 
+use ferrite_hal::{Clock as _, Instant};
 use uefi::boot::{self, ScopedProtocol};
 use uefi::proto::media::file::{Directory, File, FileAttribute, FileMode, RegularFile};
 use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::{CStr16, CString16, Status, cstr16, println};
+use uefi::{CStr16, CString16, Status, cstr16, println, system};
 
 use crate::clock::Clock;
 
@@ -14,7 +16,12 @@ use crate::clock::Clock;
 const CAP_BYTES: usize = 1 << 20;
 
 /// Minimum time between saves requested by [`BootLog::poll`].
-const FLUSH_INTERVAL_MS: u64 = 2000;
+const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// An echo taking this long means the console scrolls by copying its framebuffer.
+const SLOW_ECHO: Duration = Duration::from_millis(20);
+/// Console size assumed when the firmware does not report one; every console has mode 0.
+const MODE0: Grid = Grid { columns: 80, rows: 25 };
 
 /// Whether log lines are also printed on the firmware console.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,13 +38,13 @@ struct LogBuffer {
     saved: usize,
     dropped: u32,
     marker_saved: u32,
-    last_save_ms: u64,
+    last_save: Instant,
     cap: usize,
 }
 
 impl LogBuffer {
     fn new(cap: usize) -> Self {
-        Self { text: String::new(), saved: 0, dropped: 0, marker_saved: 0, last_save_ms: 0, cap }
+        Self { text: String::new(), saved: 0, dropped: 0, marker_saved: 0, last_save: Instant::default(), cap }
     }
 
     /// Append a line, or count it as dropped once the cap is reached. Dropping is permanent so the
@@ -55,8 +62,8 @@ impl LogBuffer {
         self.saved < self.text.len() || self.dropped != self.marker_saved
     }
 
-    fn due(&self, now_ms: u64) -> bool {
-        self.is_dirty() && now_ms.saturating_sub(self.last_save_ms) >= FLUSH_INTERVAL_MS
+    fn due(&self, now: Instant) -> bool {
+        self.is_dirty() && now - self.last_save >= FLUSH_INTERVAL
     }
 
     fn text_len(&self) -> usize {
@@ -73,10 +80,10 @@ impl LogBuffer {
         (self.dropped != self.marker_saved).then(|| format!("[log full: {:>10} lines dropped]\n", self.dropped))
     }
 
-    fn mark_saved(&mut self, now_ms: u64) {
+    fn mark_saved(&mut self, now: Instant) {
         self.saved = self.text.len();
         self.marker_saved = self.dropped;
-        self.last_save_ms = now_ms;
+        self.last_save = now;
     }
 }
 
@@ -87,14 +94,16 @@ struct Backing {
 }
 
 impl Backing {
-    fn create(path: &str) -> uefi::Result<Self> {
+    fn create(path: &str, echo: Echo) -> uefi::Result<Self> {
         let mut volume = boot::get_image_file_system(boot::image_handle())?;
         let mut root = volume.open_volume()?;
         ensure_dir(&mut root, cstr16!("\\EFI"))?;
         ensure_dir(&mut root, cstr16!("\\EFI\\ferrite"))?;
         let name = CString16::try_from(path).map_err(|_| uefi::Error::from(Status::INVALID_PARAMETER))?;
-        if let Ok(old) = root.open(&name, FileMode::ReadWrite, FileAttribute::empty()) {
-            let _ = old.delete();
+        if let Ok(old) = root.open(&name, FileMode::ReadWrite, FileAttribute::empty())
+            && let Err(err) = old.delete()
+        {
+            report_failure(echo, "deleting the old log", &err, "the end of the old run may follow this one");
         }
         let file = root
             .open(&name, FileMode::CreateReadWrite, FileAttribute::empty())?
@@ -125,17 +134,68 @@ fn ensure_dir(root: &mut Directory, path: &CStr16) -> uefi::Result {
 }
 
 #[expect(clippy::disallowed_macros, reason = "the console echo is one of the two sanctioned println homes")]
-fn report_failure(echo: Echo, what: &str, err: &uefi::Error) {
+fn report_failure(echo: Echo, what: &str, err: &uefi::Error, consequence: &str) {
     if echo == Echo::Console {
-        println!("boot log: {what} failed ({:?}); further lines stay in memory only", err.status());
+        println!("boot log: {what} failed ({:?}); {consequence}", err.status());
     }
+}
+
+const MEMORY_ONLY: &str = "further lines stay in memory only";
+
+/// Text columns and rows of the console.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Grid {
+    columns: usize,
+    rows: usize,
+}
+
+/// Rows `text` takes when printed and followed by a newline. A segment that
+/// exactly fills a row counts one extra, since the cursor wraps before the newline.
+fn rows_needed(text: &str, columns: usize) -> usize {
+    text.split('\n').map(|segment| segment.chars().count() / columns.max(1) + 1).sum()
+}
+
+/// The firmware console as an echo target.
+///
+/// A firmware console may scroll by moving the whole framebuffer. On the X1 Carbon that
+/// costs about 200 ms per line once the screen is full, which stalls every loop
+/// that logs. The first echo that slow switches the console to paging: it clears
+/// the screen when the next line would scroll, so a screenful costs one clear
+/// instead of a scroll per line. Fast consoles (QEMU, serial) keep scrolling.
+struct Console {
+    paging: Option<Grid>,
+}
+
+impl Console {
+    #[expect(clippy::disallowed_macros, reason = "the console echo is one of the two sanctioned println homes")]
+    fn echo(&mut self, clock: &Clock, line: &str) {
+        if let Some(grid) = self.paging {
+            let needed = rows_needed(line, grid.columns);
+            system::with_stdout(|out| {
+                if out.cursor_position().1 + needed >= grid.rows {
+                    // A failed clear only means this line scrolls.
+                    let _ = out.clear();
+                }
+            });
+        }
+        let t0 = clock.now();
+        println!("{line}");
+        if self.paging.is_none() && clock.elapsed(t0) >= SLOW_ECHO {
+            self.paging = Some(current_grid());
+        }
+    }
+}
+
+fn current_grid() -> Grid {
+    system::with_stdout(|out| out.current_mode().ok().flatten())
+        .map_or(MODE0, |mode| Grid { columns: mode.columns(), rows: mode.rows() })
 }
 
 pub struct BootLog {
     backing: Option<Backing>,
     buf: LogBuffer,
     display: String,
-    echo: Echo,
+    console: Option<Console>,
     clock: Clock,
 }
 
@@ -146,16 +206,17 @@ impl BootLog {
     pub fn open(name: &str, echo: Echo) -> Self {
         let clock = Clock::start();
         let display = format!("\\EFI\\ferrite\\{name}.txt");
-        let backing = Backing::create(&display).inspect_err(|err| report_failure(echo, "open", err)).ok();
-        Self { backing, buf: LogBuffer::new(CAP_BYTES), display, echo, clock }
+        let backing =
+            Backing::create(&display, echo).inspect_err(|err| report_failure(echo, "open", err, MEMORY_ONLY)).ok();
+        let console = (echo == Echo::Console).then_some(Console { paging: None });
+        Self { backing, buf: LogBuffer::new(CAP_BYTES), display, console, clock }
     }
 
     /// Append a line. The file is saved according to the flush policy, not on every line.
-    #[expect(clippy::disallowed_macros, reason = "the console echo is one of the two sanctioned println homes")]
     pub fn line(&mut self, s: &str) {
         self.buf.push_line(s);
-        if self.echo == Echo::Console {
-            println!("{s}");
+        if let Some(console) = self.console.as_mut() {
+            console.echo(&self.clock, s);
         }
     }
 
@@ -167,7 +228,7 @@ impl BootLog {
 
     /// Save the file if unsaved text has waited at least two seconds. Call from long-running loops.
     pub fn poll(&mut self) {
-        if self.buf.due(self.clock.ms()) {
+        if self.buf.due(self.clock.now()) {
             self.save();
         }
     }
@@ -185,7 +246,7 @@ impl BootLog {
 
     #[must_use]
     pub fn echo(&self) -> Echo {
-        self.echo
+        if self.console.is_some() { Echo::Console } else { Echo::Silent }
     }
 
     /// The clock started by [`BootLog::open`], for timestamping lines.
@@ -203,12 +264,12 @@ impl BootLog {
         }
         match backing.write_out(&self.buf) {
             Ok(()) => {
-                self.buf.mark_saved(self.clock.ms());
+                self.buf.mark_saved(self.clock.now());
                 true
             },
             Err(err) => {
                 self.backing = None;
-                report_failure(self.echo, "write", &err);
+                report_failure(self.echo(), "write", &err, MEMORY_ONLY);
                 false
             },
         }
@@ -234,10 +295,14 @@ mod tests {
     fn unsaved_is_only_the_text_after_the_last_save() {
         let mut buf = buffer_with(1024, &["one", "two"]);
         check!(buf.unsaved() == "one\ntwo\n");
-        buf.mark_saved(0);
+        buf.mark_saved(Instant::default());
         check!(buf.unsaved() == "");
         buf.push_line("three");
         check!(buf.unsaved() == "three\n");
+    }
+
+    fn at(ms: u64) -> Instant {
+        Instant::from_epoch(Duration::from_millis(ms))
     }
 
     #[rstest]
@@ -251,16 +316,27 @@ mod tests {
         if dirty {
             buf.push_line("x");
         }
-        check!(buf.due(now_ms) == expect);
+        check!(buf.due(at(now_ms)) == expect);
     }
 
     #[test]
     fn a_save_restarts_the_interval() {
         let mut buf = buffer_with(1024, &["x"]);
-        buf.mark_saved(5_000);
+        buf.mark_saved(at(5_000));
         buf.push_line("y");
-        check!(!buf.due(6_999));
-        check!(buf.due(7_000));
+        check!(!buf.due(at(6_999)));
+        check!(buf.due(at(7_000)));
+    }
+
+    #[rstest]
+    #[case::empty("", 1)]
+    #[case::short("hello", 1)]
+    #[case::one_short_of_a_row(&"x".repeat(79), 1)]
+    #[case::exactly_a_row(&"x".repeat(80), 2)]
+    #[case::wraps_twice(&"x".repeat(170), 3)]
+    #[case::snapshot_lines("DCCTRL=0x8a000003\nDCST=0x03000000\n", 3)]
+    fn rows_needed_counts_wraps_and_newlines(#[case] text: &str, #[case] rows: usize) {
+        check!(rows_needed(text, 80) == rows);
     }
 
     #[test]
@@ -283,7 +359,7 @@ mod tests {
         let mut buf = buffer_with(6, &["abcde", "f"]);
         assert!(let Some(marker) = buf.marker());
         check!(marker.contains("1 lines dropped"));
-        buf.mark_saved(0);
+        buf.mark_saved(Instant::default());
         check!(buf.marker().is_none());
         check!(!buf.is_dirty());
         buf.push_line("g");

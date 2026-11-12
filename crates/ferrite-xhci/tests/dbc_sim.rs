@@ -70,6 +70,7 @@ fn arm_connect_configure_and_echo() {
     check!(dbc.stats().bytes_sent == 5);
     check!(dbc.stats().bytes_received == 4);
     check!(dbc.stats().unknown_transfer_events == 0);
+    check!(sim.dma_violations() == 0, "every address the controller followed lies in our block");
     assert_bytes_balance(&dbc);
 }
 
@@ -126,6 +127,31 @@ fn stale_event_after_rearm_retires_nothing() {
 }
 
 #[test]
+fn events_queued_at_a_rearm_drain_before_the_new_ring_reuses_their_slots() {
+    let sim = Sim::with_dbc_controller();
+    let mut dbc = configured(&sim);
+    check!(dbc.write(b"aaaaaaaaaa").is_complete());
+    let (first, _) = sim.complete_out().expect("TRB 0");
+    check!(dbc.write(b"bbbbbbbbbb").is_complete());
+    sim.port_reset();
+    dbc.poll(|_| {});
+    check!(dbc.state() == State::Armed);
+
+    // The host configures again before the next poll; the event for old slot 0 is still queued.
+    sim.configure();
+    dbc.poll(|_| {});
+    check!(dbc.state() == State::Configured);
+    check!(dbc.stats().unknown_transfer_events == 1, "the old event retired nothing");
+
+    let (at, resent) = sim.complete_out().expect("the requeued bytes as one TRB");
+    check!(at == first, "the new ring reuses slot 0");
+    check!(resent == b"aaaaaaaaaabbbbbbbbbb");
+    dbc.poll(|_| {});
+    check!(dbc.buffered() == 0);
+    assert_bytes_balance(&dbc);
+}
+
+#[test]
 fn kick_keeps_bytes_written_before_configuration() {
     let sim = Sim::with_dbc_controller();
     let cfg = Config { timeout: Duration::from_secs(5), ..Config::default() };
@@ -167,6 +193,23 @@ fn open_frees_memory_the_controller_never_saw() {
     sim.set_dce_stuck(true);
     assert!(let Err(Error::RegisterTimeout { op: "clear DCE", .. }) = open_with(&sim, &Config::default()));
     check!(sim.dma_freed() == 1, "DCE was stuck before our addresses were programmed");
+}
+
+#[test]
+fn failed_dma_allocation_touches_no_dbc_register() {
+    let sim = Sim::with_dbc_controller();
+    sim.set_dma_fails(true);
+    assert!(let Err(Error::Dma { .. }) = open_with(&sim, &Config::default()));
+    check!(sim.writes_to(sim.dbc_base() + 0x20).is_empty(), "DCCTRL untouched");
+}
+
+#[test]
+fn unreachable_dcctrl_fails_open_and_frees_the_unprogrammed_block() {
+    let sim = Sim::with_dbc_controller();
+    sim.fail_mmio(sim.dbc_base() + 0x20);
+    assert!(let Err(Error::Mmio { .. }) = open_with(&sim, &Config::default()));
+    check!(sim.dma_freed() == 1);
+    check!(sim.dma_live() == 0);
 }
 
 #[test]

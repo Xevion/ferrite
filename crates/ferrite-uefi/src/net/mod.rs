@@ -12,9 +12,9 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::time::Duration;
 
+use ferrite_hal::Instant;
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::socket::{dhcpv4, udp};
-use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr};
 use snafu::{OptionExt as _, ResultExt as _, Snafu};
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams};
@@ -203,7 +203,7 @@ pub struct Net {
 
 impl Net {
     /// Open the best SNP handle, bring the adapter up, and start DHCP.
-    pub fn setup(now: Duration) -> Result<Self, NetError> {
+    pub fn setup(now: Instant) -> Result<Self, NetError> {
         let handle = pick_nic()?;
         let reconnect = Reconnect(handle);
         let snp = boot::open_protocol_exclusive::<SimpleNetwork>(handle).context(OpenSnafu { handle })?;
@@ -227,7 +227,7 @@ impl Net {
 
         let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac.octets())));
         config.random_seed = random_seed();
-        let mut iface = Interface::new(config, &mut device, instant(now));
+        let mut iface = Interface::new(config, &mut device, smol_instant(now));
         if let Err(e) = iface.join_multicast_group(MDNS_ADDR) {
             log::warn!("net: joining {MDNS_ADDR} failed, mDNS disabled: {e}");
         }
@@ -259,8 +259,8 @@ impl Net {
     }
 
     /// Advance the stack to `now`. Returns how long may pass before the next poll.
-    pub fn poll(&mut self, now: Duration, sweep: &SweepStatus) -> Duration {
-        let at = instant(now);
+    pub fn poll(&mut self, now: Instant, sweep: &SweepStatus) -> Duration {
+        let at = smol_instant(now);
         self.device.reclaim(now);
         self.status.link.up = self.device.link_up();
 
@@ -286,7 +286,7 @@ impl Net {
         self.iface.poll_delay(at, &self.sockets).map_or(IDLE_POLL, |d| Duration::from(d).min(IDLE_POLL))
     }
 
-    fn poll_dhcp(&mut self, now: Duration) {
+    fn poll_dhcp(&mut self, now: Instant) {
         // The event borrows the socket, so copy out what we need first.
         let lease = match self.sockets.get_mut::<dhcpv4::Socket<'_>>(self.dhcp).poll() {
             Some(dhcpv4::Event::Configured(c)) => Some(Some((c.address, c.router, c.dns_servers.first().copied()))),
@@ -301,7 +301,7 @@ impl Net {
     }
 
     /// Answer queued mDNS queries and send any due announcement.
-    fn serve_mdns(&mut self, now: Duration) {
+    fn serve_mdns(&mut self, now: Instant) {
         let ip = self.status.link.address.map(|c| c.address());
         let group = IpEndpoint::new(IpAddress::Ipv4(MDNS_ADDR), mdns::MDNS_PORT);
         let sock = self.sockets.get_mut::<udp::Socket<'_>>(self.mdns);
@@ -332,9 +332,10 @@ impl Net {
         }
     }
 
-    fn apply_lease(&mut self, now: Duration, address: Ipv4Cidr, router: Option<Ipv4Address>, dns: Option<Ipv4Address>) {
+    fn apply_lease(&mut self, now: Instant, address: Ipv4Cidr, router: Option<Ipv4Address>, dns: Option<Ipv4Address>) {
         self.iface.update_ip_addrs(|addrs| {
             addrs.clear();
+            // The list was just emptied and holds at least one address, so this push cannot fail.
             let _ = addrs.push(IpCidr::Ipv4(address));
         });
         match router {
@@ -382,8 +383,8 @@ fn send_mdns(sock: &mut udp::Socket<'_>, out: &[u8], to: IpEndpoint, counters: &
     }
 }
 
-fn instant(now: Duration) -> Instant {
-    Instant::from_micros(i64::try_from(now.as_micros()).unwrap_or(i64::MAX))
+fn smol_instant(now: Instant) -> smoltcp::time::Instant {
+    smoltcp::time::Instant::from_micros(i64::try_from(now.since_epoch().as_micros()).unwrap_or(i64::MAX))
 }
 
 /// The first SNP handle with media present, else the first one.
@@ -463,14 +464,8 @@ fn configure_filters(handle: Handle, snp: &SimpleNetwork) -> Result<(), NetError
 fn random_seed() -> u64 {
     rng_seed().unwrap_or_else(|| {
         log::debug!("net: no RNG protocol, seeding from the TSC");
-        tsc_seed()
+        ferrite_efi::clock::tsc_entropy()
     })
-}
-
-#[expect(clippy::disallowed_methods, reason = "the raw TSC is used as entropy, not as a time source")]
-fn tsc_seed() -> u64 {
-    // SAFETY: RDTSC has no preconditions on x86_64.
-    unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 fn rng_seed() -> Option<u64> {

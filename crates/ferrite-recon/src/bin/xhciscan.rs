@@ -22,30 +22,24 @@
 
 extern crate alloc;
 
+use alloc::string::String;
+use core::time::Duration;
+
 use ferrite_efi::bootlog::{BootLog, Echo};
 use ferrite_efi::pci::RootBridge;
 use ferrite_efi::xhci::{self, Controller};
 use ferrite_efi::{logger, session};
-use ferrite_hal::{Mmio, MmioExt, ReadOnly, Reg};
-use ferrite_recon::caps;
+use ferrite_hal::MmioExt;
 use ferrite_recon::display::{Chain, yes_no};
 use ferrite_recon::pci::{DeviceId, VendorId, power_name};
-use ferrite_xhci::XhciDevice;
 use ferrite_xhci::pci::{CMD_BUS_MASTER, CMD_MEMORY};
-use ferrite_xhci::regs::{PortSc, cap, xcap};
+use ferrite_xhci::regs::{cap, host_portsc, xcap};
+use ferrite_xhci::{ExtCap, XhciDevice, ext_caps};
 use log::LevelFilter;
 use uefi::prelude::*;
 
 /// How long to keep the report on screen before exiting back to the boot manager.
-const EXIT_AFTER_SECS: u64 = 20;
-
-/// HCCPARAMS1 bit: the controller can switch port power.
-const HCC1_PORT_POWER_CONTROL: u32 = 1 << 3;
-
-/// Root-port PORTSC registers start here from the operational base, one block per port.
-/// `ferrite_xhci::regs::host_portsc` only builds them for USB 3 ports, and this lists all.
-const PORTSC_BASE: u64 = 0x400;
-const PORTSC_STRIDE: u64 = 0x10;
+const EXIT_AFTER: Duration = Duration::from_secs(20);
 
 #[entry]
 fn main() -> Status {
@@ -55,7 +49,7 @@ fn main() -> Status {
         log::warn!("uefi helpers init failed: {e}");
     }
     report();
-    logger::with(|log| session::finish(log, EXIT_AFTER_SECS));
+    logger::with(|log| session::finish(log, EXIT_AFTER));
     Status::SUCCESS
 }
 
@@ -120,8 +114,7 @@ fn report_controller(ctrl: &Controller) {
     };
 
     let mmio = dev.mmio();
-    let version = rb.read(mmio, cap::CAPLENGTH).raw_value() >> 16;
-    let params = rb.read(mmio, cap::HCCPARAMS1);
+    let version = rb.read(mmio, cap::CAPLENGTH).hci_version();
     log::info!(
         "  HCIVERSION {:x}.{:02x}   CAPLENGTH {:#x}   MaxPorts {}",
         version >> 8,
@@ -129,7 +122,7 @@ fn report_controller(ctrl: &Controller) {
         dev.cap_length(),
         dev.max_ports()
     );
-    let ppc = params.raw_value() & HCC1_PORT_POWER_CONTROL != 0;
+    let ppc = rb.read(mmio, cap::HCCPARAMS1).port_power_control();
     log::info!(
         "  Port Power Control (PPC): {}   {}",
         yes_no(ppc),
@@ -141,11 +134,11 @@ fn report_controller(ctrl: &Controller) {
     );
 
     log::info!("  ports:");
-    for n in 1..=dev.max_ports() {
-        let reg = Reg::<PortSc, ReadOnly>::new(PORTSC_BASE + u64::from(n - 1) * PORTSC_STRIDE);
-        if let Ok(portsc) = rb.try_read(dev.op_base(), reg) {
+    for port in dev.ports() {
+        if let Ok(portsc) = rb.try_read(dev.op_base(), host_portsc(port)) {
             log::info!(
-                "    port {n:>2}: PORTSC={:#010x}  connected={}  enabled={}  powered={}  link={}  speed={}",
+                "    port {:>2}: PORTSC={:#010x}  connected={}  enabled={}  powered={}  link={}  speed={}",
+                port.get(),
                 portsc.raw_value(),
                 yes_no(portsc.ccs()),
                 yes_no(portsc.ped()),
@@ -156,16 +149,23 @@ fn report_controller(ctrl: &Controller) {
         }
     }
 
-    report_ext_caps(ctrl, &dev, &mut rb, params.xecp());
+    report_ext_caps(ctrl, &dev, &mut rb);
 }
 
-fn report_ext_caps(ctrl: &Controller, dev: &XhciDevice, rb: &mut RootBridge, xecp: u16) {
-    if xecp == 0 {
+fn report_ext_caps(ctrl: &Controller, dev: &XhciDevice, rb: &mut RootBridge) {
+    let caps = match ext_caps(rb, dev.mmio()) {
+        Ok(caps) => caps,
+        Err(e) => {
+            log::warn!("  extended caps not read: {}", Chain(&e));
+            return;
+        },
+    };
+    if caps.is_empty() {
         log::info!("  extended caps: none");
         return;
     }
     let mut dbc_found = false;
-    for cap in caps::walk(rb, dev.mmio(), xecp) {
+    for cap in caps {
         let at = cap.at;
         match cap.header.id() {
             xcap::ID_DEBUG => {
@@ -192,17 +192,18 @@ fn report_ext_caps(ctrl: &Controller, dev: &XhciDevice, rb: &mut RootBridge, xec
     );
 }
 
-/// The Supported Protocol capability: its name string (`USB `) and revision.
-fn protocol_line(rb: &mut RootBridge, cap: caps::ExtCap) -> alloc::string::String {
-    let minor = (cap.header.raw_value() >> 16) & 0xff;
-    let name = rb.read32(cap.at.offset(4)).to_le_bytes().map(|b| if b.is_ascii_graphic() { b as char } else { '.' });
+/// The Supported Protocol capability: its name string (`USB `) and BCD revision.
+fn protocol_line(rb: &mut RootBridge, cap: ExtCap) -> String {
+    let name: String = rb
+        .read(cap.at, xcap::PROTOCOL_NAME)
+        .to_le_bytes()
+        .iter()
+        .map(|&b| if b.is_ascii_graphic() { char::from(b) } else { '.' })
+        .collect();
     alloc::format!(
-        "  ext cap @ {:#x}: id 0x02 supported protocol {}{}{}{} {}.{minor}",
+        "  ext cap @ {:#x}: id 0x02 supported protocol {name} {:x}.{:02x}",
         cap.at,
-        name[0],
-        name[1],
-        name[2],
-        name[3],
         cap.header.major_revision(),
+        cap.header.minor_revision(),
     )
 }

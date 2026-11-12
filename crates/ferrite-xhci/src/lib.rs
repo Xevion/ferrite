@@ -30,6 +30,6 @@ mod watch;
 
 pub use config::Config;
 pub use dbc::{BLOCK_PAGES, Dbc, State, Written};
-pub use device::{PortNumber, PortRange, XhciDevice, XhciFunction};
+pub use device::{ExtCap, PortNumber, PortRange, XhciDevice, XhciFunction, ext_caps};
 pub use error::{DmaError, Error};
 pub use stats::{RegSnapshot, Stats, Timings};

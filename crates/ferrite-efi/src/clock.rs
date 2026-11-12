@@ -28,11 +28,6 @@ impl Clock {
         let per_ms = (t1.wrapping_sub(t0) / CALIBRATION.as_millis() as u64).max(1);
         Self { start: t1, per_ms }
     }
-
-    #[must_use]
-    pub fn ms(&self) -> u64 {
-        rdtsc().wrapping_sub(self.start) / self.per_ms
-    }
 }
 
 /// Instants count from [`Clock::start`].
@@ -50,8 +45,15 @@ impl Delay for Clock {
     }
 }
 
+/// Raw TSC ticks, for seeding a generator when the firmware has no RNG; never a time source.
+#[must_use]
+pub fn tsc_entropy() -> u64 {
+    rdtsc()
+}
+
+/// Busy-wait through boot services, for the rare caller with no [`Clock`] at hand.
 #[expect(clippy::disallowed_methods, reason = "the clock's Delay is the one sanctioned busy-wait")]
-fn stall(duration: Duration) {
+pub(crate) fn stall(duration: Duration) {
     boot::stall(duration);
 }
 

@@ -1,7 +1,7 @@
 //! `dbcbench`: measure what the DbC link really does, so tuning is guided by numbers.
 //!
-//! After the same bring-up as `dbcping` it runs four phases against the desktop tool
-//! (`dbc-bench.py`), each announced by a marker line once the desktop says `BENCH ready`:
+//! After the same bring-up as `dbcping` it runs four phases against a desktop peer, each
+//! announced by a marker line once the desktop says `BENCH ready`:
 //!
 //!   - source: send 4 MiB as 1 KiB checksummed frames and time it to the last ack;
 //!   - sink: receive and verify frames from the desktop for 10 s;
@@ -36,7 +36,7 @@ use ferrite_xhci::{Config, State};
 use log::LevelFilter;
 use uefi::prelude::*;
 
-const EXIT_AFTER_SECS: u64 = 10;
+const EXIT_AFTER: Duration = Duration::from_secs(10);
 
 const SOURCE_FRAMES: u32 = 4096;
 const SOURCE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -133,7 +133,7 @@ fn main() -> Status {
         link
     });
 
-    logger::with(|log| session::finish(log, EXIT_AFTER_SECS));
+    logger::with(|log| session::finish(log, EXIT_AFTER));
     drop(link);
     Status::SUCCESS
 }
@@ -142,10 +142,7 @@ fn main() -> Status {
 /// does not answer.
 fn run(link: &mut Link, clock: Clock) -> Results {
     let Link { dbc, survey } = link;
-    while survey.pending() {
-        dbc.poll(|_| {});
-        survey.step(dbc);
-    }
+    survey.finish();
     let mut results = Results::default();
     let Some(source) = source(dbc, clock) else { return results };
     results.source = Some(source);

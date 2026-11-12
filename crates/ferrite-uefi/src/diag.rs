@@ -9,6 +9,7 @@ use core::time::Duration;
 
 use ferrite_efi::bootlog::BootLog;
 use ferrite_efi::logger;
+use ferrite_hal::Instant;
 
 use crate::net::{Link, NetStatus};
 use crate::sweep::SweepStatus;
@@ -27,17 +28,17 @@ pub fn milestone(msg: &str) {
 pub struct Diag {
     last_link: Option<Link>,
     fault_logged: bool,
-    last_alive: Duration,
+    last_alive: Instant,
 }
 
 impl Diag {
     #[must_use]
     pub const fn new() -> Self {
-        Self { last_link: None, fault_logged: false, last_alive: Duration::ZERO }
+        Self { last_link: None, fault_logged: false, last_alive: Instant::from_epoch(Duration::ZERO) }
     }
 
     /// Log what changed since the last call, and let the log save itself when due.
-    pub fn tick(&mut self, now: Duration, net: Option<&NetStatus>, sweep: &SweepStatus) {
+    pub fn tick(&mut self, now: Instant, net: Option<&NetStatus>, sweep: &SweepStatus) {
         if let Some(net) = net {
             self.link_changed(&net.link);
         }
@@ -54,7 +55,7 @@ impl Diag {
                 sweep.passes
             ));
         }
-        if now.saturating_sub(self.last_alive) >= ALIVE_INTERVAL {
+        if now - self.last_alive >= ALIVE_INTERVAL {
             self.last_alive = now;
             match net {
                 Some(net) => log::debug!("alive sweep: {sweep} net: {}", net.counters),
