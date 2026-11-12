@@ -119,6 +119,10 @@ netdev := "-netdev user,id=net0,hostfwd=tcp::8080-:80 -device e1000,netdev=net0"
 uefi-check:
     cargo check -p ferrite-uefi --target x86_64-unknown-uefi
 
+# run the shared lib's unit tests on the host
+uefi-test:
+    cargo test -p ferrite-uefi --lib --target x86_64-unknown-linux-gnu
+
 # build the .efi (debug)
 uefi-build:
     cargo build -p ferrite-uefi --target x86_64-unknown-uefi
@@ -203,6 +207,30 @@ xhciscan: (stage "xhciscan")
 
 # boot the xHCI recon tool headless, console over serial
 xhciscan-serial: (stage "xhciscan")
+    qemu-system-x86_64 \
+        -enable-kvm \
+        -machine q35 \
+        -m 512M \
+        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
+        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
+        -drive format=raw,file=fat:rw:esp \
+        -device qemu-xhci \
+        -nographic
+
+# boot the xHCI Debug Capability bring-up app in a graphical window
+dbcping: (stage "dbcping")
+    qemu-system-x86_64 \
+        -enable-kvm \
+        -machine q35 \
+        -m 512M \
+        -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
+        -drive if=pflash,format=raw,file=OVMF_VARS.fd \
+        -drive format=raw,file=fat:rw:esp \
+        -device qemu-xhci \
+        -display {{ display }}
+
+# boot the DbC bring-up app headless, console over serial
+dbcping-serial: (stage "dbcping")
     qemu-system-x86_64 \
         -enable-kvm \
         -machine q35 \

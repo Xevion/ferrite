@@ -9,10 +9,10 @@ publish = false
 [dependencies]
 ratatui-core = "0.1"
 ratatui = { version = "0.30", default-features = false }
-uefi = { version = "0.38", features = [
-  "alloc",
-  "global_allocator",
-  "logger",
-  "panic_handler",
-] }
+uefi = { version = "0.38", features = ["alloc", "logger"] }
 smoltcp = { version = "0.13.1", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-dhcpv4", "socket-udp", "socket-tcp", "multicast"] }
+
+# The allocator and panic handler would collide with std's when the lib is
+# built for the host to run unit tests, so they only apply to the UEFI target.
+[target.'cfg(target_os = "uefi")'.dependencies]
+uefi = { version = "0.38", features = ["global_allocator", "panic_handler"] }

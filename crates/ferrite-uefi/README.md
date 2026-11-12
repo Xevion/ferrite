@@ -13,7 +13,8 @@ suite before (or instead of) booting an operating system.
 - [x] Incremental pattern sweep over a test buffer, with fault tracking, shown in the UI
 - [x] Headless diagnostics log on the boot volume (`\ferrite.log`)
 - [x] Recon apps: `pciscan` (PCI and Wi-Fi registers), `xhciscan` (USB controllers and DbC)
-- [ ] Live debug serial over USB (xHCI DbC) from the app
+- [x] USB debug serial (xHCI DbC) driver, verified on real hardware with `dbcping`
+- [ ] DbC log output from the main app
 - [ ] Wi-Fi via real Linux drivers on a Rust shim
 - [ ] DNS-SD service enumeration (PTR/SRV/TXT) on top of the mDNS responder
 - [ ] GOP framebuffer backend for a truecolor UI
@@ -54,6 +55,8 @@ Boot the target machine from the USB (disable Secure Boot, or sign the image).
 | `src/diag.rs`         | Milestone log rewritten to `\ferrite.log` on the boot volume      |
 | `src/bin/pciscan.rs`  | Standalone PCI enumerator; reads live registers off Intel Wi-Fi   |
 | `src/bin/xhciscan.rs` | Standalone xHCI and DbC recon; saves a report file and auto-exits |
+| `src/lib.rs`, `src/dbc/` | xHCI Debug Capability driver, shared by the apps                |
+| `src/bin/dbcping.rs`  | Standalone DbC bring-up: ping at 1 Hz, echo input, report file    |
 
 ### Networking
 
