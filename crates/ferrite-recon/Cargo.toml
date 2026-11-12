@@ -1,19 +1,27 @@
 [package]
 name = "ferrite-recon"
-description = "Standalone hardware recon apps: PCI scan, xHCI scan, DbC bring-up"
+description = "Standalone hardware recon apps: PCI scan, xHCI scan, DbC bring-up and benchmark"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
+crc32fast.workspace = true
 ferrite-efi.workspace = true
+ferrite-hal.workspace = true
 ferrite-xhci.workspace = true
+log.workspace = true
 uefi.workspace = true
 
 # The allocator and panic handler would collide with std's on a host build.
 [target.'cfg(target_os = "uefi")'.dependencies]
-uefi = { workspace = true, features = ["global_allocator", "panic_handler"] }
+ferrite-efi = { workspace = true, features = ["panic-handler"] }
+uefi = { workspace = true, features = ["global_allocator"] }
+
+[dev-dependencies]
+assert2.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

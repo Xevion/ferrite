@@ -26,12 +26,14 @@ check:
 # clippy over the host crates and the UEFI apps, plus unused-dependency check
 lint:
     cargo clippy --all-targets
+    cargo clippy -p ferrite-uefi -p ferrite-recon --lib --tests
     cargo efi-clippy
     cargo machete
 
 # run the unit tests on the host
 test *args:
     cargo nextest run {{ args }}
+    cargo nextest run -p ferrite-uefi -p ferrite-recon --lib {{ args }}
 
 format:
     cargo fmt --all

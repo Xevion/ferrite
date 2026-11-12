@@ -124,6 +124,7 @@ fn ensure_dir(root: &mut Directory, path: &CStr16) -> uefi::Result {
     root.open(path, FileMode::CreateReadWrite, FileAttribute::DIRECTORY).map(drop)
 }
 
+#[expect(clippy::disallowed_macros, reason = "the console echo is one of the two sanctioned println homes")]
 fn report_failure(echo: Echo, what: &str, err: &uefi::Error) {
     if echo == Echo::Console {
         println!("boot log: {what} failed ({:?}); further lines stay in memory only", err.status());
@@ -150,6 +151,7 @@ impl BootLog {
     }
 
     /// Append a line. The file is saved according to the flush policy, not on every line.
+    #[expect(clippy::disallowed_macros, reason = "the console echo is one of the two sanctioned println homes")]
     pub fn line(&mut self, s: &str) {
         self.buf.push_line(s);
         if self.echo == Echo::Console {

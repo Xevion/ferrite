@@ -18,7 +18,8 @@ uefi.workspace = true
 
 # The allocator and panic handler would collide with std's on a host build.
 [target.'cfg(target_os = "uefi")'.dependencies]
-uefi = { workspace = true, features = ["global_allocator", "panic_handler"] }
+ferrite-efi = { workspace = true, features = ["panic-handler"] }
+uefi = { workspace = true, features = ["global_allocator"] }
 
 [dev-dependencies]
 assert2.workspace = true

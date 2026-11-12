@@ -9,11 +9,11 @@ suite before (or instead of) booting an operating system.
 
 - [x] Boots under OVMF in QEMU and renders a ratatui UI
 - [x] Text-console backend with **run-coalesced** drawing (see below)
-- [x] Wired networking: SNP to smoltcp, DHCP, mDNS (`ferrite.local`), HTTP status page
+- [x] Wired networking: SNP to smoltcp, DHCP, mDNS (`ferrite.local`), HTTP status page. Verified under QEMU only, not yet on real hardware (see Networking)
 - [x] Incremental pattern sweep over a test buffer, with fault tracking, shown in the UI
-- [x] Headless diagnostics log on the boot volume (`\ferrite.log`)
-- [x] Recon apps: `pciscan` (PCI and Wi-Fi registers), `xhciscan` (USB controllers and DbC)
-- [x] USB debug serial (xHCI DbC) driver, verified on real hardware with `dbcping`
+- [x] Headless diagnostics log on the boot volume (`\EFI\ferrite\ferrite-uefi.txt`)
+- [x] Recon apps: `pciscan` (PCI and Wi-Fi registers), `xhciscan` (USB controllers and DbC), `dbcping` and `dbcbench` (DbC link)
+- [x] USB debug serial (xHCI DbC) driver, verified on real hardware with `dbcping`; `dbcbench` has not been run on hardware yet
 - [ ] DbC log output from the main app
 - [ ] Wi-Fi via real Linux drivers on a Rust shim
 - [ ] DNS-SD service enumeration (PTR/SRV/TXT) on top of the mDNS responder
@@ -22,41 +22,48 @@ suite before (or instead of) booting an operating system.
 ## Quickstart
 
 ```bash
-just build        # compile the .efi (x86_64-unknown-uefi)
-just qemu         # boot it in QEMU with a graphical window (needs OVMF)
-just qemu-serial  # boot headless, console mirrored to your terminal
+just build                        # compile every .efi (x86_64-unknown-uefi)
+just qemu                         # boot the main app in QEMU with a graphical window (needs OVMF)
+just qemu ferrite-uefi serial     # boot headless, console mirrored to your terminal
+just qemu xhciscan serial         # any app by name: ferrite-uefi, pciscan, xhciscan, dbcping, dbcbench
 ```
 
-Press `q` or `Esc` to exit. Requires `qemu-system-x86_64` and OVMF firmware at
-`/usr/share/OVMF/OVMF_CODE_4M.fd` (override the `ovmf_code`/`ovmf_vars` vars in
-the `justfile` if your distro puts them elsewhere).
+`just qemu <app> <gui|serial> <user|tap>` stages the app as `esp/efi/boot/bootx64.efi`
+and boots it with an `e1000` NIC and a `qemu-xhci` controller. Press `q` or `Esc`
+to leave the main app. Requires `qemu-system-x86_64` and OVMF firmware at
+`/usr/share/OVMF/OVMF_CODE_4M.fd` (override the `ovmf_code` and `ovmf_vars`
+variables in the `Justfile` if your distro puts them elsewhere). QEMU has no
+xHCI Debug Capability, so the DbC apps only run to "no DbC found" there.
+
+Every app writes its log to `\EFI\ferrite\<app>.txt` on the boot volume (for
+example `\EFI\ferrite\xhciscan.txt`). QEMU's `fat:rw:` drive corrupts files that
+grow, so inspect those logs from a real FAT image instead.
 
 ### Deploying to real hardware
 
-The application is `esp/efi/boot/bootx64.efi`, the default boot path UEFI
+The staged application is `esp/efi/boot/bootx64.efi`, the default boot path UEFI
 firmware looks for on removable media. Format a USB stick as FAT32 and:
 
 ```bash
-just stage-usb /run/media/you/USBLABEL   # copies bootx64.efi to /efi/boot/
+just stage-usb /run/media/you/USBLABEL            # main app
+just stage-usb /run/media/you/USBLABEL dbcping    # another app
 ```
 
 Boot the target machine from the USB (disable Secure Boot, or sign the image).
 
 ## Architecture
 
-| File                  | Role                                                              |
-| --------------------- | ----------------------------------------------------------------- |
-| `src/main.rs`         | UEFI `#[entry]`; grabs stdin/stdout, runs the app                 |
-| `src/app.rs`          | The ratatui UI + render/input/network/sweep poll loop             |
-| `src/backend.rs`      | A ratatui `Backend` over the UEFI Simple Text Output Protocol     |
-| `src/net.rs`          | smoltcp `Device` over SNP; DHCP client, HTTP server, mDNS wiring  |
-| `src/mdns.rs`         | Minimal mDNS responder (parses queries, builds A answers)         |
-| `src/sweep.rs`        | Incremental write/verify pattern sweep with fault tracking        |
-| `src/diag.rs`         | Milestone log rewritten to `\ferrite.log` on the boot volume      |
-| `src/bin/pciscan.rs`  | Standalone PCI enumerator; reads live registers off Intel Wi-Fi   |
-| `src/bin/xhciscan.rs` | Standalone xHCI and DbC recon; saves a report file and auto-exits |
-| `src/lib.rs`, `src/dbc/` | xHCI Debug Capability driver, shared by the apps                |
-| `src/bin/dbcping.rs`  | Standalone DbC bring-up: ping at 1 Hz, echo input, report file    |
+| Crate | Role |
+| --- | --- |
+| `ferrite-hal` | Platform traits (MMIO, PCI config, DMA, clock, delay) and the address, time and register types drivers share |
+| `ferrite-xhci` | xHCI Debug Capability driver, written only against `ferrite-hal` |
+| `ferrite-efi` | UEFI backends for those traits, the boot-volume log, the `log` sink, unattended exit |
+| `ferrite-testing` | Host-only test doubles: mock HAL, simulated DbC register file |
+| `ferrite-uefi` | The main app: ratatui UI (`ui.rs`, `backend.rs`), memory sweep (`sweep.rs`), SNP + smoltcp networking (`net/`), mDNS (`mdns.rs`), headless log (`diag.rs`) |
+| `ferrite-recon` | The standalone apps `pciscan`, `xhciscan`, `dbcping`, `dbcbench`, and the code they share |
+
+The crate boundaries, the `no_std` line and the type, error and logging rules are
+in [docs/CONVENTIONS.md](docs/CONVENTIONS.md).
 
 ### Networking
 
@@ -76,7 +83,7 @@ supplies the rest of the stack:
 `wait_for_packet_event` is documented as never firing under QEMU, so the stack
 *polls* `receive` on every render tick rather than blocking on the event.
 
-**Testing.** The QEMU recipes attach an `e1000` NIC via user-mode (SLIRP)
+**Testing.** `just qemu` attaches the `e1000` NIC through user-mode (SLIRP)
 networking, which includes a DHCP server (guest gets `10.0.2.15`) and forwards
 host `:8080` to guest `:80`:
 
@@ -85,9 +92,34 @@ just qemu            # boot; watch the network panel acquire a lease
 curl http://127.0.0.1:8080/   # fetch the status page through the port-forward
 ```
 
-SLIRP does **not** carry multicast between host and guest, so full mDNS
-*discovery* can't be exercised locally. That needs bridged networking (a wired
-box on the LAN, or the target hardware).
+SLIRP does not carry multicast between host and guest, so mDNS needs the `tap`
+mode, which joins a tap device to libvirt's NAT bridge `virbr0`. Create the tap
+once per boot of the host (the two commands vanish on reboot):
+
+```bash
+sudo ip tuntap add dev tap-ferrite mode tap user $USER
+sudo ip link set tap-ferrite master virbr0 up
+just qemu ferrite-uefi gui tap
+```
+
+`virbr0` is libvirt's private NAT network and is never bridged to the physical
+NIC, so the guest cannot reach or disturb the LAN. Its DHCP server hands the
+guest a lease, and the host reaches the guest at `ferrite.local` over the same
+bridge.
+
+Verified under QEMU/OVMF with an `e1000` on `tap-ferrite` on `virbr0`, on QEMU's
+iPXE SNP driver:
+
+- DHCP lease acquired.
+- `ferrite.local` resolves through avahi and through the system resolver.
+- The guest answers ping.
+- HTTP gives 200 for `/` (59 ms), 404 for `/favicon.ico` and 405 for `POST /`.
+
+This is the first time mDNS has been verified; before it only DHCP and HTTP
+through SLIRP were. Nothing here has run on real hardware or on a real NIC's SNP
+driver yet. The routing and status codes are also covered by unit tests in
+`crates/ferrite-uefi/src/net/http.rs`; the QEMU results above are from a manual
+run with no recorded artifact.
 
 ### The backend, and the performance note
 

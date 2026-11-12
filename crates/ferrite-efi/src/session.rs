@@ -4,7 +4,7 @@ use core::time::Duration;
 
 use uefi::boot::{self, EventType, TimerTrigger, Tpl};
 use uefi::runtime::{self, ResetType, VariableVendor};
-use uefi::{Status, cstr16, guid, println, system};
+use uefi::{Status, cstr16, guid, system};
 
 use crate::bootlog::BootLog;
 
@@ -12,12 +12,12 @@ use crate::bootlog::BootLog;
 ///
 /// With no key, a run launched by systemd-boot cold-resets so the machine lands
 /// back in its default OS; otherwise this returns and the caller exits to the firmware.
+#[expect(clippy::disallowed_methods, reason = "session is the one home of the reset")]
 pub fn finish(report: &mut BootLog, secs: u64) {
     let saved = report.flush();
-    println!(
-        "\nreport file: {}\npress a key to exit (auto-exit in {secs}s)...",
-        if saved { report.display_path() } else { "NOT written" }
-    );
+    let path = if saved { report.display_path() } else { "NOT written" };
+    let note = alloc::format!("\nreport file: {path}\npress a key to exit (auto-exit in {secs}s)...");
+    report.line(&note);
     if !wait_for_key_or_timeout(secs) && launched_by_systemd_boot() {
         runtime::reset(ResetType::COLD, Status::SUCCESS, None);
     }
@@ -34,6 +34,10 @@ pub fn launched_by_systemd_boot() -> bool {
 /// Wait for a keypress, giving up after `secs`. Returns false only when the
 /// full timeout elapsed; a key or a firmware error while waiting returns true,
 /// so a failure never triggers the unattended reset.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "fallback when no timer event can be created: the only stalls outside the clock"
+)]
 pub fn wait_for_key_or_timeout(secs: u64) -> bool {
     let timeout = Duration::from_secs(secs);
     // SAFETY: no notify function is registered, so no callback can run after the event is closed or boot services exit.
@@ -65,6 +69,8 @@ pub fn wait_for_key_or_timeout(secs: u64) -> bool {
 /// Records the panic in the boot log, shows it, then after ten seconds resets (under systemd-boot) or powers off.
 #[cfg(all(target_os = "uefi", feature = "panic-handler"))]
 #[panic_handler]
+#[expect(clippy::disallowed_macros, reason = "the panic handler is one of the two sanctioned println homes")]
+#[expect(clippy::disallowed_methods, reason = "session is the one home of the reset, here for the panic path")]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -72,7 +78,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 
     if !PANICKING.swap(true, Ordering::Relaxed) {
         if !crate::logger::record_panic(info) {
-            println!("[PANIC]: {info}");
+            uefi::println!("[PANIC]: {info}");
         }
         if boot_services_active() {
             boot::stall(Duration::from_secs(10));
