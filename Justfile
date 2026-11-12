@@ -4,9 +4,11 @@ uefi := "x86_64-unknown-uefi"
 ovmf_code := "/usr/share/OVMF/OVMF_CODE_4M.fd"
 ovmf_vars := "/usr/share/OVMF/OVMF_VARS_4M.fd"
 
-# e1000 has a UNDI driver in OVMF; user-mode net gives a built-in DHCP server
-# (guest 10.0.2.15) and forwards host :8080 to the guest's HTTP :80.
-netdev := "-netdev user,id=net0,hostfwd=tcp::8080-:80 -device e1000,netdev=net0"
+# e1000 has a UNDI driver in OVMF. `user` gives a built-in DHCP server (guest
+# 10.0.2.15) and forwards host :8080 to the guest's :80, but carries no multicast.
+# `tap` joins tap-ferrite on libvirt's NAT bridge virbr0, where mDNS works.
+user_net := "-netdev user,id=net0,hostfwd=tcp::8080-:80"
+tap_net := "-netdev tap,id=net0,ifname=tap-ferrite,script=no,downscript=no"
 
 alias c := check
 alias t := test
@@ -45,8 +47,8 @@ stage app="ferrite-uefi":
     cp -f target/{{ uefi }}/debug/{{ app }}.efi esp/efi/boot/bootx64.efi
     test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
 
-# boot an app in QEMU: `just qemu`, `just qemu xhciscan serial`
-qemu app="ferrite-uefi" mode="gui": (stage app)
+# boot an app in QEMU: `just qemu`, `just qemu xhciscan serial`, `just qemu ferrite-uefi serial tap`
+qemu app="ferrite-uefi" mode="gui" net="user": (stage app)
     qemu-system-x86_64 \
         -enable-kvm \
         -machine q35 \
@@ -54,7 +56,7 @@ qemu app="ferrite-uefi" mode="gui": (stage app)
         -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
         -drive if=pflash,format=raw,file=OVMF_VARS.fd \
         -drive format=raw,file=fat:rw:esp \
-        {{ netdev }} \
+        {{ if net == "tap" { tap_net } else { user_net } }} -device e1000,netdev=net0 \
         -device qemu-xhci \
         {{ if mode == "serial" { "-nographic" } else { "-display gtk" } }}
 
