@@ -132,18 +132,19 @@ void lx_kernel_init(void)
 }
 
 /*
- * Find the first wireless interface (op 0) or bring it up (1) or down (2), as
- * `ip link set` does, copying its name to name. -ENODEV when none is
- * registered, else what dev_open returned (0 for the others).
+ * Find the nth wireless interface, from 0 in registration order (op 0), or bring
+ * it up (1) or down (2), as `ip link set` does, copying its name to name.
+ * -ENODEV when there is no such interface, else what dev_open returned (0 for
+ * the others).
  */
-int lx_wireless_ctl(int op, char name[IFNAMSIZ])
+int lx_wireless_ctl(int op, int nth, char name[IFNAMSIZ])
 {
 	struct net_device *dev, *found = NULL;
 	int err = 0;
 
 	rtnl_lock();
 	for_each_netdev(&init_net, dev) {
-		if (dev->ieee80211_ptr) {
+		if (dev->ieee80211_ptr && nth-- == 0) {
 			found = dev;
 			break;
 		}

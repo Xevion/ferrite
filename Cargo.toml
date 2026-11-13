@@ -4,7 +4,7 @@ members = ["crates/*"]
 # Host-buildable crates. The UEFI binaries are built through the `efi-*`
 # aliases in .cargo/config.toml, which pass `--target x86_64-unknown-uefi`.
 # ferrite-wifi-sys needs its Linux snapshot, which the Justfile recipes make first with `just vendor`.
-default-members = ["crates/ferrite-hal", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-wire", "crates/ferrite-dev", "crates/ferrite-wifi-sys", "crates/ferrite-lkpi", "crates/ferrite-wifi-start", "crates/ferrite-lab", "crates/ferrite-linux"]
+default-members = ["crates/ferrite-hal", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-wire", "crates/ferrite-dev", "crates/ferrite-wifi-sys", "crates/ferrite-nl80211", "crates/ferrite-lkpi", "crates/ferrite-wifi-start", "crates/ferrite-lab", "crates/ferrite-linux"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,7 @@ publish = false
 ferrite-efi = { path = "crates/ferrite-efi" }
 ferrite-hal = { path = "crates/ferrite-hal" }
 ferrite-lkpi = { path = "crates/ferrite-lkpi" }
+ferrite-nl80211 = { path = "crates/ferrite-nl80211" }
 ferrite-wifi-start = { path = "crates/ferrite-wifi-start" }
 ferrite-wifi-sys = { path = "crates/ferrite-wifi-sys" }
 ferrite-recon = { path = "crates/ferrite-recon" }

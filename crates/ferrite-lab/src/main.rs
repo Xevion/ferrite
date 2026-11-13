@@ -29,6 +29,8 @@ const FIRMWARE_DIR: &str = "/lib/firmware";
 const REGDB_LIMIT: Duration = Duration::from_secs(2);
 /// How long a PCI Wi-Fi card gets to register its interface; the lab has none yet.
 const WIFI_LIMIT: Duration = Duration::from_secs(10);
+/// How long the simulated radios' scan gets to end.
+const SCAN_LIMIT: Duration = Duration::from_secs(10);
 /// How long one poll step may run tasks before the main loop gets the CPU back.
 const BUDGET: Duration = Duration::from_millis(10);
 /// The kernel's memory: every page, slab object and vmalloc block.
@@ -108,6 +110,7 @@ fn main() -> ExitCode {
         firmware_reference: firmware,
         regdb_limit: REGDB_LIMIT,
         wifi_limit: WIFI_LIMIT,
+        scan_limit: SCAN_LIMIT,
     };
     let init_task = match ferrite_wifi_start::start_init(start_up) {
         Ok(task) => task,

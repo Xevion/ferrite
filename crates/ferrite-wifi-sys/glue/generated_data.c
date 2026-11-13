@@ -229,6 +229,11 @@
 #include <linux/random.h>
 #include <linux/idr.h>
 #include <linux/pci.h>
+#include <linux/bvec.h>
+#include <linux/uio.h>
+#include <linux/pagemap.h>
+#include <linux/splice.h>
+#include <linux/iov_iter.h>
 #include <linux/stdarg.h>
 #include <linux/klist.h>
 #include <linux/kobject.h>
@@ -251,8 +256,6 @@
 #include <linux/spinlock.h>
 #include <linux/rculist.h>
 #include <linux/rhashtable.h>
-#include <linux/bvec.h>
-#include <linux/uio.h>
 #include <linux/folio_queue.h>
 #include <linux/siphash.h>
 #include <linux/dcache.h>
@@ -309,8 +312,6 @@
 #include "linux/drivers/pci/pci.h"
 #include "linux/drivers/pci/pcie/portdrv.h"
 #include <linux/poll.h>
-#include <linux/pagemap.h>
-#include <linux/iov_iter.h>
 #include <linux/indirect_call_wrapper.h>
 #include <net/protocol.h>
 #include <trace/events/skb.h>
@@ -372,8 +373,13 @@
 #include <net/tcp.h>
 #include <net/devlink.h>
 #include <linux/dpll.h>
+#include <linux/sched/user.h>
+#include <linux/pidfd.h>
+#include <linux/pidfs.h>
+#include <linux/io_uring.h>
+#include <net/cls_cgroup.h>
+#include <net/af_unix.h>
 #include <linux/udp.h>
-#include <linux/splice.h>
 #include <linux/bitfield.h>
 #include <linux/mpls.h>
 #include <linux/kcov.h>
@@ -386,14 +392,12 @@
 #include "linux/net/core/sock_destructor.h"
 #include <linux/mroute.h>
 #include <linux/mroute6.h>
-#include <net/cls_cgroup.h>
 #include <linux/sock_diag.h>
 #include <linux/filter.h>
 #include <net/sock_reuseport.h>
 #include <net/bpf_sk_storage.h>
 #include <trace/events/sock.h>
 #include <net/phonet/phonet.h>
-#include <linux/pidfd.h>
 #include <linux/bpf.h>
 #include <net/xdp.h>
 #include <net/xdp_priv.h>
@@ -417,6 +421,7 @@
 #include <trace/events/netlink.h>
 #include "linux/net/netlink/af_netlink.h"
 #include "linux/net/netlink/genetlink.h"
+#include <net/genetlink.h>
 #include <net/mac80211.h>
 #include "linux/net/mac80211/ieee80211_i.h"
 #include "linux/net/mac80211/driver-ops.h"
@@ -456,7 +461,6 @@
 #include <linux/acpi_amd_wbrf.h>
 #include <linux/units.h>
 #include <linux/if.h>
-#include <net/genetlink.h>
 #include "linux/net/wireless/nl80211.h"
 #include "linux/net/wireless/sysfs.h"
 #include "linux/net/wireless/debugfs.h"
@@ -469,6 +473,7 @@
 #include <linux/firmware.h>
 #include <linux/wireless.h>
 #include <net/cfg80211-wext.h>
+#include <net/inet_connection_sock.h>
 #include "linux/net/wireless/trace.h"
 #include "linux/drivers/net/wireless/realtek/rtw89/cam.h"
 #include "linux/drivers/net/wireless/realtek/rtw89/chan.h"
@@ -550,6 +555,10 @@
 #include "linux/drivers/net/wireless/intel/iwlwifi/mvm/sta.h"
 #include "linux/drivers/net/wireless/intel/iwlwifi/mvm/debugfs.h"
 #include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/coex.h"
+#include <linux/virtio.h>
+#include <linux/virtio_ids.h>
+#include <linux/virtio_config.h>
+#include "linux/drivers/net/wireless/virtual/mac80211_hwsim.h"
 
 #define LX_MARK(name) asm volatile(".globl " #name "\n.balign 4096\n" #name ":")
 #define LX_DATA(sym, size) asm volatile(".globl " #sym "\n.type " #sym ",@object\n.balign %c1\n" \
@@ -566,8 +575,6 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	LX_DATA(bpf_stats_enabled_key, sizeof(bpf_stats_enabled_key));
 	LX_DATA(cpu_khz, sizeof(cpu_khz));
 	LX_DATA(flow_keys_basic_dissector, sizeof(flow_keys_basic_dissector));
-	LX_DATA(genl_sk_destructing_cnt, sizeof(genl_sk_destructing_cnt));
-	LX_DATA(genl_sk_destructing_waitq, sizeof(genl_sk_destructing_waitq));
 	LX_DATA(inet_protos, sizeof(inet_protos));
 	LX_DATA(init_on_free, sizeof(init_on_free));
 	LX_DATA(init_pid_ns, sizeof(init_pid_ns));
@@ -619,8 +626,6 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "cpu_khz", &cpu_khz, sizeof(cpu_khz) },
 	{ "dst_default_metrics", &dst_default_metrics, sizeof(dst_default_metrics) },
 	{ "flow_keys_basic_dissector", &flow_keys_basic_dissector, sizeof(flow_keys_basic_dissector) },
-	{ "genl_sk_destructing_cnt", &genl_sk_destructing_cnt, sizeof(genl_sk_destructing_cnt) },
-	{ "genl_sk_destructing_waitq", &genl_sk_destructing_waitq, sizeof(genl_sk_destructing_waitq) },
 	{ "gfpflag_names", &gfpflag_names, sizeof(gfpflag_names[0]) },
 	{ "guid_index", &guid_index, sizeof(guid_index) },
 	{ "inet_protos", &inet_protos, sizeof(inet_protos) },
@@ -653,4 +658,4 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "uuid_index", &uuid_index, sizeof(uuid_index) },
 	{ "vmaflag_names", &vmaflag_names, sizeof(vmaflag_names[0]) },
 };
-const unsigned long lx_unimplemented_data_count = 41;
+const unsigned long lx_unimplemented_data_count = 39;

@@ -44,6 +44,12 @@ pub unsafe extern "sysv64" fn __get_user_8() -> ! {
     trace_and_stop(c"__get_user_8")
 }
 
+/// `void __memcpy_flushcache(void *, const void *, size_t)`, declared in `asm/string_64.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn __memcpy_flushcache() -> ! {
+    trace_and_stop(c"__memcpy_flushcache")
+}
+
 /// `void __might_fault(const char *, int)`, declared in `linux/kernel.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __might_fault() -> ! {
@@ -110,18 +116,6 @@ pub unsafe extern "sysv64" fn __put_user_8() -> ! {
     trace_and_stop(c"__put_user_8")
 }
 
-/// `void __scm_destroy(struct scm_cookie *)`, declared in `net/scm.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __scm_destroy() -> ! {
-    trace_and_stop(c"__scm_destroy")
-}
-
-/// `int __scm_send(struct socket *, struct msghdr *, struct scm_cookie *)`, declared in `net/scm.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __scm_send() -> ! {
-    trace_and_stop(c"__scm_send")
-}
-
 /// `bool __skb_flow_dissect(const struct net *, const struct sk_buff *, struct flow_dissector *, void *, const void *, __be16, int, int, unsigned int)`, declared in `linux/skbuff.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __skb_flow_dissect() -> ! {
@@ -170,28 +164,10 @@ pub unsafe extern "sysv64" fn __srcu_read_unlock() -> ! {
     trace_and_stop(c"__srcu_read_unlock")
 }
 
-/// `pid_t __task_pid_nr_ns(struct task_struct *, enum pid_type, struct pid_namespace *)`, declared in `linux/pid.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __task_pid_nr_ns() -> ! {
-    trace_and_stop(c"__task_pid_nr_ns")
-}
-
-/// `size_t _copy_from_iter(void *, size_t, struct iov_iter *)`, declared in `linux/uio.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn _copy_from_iter() -> ! {
-    trace_and_stop(c"_copy_from_iter")
-}
-
 /// `unsigned long _copy_from_user(void *, const void *, unsigned long)`, declared in `linux/uaccess.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn _copy_from_user() -> ! {
     trace_and_stop(c"_copy_from_user")
-}
-
-/// `size_t _copy_to_iter(const void *, size_t, struct iov_iter *)`, declared in `linux/uio.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn _copy_to_iter() -> ! {
-    trace_and_stop(c"_copy_to_iter")
 }
 
 /// `unsigned long _copy_to_user(void *, const void *, unsigned long)`, declared in `linux/uaccess.h`.
@@ -296,216 +272,6 @@ pub unsafe extern "sysv64" fn cap_settime() -> ! {
     trace_and_stop(c"cap_settime")
 }
 
-/// `void cfg80211_assoc_comeback(struct net_device *, const u8 *, u32)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_assoc_comeback() -> ! {
-    trace_and_stop(c"cfg80211_assoc_comeback")
-}
-
-/// `int cfg80211_bss_color_notify(struct net_device *, enum nl80211_commands, u8, u64, u8)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_bss_color_notify() -> ! {
-    trace_and_stop(c"cfg80211_bss_color_notify")
-}
-
-/// `void cfg80211_ch_switch_notify(struct net_device *, struct cfg80211_chan_def *, unsigned int)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_ch_switch_notify() -> ! {
-    trace_and_stop(c"cfg80211_ch_switch_notify")
-}
-
-/// `void cfg80211_ch_switch_started_notify(struct net_device *, struct cfg80211_chan_def *, unsigned int, u8, bool)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_ch_switch_started_notify() -> ! {
-    trace_and_stop(c"cfg80211_ch_switch_started_notify")
-}
-
-/// `int cfg80211_check_station_change(struct wiphy *, struct station_parameters *, enum cfg80211_station_type)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_check_station_change() -> ! {
-    trace_and_stop(c"cfg80211_check_station_change")
-}
-
-/// `void cfg80211_control_port_tx_status(struct wireless_dev *, u64, const u8 *, size_t, bool, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_control_port_tx_status() -> ! {
-    trace_and_stop(c"cfg80211_control_port_tx_status")
-}
-
-/// `void cfg80211_cqm_beacon_loss_notify(struct net_device *, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_cqm_beacon_loss_notify() -> ! {
-    trace_and_stop(c"cfg80211_cqm_beacon_loss_notify")
-}
-
-/// `void cfg80211_cqm_pktloss_notify(struct net_device *, const u8 *, u32, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_cqm_pktloss_notify() -> ! {
-    trace_and_stop(c"cfg80211_cqm_pktloss_notify")
-}
-
-/// `void cfg80211_cqm_rssi_notify(struct net_device *, enum nl80211_cqm_rssi_threshold_event, s32, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_cqm_rssi_notify() -> ! {
-    trace_and_stop(c"cfg80211_cqm_rssi_notify")
-}
-
-/// `void cfg80211_cqm_rssi_notify_work(struct wiphy *, struct wiphy_work *)`, declared in `linux/net/wireless/core.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_cqm_rssi_notify_work() -> ! {
-    trace_and_stop(c"cfg80211_cqm_rssi_notify_work")
-}
-
-/// `void cfg80211_del_sta_sinfo(struct net_device *, const u8 *, struct station_info *, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_del_sta_sinfo() -> ! {
-    trace_and_stop(c"cfg80211_del_sta_sinfo")
-}
-
-/// `void cfg80211_epcs_changed(struct net_device *, bool)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_epcs_changed() -> ! {
-    trace_and_stop(c"cfg80211_epcs_changed")
-}
-
-/// `void cfg80211_gtk_rekey_notify(struct net_device *, const u8 *, const u8 *, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_gtk_rekey_notify() -> ! {
-    trace_and_stop(c"cfg80211_gtk_rekey_notify")
-}
-
-/// `void cfg80211_links_removed(struct net_device *, u16)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_links_removed() -> ! {
-    trace_and_stop(c"cfg80211_links_removed")
-}
-
-/// `void cfg80211_mgmt_tx_status_ext(struct wireless_dev *, struct cfg80211_tx_status *, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_mgmt_tx_status_ext() -> ! {
-    trace_and_stop(c"cfg80211_mgmt_tx_status_ext")
-}
-
-/// `void cfg80211_nan_func_terminated(struct wireless_dev *, u8, enum nl80211_nan_func_term_reason, u64, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_nan_func_terminated() -> ! {
-    trace_and_stop(c"cfg80211_nan_func_terminated")
-}
-
-/// `void cfg80211_nan_match(struct wireless_dev *, struct cfg80211_nan_match_params *, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_nan_match() -> ! {
-    trace_and_stop(c"cfg80211_nan_match")
-}
-
-/// `void cfg80211_new_sta(struct net_device *, const u8 *, struct station_info *, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_new_sta() -> ! {
-    trace_and_stop(c"cfg80211_new_sta")
-}
-
-/// `void cfg80211_probe_status(struct net_device *, const u8 *, u64, bool, s32, bool, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_probe_status() -> ! {
-    trace_and_stop(c"cfg80211_probe_status")
-}
-
-/// `void cfg80211_ready_on_channel(struct wireless_dev *, u64, struct ieee80211_channel *, unsigned int, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_ready_on_channel() -> ! {
-    trace_and_stop(c"cfg80211_ready_on_channel")
-}
-
-/// `void cfg80211_remain_on_channel_expired(struct wireless_dev *, u64, struct ieee80211_channel *, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_remain_on_channel_expired() -> ! {
-    trace_and_stop(c"cfg80211_remain_on_channel_expired")
-}
-
-/// `void cfg80211_report_obss_beacon_khz(struct wiphy *, const u8 *, size_t, int, int)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_report_obss_beacon_khz() -> ! {
-    trace_and_stop(c"cfg80211_report_obss_beacon_khz")
-}
-
-/// `bool cfg80211_rx_control_port(struct net_device *, struct sk_buff *, bool, int)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_rx_control_port() -> ! {
-    trace_and_stop(c"cfg80211_rx_control_port")
-}
-
-/// `bool cfg80211_rx_spurious_frame(struct net_device *, const u8 *, int, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_rx_spurious_frame() -> ! {
-    trace_and_stop(c"cfg80211_rx_spurious_frame")
-}
-
-/// `bool cfg80211_rx_unexpected_4addr_frame(struct net_device *, const u8 *, int, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_rx_unexpected_4addr_frame() -> ! {
-    trace_and_stop(c"cfg80211_rx_unexpected_4addr_frame")
-}
-
-/// `void cfg80211_rx_unprot_mlme_mgmt(struct net_device *, const u8 *, size_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_rx_unprot_mlme_mgmt() -> ! {
-    trace_and_stop(c"cfg80211_rx_unprot_mlme_mgmt")
-}
-
-/// `void cfg80211_schedule_channels_check(struct wireless_dev *)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_schedule_channels_check() -> ! {
-    trace_and_stop(c"cfg80211_schedule_channels_check")
-}
-
-/// `void cfg80211_sta_opmode_change_notify(struct net_device *, const u8 *, struct sta_opmode_info *, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_sta_opmode_change_notify() -> ! {
-    trace_and_stop(c"cfg80211_sta_opmode_change_notify")
-}
-
-/// `void cfg80211_tdls_oper_request(struct net_device *, const u8 *, enum nl80211_tdls_operation, u16, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_tdls_oper_request() -> ! {
-    trace_and_stop(c"cfg80211_tdls_oper_request")
-}
-
-/// `void cfg80211_tx_mgmt_expired(struct wireless_dev *, u64, struct ieee80211_channel *, gfp_t)`, declared in `net/cfg80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_tx_mgmt_expired() -> ! {
-    trace_and_stop(c"cfg80211_tx_mgmt_expired")
-}
-
 /// `void cleanup_srcu_struct(struct srcu_struct *)`, declared in `linux/srcu.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn cleanup_srcu_struct() -> ! {
@@ -548,16 +314,34 @@ pub unsafe extern "sysv64" fn copy_mc_to_kernel() -> ! {
     trace_and_stop(c"copy_mc_to_kernel")
 }
 
+/// `unsigned long copy_mc_to_user(void *, const void *, unsigned int)`, declared in `asm/uaccess.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn copy_mc_to_user() -> ! {
+    trace_and_stop(c"copy_mc_to_user")
+}
+
 /// `void copy_page(void *, void *)`, declared in `asm/page_64.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn copy_page() -> ! {
     trace_and_stop(c"copy_page")
 }
 
-/// `size_t copy_page_from_iter(struct page *, size_t, size_t, struct iov_iter *)`, declared in `linux/uio.h`.
+/// `size_t copy_to_nontemporal(void *, const void *, size_t)`, declared in `asm/uaccess_64.h`.
 #[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn copy_page_from_iter() -> ! {
-    trace_and_stop(c"copy_page_from_iter")
+pub unsafe extern "sysv64" fn copy_to_nontemporal() -> ! {
+    trace_and_stop(c"copy_to_nontemporal")
+}
+
+/// `long copy_to_user_nofault(void *, const void *, size_t)`, declared in `linux/uaccess.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn copy_to_user_nofault() -> ! {
+    trace_and_stop(c"copy_to_user_nofault")
+}
+
+/// `size_t copy_user_flushcache(void *, const void *, size_t)`, declared in `asm/uaccess_64.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn copy_user_flushcache() -> ! {
+    trace_and_stop(c"copy_user_flushcache")
 }
 
 /// `void cpudl_cleanup(struct cpudl *)`, declared in `linux/kernel/sched/cpudeadline.h`.
@@ -710,6 +494,18 @@ pub unsafe extern "sysv64" fn ethtool_rss_notify() -> ! {
     trace_and_stop(c"ethtool_rss_notify")
 }
 
+/// `size_t fault_in_readable(const char *, size_t)`, declared in `linux/pagemap.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn fault_in_readable() -> ! {
+    trace_and_stop(c"fault_in_readable")
+}
+
+/// `size_t fault_in_safe_writeable(const char *, size_t)`, declared in `linux/pagemap.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn fault_in_safe_writeable() -> ! {
+    trace_and_stop(c"fault_in_safe_writeable")
+}
+
 /// `void fd_install(unsigned int, struct file *)`, declared in `linux/file.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn fd_install() -> ! {
@@ -722,16 +518,22 @@ pub unsafe extern "sysv64" fn fdget() -> ! {
     trace_and_stop(c"fdget")
 }
 
-/// `bool file_ns_capable(const struct file *, struct user_namespace *, int)`, declared in `linux/capability.h`.
+/// `struct file *fget_raw(unsigned int)`, declared in `linux/file.h`.
 #[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn file_ns_capable() -> ! {
-    trace_and_stop(c"file_ns_capable")
+pub unsafe extern "sysv64" fn fget_raw() -> ! {
+    trace_and_stop(c"fget_raw")
 }
 
 /// `char *file_path(struct file *, char *, int)`, declared in `linux/fs.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn file_path() -> ! {
     trace_and_stop(c"file_path")
+}
+
+/// `struct pid *find_get_pid(int)`, declared in `linux/pid.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn find_get_pid() -> ! {
+    trace_and_stop(c"find_get_pid")
 }
 
 /// `void fput(struct file *)`, declared in `linux/file.h`.
@@ -758,6 +560,12 @@ pub unsafe extern "sysv64" fn get_task_mm() -> ! {
     trace_and_stop(c"get_task_mm")
 }
 
+/// `int get_user_pages_fast(unsigned long, int, unsigned int, struct page **)`, declared in `linux/mm.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn get_user_pages_fast() -> ! {
+    trace_and_stop(c"get_user_pages_fast")
+}
+
 /// `bool gfp_pfmemalloc_allowed(gfp_t)`, declared in `linux/gfp.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn gfp_pfmemalloc_allowed() -> ! {
@@ -780,48 +588,6 @@ pub unsafe extern "sysv64" fn init_pseudo() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn init_srcu_struct() -> ! {
     trace_and_stop(c"init_srcu_struct")
-}
-
-/// `void iov_iter_advance(struct iov_iter *, size_t)`, declared in `linux/uio.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn iov_iter_advance() -> ! {
-    trace_and_stop(c"iov_iter_advance")
-}
-
-/// `void iov_iter_bvec(struct iov_iter *, unsigned int, const struct bio_vec *, unsigned long, size_t)`, declared in `linux/uio.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn iov_iter_bvec() -> ! {
-    trace_and_stop(c"iov_iter_bvec")
-}
-
-/// `ssize_t iov_iter_extract_pages(struct iov_iter *, struct page ***, size_t, unsigned int, iov_iter_extraction_t, size_t *)`, declared in `linux/uio.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn iov_iter_extract_pages() -> ! {
-    trace_and_stop(c"iov_iter_extract_pages")
-}
-
-/// `ssize_t iov_iter_get_pages2(struct iov_iter *, struct page **, size_t, unsigned int, size_t *)`, declared in `linux/uio.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn iov_iter_get_pages2() -> ! {
-    trace_and_stop(c"iov_iter_get_pages2")
-}
-
-/// `void iov_iter_kvec(struct iov_iter *, unsigned int, const struct kvec *, unsigned long, size_t)`, declared in `linux/uio.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn iov_iter_kvec() -> ! {
-    trace_and_stop(c"iov_iter_kvec")
-}
-
-/// `void iov_iter_restore(struct iov_iter *, struct iov_iter_state *)`, declared in `linux/uio.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn iov_iter_restore() -> ! {
-    trace_and_stop(c"iov_iter_restore")
-}
-
-/// `void iov_iter_revert(struct iov_iter *, size_t)`, declared in `linux/uio.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn iov_iter_revert() -> ! {
-    trace_and_stop(c"iov_iter_revert")
 }
 
 /// `void ip_send_check(struct iphdr *)`, declared in `net/ip.h`.
@@ -914,193 +680,6 @@ pub unsafe extern "sysv64" fn netdev_rss_key_fill() -> ! {
     trace_and_stop(c"netdev_rss_key_fill")
 }
 
-/// `int netlink_policy_dump_attr_size_estimate(const struct nla_policy *)`, declared in `net/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn netlink_policy_dump_attr_size_estimate() -> ! {
-    trace_and_stop(c"netlink_policy_dump_attr_size_estimate")
-}
-
-/// `int netlink_policy_dump_write_attr(struct sk_buff *, const struct nla_policy *, int)`, declared in `net/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn netlink_policy_dump_write_attr() -> ! {
-    trace_and_stop(c"netlink_policy_dump_write_attr")
-}
-
-/// `struct sk_buff *nl80211_build_scan_msg(struct cfg80211_registered_device *, struct wireless_dev *, bool)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_build_scan_msg() -> ! {
-    trace_and_stop(c"nl80211_build_scan_msg")
-}
-
-/// `void nl80211_michael_mic_failure(struct cfg80211_registered_device *, struct net_device *, const u8 *, enum nl80211_key_type, int, const u8 *, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_michael_mic_failure() -> ! {
-    trace_and_stop(c"nl80211_michael_mic_failure")
-}
-
-/// `void nl80211_mlo_reconf_add_done(struct net_device *, struct cfg80211_mlo_reconf_done_data *)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_mlo_reconf_add_done() -> ! {
-    trace_and_stop(c"nl80211_mlo_reconf_add_done")
-}
-
-/// `int nl80211_parse_chandef(struct cfg80211_registered_device *, struct netlink_ext_ack *, struct nlattr **, struct cfg80211_chan_def *)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_parse_chandef() -> ! {
-    trace_and_stop(c"nl80211_parse_chandef")
-}
-
-/// `int nl80211_parse_random_mac(struct nlattr **, u8 *, u8 *)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_parse_random_mac() -> ! {
-    trace_and_stop(c"nl80211_parse_random_mac")
-}
-
-/// `bool nl80211_put_sta_rate(struct sk_buff *, struct rate_info *, int)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_put_sta_rate() -> ! {
-    trace_and_stop(c"nl80211_put_sta_rate")
-}
-
-/// `void nl80211_radar_notify(struct cfg80211_registered_device *, const struct cfg80211_chan_def *, enum nl80211_radar_event, struct net_device *, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_radar_notify() -> ! {
-    trace_and_stop(c"nl80211_radar_notify")
-}
-
-/// `void nl80211_send_ap_stopped(struct wireless_dev *, unsigned int)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_ap_stopped() -> ! {
-    trace_and_stop(c"nl80211_send_ap_stopped")
-}
-
-/// `void nl80211_send_assoc_timeout(struct cfg80211_registered_device *, struct net_device *, const u8 *, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_assoc_timeout() -> ! {
-    trace_and_stop(c"nl80211_send_assoc_timeout")
-}
-
-/// `void nl80211_send_auth_timeout(struct cfg80211_registered_device *, struct net_device *, const u8 *, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_auth_timeout() -> ! {
-    trace_and_stop(c"nl80211_send_auth_timeout")
-}
-
-/// `void nl80211_send_beacon_hint_event(struct wiphy *, struct ieee80211_channel *, struct ieee80211_channel *)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_beacon_hint_event() -> ! {
-    trace_and_stop(c"nl80211_send_beacon_hint_event")
-}
-
-/// `void nl80211_send_connect_result(struct cfg80211_registered_device *, struct net_device *, struct cfg80211_connect_resp_params *, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_connect_result() -> ! {
-    trace_and_stop(c"nl80211_send_connect_result")
-}
-
-/// `void nl80211_send_deauth(struct cfg80211_registered_device *, struct net_device *, const u8 *, size_t, bool, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_deauth() -> ! {
-    trace_and_stop(c"nl80211_send_deauth")
-}
-
-/// `void nl80211_send_disassoc(struct cfg80211_registered_device *, struct net_device *, const u8 *, size_t, bool, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_disassoc() -> ! {
-    trace_and_stop(c"nl80211_send_disassoc")
-}
-
-/// `void nl80211_send_disconnected(struct cfg80211_registered_device *, struct net_device *, u16, const u8 *, size_t, bool)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_disconnected() -> ! {
-    trace_and_stop(c"nl80211_send_disconnected")
-}
-
-/// `void nl80211_send_ibss_bssid(struct cfg80211_registered_device *, struct net_device *, const u8 *, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_ibss_bssid() -> ! {
-    trace_and_stop(c"nl80211_send_ibss_bssid")
-}
-
-/// `int nl80211_send_mgmt(struct cfg80211_registered_device *, struct wireless_dev *, u32, struct cfg80211_rx_info *, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_mgmt() -> ! {
-    trace_and_stop(c"nl80211_send_mgmt")
-}
-
-/// `void nl80211_send_port_authorized(struct cfg80211_registered_device *, struct net_device *, const u8 *, const u8 *, u8)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_port_authorized() -> ! {
-    trace_and_stop(c"nl80211_send_port_authorized")
-}
-
-/// `void nl80211_send_roamed(struct cfg80211_registered_device *, struct net_device *, struct cfg80211_roam_info *, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_roamed() -> ! {
-    trace_and_stop(c"nl80211_send_roamed")
-}
-
-/// `void nl80211_send_rx_assoc(struct cfg80211_registered_device *, struct net_device *, const struct cfg80211_rx_assoc_resp_data *)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_rx_assoc() -> ! {
-    trace_and_stop(c"nl80211_send_rx_assoc")
-}
-
-/// `void nl80211_send_rx_auth(struct cfg80211_registered_device *, struct net_device *, const u8 *, size_t, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_rx_auth() -> ! {
-    trace_and_stop(c"nl80211_send_rx_auth")
-}
-
-/// `void nl80211_send_scan_msg(struct cfg80211_registered_device *, struct sk_buff *)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_scan_msg() -> ! {
-    trace_and_stop(c"nl80211_send_scan_msg")
-}
-
-/// `void nl80211_send_scan_start(struct cfg80211_registered_device *, struct wireless_dev *)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_scan_start() -> ! {
-    trace_and_stop(c"nl80211_send_scan_start")
-}
-
-/// `void nl80211_send_sched_scan(struct cfg80211_sched_scan_request *, u32)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_send_sched_scan() -> ! {
-    trace_and_stop(c"nl80211_send_sched_scan")
-}
-
-/// `void *nl80211hdr_put(struct sk_buff *, u32, u32, int, u8)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211hdr_put() -> ! {
-    trace_and_stop(c"nl80211hdr_put")
-}
-
 /// `int param_get_ulong(char *, const struct kernel_param *)`, declared in `linux/moduleparam.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn param_get_ulong() -> ! {
@@ -1113,16 +692,22 @@ pub unsafe extern "sysv64" fn param_set_ulong() -> ! {
     trace_and_stop(c"param_set_ulong")
 }
 
-/// `pid_t pid_vnr(struct pid *)`, declared in `linux/pid.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn pid_vnr() -> ! {
-    trace_and_stop(c"pid_vnr")
-}
-
 /// `int pidfd_prepare(struct pid *, unsigned int, struct file **)`, declared in `linux/pid.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn pidfd_prepare() -> ! {
     trace_and_stop(c"pidfd_prepare")
+}
+
+/// `int pidfs_register_pid(struct pid *)`, declared in `linux/pidfs.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn pidfs_register_pid() -> ! {
+    trace_and_stop(c"pidfs_register_pid")
+}
+
+/// `int pin_user_pages_fast(unsigned long, int, unsigned int, struct page **)`, declared in `linux/mm.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn pin_user_pages_fast() -> ! {
+    trace_and_stop(c"pin_user_pages_fast")
 }
 
 /// `void print_cfs_stats(struct seq_file *, int)`, declared in `linux/kernel/sched/sched.h`.
@@ -1173,18 +758,6 @@ pub unsafe extern "sysv64" fn proc_doulongvec_minmax() -> ! {
     trace_and_stop(c"proc_doulongvec_minmax")
 }
 
-/// `int put_cmsg(struct msghdr *, int, int, int, void *)`, declared in `linux/socket.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn put_cmsg() -> ! {
-    trace_and_stop(c"put_cmsg")
-}
-
-/// `void put_pid(struct pid *)`, declared in `linux/pid.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn put_pid() -> ! {
-    trace_and_stop(c"put_pid")
-}
-
 /// `void put_unused_fd(unsigned int)`, declared in `linux/file.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn put_unused_fd() -> ! {
@@ -1209,6 +782,24 @@ pub unsafe extern "sysv64" fn rcuref_get_slowpath() -> ! {
     trace_and_stop(c"rcuref_get_slowpath")
 }
 
+/// `int receive_fd(struct file *, int *, unsigned int)`, declared in `linux/file.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn receive_fd() -> ! {
+    trace_and_stop(c"receive_fd")
+}
+
+/// `unsigned long rep_movs_alternative(void *, const void *, unsigned int)`, declared in `asm/uaccess_64.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn rep_movs_alternative() -> ! {
+    trace_and_stop(c"rep_movs_alternative")
+}
+
+/// `unsigned long rep_stos_alternative(void *, unsigned long)`, declared in `asm/uaccess_64.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn rep_stos_alternative() -> ! {
+    trace_and_stop(c"rep_stos_alternative")
+}
+
 /// `int reuseport_detach_prog(struct sock *)`, declared in `net/sock_reuseport.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn reuseport_detach_prog() -> ! {
@@ -1225,12 +816,6 @@ pub unsafe extern "sysv64" fn reuseport_detach_sock() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn reuseport_update_incoming_cpu() -> ! {
     trace_and_stop(c"reuseport_update_incoming_cpu")
-}
-
-/// `void scm_recv(struct socket *, struct msghdr *, struct scm_cookie *, int)`, declared in `net/scm.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn scm_recv() -> ! {
-    trace_and_stop(c"scm_recv")
 }
 
 /// `int send_sigurg(struct file *)`, declared in `linux/fs.h`.
@@ -1335,12 +920,6 @@ pub unsafe extern "sysv64" fn sk_filter_charge() -> ! {
     trace_and_stop(c"sk_filter_charge")
 }
 
-/// `int sk_filter_trim_cap(struct sock *, struct sk_buff *, unsigned int, enum skb_drop_reason *)`, declared in `linux/filter.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sk_filter_trim_cap() -> ! {
-    trace_and_stop(c"sk_filter_trim_cap")
-}
-
 /// `void sk_filter_uncharge(struct sock *, struct sk_filter *)`, declared in `linux/filter.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn sk_filter_uncharge() -> ! {
@@ -1405,12 +984,6 @@ pub unsafe extern "sysv64" fn sock_gen_put() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn sock_is_registered() -> ! {
     trace_and_stop(c"sock_is_registered")
-}
-
-/// `int sock_sendmsg(struct socket *, struct msghdr *)`, declared in `linux/net.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sock_sendmsg() -> ! {
-    trace_and_stop(c"sock_sendmsg")
 }
 
 /// `int sock_wake_async(struct socket_wq *, int, int)`, declared in `linux/net.h`.

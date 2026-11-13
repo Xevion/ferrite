@@ -47,6 +47,10 @@ const LAB_FLAGS: [&str; 3] = ["-g", "-fno-omit-frame-pointer", "-fasynchronous-u
 /// headers do not support.
 const C_TARGET: &str = "x86_64-unknown-none";
 
+/// `source.list` files only the lab compiles: `mac80211_hwsim` gives it radios, and a real machine must not
+/// gain simulated ones beside its card.
+const LAB_ONLY: [&str; 1] = ["drivers/net/wireless/virtual/mac80211_hwsim.c"];
+
 fn fail(message: &str) -> ! {
     eprintln!("ferrite-wifi-sys: {message}");
     exit(1)
@@ -122,8 +126,11 @@ struct Unit {
 }
 
 /// Every C file to compile as a Linux unit: `source.list` from the snapshot, then the shadows.
-fn units(crate_dir: &Path, snapshot: &Path) -> Vec<Unit> {
-    let listed = source_list(&read(&crate_dir.join("source.list")));
+fn units(crate_dir: &Path, snapshot: &Path, lab: bool) -> Vec<Unit> {
+    let mut listed = source_list(&read(&crate_dir.join("source.list")));
+    if !lab {
+        listed.retain(|source| !LAB_ONLY.contains(&source.as_str()));
+    }
     let flags_text = read(&snapshot.join("kbuild-flags.txt"));
     let per_file = file_flags(&flags_text);
     let shadowed = shadow_sources(&crate_dir.join("shadow"));
@@ -393,10 +400,11 @@ fn main() {
     }
 
     let mut flags = global_flags(&read(&crate_dir.join("cflags.txt")));
-    if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "linux") {
+    let lab = env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "linux");
+    if lab {
         flags.extend(LAB_FLAGS.map(str::to_owned));
     }
-    let units = units(&crate_dir, &snapshot);
+    let units = units(&crate_dir, &snapshot, lab);
     let sources: Vec<String> = units.iter().map(|unit| unit.path.clone()).collect();
 
     let collisions = crate_dir.join("libc-collisions.txt");

@@ -1,6 +1,7 @@
 //! Runs the lab binary: the Linux C runs on the shim's scheduler through the time and driver-core
-//! bring-up, the page model check, every initcall, the firmware loader and every exitcall, and the lab exits 0. A run that
-//! stops in a stub or on unimplemented data exits 86 or 87 instead.
+//! bring-up, the page model check, every initcall, the firmware loader, an nl80211 scan between the two
+//! simulated radios and every exitcall, and the lab exits 0. A run that stops in a stub or on
+//! unimplemented data exits 86 or 87 instead.
 
 use std::process::Command;
 
@@ -38,6 +39,13 @@ fn every_initcall_returns_0_firmware_loads_and_every_exitcall_runs() {
         "{stderr}"
     );
     check!(stderr.contains("regulatory.db loaded and applied by cfg80211 after "), "{stderr}");
+
+    // The scan goes through nl80211 over netlink sockets, ends on the scan group and finds the AP.
+    check!(stderr.contains("initcall init_mac80211_hwsim returned 0"), "{stderr}");
+    check!(stderr.contains("beacons the open network \"ferrite-lab\" on 2412 MHz"), "{stderr}");
+    check!(stderr.contains("nl80211: scan on wlan0 done after "), "{stderr}");
+    check!(stderr.contains("BSS 02:00:00:00:01:00 2412 MHz"), "{stderr}");
+    check!(stderr.contains("the scan on wlan0 found wlan1's network \"ferrite-lab\""), "{stderr}");
 
     let ran =
         stderr.lines().filter(|line| line.starts_with("INFO  exitcall ") && !line.contains("exitcalls done")).count();

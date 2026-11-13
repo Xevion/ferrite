@@ -923,6 +923,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-nl80211"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "ferrite-hal",
+ "log",
+ "snafu",
+]
+
+[[package]]
 name = "ferrite-recon"
 version = "0.1.0"
 dependencies = [
@@ -979,6 +989,7 @@ version = "0.1.0"
 dependencies = [
  "ferrite-hal",
  "ferrite-lkpi",
+ "ferrite-nl80211",
  "ferrite-wifi-sys",
  "log",
  "snafu",

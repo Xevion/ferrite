@@ -52,6 +52,8 @@ const BUDGET: Duration = Duration::from_millis(10);
 const REGDB_LIMIT: Duration = Duration::from_secs(5);
 /// How long a card gets from probe to a registered interface: firmware read, INIT image, NVM.
 const WIFI_LIMIT: Duration = Duration::from_secs(15);
+/// How long a scan gets from its trigger to its end on the scan group; a full 8265 sweep takes a few seconds.
+const SCAN_LIMIT: Duration = Duration::from_secs(10);
 /// The whole run ends here, wherever it is.
 const RUN_LIMIT: Duration = Duration::from_secs(20);
 const EXIT_AFTER: Duration = Duration::from_secs(10);
@@ -301,6 +303,7 @@ fn execute(clock: Clock) -> Status {
         firmware_reference: &VolumeFirmware,
         regdb_limit: REGDB_LIMIT,
         wifi_limit: WIFI_LIMIT,
+        scan_limit: SCAN_LIMIT,
     };
     let init_task = match ferrite_wifi_start::start_init(start_up) {
         Ok(task) => task,
