@@ -1,5 +1,8 @@
 //! The main loop: poll the network every few milliseconds, render at about
 //! 20 Hz, and give the time in between to the memory sweep.
+//!
+//! While a test runs split over every core, the sweep runs the loop's duties
+//! from inside it.
 
 use alloc::format;
 use core::time::Duration;
@@ -18,10 +21,13 @@ use uefi::proto::console::text::{Input, Key, Output, ScanCode};
 use crate::backend::{BackendError, UefiBackend};
 use crate::diag::{self, Diag};
 use crate::net::Net;
-use crate::sweep::Sweep;
+use crate::sweep::{CoreChoice, Cores, Flow, Sweep, SweepStatus};
 use crate::ui::{self, View};
 
 const SWEEP_BYTES: usize = 1 << 30;
+/// The processors split tests run on. Every logical processor: verify-heavy kernels scale up to
+/// all eight threads on the laptop, while fills saturate at two cores either way.
+const CORES: CoreChoice = CoreChoice::All;
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 /// Sweep chunks are sized to take about this long, so the network is polled in time.
 const SWEEP_SLICE: Duration = Duration::from_millis(1);
@@ -68,22 +74,28 @@ impl Drop for Waiter {
 }
 
 pub struct App<'a> {
+    desk: Desk<'a>,
+    sweep: Sweep,
+    chunk_bytes: usize,
+    /// AVX state, enabled by the caller for the app's lifetime; wide sweep steps run inside its guard.
+    vector: Option<&'a VectorState>,
+}
+
+/// Everything the BSP serves besides the sweep: watchdog, network, keys, screen and log.
+struct Desk<'a> {
     input: &'a mut Input,
     terminal: Terminal<UefiBackend<'a>>,
     clock: Clock,
     net: Option<Net>,
     net_err: Option<&'static str>,
-    sweep: Sweep,
-    chunk_bytes: usize,
     diag: Diag,
     waiter: Option<Waiter>,
     last_view: Option<View>,
     draw_failures: u32,
+    next_frame: Instant,
     /// The loader's link, when this app was started by the loader.
     loader: Option<LoaderLink>,
     watchdog: Option<Keepalive>,
-    /// AVX state, enabled by the caller for the app's lifetime; wide sweep steps run inside its guard.
-    vector: Option<&'a VectorState>,
 }
 
 impl<'a> App<'a> {
@@ -109,58 +121,108 @@ impl<'a> App<'a> {
         let waiter = Waiter::new(input).inspect_err(|e| log::warn!("ui: no wait events, stalling instead: {e}")).ok();
         let loader = LoaderLink::locate();
         let watchdog = loader.map(|_| Keepalive::new(WATCHDOG, WATCHDOG_REARM, clock.now()));
-        Ok(Self {
+        let cores = Cores::locate(CORES, clock);
+        let desk = Desk {
             input,
             terminal,
             clock,
             net,
             net_err,
-            sweep: Sweep::new(SWEEP_BYTES, caps),
-            chunk_bytes: START_CHUNK_BYTES,
             diag: Diag::new(),
             waiter,
             last_view: None,
             draw_failures: 0,
+            next_frame: Instant::default(),
             loader,
             watchdog,
-            vector,
-        })
+        };
+        Ok(Self { desk, sweep: Sweep::new(SWEEP_BYTES, caps, cores), chunk_bytes: START_CHUNK_BYTES, vector })
     }
 
     fn now(&self) -> Instant {
-        self.clock.now()
+        self.desk.clock.now()
     }
 
     /// Run until `q` or `Esc` on the console, or until the desktop asks the loader's app to stop
     /// (a `Stop` message or a `q` typed in `ferrite-dev push`). Logs a sweep summary on the way out.
     pub fn run(&mut self) {
-        let mut next_frame = Instant::default();
         loop {
             let now = self.now();
-            if let Some(watchdog) = self.watchdog.as_mut() {
-                watchdog.tick(now);
+            let Some(deadline) = self.desk.duties(now, &self.sweep.status()) else { break };
+            if self.sweep.split_ready(now) {
+                let desk = &mut self.desk;
+                if self.sweep.run_split(self.vector, &mut |now, status| desk.duties(now, status)) == Flow::Stop {
+                    break;
+                }
+                continue;
             }
-            let sweep = self.sweep.status();
-            let net_wait = self.net.as_mut().map_or(FRAME_INTERVAL, |net| net.poll(now, &sweep));
-            if self.quit_requested() || self.desktop_stop_requested() {
-                log::info!(
-                    "sweep: stopping after {} passes over {} bytes ({} bytes tested), in {sweep}, {} errors, {}",
-                    sweep.passes,
-                    sweep.bytes,
-                    sweep.passes.saturating_mul(sweep.bytes as u64),
-                    sweep.faults,
-                    sweep.analysis
-                );
+            self.idle_until(deadline);
+        }
+        let sweep = self.sweep.status();
+        log::info!(
+            "sweep: stopping after {} passes over {} bytes ({} bytes tested), in {sweep}, {} errors, {}",
+            sweep.passes,
+            sweep.bytes,
+            sweep.passes.saturating_mul(sweep.bytes as u64),
+            sweep.faults,
+            sweep.analysis
+        );
+        self.sweep.check_cores();
+    }
+
+    /// Sweep until `deadline` (at least one chunk), or wait on the timer and key
+    /// events when there is nothing to sweep. Without events the loop just spins.
+    fn idle_until(&mut self, deadline: Instant) {
+        let now = self.now();
+        if !self.sweep.has_work(now) {
+            let wake = self.sweep.waiting_until().map_or(deadline, |until| until.min(deadline));
+            if wake - now < SHORT_WAIT && self.sweep.waiting_until().is_some() {
                 return;
             }
-            let net = self.net.as_ref().map(Net::status);
-            if now >= next_frame {
-                self.draw(View { sweep, net, net_err: self.net_err });
-                next_frame = now + FRAME_INTERVAL;
+            let timeout = wake - now;
+            if let Some(waiter) = self.desk.waiter.as_mut()
+                && let Err(e) = waiter.wait(timeout)
+            {
+                log::warn!("ui: waiting on events failed, polling instead: {e}");
+                self.desk.waiter = None;
             }
-            self.diag.tick(now, net.as_ref(), &sweep);
-            self.idle_until((now + net_wait).min(next_frame));
+            return;
         }
+        loop {
+            let start = self.now();
+            self.sweep.step(self.chunk_bytes, start, self.vector);
+            let end = self.now();
+            let took = end - start;
+            if took < SWEEP_SLICE {
+                self.chunk_bytes = (self.chunk_bytes * 2).min(MAX_CHUNK_BYTES);
+            } else if took > SWEEP_SLICE * 2 {
+                self.chunk_bytes = (self.chunk_bytes / 2).max(MIN_CHUNK_BYTES);
+            }
+            if end >= deadline || !self.sweep.has_work(end) || self.sweep.split_ready(end) {
+                return;
+            }
+        }
+    }
+}
+
+impl Desk<'_> {
+    /// One round of the duties: re-arm the watchdog, poll the network, read keys and the loader's
+    /// stop, draw when a frame is due, log. Returns when they are next due, or `None` to stop.
+    fn duties(&mut self, now: Instant, sweep: &SweepStatus) -> Option<Instant> {
+        if let Some(watchdog) = self.watchdog.as_mut() {
+            watchdog.tick(now);
+        }
+        let net_wait = self.net.as_mut().map_or(FRAME_INTERVAL, |net| net.poll(now, sweep));
+        if self.quit_requested() || self.desktop_stop_requested() {
+            return None;
+        }
+        let net = self.net.as_ref().map(Net::status);
+        if now >= self.next_frame {
+            self.draw(View { sweep: *sweep, net, net_err: self.net_err });
+            self.next_frame = now + FRAME_INTERVAL;
+        }
+        self.diag.tick(now, net.as_ref(), sweep);
+        Some((now + net_wait).min(self.next_frame))
     }
 
     fn quit_requested(&mut self) -> bool {
@@ -187,40 +249,6 @@ impl<'a> App<'a> {
             asked |= typed[..n].iter().any(|b| matches!(b, b'q' | b'Q'));
         }
         asked
-    }
-
-    /// Sweep until `deadline` (at least one chunk), or wait on the timer and key
-    /// events when there is nothing to sweep. Without events the loop just spins.
-    fn idle_until(&mut self, deadline: Instant) {
-        let now = self.now();
-        if !self.sweep.has_work(now) {
-            let wake = self.sweep.waiting_until().map_or(deadline, |until| until.min(deadline));
-            if wake - now < SHORT_WAIT && self.sweep.waiting_until().is_some() {
-                return;
-            }
-            let timeout = wake - now;
-            if let Some(waiter) = self.waiter.as_mut()
-                && let Err(e) = waiter.wait(timeout)
-            {
-                log::warn!("ui: waiting on events failed, polling instead: {e}");
-                self.waiter = None;
-            }
-            return;
-        }
-        loop {
-            let start = self.now();
-            self.sweep.step(self.chunk_bytes, start, self.vector);
-            let end = self.now();
-            let took = end - start;
-            if took < SWEEP_SLICE {
-                self.chunk_bytes = (self.chunk_bytes * 2).min(MAX_CHUNK_BYTES);
-            } else if took > SWEEP_SLICE * 2 {
-                self.chunk_bytes = (self.chunk_bytes / 2).max(MIN_CHUNK_BYTES);
-            }
-            if end >= deadline || !self.sweep.has_work(end) {
-                return;
-            }
-        }
     }
 
     fn draw(&mut self, view: View) {

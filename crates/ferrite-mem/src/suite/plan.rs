@@ -28,6 +28,18 @@ impl Span {
     pub const fn blocks(self) -> u64 {
         (self.words / BLOCK_WORDS) as u64
     }
+
+    /// The words of `self` that are also in `other`; empty, and inside `self`, when none.
+    #[must_use]
+    pub fn clip(self, other: Self) -> Self {
+        let start = self.start.max(other.start).min(self.end());
+        let end = self.end().min(other.end()).max(start);
+        Self { start, words: end - start }
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        other.start >= self.start && other.end() <= self.end()
+    }
 }
 
 /// A PRSG sequence starting at its span's first word.
@@ -107,13 +119,15 @@ pub struct Phase {
 }
 
 impl Phase {
-    /// Words of work, the unit of step budgets and of progress.
-    pub const fn work(&self) -> usize {
+    /// Words of work inside `share`, the unit of step budgets and of progress. A move window is
+    /// worked whole or not at all, so shares are cut on window boundaries.
+    pub fn work_in(&self, share: Span) -> usize {
         match self.op {
             Op::AddressWalk { .. } => BLOCK_WORDS,
-            Op::Move { iterations } => iterations as usize * 2 * move_half(self.span),
-            Op::Bus(bus) => bus.fill.span.words + if let Some(c) = bus.check { c.span.words } else { 0 },
-            _ => self.span.words,
+            Op::Move { iterations } if share.contains(self.span) => iterations as usize * 2 * move_half(self.span),
+            Op::Move { .. } => 0,
+            Op::Bus(bus) => bus.fill.span.clip(share).words + bus.check.map_or(0, |c| c.span.clip(share).words),
+            _ => self.span.clip(share).words,
         }
     }
 
@@ -128,6 +142,12 @@ impl Phase {
 /// Words in each half of a move window; the two halves cover whole blocks of it.
 pub const fn move_half(span: Span) -> usize {
     span.words / GROUP_WORDS * BLOCK_WORDS
+}
+
+/// Words in each block-move window but the last, a whole number of groups.
+pub fn move_window(cfg: &Config) -> usize {
+    let window = (cfg.move_window_bytes / 8).max(GROUP_WORDS);
+    window - window % GROUP_WORDS
 }
 
 /// The phases of `kind` over a region of `words` words, in order, until `emit` breaks.
@@ -234,8 +254,7 @@ pub fn plan(
         },
         TestKind::BlockMove => {
             e.whole(Op::MoveInit)?;
-            let window = (cfg.move_window_bytes / 8).max(GROUP_WORDS);
-            for span in windows(words, window, GROUP_WORDS) {
+            for span in windows(words, move_window(cfg), GROUP_WORDS) {
                 e.on(span, Op::Move { iterations: cfg.move_iterations })?;
             }
             e.whole(Op::VerifyPairs)?;
@@ -325,15 +344,25 @@ fn mix(seed: u64, kind: u64, pass: u64, round: u64) -> u64 {
         .fold(seed, |s, x| splitmix(s ^ x.wrapping_add(1).wrapping_mul(0x9e37_79b9_7f4a_7c15)))
 }
 
-/// The number of phases and their total work.
-pub fn measure(kind: TestKind, cfg: &Config, pass: u64, words: usize) -> (usize, u64) {
-    let (mut count, mut work) = (0, 0_u64);
+/// A test's phase count, its work inside one share, and the time its waits take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Measure {
+    pub phases: usize,
+    pub work: u64,
+    pub waits: Duration,
+}
+
+pub fn measure(kind: TestKind, cfg: &Config, pass: u64, words: usize, share: Span) -> Measure {
+    let mut m = Measure { phases: 0, work: 0, waits: Duration::ZERO };
     let _ = plan(kind, cfg, pass, words, &mut |phase| {
-        count += 1;
-        work += phase.work() as u64;
+        m.phases += 1;
+        m.work += phase.work_in(share) as u64;
+        if let Op::Wait(d) = phase.op {
+            m.waits += d;
+        }
         ControlFlow::Continue(())
     });
-    (count, work)
+    m
 }
 
 /// Phase `index`, if the test has that many.

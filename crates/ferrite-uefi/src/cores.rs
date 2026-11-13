@@ -496,7 +496,7 @@ fn guarded(vector: Option<&VectorState>, kernel: Kernel, f: impl FnOnce()) {
 }
 
 /// Whether `tier` runs on the calling core as its CR4 and XCR0 are now.
-fn tier_usable(tier: Tier) -> bool {
+pub(crate) fn tier_usable(tier: Tier) -> bool {
     let support = VectorSupport::probe();
     match tier {
         Tier::Scalar | Tier::RepString | Tier::Sse2 => true,

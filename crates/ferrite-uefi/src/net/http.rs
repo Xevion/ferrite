@@ -88,19 +88,26 @@ pub fn status_page(net: &NetStatus, sweep: &SweepStatus) -> String {
         || String::from("no faults"),
         |f| {
             format!(
-                "{} FAULTS, first at {} in {}: expected {:#018x}, read {:#018x}; {}",
-                sweep.faults, f.addr, sweep.first_fault_test, f.expected, f.actual, sweep.analysis
+                "{} FAULTS, first at {} in {} on cpu{}: expected {:#018x}, read {:#018x}; {}",
+                sweep.faults,
+                f.addr,
+                sweep.first_fault_test,
+                sweep.first_fault_cpu,
+                f.expected,
+                f.actual,
+                sweep.analysis
             )
         },
     );
     let c = &net.counters;
+    let mode: &str = sweep.mode.into();
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <title>ferrite-uefi</title></head><body style=\"font-family:monospace\">\
          <h1>ferrite-uefi</h1>\
          <p>bare-metal memory tester (spike), no OS underneath</p>\
          <ul><li>ip: {ip}</li><li>mac: {}</li>\
-         <li>sweep: {} MiB ({}), test {} ({}/{}) {}%, pass {}%</li>\
+         <li>sweep: {} MiB ({}), test {} ({}/{}) {}%, pass {}%, {mode} on {} cpus</li>\
          <li>pass {}, {verdict}</li>\
          <li>mdns queries: {}, http responses: {}</li></ul>\
          </body></html>",
@@ -112,6 +119,7 @@ pub fn status_page(net: &NetStatus, sweep: &SweepStatus) -> String {
         sweep.position.1,
         sweep.test_percent,
         sweep.percent,
+        sweep.cpus,
         sweep.passes,
         c.mdns_queries,
         c.http_responses,

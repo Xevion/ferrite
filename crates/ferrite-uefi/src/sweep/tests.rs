@@ -1,5 +1,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
+use core::num::NonZeroUsize;
 use core::time::Duration;
 
 use assert2::{assert, check};
@@ -21,7 +22,7 @@ const CFG: Config = Config {
 };
 
 fn sweep_of_words(words: usize) -> Sweep {
-    Sweep::with_buffer(Some(Buffer::host(words)), Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard)
+    Sweep::with_buffer(Some(Buffer::host(words)), Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard, None)
 }
 
 #[test]
@@ -84,6 +85,7 @@ fn a_waiting_suite_does_no_work_until_its_time() {
         Kernels::uniform(Kernel::SCALAR),
         Config { fade, ..CFG },
         Preset::Thorough,
+        None,
     );
     let t0 = Instant::default();
     while sweep.waiting_until().is_none() {
@@ -100,7 +102,7 @@ fn a_waiting_suite_does_no_work_until_its_time() {
 
 #[test]
 fn no_buffer_means_no_work() {
-    let mut sweep = Sweep::with_buffer(None, Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard);
+    let mut sweep = Sweep::with_buffer(None, Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard, None);
     sweep.step(4096, Instant::default(), None);
     let status = sweep.status();
     check!(!sweep.has_work(Instant::default()));
@@ -128,4 +130,80 @@ fn allocation_gives_up_below_the_minimum() {
     });
     check!(tried == [24 << 10, 12 << 10, 8 << 10]);
     check!(buf.is_none());
+}
+
+/// A clock that stays at one instant.
+#[derive(Clone, Copy)]
+struct Fixed;
+
+impl ferrite_hal::Clock for Fixed {
+    fn now(&self) -> Instant {
+        Instant::default()
+    }
+}
+
+#[test]
+fn faults_merged_from_several_cores_keep_their_finder_and_classify_together() {
+    use ferrite_mem::suite::{Mode, TestKind, shares};
+
+    use crate::crew::{Crew, Job, Seat, Turn};
+
+    let words = 3 * 512;
+    let buffer = Buffer::host(words);
+    // SAFETY: the buffer is ours, and is only written below while every job waits at a gate.
+    let mut region = unsafe { Region::from_raw(buffer.base.as_ptr(), words) }.unwrap();
+    let kind = TestKind::SolidBits;
+    assert!(kind.mode() == Mode::Split);
+    let parts = NonZeroUsize::new(3).unwrap();
+    let split: Vec<(Span, Region<'_>)> = shares(&mut region, kind, &CFG, parts).collect();
+    let starts: Vec<usize> = split.iter().map(|(s, _)| s.start).collect();
+    let crew = Crew::default();
+    let seats: Vec<Seat> = split.iter().map(|_| Seat::default()).collect();
+    let jobs: Vec<Job<'_, Fixed>> = split
+        .into_iter()
+        .zip(&seats)
+        .map(|((span, region), seat)| {
+            let test = Test::for_share(kind, CFG, 0, words, span);
+            Job::new(test, region, Kernels::uniform(Kernel::SCALAR), 16 << 10, Fixed, &crew, seat)
+        })
+        .collect();
+    let mut workers: Vec<_> = jobs.iter().map(|j| j.claim().unwrap()).collect();
+    let mut gated = 0;
+    // Every core fills 0, then waits at the gate before verifying it.
+    while gated < workers.len() {
+        gated = workers.iter_mut().map(|w| w.turn(None)).filter(|&t| t == Turn::Gate).count();
+    }
+    let flip = |word: usize, mask: u64| {
+        // SAFETY: inside the buffer, and every job is held at the gate.
+        unsafe { buffer.base.as_ptr().add(word).write(mask) };
+    };
+    // Bit 7 stuck high on two words of the second share and one of the third.
+    let bad = [starts[1] + 3, starts[1] + 40, starts[2] + 9];
+    for &w in &bad {
+        flip(w, 1 << 7);
+    }
+    let mut ended = false;
+    while !ended {
+        ended = crew.coordinate(&seats);
+        for w in &mut workers {
+            w.turn(None);
+        }
+    }
+    let cpus = [0, 5, 7];
+    let mut tally = Tally::default();
+    let mut absorbed = vec![0; seats.len()];
+    absorb(&mut tally, &seats, &mut absorbed, &cpus, kind.name());
+    let base = SweepStatus { cpus: 3, mode: Mode::Split, ..SweepStatus::IDLE };
+    let total = seats.iter().map(Seat::done).sum();
+    let status = live(&base, &seats, &tally, 2, (0, total, total));
+    check!(seats.iter().map(Seat::faults).collect::<Vec<_>>() == [0, 2, 1]);
+    check!(status.faults == 2 + 3, "faults found before the test are kept");
+    check!(status.test_percent == 100);
+    assert!(let Some(first) = status.first_fault);
+    check!(first.addr.get() == buffer.base.as_ptr().wrapping_add(bad[0]).addr());
+    check!(status.first_fault_cpu == 5);
+    check!(status.first_fault_test == "solid bits");
+    check!(status.analysis == Classification::StuckBits { mask: 1 << 7 });
+    absorb(&mut tally, &seats, &mut absorbed, &cpus, kind.name());
+    check!(tally.stats.faults() == 3, "a fault is absorbed once");
 }

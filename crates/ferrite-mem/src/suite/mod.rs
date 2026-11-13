@@ -22,10 +22,13 @@ use crate::region::Region;
 
 mod plan;
 mod run;
+mod share;
 #[cfg(test)]
 mod tests;
 
+pub use plan::Span;
 pub use run::{Progress, Test};
+pub use share::{Mode, shares};
 
 /// Preset tiers, cumulative: a preset runs every test of its tier and the tiers below it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, strum::IntoStaticStr)]
@@ -281,6 +284,12 @@ impl<'a> Suite<'a> {
         }
     }
 
+    /// Count the current test done and move on, when it was run elsewhere: split into shares over
+    /// several cores, each with its own [`Test::for_share`].
+    pub fn finish_test(&mut self) {
+        self.next_test();
+    }
+
     fn next_test(&mut self) {
         let kind = self.test.kind();
         self.pass_done += self.test.total();
@@ -319,9 +328,27 @@ impl<'a> Suite<'a> {
         percent(self.pass_done + self.test.done(), self.pass_total)
     }
 
+    /// Work of the pass's tests before the current one, and of the whole pass, for progress of a
+    /// test run elsewhere.
+    #[must_use]
+    pub const fn pass_work(&self) -> (u64, u64) {
+        (self.pass_done, self.pass_total)
+    }
+
     #[must_use]
     pub const fn region(&self) -> &Region<'a> {
         &self.region
+    }
+
+    /// The region, to split the current test over several cores; the suite's own [`Test`] keeps no
+    /// state in it, so such a run must start from the test's first phase.
+    pub const fn region_mut(&mut self) -> &mut Region<'a> {
+        &mut self.region
+    }
+
+    #[must_use]
+    pub const fn config(&self) -> Config {
+        self.config
     }
 
     #[must_use]
@@ -335,6 +362,8 @@ impl<'a> Suite<'a> {
     }
 }
 
-fn percent(done: u64, total: u64) -> u16 {
+/// `done` of `total`, 0 to 100.
+#[must_use]
+pub fn percent(done: u64, total: u64) -> u16 {
     if total == 0 { 0 } else { (u128::from(done.min(total)) * 100 / u128::from(total)) as u16 }
 }

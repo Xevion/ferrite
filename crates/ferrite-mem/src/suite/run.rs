@@ -4,7 +4,7 @@ use core::time::Duration;
 
 use ferrite_hal::Instant;
 
-use super::plan::{self, Bus, MODULO, Op, Phase, move_half};
+use super::plan::{self, Bus, MODULO, Op, Phase, Span, move_half};
 use super::{Config, Kernels, TestKind, percent};
 use crate::fault::Faults;
 use crate::kernels::{self, Dram, Stride};
@@ -28,16 +28,24 @@ pub enum Progress {
     Done,
 }
 
-/// One test over one region, as a sequence of phases advanced by [`Test::step`].
+/// One test over one region, or over one core's share of it, as a sequence of phases advanced by
+/// [`Test::step`].
 #[derive(Debug)]
 pub struct Test {
     kind: TestKind,
     config: Config,
     pass: u64,
+    /// Words of the whole region the phases are planned over.
     words: usize,
+    /// The words of it this test works on.
+    share: Span,
     phases: usize,
     phase: usize,
     active: Option<Active>,
+    /// The phase after the one that last ended, fetched to decide [`Test::gated`].
+    next: Option<Phase>,
+    gated: bool,
+    waits: Duration,
     /// Work of the phases already done, and of all of them.
     done: u64,
     total: u64,
@@ -48,8 +56,44 @@ impl Test {
     #[must_use]
     pub fn new(kind: TestKind, config: Config, pass: u64, region: &Region<'_>) -> Self {
         let words = region.words();
-        let (phases, total) = plan::measure(kind, &config, pass, words);
-        Self { kind, config, pass, words, phases, phase: 0, active: None, done: 0, total }
+        Self::for_share(kind, config, pass, words, Span { start: 0, words })
+    }
+
+    /// The test planned over a region of `words` words, working only on `share` of it: every step
+    /// must get the region of `share` alone, whose word 0 is word `share.start` of the whole. The
+    /// sequences (PRSG, shifting pattern, stride, move pattern) continue across shares, so the
+    /// shares of one region together do what the whole-region test does.
+    #[must_use]
+    pub fn for_share(kind: TestKind, config: Config, pass: u64, words: usize, share: Span) -> Self {
+        let m = plan::measure(kind, &config, pass, words, share);
+        Self {
+            kind,
+            config,
+            pass,
+            words,
+            share,
+            phases: m.phases,
+            phase: 0,
+            active: None,
+            next: None,
+            gated: false,
+            waits: m.waits,
+            done: 0,
+            total: m.work,
+        }
+    }
+
+    /// Whether the phase the next step starts may only begin once every share has ended the one
+    /// before. Only consecutive block-move windows go without, since each lies inside one share.
+    #[must_use]
+    pub const fn gated(&self) -> bool {
+        self.gated
+    }
+
+    /// The time the test's phases spend waiting, in all.
+    #[must_use]
+    pub const fn waits(&self) -> Duration {
+        self.waits
     }
 
     #[must_use]
@@ -95,15 +139,19 @@ impl Test {
         now: Instant,
         faults: &mut Faults<'_>,
     ) -> Progress {
+        debug_assert!(region.words() == self.share.words, "a step gets its share's region");
         if self.phase >= self.phases {
             return Progress::Done;
         }
         if self.active.is_none() {
-            let Some(phase) = plan::nth(self.kind, &self.config, self.pass, self.words, self.phase) else {
+            let next = self.next.take();
+            let Some(phase) = next.or_else(|| plan::nth(self.kind, &self.config, self.pass, self.words, self.phase))
+            else {
                 self.phase = self.phases;
                 return Progress::Done;
             };
-            self.active = Some(Active::start(phase));
+            self.active = Some(Active::start(phase, self.share));
+            self.gated = false;
         }
         let Some(active) = self.active.as_mut() else { return Progress::Done };
         let budget = (budget_bytes / size_of::<u64>()).max(BLOCK_WORDS) / BLOCK_WORDS * BLOCK_WORDS;
@@ -116,9 +164,15 @@ impl Test {
             return Progress::Running;
         }
         self.done += active.work as u64;
+        let windowed = matches!(active.phase.op, Op::Move { .. });
         self.active = None;
         self.phase += 1;
-        if self.phase == self.phases { Progress::Done } else { Progress::Running }
+        if self.phase == self.phases {
+            return Progress::Done;
+        }
+        self.next = plan::nth(self.kind, &self.config, self.pass, self.words, self.phase);
+        self.gated = !(windowed && self.next.is_some_and(|p| matches!(p.op, Op::Move { .. })));
+        Progress::Running
     }
 }
 
@@ -126,6 +180,12 @@ impl Test {
 #[derive(Debug)]
 struct Active {
     phase: Phase,
+    /// The words of the phase's span inside the share; for a bus sweep, of its fill stream.
+    span: Span,
+    /// The words of a bus sweep's verify stream inside the share.
+    check_span: Span,
+    /// The share's first word, word 0 of the region each step gets.
+    base: usize,
     work: usize,
     cursor: usize,
     prsg: Prsg,
@@ -139,24 +199,46 @@ struct Active {
 }
 
 impl Active {
-    fn start(phase: Phase) -> Self {
-        let span = phase.span;
-        let at = |blocks: u64| if phase.order() == Order::Descending { blocks } else { 0 };
+    fn start(phase: Phase, share: Span) -> Self {
+        let mut span = phase.span.clip(share);
+        let mut check_span = Span { start: span.start, words: 0 };
+        // The block of the sequence at which this share's walk of `part` (a part of `of`) begins.
+        let entry = |part: Span, of: Span| {
+            let word = if phase.order() == Order::Descending { part.end() } else { part.start };
+            ((word - of.start) / BLOCK_WORDS) as u64
+        };
         let (mut prsg, mut check, mut rot) = (Prsg::new(0), Prsg::new(0), Rotating::at(0, 0));
         match phase.op {
             Op::FillPrsg { seed, .. } | Op::VerifyPrsg { seed, .. } | Op::InvertPrsg { seed, .. } => {
-                prsg = Prsg::at(seed, at(span.blocks()));
+                prsg = Prsg::at(seed, entry(span, phase.span));
             },
             Op::FillRotating { pattern, .. } | Op::InvertRotating { pattern, .. } => {
-                rot = Rotating::at(pattern, at(span.blocks()));
+                rot = Rotating::at(pattern, entry(span, phase.span));
             },
             Op::Bus(bus) => {
-                prsg = Prsg::new(bus.fill.seed);
-                check = Prsg::new(bus.check.map_or(0, |c| c.seed));
+                span = bus.fill.span.clip(share);
+                prsg = Prsg::at(bus.fill.seed, entry(span, bus.fill.span));
+                if let Some(c) = bus.check {
+                    check_span = c.span.clip(share);
+                    check = Prsg::at(c.seed, entry(check_span, c.span));
+                }
             },
             _ => {},
         }
-        Self { phase, work: phase.work(), cursor: 0, prsg, check, rot, bus: [0; 2], since_gap: 0, until: None }
+        Self {
+            phase,
+            span,
+            check_span,
+            base: share.start,
+            work: phase.work_in(share),
+            cursor: 0,
+            prsg,
+            check,
+            rot,
+            bus: [0; 2],
+            since_gap: 0,
+            until: None,
+        }
     }
 
     /// Run one chunk of at most `budget` words, or return the time to wait until.
@@ -192,7 +274,7 @@ impl Active {
             Op::Bus(bus) => self.bus(region, *k, bus, budget, now, faults),
             Op::MoveInit => {
                 let (start, n) = self.next_chunk(budget.next_multiple_of(2 * BLOCK_WORDS));
-                let chunk = region.sub(start, n);
+                let chunk = region.sub(start - self.base, n);
                 // SAFETY: the chunk is a region, so its blocks are ours.
                 unsafe { kernels::fill_move_pattern(chunk.ptr(), chunk.blocks(), start / (2 * BLOCK_WORDS)) };
             },
@@ -201,10 +283,11 @@ impl Active {
         None
     }
 
-    /// The next chunk of a phase that walks its span once, as its first region word and length.
+    /// The next chunk of a phase that walks its span once, as its first word of the whole region
+    /// and its length.
     fn next_chunk(&mut self, budget: usize) -> (usize, usize) {
         let n = budget.min(self.work - self.cursor);
-        let span = self.phase.span;
+        let span = self.span;
         let start = match self.phase.order() {
             Order::Ascending => span.start + self.cursor,
             Order::Descending => span.end() - self.cursor - n,
@@ -216,7 +299,7 @@ impl Active {
     fn linear_op(&mut self, region: &mut Region<'_>, k: &Kernels, budget: usize, faults: &mut Faults<'_>) {
         let op = self.phase.op;
         let (start, n) = self.next_chunk(budget);
-        let mut c = region.sub(start, n);
+        let mut c = region.sub(start - self.base, n);
         let (prsg, rot) = (&mut self.prsg, &mut self.rot);
         let stride = |offset| Stride { n: MODULO, offset, first: start % MODULO };
         match op {
@@ -263,7 +346,7 @@ impl Active {
             (true, half - BLOCK_WORDS + o, o, BLOCK_WORDS - o)
         };
         let n = left.min(budget);
-        let mut window = region.sub(span.start, 2 * half);
+        let mut window = region.sub(span.start - self.base, 2 * half);
         let (mut low, mut high) = window.split_at(half);
         let copied = if from_high {
             ops::copy(k.fill, &high.sub(src, n), &mut low.sub(dst, n))
@@ -285,18 +368,18 @@ impl Active {
         faults: &mut Faults<'_>,
     ) {
         let burst = bus.burst_blocks * BLOCK_WORDS;
-        let check_words = bus.check.map_or(0, |c| c.span.words);
+        let (fill_span, check_span) = (self.span, self.check_span);
         let mut spent = 0;
         while spent < budget && self.cursor < self.work {
-            let fill = burst.min(bus.fill.span.words - self.bus[0]);
+            let fill = burst.min(fill_span.words - self.bus[0]);
             if fill > 0 {
-                let mut chunk = region.sub(bus.fill.span.start + self.bus[0], fill);
+                let mut chunk = region.sub(fill_span.start + self.bus[0] - self.base, fill);
                 ops::fill_prsg(k.fill, &mut chunk, &mut self.prsg, 0);
                 self.bus[0] += fill;
             }
-            let verify = burst.min(check_words - self.bus[1]);
-            if let Some(check) = bus.check.filter(|_| verify > 0) {
-                let chunk = region.sub(check.span.start + self.bus[1], verify);
+            let verify = burst.min(check_span.words - self.bus[1]);
+            if verify > 0 {
+                let chunk = region.sub(check_span.start + self.bus[1] - self.base, verify);
                 ops::verify_prsg(k.verify, &chunk, &mut self.check, 0, faults);
                 self.bus[1] += verify;
             }

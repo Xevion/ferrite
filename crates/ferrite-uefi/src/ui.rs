@@ -74,8 +74,8 @@ fn sweep_gauge(sweep: &SweepStatus) -> Gauge<'static> {
         .gauge_style(Style::new().fg(Color::Green).bg(Color::Black))
         .percent(sweep.percent.min(100))
         .label(format!(
-            "{} ({}/{}) {}%, pass {}%",
-            sweep.test, sweep.position.0, sweep.position.1, sweep.test_percent, sweep.percent
+            "{} ({}/{}) {}% on {} cpus, pass {}%",
+            sweep.test, sweep.position.0, sweep.position.1, sweep.test_percent, sweep.cpus, sweep.percent
         ))
 }
 
@@ -89,10 +89,11 @@ fn sweep_summary(sweep: &SweepStatus) -> Paragraph<'static> {
         None => spans.push(Span::styled("no faults", Style::new().fg(Color::Green))),
         Some(f) => spans.push(Span::styled(
             format!(
-                "{} FAULTS (first @ {} in {}, bits {:#x}; {})",
+                "{} FAULTS (first @ {} in {} on cpu{}, bits {:#x}; {})",
                 sweep.faults,
                 f.addr,
                 sweep.first_fault_test,
+                sweep.first_fault_cpu,
                 f.expected ^ f.actual,
                 sweep.analysis
             ),

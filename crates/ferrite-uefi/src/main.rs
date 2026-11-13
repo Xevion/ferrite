@@ -65,8 +65,13 @@ fn main() -> Status {
     diag::milestone("exit");
     // Before `finish`, which may reset the machine.
     if let Some(vector) = vector {
+        let (saved_xcr0, _) = vector.xcr0();
         drop(vector);
-        log::info!("cpu: vector state restored; {}", FpuControl::read());
+        log::info!(
+            "cpu: vector state restored to xcr0 {saved_xcr0:#x}; {}; {}",
+            FpuControl::read(),
+            VectorSupport::probe()
+        );
     }
     logger::with(|log| session::finish(log, EXIT_WAIT));
     status

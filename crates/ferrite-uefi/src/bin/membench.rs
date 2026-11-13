@@ -345,6 +345,8 @@ impl<'v> Bench<'v> {
             self.skipped += 1;
             return None;
         }
+        // A log save is due every 2 s and stalls the BSP's share; saving now keeps it out of the round.
+        logger::with(BootLog::flush);
         let spec = Spec {
             kernel,
             work,
