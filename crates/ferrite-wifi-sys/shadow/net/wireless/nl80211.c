@@ -32,3 +32,21 @@ void nl80211_notify_iface(struct cfg80211_registered_device *rdev, struct wirele
 			  enum nl80211_commands cmd)
 {
 }
+
+/* Stock: a wiphy's coalesce rules, which only nl80211 sets, freed when it unregisters. */
+void cfg80211_free_coalesce(struct cfg80211_coalesce *coalesce)
+{
+	struct cfg80211_coalesce_rules *rule;
+	int i, j;
+
+	if (!coalesce)
+		return;
+
+	for (i = 0; i < coalesce->n_rules; i++) {
+		rule = &coalesce->rules[i];
+		for (j = 0; j < rule->n_patterns; j++)
+			kfree(rule->patterns[j].mask);
+		kfree(rule->patterns);
+	}
+	kfree(coalesce);
+}

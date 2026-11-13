@@ -27,6 +27,13 @@ struct proc_dir_entry *proc_create_seq_private(const char *name, umode_t mode,
 }
 EXPORT_SYMBOL(proc_create_seq_private);
 
+struct proc_dir_entry *proc_create_single_data(const char *name, umode_t mode,
+		struct proc_dir_entry *parent, int (*show)(struct seq_file *, void *), void *data)
+{
+	return &lx_proc_entry;
+}
+EXPORT_SYMBOL(proc_create_single_data);
+
 void remove_proc_entry(const char *name, struct proc_dir_entry *parent)
 {
 }

@@ -62,24 +62,6 @@ pub unsafe extern "sysv64" fn __mmdrop() -> ! {
     trace_and_stop(c"__mmdrop")
 }
 
-/// `int __netlink_dump_start(struct sock *, struct sk_buff *, const struct nlmsghdr *, struct netlink_dump_control *)`, declared in `linux/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __netlink_dump_start() -> ! {
-    trace_and_stop(c"__netlink_dump_start")
-}
-
-/// `struct sock *__netlink_kernel_create(struct net *, int, struct module *, struct netlink_kernel_cfg *)`, declared in `linux/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __netlink_kernel_create() -> ! {
-    trace_and_stop(c"__netlink_kernel_create")
-}
-
-/// `struct nlmsghdr *__nlmsg_put(struct sk_buff *, u32, u32, int, int, int)`, declared in `linux/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __nlmsg_put() -> ! {
-    trace_and_stop(c"__nlmsg_put")
-}
-
 /// `struct sched_entity *__pick_first_entity(struct cfs_rq *)`, declared in `linux/kernel/sched/sched.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __pick_first_entity() -> ! {
@@ -126,6 +108,18 @@ pub unsafe extern "sysv64" fn __put_user_4() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __put_user_8() -> ! {
     trace_and_stop(c"__put_user_8")
+}
+
+/// `void __scm_destroy(struct scm_cookie *)`, declared in `net/scm.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn __scm_destroy() -> ! {
+    trace_and_stop(c"__scm_destroy")
+}
+
+/// `int __scm_send(struct socket *, struct msghdr *, struct scm_cookie *)`, declared in `net/scm.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn __scm_send() -> ! {
+    trace_and_stop(c"__scm_send")
 }
 
 /// `bool __skb_flow_dissect(const struct net *, const struct sk_buff *, struct flow_dissector *, void *, const void *, __be16, int, int, unsigned int)`, declared in `linux/skbuff.h`.
@@ -384,13 +378,6 @@ pub unsafe extern "sysv64" fn cfg80211_del_sta_sinfo() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn cfg80211_epcs_changed() -> ! {
     trace_and_stop(c"cfg80211_epcs_changed")
-}
-
-/// `void cfg80211_free_coalesce(struct cfg80211_coalesce *)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn cfg80211_free_coalesce() -> ! {
-    trace_and_stop(c"cfg80211_free_coalesce")
 }
 
 /// `void cfg80211_gtk_rekey_notify(struct net_device *, const u8 *, const u8 *, gfp_t)`, declared in `net/cfg80211.h`.
@@ -657,12 +644,6 @@ pub unsafe extern "sysv64" fn do_no_restart_syscall() -> ! {
     trace_and_stop(c"do_no_restart_syscall")
 }
 
-/// `void do_trace_netlink_extack(const char *)`, declared in `linux/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn do_trace_netlink_extack() -> ! {
-    trace_and_stop(c"do_trace_netlink_extack")
-}
-
 /// `int dst_cache_init(struct dst_cache *, gfp_t)`, declared in `net/dst_cache.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn dst_cache_init() -> ! {
@@ -735,6 +716,12 @@ pub unsafe extern "sysv64" fn fd_install() -> ! {
     trace_and_stop(c"fd_install")
 }
 
+/// `struct fd fdget(unsigned int)`, declared in `linux/file.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn fdget() -> ! {
+    trace_and_stop(c"fdget")
+}
+
 /// `bool file_ns_capable(const struct file *, struct user_namespace *, int)`, declared in `linux/capability.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn file_ns_capable() -> ! {
@@ -747,12 +734,6 @@ pub unsafe extern "sysv64" fn file_path() -> ! {
     trace_and_stop(c"file_path")
 }
 
-/// `void finish_rcuwait(struct rcuwait *)`, declared in `linux/rcuwait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn finish_rcuwait() -> ! {
-    trace_and_stop(c"finish_rcuwait")
-}
-
 /// `void fput(struct file *)`, declared in `linux/file.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn fput() -> ! {
@@ -763,12 +744,6 @@ pub unsafe extern "sysv64" fn fput() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn free_uid() -> ! {
     trace_and_stop(c"free_uid")
-}
-
-/// `unsigned int full_name_hash(const void *, const char *, unsigned int)`, declared in `linux/stringhash.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn full_name_hash() -> ! {
-    trace_and_stop(c"full_name_hash")
 }
 
 /// `unsigned long gcd(unsigned long, unsigned long)`, declared in `linux/gcd.h`.
@@ -861,16 +836,16 @@ pub unsafe extern "sysv64" fn ipv6_ext_hdr() -> ! {
     trace_and_stop(c"ipv6_ext_hdr")
 }
 
-/// `void kernel_param_lock(struct module *)`, declared in `linux/moduleparam.h`.
+/// `bool irq_work_queue(struct irq_work *)`, declared in `linux/irq_work.h`.
 #[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kernel_param_lock() -> ! {
-    trace_and_stop(c"kernel_param_lock")
+pub unsafe extern "sysv64" fn irq_work_queue() -> ! {
+    trace_and_stop(c"irq_work_queue")
 }
 
-/// `void kernel_param_unlock(struct module *)`, declared in `linux/moduleparam.h`.
+/// `void kick_process(struct task_struct *)`, declared in `linux/sched.h`.
 #[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kernel_param_unlock() -> ! {
-    trace_and_stop(c"kernel_param_unlock")
+pub unsafe extern "sysv64" fn kick_process() -> ! {
+    trace_and_stop(c"kick_process")
 }
 
 /// `void kill_anon_super(struct super_block *)`, declared in `linux/fs.h`.
@@ -939,58 +914,16 @@ pub unsafe extern "sysv64" fn netdev_rss_key_fill() -> ! {
     trace_and_stop(c"netdev_rss_key_fill")
 }
 
-/// `struct sk_buff *netlink_alloc_large_skb(unsigned int, int)`, declared in `linux/netlink.h`.
+/// `int netlink_policy_dump_attr_size_estimate(const struct nla_policy *)`, declared in `net/netlink.h`.
 #[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn netlink_alloc_large_skb() -> ! {
-    trace_and_stop(c"netlink_alloc_large_skb")
+pub unsafe extern "sysv64" fn netlink_policy_dump_attr_size_estimate() -> ! {
+    trace_and_stop(c"netlink_policy_dump_attr_size_estimate")
 }
 
-/// `int netlink_has_listeners(struct sock *, unsigned int)`, declared in `linux/netlink.h`.
+/// `int netlink_policy_dump_write_attr(struct sk_buff *, const struct nla_policy *, int)`, declared in `net/netlink.h`.
 #[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn netlink_has_listeners() -> ! {
-    trace_and_stop(c"netlink_has_listeners")
-}
-
-/// `void netlink_kernel_release(struct sock *)`, declared in `linux/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn netlink_kernel_release() -> ! {
-    trace_and_stop(c"netlink_kernel_release")
-}
-
-/// `bool netlink_net_capable(const struct sk_buff *, int)`, declared in `linux/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn netlink_net_capable() -> ! {
-    trace_and_stop(c"netlink_net_capable")
-}
-
-/// `bool netlink_ns_capable(const struct sk_buff *, struct user_namespace *, int)`, declared in `linux/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn netlink_ns_capable() -> ! {
-    trace_and_stop(c"netlink_ns_capable")
-}
-
-/// `int netlink_rcv_skb(struct sk_buff *, int (*)(struct sk_buff *, struct nlmsghdr *, struct netlink_ext_ack *))`, declared in `net/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn netlink_rcv_skb() -> ! {
-    trace_and_stop(c"netlink_rcv_skb")
-}
-
-/// `int netlink_set_err(struct sock *, __u32, __u32, int)`, declared in `linux/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn netlink_set_err() -> ! {
-    trace_and_stop(c"netlink_set_err")
-}
-
-/// `bool netlink_strict_get_check(struct sk_buff *)`, declared in `linux/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn netlink_strict_get_check() -> ! {
-    trace_and_stop(c"netlink_strict_get_check")
-}
-
-/// `int netlink_unicast(struct sock *, struct sk_buff *, __u32, int)`, declared in `linux/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn netlink_unicast() -> ! {
-    trace_and_stop(c"netlink_unicast")
+pub unsafe extern "sysv64" fn netlink_policy_dump_write_attr() -> ! {
+    trace_and_stop(c"netlink_policy_dump_write_attr")
 }
 
 /// `struct sk_buff *nl80211_build_scan_msg(struct cfg80211_registered_device *, struct wireless_dev *, bool)`, declared in `linux/net/wireless/nl80211.h`.
@@ -1168,12 +1101,6 @@ pub unsafe extern "sysv64" fn nl80211hdr_put() -> ! {
     trace_and_stop(c"nl80211hdr_put")
 }
 
-/// `int nlmsg_notify(struct sock *, struct sk_buff *, u32, unsigned int, int, gfp_t)`, declared in `net/netlink.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nlmsg_notify() -> ! {
-    trace_and_stop(c"nlmsg_notify")
-}
-
 /// `int param_get_ulong(char *, const struct kernel_param *)`, declared in `linux/moduleparam.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn param_get_ulong() -> ! {
@@ -1220,12 +1147,6 @@ pub unsafe extern "sysv64" fn print_rt_stats() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn printk_legacy_allow_panic_sync() -> ! {
     trace_and_stop(c"printk_legacy_allow_panic_sync")
-}
-
-/// `struct proc_dir_entry *proc_create_single_data(const char *, umode_t, struct proc_dir_entry *, int (*)(struct seq_file *, void *), void *)`, declared in `linux/proc_fs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn proc_create_single_data() -> ! {
-    trace_and_stop(c"proc_create_single_data")
 }
 
 /// `int proc_dointvec(const struct ctl_table *, int, void *, size_t *, loff_t *)`, declared in `linux/sysctl.h`.
@@ -1288,18 +1209,6 @@ pub unsafe extern "sysv64" fn rcuref_get_slowpath() -> ! {
     trace_and_stop(c"rcuref_get_slowpath")
 }
 
-/// `int register_inet6addr_notifier(struct notifier_block *)`, declared in `net/addrconf.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn register_inet6addr_notifier() -> ! {
-    trace_and_stop(c"register_inet6addr_notifier")
-}
-
-/// `int register_inetaddr_notifier(struct notifier_block *)`, declared in `linux/inetdevice.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn register_inetaddr_notifier() -> ! {
-    trace_and_stop(c"register_inetaddr_notifier")
-}
-
 /// `int reuseport_detach_prog(struct sock *)`, declared in `net/sock_reuseport.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn reuseport_detach_prog() -> ! {
@@ -1316,6 +1225,12 @@ pub unsafe extern "sysv64" fn reuseport_detach_sock() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn reuseport_update_incoming_cpu() -> ! {
     trace_and_stop(c"reuseport_update_incoming_cpu")
+}
+
+/// `void scm_recv(struct socket *, struct msghdr *, struct scm_cookie *, int)`, declared in `net/scm.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn scm_recv() -> ! {
+    trace_and_stop(c"scm_recv")
 }
 
 /// `int send_sigurg(struct file *)`, declared in `linux/fs.h`.
@@ -1570,18 +1485,6 @@ pub unsafe extern "sysv64" fn task_active_pid_ns() -> ! {
     trace_and_stop(c"task_active_pid_ns")
 }
 
-/// `int task_work_add(struct task_struct *, struct callback_head *, enum task_work_notify_mode)`, declared in `linux/task_work.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn task_work_add() -> ! {
-    trace_and_stop(c"task_work_add")
-}
-
-/// `struct callback_head *task_work_cancel_func(struct task_struct *, task_work_func_t)`, declared in `linux/task_work.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn task_work_cancel_func() -> ! {
-    trace_and_stop(c"task_work_cancel_func")
-}
-
 /// `char *tcp_ca_get_name_by_key(u32, char *)`, declared in `net/tcp.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn tcp_ca_get_name_by_key() -> ! {
@@ -1624,18 +1527,6 @@ pub unsafe extern "sysv64" fn unpin_user_page() -> ! {
     trace_and_stop(c"unpin_user_page")
 }
 
-/// `int unregister_inet6addr_notifier(struct notifier_block *)`, declared in `net/addrconf.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn unregister_inet6addr_notifier() -> ! {
-    trace_and_stop(c"unregister_inet6addr_notifier")
-}
-
-/// `int unregister_inetaddr_notifier(struct notifier_block *)`, declared in `linux/inetdevice.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn unregister_inetaddr_notifier() -> ! {
-    trace_and_stop(c"unregister_inetaddr_notifier")
-}
-
 /// `s64 update_curr_common(struct rq *)`, declared in `linux/kernel/sched/sched.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn update_curr_common() -> ! {
@@ -1646,6 +1537,12 @@ pub unsafe extern "sysv64" fn update_curr_common() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn update_group_capacity() -> ! {
     trace_and_stop(c"update_group_capacity")
+}
+
+/// `void vfree_atomic(const void *)`, declared in `linux/vmalloc.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn vfree_atomic() -> ! {
+    trace_and_stop(c"vfree_atomic")
 }
 
 /// `bool vmalloc_dump_obj(void *)`, declared in `linux/vmalloc.h`.

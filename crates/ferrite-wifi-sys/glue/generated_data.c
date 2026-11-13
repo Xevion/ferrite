@@ -116,6 +116,8 @@
 #include <linux/ftrace.h>
 #include <linux/tick.h>
 #include <asm/softirq_stack.h>
+#include <linux/irq_work.h>
+#include <linux/resume_user_mode.h>
 #include <linux/clockchips.h>
 #include <linux/hrtimer.h>
 #include "linux/kernel/time/tick-internal.h"
@@ -137,7 +139,6 @@
 #include <linux/profile.h>
 #include <trace/events/power.h>
 #include <linux/sched/stat.h>
-#include <linux/irq_work.h>
 #include <linux/timex.h>
 #include <linux/time.h>
 #include <linux/timecounter.h>
@@ -411,6 +412,11 @@
 #include "linux/net/rfkill/rfkill.h"
 #include <net/tc_wrapper.h>
 #include <linux/skb_array.h>
+#include <linux/un.h>
+#include <linux/termios.h>
+#include <trace/events/netlink.h>
+#include "linux/net/netlink/af_netlink.h"
+#include "linux/net/netlink/genetlink.h"
 #include <net/mac80211.h>
 #include "linux/net/mac80211/ieee80211_i.h"
 #include "linux/net/mac80211/driver-ops.h"
@@ -560,6 +566,8 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	LX_DATA(bpf_stats_enabled_key, sizeof(bpf_stats_enabled_key));
 	LX_DATA(cpu_khz, sizeof(cpu_khz));
 	LX_DATA(flow_keys_basic_dissector, sizeof(flow_keys_basic_dissector));
+	LX_DATA(genl_sk_destructing_cnt, sizeof(genl_sk_destructing_cnt));
+	LX_DATA(genl_sk_destructing_waitq, sizeof(genl_sk_destructing_waitq));
 	LX_DATA(inet_protos, sizeof(inet_protos));
 	LX_DATA(init_on_free, sizeof(init_on_free));
 	LX_DATA(init_pid_ns, sizeof(init_pid_ns));
@@ -574,7 +582,6 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	LX_DATA(reboot_mode, sizeof(reboot_mode));
 	LX_DATA(sched_smp_initialized, sizeof(sched_smp_initialized));
 	LX_DATA(suppress_printk, sizeof(suppress_printk));
-	LX_DATA(sysctl_net_busy_read, sizeof(sysctl_net_busy_read));
 	LX_DATA(sysctl_sched_base_slice, sizeof(sysctl_sched_base_slice));
 	LX_DATA(sysctl_sched_features, sizeof(sysctl_sched_features));
 	LX_DATA(sysctl_sched_tunable_scaling, sizeof(sysctl_sched_tunable_scaling));
@@ -612,6 +619,8 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "cpu_khz", &cpu_khz, sizeof(cpu_khz) },
 	{ "dst_default_metrics", &dst_default_metrics, sizeof(dst_default_metrics) },
 	{ "flow_keys_basic_dissector", &flow_keys_basic_dissector, sizeof(flow_keys_basic_dissector) },
+	{ "genl_sk_destructing_cnt", &genl_sk_destructing_cnt, sizeof(genl_sk_destructing_cnt) },
+	{ "genl_sk_destructing_waitq", &genl_sk_destructing_waitq, sizeof(genl_sk_destructing_waitq) },
 	{ "gfpflag_names", &gfpflag_names, sizeof(gfpflag_names[0]) },
 	{ "guid_index", &guid_index, sizeof(guid_index) },
 	{ "inet_protos", &inet_protos, sizeof(inet_protos) },
@@ -636,7 +645,6 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "reboot_mode", &reboot_mode, sizeof(reboot_mode) },
 	{ "sched_smp_initialized", &sched_smp_initialized, sizeof(sched_smp_initialized) },
 	{ "suppress_printk", &suppress_printk, sizeof(suppress_printk) },
-	{ "sysctl_net_busy_read", &sysctl_net_busy_read, sizeof(sysctl_net_busy_read) },
 	{ "sysctl_sched_base_slice", &sysctl_sched_base_slice, sizeof(sysctl_sched_base_slice) },
 	{ "sysctl_sched_features", &sysctl_sched_features, sizeof(sysctl_sched_features) },
 	{ "sysctl_sched_tunable_scaling", &sysctl_sched_tunable_scaling, sizeof(sysctl_sched_tunable_scaling) },
@@ -645,4 +653,4 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "uuid_index", &uuid_index, sizeof(uuid_index) },
 	{ "vmaflag_names", &vmaflag_names, sizeof(vmaflag_names[0]) },
 };
-const unsigned long lx_unimplemented_data_count = 40;
+const unsigned long lx_unimplemented_data_count = 41;

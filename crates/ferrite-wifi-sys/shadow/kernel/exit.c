@@ -10,6 +10,7 @@
 #include <linux/rcuwait.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
+#include <linux/task_work.h>
 
 #include <lx/task.h>
 
@@ -20,6 +21,13 @@ int rcuwait_wake_up(struct rcuwait *w)
 	return task ? wake_up_process(task) : 0;
 }
 EXPORT_SYMBOL_GPL(rcuwait_wake_up);
+
+void finish_rcuwait(struct rcuwait *w)
+{
+	rcu_assign_pointer(w->task, NULL);
+	__set_current_state(TASK_RUNNING);
+}
+EXPORT_SYMBOL_GPL(finish_rcuwait);
 
 void __noreturn do_exit(long code)
 {
@@ -34,6 +42,7 @@ void __noreturn do_exit(long code)
 			kthread_do_exit(kthread, code);
 	}
 	tsk->flags |= PF_EXITING | PF_NOFREEZE;
+	exit_task_work(tsk);
 	set_special_state(TASK_DEAD);
 	list_del_init(&tsk->tasks);
 

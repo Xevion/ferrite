@@ -58,6 +58,14 @@ asmlinkage __visible void __sched schedule(void)
 }
 EXPORT_SYMBOL(schedule);
 
+/* Back of the run queue: the task stays runnable and every other runnable one goes first. */
+void __sched yield(void)
+{
+	set_current_state(TASK_RUNNING);
+	schedule();
+}
+EXPORT_SYMBOL(yield);
+
 void __sched schedule_preempt_disabled(void)
 {
 	sched_preempt_enable_no_resched();

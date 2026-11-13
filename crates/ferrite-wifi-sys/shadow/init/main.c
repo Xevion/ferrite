@@ -124,6 +124,9 @@ void lx_kernel_init(void)
 	platform_bus_init();
 	faux_bus_init();
 
+	/* start_kernel sets up init_net, and with it the device list every netdev joins */
+	net_ns_init();
+
 	/* sock_init's skb caches; net/socket.c is not built */
 	skb_init();
 }
