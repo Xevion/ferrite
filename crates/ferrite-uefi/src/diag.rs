@@ -43,16 +43,16 @@ impl Diag {
             self.link_changed(&net.link);
         }
         if !self.fault_logged
-            && let Some(fault) = sweep.first_fault
+            && let Some(first) = sweep.first_fault
         {
             self.fault_logged = true;
             milestone(&alloc::format!(
                 "sweep: FAULT at {}: expected {:#018x}, read {:#018x} ({} on cpu{}, pass {})",
-                fault.addr,
-                fault.expected,
-                fault.actual,
-                sweep.first_fault_test,
-                sweep.first_fault_cpu,
+                first.fault.addr,
+                first.fault.expected,
+                first.fault.actual,
+                first.test,
+                first.cpu,
                 sweep.passes
             ));
         }

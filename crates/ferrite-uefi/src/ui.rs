@@ -47,7 +47,11 @@ fn status_lines(view: &View) -> Vec<Line<'static>> {
     let faults = match sweep.faults {
         0 => Span::styled("none", Style::new().fg(Color::Green)),
         n => Span::styled(
-            format!("{n} ({}; first in {} on cpu {})", sweep.analysis, sweep.first_fault_test, sweep.first_fault_cpu),
+            format!(
+                "{n} ({}{})",
+                sweep.analysis,
+                sweep.first_fault.map_or_else(String::new, |f| format!("; first in {} on cpu {}", f.test, f.cpu))
+            ),
             Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
     };

@@ -328,10 +328,10 @@ impl ToJson for StatusDoc<'_> {
             .field(
                 "faults",
                 &Section(|o: &mut Object<'_>| {
-                    let first = status.first_fault.map(|fault| {
+                    let first = status.first_fault.map(|first| {
                         Section(move |o: &mut Object<'_>| {
-                            o.field("test", status.first_fault_test).field("cpu", &status.first_fault_cpu);
-                            fault_fields(o, &fault);
+                            o.field("test", first.test).field("cpu", &first.cpu);
+                            fault_fields(o, &first.fault);
                         })
                     });
                     o.field("total", &status.faults)
@@ -428,9 +428,7 @@ mod tests {
             mode: Mode::Split,
             cpus: 4,
             faults: 1,
-            first_fault: Some(fault()),
-            first_fault_test: "moving-inversions",
-            first_fault_cpu: 2,
+            first_fault: Some(FaultRecord { fault: fault(), test: "moving-inversions", cpu: 2, pass: 1 }),
             analysis: Classification::StuckBits { mask: 0x10 },
             preset: Preset::Thorough,
             paused: true,

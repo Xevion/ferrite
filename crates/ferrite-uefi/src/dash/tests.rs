@@ -24,8 +24,6 @@ fn status() -> SweepStatus {
         cpus: 8,
         faults: 0,
         first_fault: None,
-        first_fault_test: "",
-        first_fault_cpu: 0,
         analysis: Classification::Clean,
         preset: Preset::Standard,
         paused: false,
@@ -83,9 +81,7 @@ fn faulty(status: &mut SweepStatus, faults: &mut VecDeque<FaultRecord>) {
         faults.push_back(FaultRecord { fault, test: TestKind::MovingInversions.name(), cpu: 2, pass: 2 });
     }
     status.faults = 3;
-    status.first_fault = Some(faults[0].fault);
-    status.first_fault_test = faults[0].test;
-    status.first_fault_cpu = 2;
+    status.first_fault = Some(faults[0]);
     status.analysis = Classification::Mixed { stuck: 1 << 3 };
 }
 

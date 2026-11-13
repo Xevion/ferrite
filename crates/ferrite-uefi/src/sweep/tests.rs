@@ -69,11 +69,11 @@ fn a_corrupted_word_is_counted_and_reported_with_its_test() {
     }
     let status = sweep.status();
     check!(status.faults == 1);
-    assert!(let Some(fault) = status.first_fault);
-    check!(fault.addr.get() == base.get() + word * WORD);
-    check!(fault.expected == expected);
-    check!(fault.actual == expected ^ 1 << 7);
-    check!(status.first_fault_test == "solid bits");
+    assert!(let Some(first) = status.first_fault);
+    check!(first.fault.addr.get() == base.get() + word * WORD);
+    check!(first.fault.expected == expected);
+    check!(first.fault.actual == expected ^ 1 << 7);
+    check!(first.test == "solid bits");
     check!(status.analysis == Classification::StuckBits { mask: 1 << 7 });
 }
 
@@ -200,9 +200,9 @@ fn faults_merged_from_several_cores_keep_their_finder_and_classify_together() {
     check!(status.faults == 2 + 3, "faults found before the test are kept");
     check!(status.test_percent == 100);
     assert!(let Some(first) = status.first_fault);
-    check!(first.addr.get() == buffer.base.as_ptr().wrapping_add(bad[0]).addr());
-    check!(status.first_fault_cpu == 5);
-    check!(status.first_fault_test == "solid bits");
+    check!(first.fault.addr.get() == buffer.base.as_ptr().wrapping_add(bad[0]).addr());
+    check!(first.cpu == 5);
+    check!(first.test == "solid bits");
     check!(status.analysis == Classification::StuckBits { mask: 1 << 7 });
     absorb(&mut tally, &seats, &mut absorbed, &cpus, kind.name(), 0);
     check!(tally.stats.faults() == 3, "a fault is absorbed once");

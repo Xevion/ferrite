@@ -406,8 +406,6 @@ mod tests {
             cpus: 1,
             faults: 0,
             first_fault: None,
-            first_fault_test: "",
-            first_fault_cpu: 0,
             analysis: Classification::Clean,
             preset: Preset::Standard,
             paused: false,

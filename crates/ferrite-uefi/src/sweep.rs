@@ -62,11 +62,8 @@ pub struct SweepStatus {
     pub cpus: usize,
     /// Mismatched words over all passes.
     pub faults: u64,
-    pub first_fault: Option<Fault>,
-    /// The test that found the first fault.
-    pub first_fault_test: &'static str,
-    /// The firmware's number of the processor that found the first fault.
-    pub first_fault_cpu: usize,
+    /// The first fault of the run, with the test and processor that found it.
+    pub first_fault: Option<FaultRecord>,
     pub analysis: Classification,
     pub preset: Preset,
     /// Sweeping is paused by request.
@@ -98,8 +95,6 @@ impl SweepStatus {
         cpus: 0,
         faults: 0,
         first_fault: None,
-        first_fault_test: "",
-        first_fault_cpu: 0,
         analysis: Classification::Clean,
         preset: Preset::Standard,
         paused: false,
@@ -544,9 +539,7 @@ fn status_of(suite: &Suite<'_>, tally: &Tally, mode: Mode, cpus: usize) -> Sweep
         mode,
         cpus,
         faults: tally.faults,
-        first_fault: tally.first.map(|f| f.fault),
-        first_fault_test: tally.first.map_or("", |f| f.test),
-        first_fault_cpu: tally.first.map_or(0, |f| f.cpu),
+        first_fault: tally.first,
         analysis: tally.stats.classification(),
         preset: suite.preset(),
         paused: false,
@@ -617,9 +610,7 @@ fn live(base: &SweepStatus, seats: &[Seat], tally: &Tally, faults_before: u64, w
         test_percent: suite::percent(done, test_total),
         percent: suite::percent(pass_done + done.min(test_total), pass_total),
         faults: faults_before + seats.iter().map(Seat::faults).sum::<u64>(),
-        first_fault: tally.first.map(|f| f.fault),
-        first_fault_test: tally.first.map_or("", |f| f.test),
-        first_fault_cpu: tally.first.map_or(0, |f| f.cpu),
+        first_fault: tally.first,
         analysis: tally.stats.classification(),
         ..*base
     }

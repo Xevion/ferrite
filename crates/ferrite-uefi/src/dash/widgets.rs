@@ -403,7 +403,7 @@ pub fn faults(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     x += p.text(x, base, &count, Pen::style(Face::Bold, l.text.title, BAD)) + l.m(12.0);
     let analysis = format!("{}", s.analysis);
     x += p.text(x, base, &analysis, Pen::style(Face::Regular, l.text.body, TEXT)) + l.m(12.0);
-    let first = format!("first in {} on cpu {}", s.first_fault_test, s.first_fault_cpu);
+    let first = s.first_fault.map_or_else(String::new, |f| format!("first in {} on cpu {}", f.test, f.cpu));
     p.fit(x, base, &first, Pen::style(Face::Regular, l.text.small, MUTED), px(r.right()) - x);
 
     let mono = Pen::style(Face::Mono, l.text.mono, TEXT);
