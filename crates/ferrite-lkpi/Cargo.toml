@@ -13,11 +13,14 @@ default = ["stubs"]
 stubs = []
 
 [dependencies]
+corosensei.workspace = true
+ferrite-hal.workspace = true
 log.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
 assert2.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

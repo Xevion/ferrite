@@ -897,7 +897,10 @@ name = "ferrite-lkpi"
 version = "0.1.0"
 dependencies = [
  "assert2",
+ "corosensei",
+ "ferrite-hal",
  "log",
+ "rstest 0.28.0",
  "snafu",
 ]
 

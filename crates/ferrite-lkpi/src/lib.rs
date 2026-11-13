@@ -7,9 +7,12 @@
 #![no_std]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 mod arch;
 mod halt;
+pub mod sched;
 #[cfg(feature = "stubs")]
 mod stubs;
 
