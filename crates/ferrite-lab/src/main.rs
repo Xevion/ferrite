@@ -24,12 +24,14 @@ use log::LevelFilter;
 
 /// Exit status of a run that stopped in the halt hook, distinct from a crash or a clean exit.
 const EXIT_HALTED: u8 = 86;
-/// How long one poll step may run tasks before the main loop gets the CPU back.
 /// Where the lab finds firmware files.
 const FIRMWARE_DIR: &str = "/lib/firmware";
 /// How long cfg80211 gets to load `regulatory.db` after its initcalls.
 const REGDB_LIMIT: Duration = Duration::from_secs(2);
+/// How long one poll step may run tasks before the main loop gets the CPU back.
 const BUDGET: Duration = Duration::from_millis(10);
+/// The kernel's memory: every page, slab object and vmalloc block.
+const ARENA_SIZE: usize = 256 << 20;
 
 /// Print the stub that was hit and where from, then end the process.
 fn halt(stub: &CStr) -> ! {
@@ -55,6 +57,15 @@ unsafe extern "C" fn init(_: *mut c_void) -> c_int {
         },
         Err(error) => {
             log::error!("time check failed: {error}");
+            std::process::exit(1);
+        },
+    }
+    match kernel::page_model() {
+        Ok(()) => log::info!(
+            "page model: two page frags shared one compound block through its head and it returned on drain; alloc_skb and kfree_skb balanced"
+        ),
+        Err(error) => {
+            log::error!("page model check failed: {error}");
             std::process::exit(1);
         },
     }
@@ -100,6 +111,18 @@ fn main() -> ExitCode {
     if let Err(error) = fence::install() {
         log::error!("{error}");
         return ExitCode::FAILURE;
+    }
+
+    match host::arena(ARENA_SIZE).map(ferrite_lkpi::mem::install) {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => {
+            log::error!("{error}");
+            return ExitCode::FAILURE;
+        },
+        Err(error) => {
+            log::error!("{error}");
+            return ExitCode::FAILURE;
+        },
     }
 
     match host::entropy().map(ferrite_lkpi::random::seed) {

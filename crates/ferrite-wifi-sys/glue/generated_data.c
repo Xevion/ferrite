@@ -162,6 +162,10 @@
 #include <linux/mempool.h>
 #include <linux/writeback.h>
 #include "linux/mm/slab.h"
+#include <linux/build_bug.h>
+#include <linux/gfp_types.h>
+#include <linux/page_frag_cache.h>
+#include "linux/mm/internal.h"
 #include <linux/swapops.h>
 #include <linux/mman.h>
 #include <linux/hugetlb.h>
@@ -170,7 +174,6 @@
 #include <linux/fsnotify.h>
 #include <linux/page_idle.h>
 #include <kunit/visibility.h>
-#include "linux/mm/internal.h"
 #include "linux/mm/swap.h"
 #include <linux/nls.h>
 #include <crypto/internal/acompress.h>
@@ -258,7 +261,6 @@
 #include <kunit/test.h>
 #include <kunit/test-bug.h>
 #include <linux/timerqueue.h>
-#include <linux/build_bug.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/errname.h>
@@ -500,7 +502,6 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	LX_DATA(cpu_khz, sizeof(cpu_khz));
 	LX_DATA(flow_keys_basic_dissector, sizeof(flow_keys_basic_dissector));
 	LX_DATA(inet_protos, sizeof(inet_protos));
-	LX_DATA(init_on_alloc, sizeof(init_on_alloc));
 	LX_DATA(init_pid_ns, sizeof(init_pid_ns));
 	LX_DATA(init_user_ns, sizeof(init_user_ns));
 	LX_DATA(init_uts_ns, sizeof(init_uts_ns));
@@ -508,11 +509,9 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	LX_DATA(no_irq_chip, sizeof(no_irq_chip));
 	LX_DATA(noirqdebug, sizeof(noirqdebug));
 	LX_DATA(oops_in_progress, sizeof(oops_in_progress));
-	LX_DATA(page_offset_base, sizeof(page_offset_base));
 	LX_DATA(panic_reboot_mode, sizeof(panic_reboot_mode));
 	LX_DATA(pci_bus_groups, sizeof(pci_bus_groups[0]));
 	LX_DATA(pci_dev_groups, sizeof(pci_dev_groups[0]));
-	LX_DATA(phys_base, sizeof(phys_base));
 	LX_DATA(reboot_mode, sizeof(reboot_mode));
 	LX_DATA(sched_smp_initialized, sizeof(sched_smp_initialized));
 	LX_DATA(suppress_printk, sizeof(suppress_printk));
@@ -557,7 +556,6 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "gfpflag_names", &gfpflag_names, sizeof(gfpflag_names[0]) },
 	{ "guid_index", &guid_index, sizeof(guid_index) },
 	{ "inet_protos", &inet_protos, sizeof(inet_protos) },
-	{ "init_on_alloc", &init_on_alloc, sizeof(init_on_alloc) },
 	{ "init_pid_ns", &init_pid_ns, sizeof(init_pid_ns) },
 	{ "init_user_ns", &init_user_ns, sizeof(init_user_ns) },
 	{ "init_uts_ns", &init_uts_ns, sizeof(init_uts_ns) },
@@ -567,7 +565,6 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "noirqdebug", &noirqdebug, sizeof(noirqdebug) },
 	{ "nosteal_pipe_buf_ops", &nosteal_pipe_buf_ops, sizeof(nosteal_pipe_buf_ops) },
 	{ "oops_in_progress", &oops_in_progress, sizeof(oops_in_progress) },
-	{ "page_offset_base", &page_offset_base, sizeof(page_offset_base) },
 	{ "pageflag_names", &pageflag_names, sizeof(pageflag_names[0]) },
 	{ "panic_reboot_mode", &panic_reboot_mode, sizeof(panic_reboot_mode) },
 	{ "param_ops_bool", &param_ops_bool, sizeof(param_ops_bool) },
@@ -577,7 +574,6 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "param_ops_ulong", &param_ops_ulong, sizeof(param_ops_ulong) },
 	{ "pci_bus_groups", &pci_bus_groups, sizeof(pci_bus_groups[0]) },
 	{ "pci_dev_groups", &pci_dev_groups, sizeof(pci_dev_groups[0]) },
-	{ "phys_base", &phys_base, sizeof(phys_base) },
 	{ "reboot_mode", &reboot_mode, sizeof(reboot_mode) },
 	{ "sched_smp_initialized", &sched_smp_initialized, sizeof(sched_smp_initialized) },
 	{ "suppress_printk", &suppress_printk, sizeof(suppress_printk) },
@@ -590,4 +586,4 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "uuid_index", &uuid_index, sizeof(uuid_index) },
 	{ "vmaflag_names", &vmaflag_names, sizeof(vmaflag_names[0]) },
 };
-const unsigned long lx_unimplemented_data_count = 43;
+const unsigned long lx_unimplemented_data_count = 40;

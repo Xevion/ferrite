@@ -1,5 +1,5 @@
 //! Runs the lab binary: the Linux C runs on the shim's scheduler through the time and driver-core
-//! bring-up, every initcall, the firmware loader and every exitcall, and the lab exits 0. A run that
+//! bring-up, the page model check, every initcall, the firmware loader and every exitcall, and the lab exits 0. A run that
 //! stops in a stub or on unimplemented data exits 86 or 87 instead.
 
 use std::process::Command;
@@ -14,6 +14,12 @@ fn every_initcall_returns_0_firmware_loads_and_every_exitcall_runs() {
     check!(stderr.contains("kthread round trip through kthreadd: created, ran, stopped"), "{stderr}");
     check!(stderr.contains("msleep(20) returned after"), "{stderr}");
     check!(stderr.contains("; a timer_list fired"), "{stderr}");
+    check!(
+        stderr.contains(
+            "page model: two page frags shared one compound block through its head and it returned on drain; alloc_skb and kfree_skb balanced"
+        ),
+        "{stderr}"
+    );
 
     let started = stderr.matches("initcall level ").count();
     let returned_0 = stderr.lines().filter(|line| line.contains("initcall ") && line.ends_with(" returned 0")).count();

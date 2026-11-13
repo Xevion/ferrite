@@ -44,6 +44,11 @@ unsafe extern "C" {
     fn rtnl_lock();
     fn rtnl_unlock();
     fn freq_reg_info(wiphy: *mut c_void, center_freq_khz: u32) -> *const c_void;
+    fn __page_frag_alloc_align(cache: *mut PageFragCache, size: c_uint, gfp: c_uint, align_mask: c_uint) -> *mut u8;
+    fn page_frag_free(addr: *mut u8);
+    fn page_frag_cache_drain(cache: *mut PageFragCache);
+    fn __alloc_skb(size: c_uint, gfp: c_uint, flags: c_int, node: c_int) -> *mut c_void;
+    fn sk_skb_reason_drop(sk: *mut c_void, skb: *mut c_void, reason: c_uint);
 }
 
 /// `struct firmware`.
@@ -293,4 +298,108 @@ pub fn wait_for_regdb(limit: Duration) -> Result<Duration, RegdbError> {
         }
     }
     Err(RegdbError::NotLoaded(start.elapsed()))
+}
+
+const GFP_KERNEL: c_uint = 0xcc0;
+const PAGE_SIZE: usize = 4096;
+/// `PAGE_FRAG_CACHE_MAX_ORDER`: a frag cache refills with an order-3 compound block.
+const FRAG_BLOCK_PAGES: usize = 8;
+/// `SKB_DROP_REASON_NOT_SPECIFIED`, what `kfree_skb` passes.
+const SKB_DROP_NOT_SPECIFIED: c_uint = 2;
+
+/// `struct page_frag_cache`: encoded page, offset and bias; zeroed means empty.
+#[repr(C)]
+pub struct PageFragCache([u64; 2]);
+
+#[derive(Debug)]
+pub enum PageModelError {
+    FragAlloc,
+    FragLayout { first: usize, second: usize },
+    Taken(usize),
+    FreedEarly(usize),
+    NotReturned(usize),
+    SkbAlloc,
+    SkbLeak { first: usize, second: usize },
+}
+
+impl fmt::Display for PageModelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FragAlloc => write!(f, "page_frag_alloc returned NULL"),
+            Self::FragLayout { first, second } => {
+                write!(f, "frags at {first:#x} and {second:#x} are not adjacent pages of one aligned block")
+            },
+            Self::Taken(pages) => write!(f, "the frag cache took {pages} pages, not {FRAG_BLOCK_PAGES}"),
+            Self::FreedEarly(missing) => {
+                write!(f, "freeing both frags returned the block while the cache still held it ({missing} pages out)")
+            },
+            Self::NotReturned(missing) => write!(f, "draining the frag cache left {missing} pages allocated"),
+            Self::SkbAlloc => write!(f, "alloc_skb returned NULL"),
+            Self::SkbLeak { first, second } => {
+                write!(f, "an alloc_skb/kfree_skb cycle left {first} free pages, the next {second}")
+            },
+        }
+    }
+}
+
+fn free_pages() -> usize {
+    ferrite_lkpi::mem::free_page_count().unwrap_or(0)
+}
+
+/// The flat page model through stock Linux: two page-sized frags from one frag cache share a compound
+/// block, the second in a tail page; freeing both drops references on the head without freeing it,
+/// since the cache's bias holds it, and draining the cache returns all of it. Then two `alloc_skb` and
+/// `kfree_skb` cycles, the second leaving the free page count where the first did.
+pub fn page_model() -> Result<(), PageModelError> {
+    let mut cache = PageFragCache([0; 2]);
+    let before = free_pages();
+    // SAFETY: called on a task after the kernel start-up; the cache is drained before it goes.
+    let (first, second) = unsafe {
+        let size = PAGE_SIZE as c_uint;
+        (
+            __page_frag_alloc_align(&raw mut cache, size, GFP_KERNEL, !0),
+            __page_frag_alloc_align(&raw mut cache, size, GFP_KERNEL, !0),
+        )
+    };
+    if first.is_null() || second.is_null() {
+        return Err(PageModelError::FragAlloc);
+    }
+    let (a, b) = (first.addr(), second.addr());
+    if b != a + PAGE_SIZE || !a.is_multiple_of(PAGE_SIZE * FRAG_BLOCK_PAGES) {
+        return Err(PageModelError::FragLayout { first: a, second: b });
+    }
+    let taken = before - free_pages();
+    if taken != FRAG_BLOCK_PAGES {
+        return Err(PageModelError::Taken(taken));
+    }
+    // SAFETY: both frags came from the cache above and are freed once.
+    unsafe {
+        page_frag_free(second);
+        page_frag_free(first);
+    }
+    if free_pages() != before - FRAG_BLOCK_PAGES {
+        return Err(PageModelError::FreedEarly(before - free_pages()));
+    }
+    // SAFETY: the cache was filled above, and is not used again.
+    unsafe { page_frag_cache_drain(&raw mut cache) };
+    if free_pages() != before {
+        return Err(PageModelError::NotReturned(before - free_pages()));
+    }
+
+    let mut counts = [0; 2];
+    for count in &mut counts {
+        // SAFETY: on a task after skb_init; the skb is dropped at once and never shared.
+        unsafe {
+            let skb = __alloc_skb(1500, GFP_KERNEL, 0, NUMA_NO_NODE);
+            if skb.is_null() {
+                return Err(PageModelError::SkbAlloc);
+            }
+            sk_skb_reason_drop(std::ptr::null_mut(), skb, SKB_DROP_NOT_SPECIFIED);
+        }
+        *count = free_pages();
+    }
+    if counts[0] != counts[1] {
+        return Err(PageModelError::SkbLeak { first: counts[0], second: counts[1] });
+    }
+    Ok(())
 }

@@ -12,6 +12,7 @@
 #include <linux/radix-tree.h>
 #include <linux/sched/clock.h>
 #include <linux/sched/task.h>
+#include <linux/skbuff.h>
 #include <linux/tick.h>
 #include <linux/timekeeping.h>
 #include <linux/timer.h>
@@ -88,4 +89,7 @@ void lx_kernel_init(void)
 	classes_init();
 	platform_bus_init();
 	faux_bus_init();
+
+	/* sock_init's skb caches; net/socket.c is not built */
+	skb_init();
 }

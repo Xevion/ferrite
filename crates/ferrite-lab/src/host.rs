@@ -7,8 +7,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Instant as StdInstant;
 
 use corosensei::stack::{Stack, StackPointer};
-use ferrite_hal::Instant;
+use ferrite_hal::{BusAddr, Instant};
 use ferrite_lkpi::firmware::{FirmwareError, FirmwareProvider};
+use ferrite_lkpi::mem::{ARENA_ALIGN, Arena, ArenaError};
 use ferrite_lkpi::sched::{Platform, StackAllocError, StackSource};
 
 const PAGE: usize = 4096;
@@ -94,6 +95,52 @@ impl StackSource for MmapStacks {
             log::warn!("munmap of a stack at {:#x} failed: {}", stack.start, std::io::Error::last_os_error());
         }
     }
+}
+
+/// Where the lab's kernel arena sits in device address space: below 4 GiB for 32-bit DMA, and the IOVA
+/// it is to be mapped at once VFIO maps it.
+pub const ARENA_IOVA: u64 = 0x4000_0000;
+
+#[derive(Debug)]
+pub enum ArenaMapError {
+    Mmap(std::io::Error),
+    Arena(ArenaError),
+}
+
+impl std::fmt::Display for ArenaMapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mmap(error) => write!(f, "mmap of the kernel arena failed: {error}"),
+            Self::Arena(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+/// An anonymous mapping of `size` bytes, aligned like its IOVA, kept for the life of the process.
+/// Untouched pages cost nothing (`MAP_NORESERVE`).
+pub fn arena(size: usize) -> Result<Arena, ArenaMapError> {
+    let length = size + ARENA_ALIGN;
+    // SAFETY: a fresh anonymous mapping that nothing else refers to.
+    let start = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            length,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+            -1,
+            0,
+        )
+    };
+    if start == libc::MAP_FAILED {
+        return Err(ArenaMapError::Mmap(std::io::Error::last_os_error()));
+    }
+    let base = start.cast::<u8>().wrapping_add(start.addr().next_multiple_of(ARENA_ALIGN) - start.addr());
+    let Some(base) = std::ptr::NonNull::new(base) else {
+        return Err(ArenaMapError::Mmap(std::io::Error::from(ErrorKind::InvalidData)));
+    };
+    // SAFETY: `size` bytes from `base` lie inside the mapping, which is never unmapped or used elsewhere;
+    // the lab has no device, so the bus address is only the one DMA mapping will use.
+    unsafe { Arena::new(base, BusAddr::new(ARENA_IOVA), size) }.map_err(ArenaMapError::Arena)
 }
 
 /// Seed bytes from the host kernel's entropy pool.

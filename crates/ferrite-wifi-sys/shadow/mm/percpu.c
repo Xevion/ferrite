@@ -5,13 +5,14 @@
  * shadow (Stefan Kalkowski, Genode Labs).
  */
 
+#include <linux/log2.h>
 #include <linux/percpu.h>
 #include <linux/slab.h>
 
-/* kmalloc aligns a block to its size rounded up to a power of two, which covers the alignment. */
+/* kmalloc aligns a power-of-two size to itself, which covers the alignment. */
 void __percpu *pcpu_alloc_noprof(size_t size, size_t align, bool reserved, gfp_t gfp)
 {
-	return __kmalloc_noprof(max(size, align), gfp | __GFP_ZERO);
+	return __kmalloc_noprof(roundup_pow_of_two(max(size, align)), gfp | __GFP_ZERO);
 }
 EXPORT_SYMBOL_GPL(pcpu_alloc_noprof);
 

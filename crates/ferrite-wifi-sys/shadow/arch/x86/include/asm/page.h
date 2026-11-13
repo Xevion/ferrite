@@ -1,38 +1,34 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * struct page lookups that never compute an address from vmemmap_base.
+ * The stock flat page model over the shim's arena (ferrite-lkpi mem), with a
+ * checked virt_to_page.
  *
- * Linux finds a page struct as vmemmap_base + pfn, and the address of a page
- * from page_offset_base. The shim has no vmemmap: a zero base under UEFI's
- * identity map would turn a refcount update into a write into real RAM. So the
- * shim owns the page structs of its own allocations:
- *
- *   struct page *lx_virt_to_page(const void *addr)   the page struct of the
- *                                                    page holding addr
- *
- * and each page struct records its address (WANT_PAGE_VIRTUAL), which
- * page_address and page_to_virt read back.
+ * __pa is virt - page_offset_base, the arena's bus address, and pfn_to_page
+ * is vmemmap_base + pfn into the memmap at the arena's front, so page_address,
+ * pfn_to_page, page_to_pfn and nth_page are the stock arithmetic. virt_to_page
+ * stops the program, through lx_mem_fault, for an address outside the arena
+ * instead of indexing past the memmap; the check is on in every build.
  */
 #ifndef _LX_SHADOW_ASM_PAGE_H
 #define _LX_SHADOW_ASM_PAGE_H
-
-#define WANT_PAGE_VIRTUAL
 
 #include_next <asm/page.h>
 
 #ifndef __ASSEMBLER__
 
-extern struct page *lx_virt_to_page(const void *addr);
+extern unsigned long lx_arena_start;
+extern unsigned long lx_arena_size;
+extern void lx_mem_fault(const char *what, unsigned long addr) __attribute__((__noreturn__));
+
+static __always_inline unsigned long lx_arena_pfn(unsigned long addr)
+{
+	if (__builtin_expect(addr - lx_arena_start >= lx_arena_size, 0))
+		lx_mem_fault("virt_to_page outside the kernel arena", addr);
+	return __pa(addr) >> PAGE_SHIFT;
+}
 
 #undef virt_to_page
-#define virt_to_page(kaddr) lx_virt_to_page((const void *)(kaddr))
-
-#define page_to_virt(page) ((page)->virtual)
-
-#undef pfn_to_page
-#undef page_to_pfn
-#define pfn_to_page(pfn) lx_virt_to_page(pfn_to_kaddr(pfn))
-#define page_to_pfn(page) (__pa(page_to_virt(page)) >> PAGE_SHIFT)
+#define virt_to_page(kaddr) pfn_to_page(lx_arena_pfn((unsigned long)(kaddr)))
 
 #endif /* !__ASSEMBLER__ */
 

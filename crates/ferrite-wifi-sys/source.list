@@ -42,6 +42,7 @@ kernel/time/timer.c
 kernel/time/timer_list.c
 kernel/workqueue.c
 mm/mempool.c
+mm/page_frag_cache.c
 mm/util.c
 fs/nls/nls_base.c
 crypto/acompress.c

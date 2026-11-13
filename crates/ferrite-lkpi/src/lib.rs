@@ -11,10 +11,10 @@ extern crate alloc;
 extern crate std;
 
 mod arch;
+mod buddy;
 pub mod firmware;
 mod halt;
-mod mem;
-mod page;
+pub mod mem;
 mod printk;
 pub mod random;
 pub mod sched;

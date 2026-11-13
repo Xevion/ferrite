@@ -14,12 +14,6 @@ pub unsafe extern "sysv64" fn ___ratelimit() -> ! {
     trace_and_stop(c"___ratelimit")
 }
 
-/// `struct page *__alloc_pages_noprof(gfp_t, unsigned int, int, nodemask_t *)`, declared in `linux/gfp.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __alloc_pages_noprof() -> ! {
-    trace_and_stop(c"__alloc_pages_noprof")
-}
-
 /// `void __const_udelay(unsigned long)`, declared in `asm-generic/delay.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __const_udelay() -> ! {
@@ -54,18 +48,6 @@ pub unsafe extern "sysv64" fn __dma_sync_single_for_device() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __ethtool_get_link_ksettings() -> ! {
     trace_and_stop(c"__ethtool_get_link_ksettings")
-}
-
-/// `void __folio_put(struct folio *)`, declared in `linux/mm.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __folio_put() -> ! {
-    trace_and_stop(c"__folio_put")
-}
-
-/// `void __free_pages(struct page *, unsigned int)`, declared in `linux/gfp.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __free_pages() -> ! {
-    trace_and_stop(c"__free_pages")
 }
 
 /// `int __get_user_4(void)`, declared in `asm/uaccess.h`.
@@ -114,12 +96,6 @@ pub unsafe extern "sysv64" fn __netlink_kernel_create() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __nlmsg_put() -> ! {
     trace_and_stop(c"__nlmsg_put")
-}
-
-/// `void *__page_frag_alloc_align(struct page_frag_cache *, unsigned int, gfp_t, unsigned int)`, declared in `linux/page_frag_cache.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __page_frag_alloc_align() -> ! {
-    trace_and_stop(c"__page_frag_alloc_align")
 }
 
 /// `struct sched_entity *__pick_first_entity(struct cfs_rq *)`, declared in `linux/kernel/sched/sched.h`.
@@ -228,12 +204,6 @@ pub unsafe extern "sysv64" fn __task_pid_nr_ns() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __udelay() -> ! {
     trace_and_stop(c"__udelay")
-}
-
-/// `bool __virt_addr_valid(unsigned long)`, declared in `asm/page.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __virt_addr_valid() -> ! {
-    trace_and_stop(c"__virt_addr_valid")
 }
 
 /// `size_t _copy_from_iter(void *, size_t, struct iov_iter *)`, declared in `linux/uio.h`.
@@ -963,12 +933,6 @@ pub unsafe extern "sysv64" fn ipv6_ext_hdr() -> ! {
     trace_and_stop(c"ipv6_ext_hdr")
 }
 
-/// `bool is_free_buddy_page(const struct page *)`, declared in `linux/page-flags.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn is_free_buddy_page() -> ! {
-    trace_and_stop(c"is_free_buddy_page")
-}
-
 /// `void kernel_param_lock(struct module *)`, declared in `linux/moduleparam.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn kernel_param_lock() -> ! {
@@ -1330,12 +1294,6 @@ pub unsafe extern "sysv64" fn nohz_balance_enter_idle() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn note_interrupt() -> ! {
     trace_and_stop(c"note_interrupt")
-}
-
-/// `void page_frag_free(void *)`, declared in `linux/page_frag_cache.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn page_frag_free() -> ! {
-    trace_and_stop(c"page_frag_free")
 }
 
 /// `int param_get_ulong(char *, const struct kernel_param *)`, declared in `linux/moduleparam.h`.
@@ -1936,12 +1894,6 @@ pub unsafe extern "sysv64" fn update_group_capacity() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn vmalloc_dump_obj() -> ! {
     trace_and_stop(c"vmalloc_dump_obj")
-}
-
-/// `struct page *vmalloc_to_page(const void *)`, declared in `linux/mm.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn vmalloc_to_page() -> ! {
-    trace_and_stop(c"vmalloc_to_page")
 }
 
 /// `int xdp_do_generic_redirect(struct net_device *, struct sk_buff *, struct xdp_buff *, const struct bpf_prog *)`, declared in `linux/filter.h`.
