@@ -72,10 +72,11 @@ stage app="ferrite-uefi": vendor
     {{ if app == "wifitrace" { "mkdir -p esp/efi/ferrite/firmware && cp /lib/firmware/regulatory.db esp/efi/ferrite/firmware/ && cp /lib/firmware/iwlwifi-8265-36.ucode esp/efi/ferrite/firmware/ && if test -f .env; then grep -E '^WPA_(SSID|PASSPHRASE)=' .env > esp/efi/ferrite/firmware/wifi.env || true; fi" } else { "true" } }}
     test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
 
-# boot an app in QEMU: `just qemu`, `just qemu xhciscan serial`, `just qemu ferrite-uefi serial tap`
-qemu app="ferrite-uefi" mode="gui" net="user": (stage app)
+# boot an app in QEMU: `just qemu`, `just qemu xhciscan serial`, `just qemu ferrite-uefi serial tap`; a fourth argument picks the CPU model (`just qemu membench serial user host`)
+qemu app="ferrite-uefi" mode="gui" net="user" cpu="": (stage app)
     qemu-system-x86_64 \
         -enable-kvm \
+        {{ if cpu != "" { "-cpu " + cpu } else { "" } }} \
         -machine q35 \
         -m 512M \
         -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \

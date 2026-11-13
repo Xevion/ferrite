@@ -1,10 +1,13 @@
 //! Which vector extensions the CPU has and which state the firmware left enabled for them.
 //!
 //! AVX code needs CR4.OSXSAVE set and XCR0 bits 1 and 2 (SSE and AVX state); AVX-512 also needs bits 5
-//! to 7. The apps report it at start-up and change neither register.
+//! to 7. The apps report it at start-up; [`VectorState::enable`] turns the state on for an app's
+//! lifetime and puts both registers back when it ends.
 
-use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
+use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv, _xsetbv};
 use core::fmt;
+
+use snafu::Snafu;
 
 /// XCR0 state-component bits that AVX needs: SSE (1) and AVX (2).
 const XCR0_AVX: u64 = 0b110;
@@ -128,4 +131,138 @@ impl fmt::Display for VectorSupport {
         }
         write!(f, "; usable now: avx2={} avx512f={}", self.avx2_usable(), self.avx512f_usable())
     }
+}
+
+/// XCR0 bit for x87 state, which must always be set.
+const XCR0_X87: u64 = 1;
+const RFLAGS_IF: u64 = 1 << 9;
+
+#[derive(Debug, Snafu, PartialEq, Eq)]
+pub enum XsaveError {
+    #[snafu(display("CPUID reports no XSAVE, so AVX state cannot be enabled"))]
+    NoXsave,
+}
+
+/// AVX (and AVX-512) state turned on by this app; CR4 and XCR0 go back to the firmware's values on drop.
+///
+/// The loader and later apps run after us, so nothing we change may outlive the app. A panic resets
+/// the machine instead of returning, so it needs no restore.
+#[derive(Debug)]
+#[must_use = "dropping it restores CR4 and XCR0 at once"]
+pub struct VectorState {
+    saved_cr4: u64,
+    saved_xcr0: u64,
+    xcr0: u64,
+}
+
+impl VectorState {
+    /// Set CR4.OSXSAVE, then add to XCR0 what CPUID leaf 0xD reports supported among x87, SSE and AVX,
+    /// and the opmask and ZMM components when AVX-512F is present and all three are supported.
+    pub fn enable() -> Result<Self, XsaveError> {
+        let leaf1 = __cpuid(1);
+        let max_leaf = __cpuid(0).eax;
+        if leaf1.ecx & (1 << 26) == 0 || max_leaf < 0xd {
+            return Err(XsaveError::NoXsave);
+        }
+        let avx = leaf1.ecx & (1 << 28) != 0;
+        let avx512f = max_leaf >= 7 && __cpuid_count(7, 0).ebx & (1 << 16) != 0;
+        let supported = u64::from(__cpuid_count(0xd, 0).eax);
+        let sse_avx = if avx { XCR0_AVX } else { XCR0_AVX & !0b100 };
+        let mut want = XCR0_X87 | (supported & sse_avx);
+        if avx && avx512f && supported & XCR0_AVX512 == XCR0_AVX512 {
+            want |= XCR0_AVX512;
+        }
+        let saved_cr4 = read_cr4();
+        if saved_cr4 & CR4_OSXSAVE == 0 {
+            // SAFETY: CPUID reports XSAVE, so the bit is defined; it only enables XGETBV/XSETBV and XSAVE.
+            unsafe { write_cr4(saved_cr4 | CR4_OSXSAVE) };
+        }
+        // SAFETY: CR4.OSXSAVE is set now. XCR0 kept its value while the bit was clear, so this is the original.
+        let saved_xcr0 = unsafe { read_xcr0() };
+        let xcr0 = saved_xcr0 | want;
+        if xcr0 != saved_xcr0 {
+            // SAFETY: every bit is one CPUID leaf 0xD reports supported, x87 is set, and the AVX-512
+            // components are only added with AVX, as XSETBV requires.
+            unsafe { write_xcr0(xcr0) };
+        }
+        Ok(Self { saved_cr4, saved_xcr0, xcr0 })
+    }
+
+    /// XCR0 as the firmware left it, and as it is now.
+    pub const fn xcr0(&self) -> (u64, u64) {
+        (self.saved_xcr0, self.xcr0)
+    }
+
+    /// CR4 as the firmware left it.
+    pub const fn saved_cr4(&self) -> u64 {
+        self.saved_cr4
+    }
+
+    /// Run `f` with interrupts off, then clear the YMM and ZMM upper halves and restore IF.
+    ///
+    /// EDK2's interrupt entry saves only the FXSAVE state, so wide-register work must not be
+    /// interrupted. Keep `f` short (well under 1 ms) so the firmware's timer is not starved.
+    pub fn wide<R>(&self, f: impl FnOnce() -> R) -> R {
+        let flags: u64;
+        // SAFETY: CPL 0; reads RFLAGS through the stack and clears IF.
+        unsafe { core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags, options(nomem)) };
+        let result = f();
+        if self.xcr0 & XCR0_AVX == XCR0_AVX {
+            // SAFETY: AVX state is enabled; no compiled code in this crate keeps values in upper halves.
+            unsafe { core::arch::asm!("vzeroupper", options(nomem, nostack, preserves_flags)) };
+        }
+        if flags & RFLAGS_IF != 0 {
+            // SAFETY: interrupts were on before, so turning them back on restores the caller's state.
+            unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+        }
+        result
+    }
+}
+
+impl Drop for VectorState {
+    fn drop(&mut self) {
+        if self.xcr0 != self.saved_xcr0 {
+            // SAFETY: CR4.OSXSAVE is still set and the saved value was valid XCR0 before.
+            unsafe { write_xcr0(self.saved_xcr0) };
+        }
+        if self.saved_cr4 & CR4_OSXSAVE == 0 {
+            // SAFETY: restores the firmware's CR4, differing only in OSXSAVE.
+            unsafe { write_cr4(self.saved_cr4) };
+        }
+    }
+}
+
+impl fmt::Display for VectorState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "cr4 {:#x} -> {:#x}, xcr0 {:#x} -> {:#x}",
+            self.saved_cr4,
+            self.saved_cr4 | CR4_OSXSAVE,
+            self.saved_xcr0,
+            self.xcr0
+        )
+    }
+}
+
+fn read_cr4() -> u64 {
+    let cr4: u64;
+    // SAFETY: reading CR4 at CPL 0 has no side effects.
+    unsafe { core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags)) };
+    cr4
+}
+
+/// # Safety
+/// `value` must be a valid CR4 for the running firmware: only OSXSAVE may differ from what it had.
+unsafe fn write_cr4(value: u64) {
+    // SAFETY: the caller's contract.
+    unsafe { core::arch::asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) };
+}
+
+/// # Safety
+/// CR4.OSXSAVE must be set and `value` a combination XSETBV accepts.
+#[target_feature(enable = "xsave")]
+unsafe fn write_xcr0(value: u64) {
+    // SAFETY: the caller's contract.
+    unsafe { _xsetbv(0, value) };
 }

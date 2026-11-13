@@ -4,7 +4,7 @@ members = ["crates/*"]
 # Host-buildable crates. The UEFI binaries are built through the `efi-*`
 # aliases in .cargo/config.toml.
 # ferrite-wifi-sys needs its Linux snapshot, which the Justfile recipes make first with `just vendor`.
-default-members = ["crates/ferrite-hal", "crates/ferrite-rt", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-wire", "crates/ferrite-dev", "crates/ferrite-wifi-sys", "crates/ferrite-nl80211", "crates/ferrite-netif", "crates/ferrite-wpa", "crates/ferrite-lkpi", "crates/ferrite-wifi-start", "crates/ferrite-lab", "crates/ferrite-linux"]
+default-members = ["crates/ferrite-hal", "crates/ferrite-rt", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-wire", "crates/ferrite-dev", "crates/ferrite-wifi-sys", "crates/ferrite-nl80211", "crates/ferrite-netif", "crates/ferrite-wpa", "crates/ferrite-lkpi", "crates/ferrite-wifi-start", "crates/ferrite-lab", "crates/ferrite-mem", "crates/ferrite-linux"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,7 @@ publish = false
 ferrite-efi = { path = "crates/ferrite-efi" }
 ferrite-hal = { path = "crates/ferrite-hal" }
 ferrite-lkpi = { path = "crates/ferrite-lkpi" }
+ferrite-mem = { path = "crates/ferrite-mem" }
 ferrite-rt = { path = "crates/ferrite-rt" }
 ferrite-netif = { path = "crates/ferrite-netif" }
 ferrite-nl80211 = { path = "crates/ferrite-nl80211" }
@@ -112,6 +113,13 @@ missing_const_for_fn = "allow"
 # makes the memory sweep crawl; 1 costs little compile time.
 [profile.dev]
 opt-level = 1
+
+# The memory-test kernels are what membench measures and what the sweep will run; per-word overflow
+# and pointer checks would be measured with them.
+[profile.dev.package.ferrite-mem]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
 
 # Parses, checksums and copies every frame; rarely rebuilt.
 [profile.dev.package.smoltcp]

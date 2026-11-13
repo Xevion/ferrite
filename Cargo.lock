@@ -977,6 +977,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-mem"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "rstest 0.28.0",
+ "snafu",
+ "strum",
+]
+
+[[package]]
 name = "ferrite-netif"
 version = "0.1.0"
 dependencies = [
@@ -1032,6 +1042,7 @@ dependencies = [
  "assert2",
  "ferrite-efi",
  "ferrite-hal",
+ "ferrite-mem",
  "ferrite-rt",
  "log",
  "ratatui",

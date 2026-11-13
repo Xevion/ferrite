@@ -13,6 +13,7 @@ target = "x86_64-unknown-linux-gnu"
 [dependencies]
 ferrite-efi.workspace = true
 ferrite-hal.workspace = true
+ferrite-mem.workspace = true
 log.workspace = true
 ratatui.workspace = true
 ratatui-core.workspace = true

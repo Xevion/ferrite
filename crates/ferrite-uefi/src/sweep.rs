@@ -9,6 +9,8 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::ptr;
 
+use ferrite_mem::CpuAddr;
+
 /// Patterns applied in order; each byte is repeated across the word.
 const PATTERNS: [u8; 4] = [0x00, 0xFF, 0x55, 0xAA];
 const WORD: usize = size_of::<u64>();
@@ -28,28 +30,6 @@ impl fmt::Display for Phase {
             Self::Write => "write",
             Self::Verify => "verify",
         })
-    }
-}
-
-/// The CPU address of a word in the test buffer, physical under UEFI's identity map.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CpuAddr(usize);
-
-impl CpuAddr {
-    #[must_use]
-    pub fn of<T>(ptr: *const T) -> Self {
-        Self(ptr.addr())
-    }
-
-    #[must_use]
-    pub const fn get(self) -> usize {
-        self.0
-    }
-}
-
-impl fmt::Display for CpuAddr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:#x}", self.0)
     }
 }
 
