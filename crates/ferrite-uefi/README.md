@@ -1,16 +1,16 @@
 # ferrite-uefi
 
 A spike exploring a **bare-metal memory-testing bootloader**: a UEFI application
-that renders a [ratatui](https://ratatui.rs) UI with no OS underneath, as a proof
-of concept for running ferrite's Linux RAM test
+that tests RAM on every core, draws a dashboard on the framebuffer and serves a
+live status page, with no OS underneath, as a proof of concept for running ferrite's Linux RAM test
 suite before (or instead of) booting an operating system.
 
 ## Status
 
-- [x] Boots under OVMF in QEMU and renders a ratatui UI
-- [x] Text-console backend with **run-coalesced** drawing (see below)
-- [x] Wired networking: SNP to smoltcp, DHCP, mDNS (`ferrite.local`), HTTP status page. Verified under QEMU only, not yet on real hardware (see Networking)
-- [x] Incremental pattern sweep over a test buffer, with fault tracking, shown in the UI
+- [x] Boots under OVMF in QEMU and on real hardware
+- [x] Framebuffer dashboard drawn with tiny-skia and fontdue, written write-combining; a short text screen where there is no GOP (see Screen)
+- [x] Wired networking: SNP to smoltcp, DHCP, mDNS (`ferrite.local`), a live status page with a JSON API and run controls. Verified under QEMU only, not yet on real hardware (see Networking)
+- [x] A 14-test suite (memtest86+'s tests plus March C- and others) on SIMD kernels from scalar to AVX-512, split over every core through MP Services
 - [x] Headless diagnostics log on the boot volume (`\EFI\ferrite\ferrite-uefi.txt`)
 - [x] Recon apps: `pciscan` (PCI and Wi-Fi registers), `xhciscan` (USB controllers and DbC), `dbcping` and `dbcbench` (DbC link)
 - [x] USB debug serial (xHCI DbC) driver, verified on real hardware with `dbcping` and `dbcbench` (326 MB/s target to desktop, 189 MB/s back)
@@ -18,7 +18,6 @@ suite before (or instead of) booting an operating system.
 - [x] DbC log output from the main app, through the loader
 - [ ] Wi-Fi via real Linux drivers on a Rust shim
 - [ ] DNS-SD service enumeration (PTR/SRV/TXT) on top of the mDNS responder
-- [ ] GOP framebuffer backend for a truecolor UI
 
 ## Quickstart
 
@@ -30,8 +29,8 @@ just qemu xhciscan serial         # any app by name: ferrite-uefi, pciscan, xhci
 ```
 
 `just qemu <app> <gui|serial> <user|tap>` stages the app as `esp/efi/boot/bootx64.efi`
-and boots it with an `e1000` NIC and a `qemu-xhci` controller. Press `q` or `Esc`
-to leave the main app. Requires `qemu-system-x86_64` and OVMF firmware at
+and boots it with an `e1000` NIC and a `qemu-xhci` controller. In the main app `p`
+pauses or resumes, `r` restarts, and `q` or `Esc` leaves. Requires `qemu-system-x86_64` and OVMF firmware at
 `/usr/share/OVMF/OVMF_CODE_4M.fd` (override the `ovmf_code` and `ovmf_vars`
 variables in the `Justfile` if your distro puts them elsewhere). QEMU has no
 xHCI Debug Capability, so the DbC apps only run to "no DbC found" there.
@@ -60,7 +59,8 @@ Boot the target machine from the USB (disable Secure Boot, or sign the image).
 | `ferrite-xhci` | xHCI Debug Capability driver, written only against `ferrite-hal` |
 | `ferrite-efi` | UEFI backends for those traits, the boot-volume log, the `log` sink, unattended exit |
 | `ferrite-testing` | Host-only test doubles: mock HAL, simulated DbC register file |
-| `ferrite-uefi` | The main app: ratatui UI (`ui.rs`, `backend.rs`), memory sweep (`sweep.rs`), SNP + smoltcp networking (`net/`), mDNS (`mdns.rs`), headless log (`diag.rs`) |
+| `ferrite-mem` | The memory tests: kernels per SIMD tier, the test suite, fault analysis |
+| `ferrite-uefi` | The main app: memory sweep on every core (`sweep.rs`, `crew.rs`), run history and commands (`report.rs`, `control.rs`), framebuffer dashboard (`dash/`, `gfx/`, `gop.rs`) with a text fallback (`ui.rs`, `backend.rs`), SNP + smoltcp networking and the status page (`net/`), mDNS (`mdns.rs`), headless log (`diag.rs`) |
 | `ferrite-recon` | The standalone apps `pciscan`, `xhciscan`, `dbcping`, `dbcbench`, and the code they share |
 
 The crate boundaries, the `no_std` line and the type, error and logging rules are
@@ -74,10 +74,12 @@ implements a smoltcp [`Device`](https://docs.rs/smoltcp/latest/smoltcp/phy/trait
 over the Simple Network Protocol (`transmit`/`receive`/`mode`), and smoltcp
 supplies the rest of the stack:
 
-- **DHCPv4**: acquires an address; shown live in the UI as it transitions from
-  `requesting (DHCP)...` to the leased CIDR + gateway + DNS.
-- **HTTP** (TCP :80): a single-connection HTTP/1.0 status page reflecting the
-  live tester state (IP, MAC, sweep %).
+- **DHCPv4**: acquires an address, shown on the dashboard once leased.
+- **HTTP** (TCP :80): picoserve over smoltcp sockets, polled from the main loop.
+  `/` is a self-contained live dashboard; `/api/status` is the run as JSON;
+  `/api/events` streams it as server-sent events; `POST /api/{pause,resume,restart,cores,quit}`
+  control the run. Controls need `Content-Type: application/json`, which a
+  cross-site form cannot send.
 - **mDNS** (UDP :5353): answers `A` queries for `ferrite.local` so a laptop on
   the same segment can browse to `http://ferrite.local`.
 
@@ -118,26 +120,27 @@ iPXE SNP driver:
 
 This is the first time mDNS has been verified; before it only DHCP and HTTP
 through SLIRP were. Nothing here has run on real hardware or on a real NIC's SNP
-driver yet. The routing and status codes are also covered by unit tests in
-`crates/ferrite-uefi/src/net/http.rs`; the QEMU results above are from a manual
-run with no recorded artifact.
+driver yet. Routing, the control bodies and end-to-end requests over a smoltcp
+loopback are covered by unit tests in `crates/ferrite-uefi/src/net/http/`.
 
-### The backend, and the performance note
+### Screen
 
-The backend is vendored from [`ratatuefi`](https://github.com/sermuns/ratatuefi)
-(MIT/Apache) and reworked. It renders to the **text console** (Simple Text Output
-Protocol), a 16-colour character grid, not a pixel framebuffer.
+With a GOP the app switches to the display's native mode (the EDID's preferred
+timing) and draws a dashboard: tiny-skia for shapes, fontdue for text from
+embedded Inter and JetBrains Mono, into a BGRA canvas the size of the screen.
+Each widget redraws only when its inputs change, and only the pixels that differ
+are pushed.
 
-Upstream issued three firmware protocol calls *per character cell*
-(`set_cursor_position` + `set_color` + `write_str`), which is slow on real
-firmware where each call is expensive. This version **coalesces contiguous,
-identically-styled cells on a row into a single write**, and only re-issues
-cursor/color calls when they change. Combined with ratatui's own frame diffing
-(only changed cells reach the backend), that collapses "calls per character" into
-"calls per styled run."
+Firmware usually leaves the framebuffer aperture uncacheable, and `memcpy` here is
+`rep movsb`, which that turns into one bus write per byte (5 MB/s on the laptop). Rows
+go out in 16-byte stores instead, with the framebuffer remapped write-combining
+for the app's lifetime through a spare PAT entry
+(`ferrite_efi::paging::WriteCombining`): 4.6 GB/s on the laptop, against 96 MB/s for
+the firmware's `Blt`. Startup times each path on a strip and keeps the fastest.
 
-A **GOP framebuffer backend** with an embedded bitmap font is the path to a
-truecolor UI; the text console is the fast route to something on screen.
+Without a GOP the app falls back to a few lines of ratatui on the text console,
+through a backend derived from [`ratatuefi`](https://github.com/sermuns/ratatuefi)
+(MIT/Apache) that writes runs of same-styled cells in one call.
 
 ## Wi-Fi
 
