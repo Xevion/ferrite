@@ -10,6 +10,7 @@
 mod fence;
 mod host;
 mod logger;
+mod net;
 
 use std::backtrace::Backtrace;
 use std::ffi::CStr;
@@ -33,12 +34,53 @@ const WIFI_LIMIT: Duration = Duration::from_secs(10);
 const SCAN_LIMIT: Duration = Duration::from_secs(10);
 /// How long the lab station gets from its connect request to the open port.
 const CONNECT_LIMIT: Duration = Duration::from_secs(10);
-/// How long the lab holds the connection before it disconnects.
-const HOLD: Duration = Duration::from_millis(500);
+/// How long init keeps the connection for the main loop's IP checks at most.
+const HOLD: Duration = Duration::from_secs(10);
 /// How long one poll step may run tasks before the main loop gets the CPU back.
 const BUDGET: Duration = Duration::from_millis(10);
 /// The kernel's memory: every page, slab object and vmalloc block.
 const ARENA_SIZE: usize = 256 << 20;
+
+/// Poll the scheduler and the main loop's IP until init is gone, sleeping until the next deadline when
+/// nothing is runnable.
+fn poll_until_done<
+    P: ferrite_lkpi::sched::Platform + 'static,
+    S: ferrite_lkpi::sched::StackSource,
+    H: ferrite_lkpi::sched::Hooks,
+>(
+    sched: &mut Scheduler<P, S, H>,
+    init_id: ferrite_lkpi::sched::TaskId,
+) -> Result<(), ExitCode> {
+    let seed = match host::entropy() {
+        Ok(bytes) => bytes.iter().fold(0_u64, |seed, byte| seed.rotate_left(8) ^ u64::from(*byte)),
+        Err(error) => {
+            log::error!("reading host entropy failed: {error}");
+            return Err(ExitCode::FAILURE);
+        },
+    };
+    let mut ip = net::MainNet::default();
+    while sched.info(init_id).is_some() {
+        let step = sched.poll(BUDGET);
+        let ip_wait = ip.poll(sched.handle().now(), seed);
+        match step {
+            Ok(step) if step.runnable || sched.info(init_id).is_none() || ip_wait == Some(Duration::ZERO) => {},
+            Ok(Step { next_deadline: Some(at), .. }) => {
+                let wait = at.saturating_duration_since(sched.handle().now());
+                std::thread::sleep(ip_wait.map_or(wait, |ip| ip.min(wait)));
+            },
+            Ok(_) if ip_wait.is_some() => std::thread::sleep(ip_wait.unwrap_or_default()),
+            Ok(_) => {
+                log::error!("every task is blocked and nothing will wake one; init never finished");
+                return Err(ExitCode::FAILURE);
+            },
+            Err(error) => {
+                log::error!("{error}");
+                return Err(ExitCode::FAILURE);
+            },
+        }
+    }
+    Ok(())
+}
 
 /// Print the stub that was hit and where from, then end the process.
 fn halt(stub: &CStr) -> ! {
@@ -130,21 +172,8 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    while sched.info(init_id).is_some() {
-        match sched.poll(BUDGET) {
-            Ok(step) if step.runnable || sched.info(init_id).is_none() => {},
-            Ok(Step { next_deadline: Some(at), .. }) => {
-                std::thread::sleep(at.saturating_duration_since(sched.handle().now()));
-            },
-            Ok(_) => {
-                log::error!("every task is blocked and nothing will wake one; init never finished");
-                return ExitCode::FAILURE;
-            },
-            Err(error) => {
-                log::error!("{error}");
-                return ExitCode::FAILURE;
-            },
-        }
+    if let Err(code) = poll_until_done(&mut sched, init_id) {
+        return code;
     }
     if ferrite_wifi_start::init_failed() { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }

@@ -1,0 +1,18 @@
+[package]
+name = "ferrite-netif"
+description = "Ethernet frames between a kernel network device and smoltcp: bounded queues, the Device, ping and a tiny HTTP responder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ferrite-hal.workspace = true
+log.workspace = true
+smoltcp = { workspace = true, features = ["socket-icmp", "auto-icmp-echo-reply"] }
+
+[dev-dependencies]
+assert2.workspace = true
+
+[lints]
+workspace = true

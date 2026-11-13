@@ -12,6 +12,7 @@ extern crate alloc;
 
 mod connect;
 mod lab_ap;
+pub mod net;
 mod scan;
 
 use alloc::boxed::Box;
@@ -343,10 +344,7 @@ fn pci_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
         let report = scan::scan(&mut client, &name, &[], scan_limit, clock)?;
         Ok((client, report))
     }) {
-        Ok((mut client, report)) => {
-            join_from_credentials(&mut client, &name, &report.bsses, start_up, clock);
-            true
-        },
+        Ok((mut client, report)) => join_from_credentials(&mut client, &name, &report.bsses, start_up, clock),
         Err(error) => {
             log::error!("nl80211 scan failed: {error}");
             false
@@ -361,28 +359,29 @@ fn pci_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
 /// The file on the firmware volume with the network to join, in `.env` lines.
 const CREDENTIALS_FILE: &str = "wifi.env";
 
-/// Join the network `wifi.env` names, if the scan found it, and leave it again. A failure is logged with
-/// its step and does not fail the run, so the teardown still runs.
+/// Join the network `wifi.env` names, if the scan found it, hand the link to the main loop's IP stack,
+/// and leave it again. Without the file the connect is skipped and that counts as passing; with it, any
+/// failure is logged with its step and fails the run, and the teardown still runs.
 fn join_from_credentials(
     client: &mut ferrite_nl80211::client::Client<scan::KernelSocket>,
     name: &str,
     bsses: &[ferrite_nl80211::nl80211::Bss],
     start_up: &StartUp,
     clock: &dyn Fn() -> Instant,
-) {
+) -> bool {
     use ferrite_nl80211::nl80211::{Security, SsidDisplay};
     let text = match start_up.firmware_reference.load(CREDENTIALS_FILE) {
         Ok(text) => text,
         Err(error) => {
             log::info!("no credentials ({error}); the connect is skipped");
-            return;
+            return true;
         },
     };
     let credentials = match ferrite_wpa::env::Credentials::from_env(&text) {
         Ok(credentials) => credentials,
         Err(error) => {
-            log::warn!("{CREDENTIALS_FILE}: {error}; the connect is skipped");
-            return;
+            log::error!("{CREDENTIALS_FILE}: {error}; the connect is skipped");
+            return false;
         },
     };
     let ssid = credentials.ssid.as_bytes();
@@ -392,23 +391,26 @@ fn join_from_credentials(
         .filter(|bss| bss.ssid == ssid && bss.security == Security::Rsn)
         .max_by_key(|bss| bss.signal.map_or(i32::MIN, |s| s.0))
     else {
-        log::warn!("the scan found no RSN BSS named \"{}\"; the connect is skipped", SsidDisplay(ssid));
-        return;
+        log::error!("the scan found no RSN BSS named \"{}\"; the connect is skipped", SsidDisplay(ssid));
+        return false;
     };
     let signal = bss.signal.map_or_else(|| alloc::string::String::from("?"), |s| alloc::format!("{s}"));
     log::info!("connecting to {} on {} MHz at {signal}", bss.bssid, bss.frequency.0);
     let derive = clock();
     let pmk = ferrite_wpa::kdf::Pmk::from_passphrase(&credentials.passphrase, &credentials.ssid);
     log::info!("PMK derived in {} ms", (clock() - derive).as_millis());
-    let _ = join(client, name, bss, pmk, start_up, clock);
+    join(client, name, bss, pmk, None, start_up, clock)
 }
 
-/// Connect `name` to `bss`, hold the connection and leave it; true when every step passed.
+/// Connect `name` to `bss`, hand the link (and `ap`'s, in the lab) to the main loop's IP stack, hold
+/// the connection until the main loop is done, detach and leave it; true when every step passed and the
+/// main loop reported success.
 fn join(
     client: &mut ferrite_nl80211::client::Client<scan::KernelSocket>,
     name: &str,
     bss: &ferrite_nl80211::nl80211::Bss,
     pmk: ferrite_wpa::kdf::Pmk,
+    ap: Option<ferrite_nl80211::nl80211::IfIndex>,
     start_up: &StartUp,
     clock: &dyn Fn() -> Instant,
 ) -> bool {
@@ -420,7 +422,7 @@ fn join(
             return false;
         },
     };
-    let connection =
+    let mut connection =
         match connect::connect(client, interface.ifindex, interface.mac, bss, pmk, start_up.connect_limit, clock) {
             Ok(connection) => connection,
             Err(error) => {
@@ -435,21 +437,98 @@ fn join(
         connection.associated_after.as_millis(),
         connection.handshake_after.as_millis()
     );
-    enter(c"holding the connection, then disconnecting");
-    match connection.hold_and_leave(client, start_up.hold, start_up.connect_limit, clock) {
+    enter(c"handing the link to the main loop's IP stack");
+    let attached = attach_links(interface.ifindex, name, ap, start_up, clock);
+    let held_from = clock();
+    let held = attached.as_ref().map(|_| {
+        enter(c"holding the connection while the main loop runs IP");
+        connection.hold(client, start_up.hold, &|| net::outcome().is_some(), clock)
+    });
+    let outcome = net::outcome();
+    let taken = net::taken();
+    if let Some(attachments) = attached {
+        attachments.into_iter().for_each(net::Attachment::detach);
+        net::close();
+    }
+    let held_for = clock() - held_from;
+    let ip = match (held, outcome) {
+        (None, _) => false,
+        (Some(Err(error)), _) => {
+            log::error!("the connection dropped while the main loop ran IP: {error}");
+            false
+        },
+        (Some(Ok(())), Some(ok)) => {
+            log::info!(
+                "the main loop finished IP after {} ms: {}",
+                held_for.as_millis(),
+                if ok { "passed" } else { "failed" }
+            );
+            ok
+        },
+        (Some(Ok(())), None) => {
+            log::error!(
+                "the main loop {} the link and did not finish within {} ms",
+                if taken { "took" } else { "never took" },
+                start_up.hold.as_millis()
+            );
+            false
+        },
+    };
+    enter(c"disconnecting");
+    match connection.leave(client, start_up.connect_limit, clock) {
         Ok(reason) => {
             log::info!(
                 "disconnected after holding {} ms: reason {}",
-                start_up.hold.as_millis(),
+                held_for.as_millis(),
                 reason.map_or_else(|| alloc::string::String::from("none"), |r| alloc::format!("{r}"))
             );
-            true
+            ip
         },
         Err(error) => {
             log::error!("leaving the connection failed: {error}");
             false
         },
     }
+}
+
+/// Attach the station's netdev, and in the lab the AP's once it has authorized the station, then
+/// publish them to the main loop.
+fn attach_links(
+    station: ferrite_nl80211::nl80211::IfIndex,
+    name: &str,
+    ap: Option<ferrite_nl80211::nl80211::IfIndex>,
+    start_up: &StartUp,
+    clock: &dyn Fn() -> Instant,
+) -> Option<alloc::vec::Vec<net::Attachment>> {
+    let mut attachments = alloc::vec::Vec::new();
+    match net::attach(station) {
+        Ok(attachment) => attachments.push(attachment),
+        Err(code) => {
+            log::error!("attaching to {name}'s frames failed: {code}");
+            return None;
+        },
+    }
+    if let Some(ap) = ap {
+        let start = clock();
+        while !lab_ap::PORT_OPEN.load(Ordering::Acquire) && clock() - start < start_up.connect_limit {
+            // SAFETY: on a task after the time bring-up.
+            unsafe { msleep(WIFI_POLL_MS) };
+        }
+        match net::attach(ap) {
+            Ok(attachment) => attachments.push(attachment),
+            Err(code) => {
+                log::error!("attaching to the lab AP's frames failed: {code}");
+                attachments.into_iter().for_each(net::Attachment::detach);
+                return None;
+            },
+        }
+    }
+    net::publish(net::Session {
+        station: attachments[0].link(),
+        station_name: name.into(),
+        ap: attachments.get(1).map(net::Attachment::link),
+    });
+    Some(attachments)
 }
 
 /// The SSID and passphrase of the lab's WPA2-PSK network, which the second simulated radio serves.
@@ -484,9 +563,11 @@ fn simulated_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
             0 => Ok(()),
             code => Err(code),
         })?;
-        lab_ap::start(ap_client, start_up.sched.clone(), interface.ifindex, interface.mac, LAB_SSID, pmk.clone())
+        let task =
+            lab_ap::start(ap_client, start_up.sched.clone(), interface.ifindex, interface.mac, LAB_SSID, pmk.clone())?;
+        Ok((task, interface.ifindex))
     });
-    let ap = match ap {
+    let (ap, ap_ifindex) = match ap {
         Ok(ap) => ap,
         Err(error) => {
             log::error!("starting the lab AP failed: {error}");
@@ -515,7 +596,7 @@ fn simulated_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
                     bss.security,
                     report.took.as_millis()
                 );
-                let joined = join(&mut client, &first, bss, pmk, start_up, clock);
+                let joined = join(&mut client, &first, bss, pmk, Some(ap_ifindex), start_up, clock);
                 let ap_side =
                     lab_ap::PORT_OPEN.load(Ordering::Acquire) && lab_ap::GROUP_KEY_INSTALLED.load(Ordering::Acquire);
                 if ap_side {

@@ -16,7 +16,8 @@
 | `ferrite-wifi-sys` | `no_std` | Pinned Linux mac80211, cfg80211, rtw89 and iwlwifi C built by `build.rs`, and the tables of its initcalls |
 | `ferrite-nl80211` | `no_std` + `alloc` | Generic netlink and nl80211 messages, and a client over any netlink socket: scan, connect, keys, stations, frames and the control port |
 | `ferrite-wpa` | `no_std` + `alloc` | WPA2-PSK: PMK and PTK derivation, EAPOL-Key frames, the supplicant's 4-way and group key handshakes, credentials from `.env` lines; the `authenticator` feature adds the AP side |
-| `ferrite-wifi-start` | `no_std` | The Wi-Fi C's kernel entry points and the init thread (seam checks, initcalls, exitcalls) that the lab and `wifitrace` share |
+| `ferrite-netif` | `no_std` + `alloc` | Ethernet frames between a kernel netdev and smoltcp: bounded queues with drop counters, the smoltcp `Device`, DHCP client, ping and a minimal HTTP responder |
+| `ferrite-wifi-start` | `no_std` | The Wi-Fi C's kernel entry points and the init thread (seam checks, initcalls, exitcalls) that the lab and `wifitrace` share, and the frame seam that hands an open link to the main loop |
 | `ferrite-wifi-efi` | `no_std`, UEFI app built as ELF | The shim's platform pieces from firmware services (arena, guarded task stacks, firmware files, clock, PCI I/O devices, the DMA protection probe), and `wifitrace`, which runs the Wi-Fi C on them |
 | `ferrite-lab` | std | The Wi-Fi C run as a Linux process on the desktop: logger, halt hook with a backtrace, the data fence, the host platform pieces |
 | `ferrite-dev` | std | Desktop tool: `log` (DbC capture), `bench` (dbcbench peer), `run` (one-shot cycle on the laptop), `push` and `loader` (client of the resident loader), `build` (an app's `.efi`, converting ELF-built apps), `vendor` (Linux snapshot), `stubs` (generates the kernel-symbol stubs) |

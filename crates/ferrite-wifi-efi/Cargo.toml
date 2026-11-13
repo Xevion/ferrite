@@ -15,8 +15,10 @@ corosensei.workspace = true
 ferrite-efi = { workspace = true, features = ["panic-handler"] }
 ferrite-hal.workspace = true
 ferrite-lkpi.workspace = true
+ferrite-netif.workspace = true
 ferrite-wifi-start.workspace = true
 log.workspace = true
+smoltcp.workspace = true
 snafu.workspace = true
 uefi = { workspace = true, features = ["global_allocator"] }
 

@@ -941,10 +941,12 @@ dependencies = [
  "corosensei",
  "ferrite-hal",
  "ferrite-lkpi",
+ "ferrite-netif",
  "ferrite-wifi-start",
  "ferrite-wifi-sys",
  "libc",
  "log",
+ "smoltcp",
 ]
 
 [[package]]
@@ -972,6 +974,16 @@ dependencies = [
  "ferrite-xhci",
  "log",
  "uefi",
+]
+
+[[package]]
+name = "ferrite-netif"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "ferrite-hal",
+ "log",
+ "smoltcp",
 ]
 
 [[package]]
@@ -1029,8 +1041,10 @@ dependencies = [
  "ferrite-efi",
  "ferrite-hal",
  "ferrite-lkpi",
+ "ferrite-netif",
  "ferrite-wifi-start",
  "log",
+ "smoltcp",
  "snafu",
  "uefi",
 ]
@@ -1041,6 +1055,7 @@ version = "0.1.0"
 dependencies = [
  "ferrite-hal",
  "ferrite-lkpi",
+ "ferrite-netif",
  "ferrite-nl80211",
  "ferrite-wifi-sys",
  "ferrite-wpa",

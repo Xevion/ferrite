@@ -52,6 +52,8 @@ pub enum ConnectError {
     Unsupported,
 }
 
+const HOLD_SLICE: Duration = Duration::from_millis(100);
+
 fn step(step: &'static str) -> impl FnOnce(ClientError) -> ConnectError {
     move |source| ConnectError::Nl80211 { step, source }
 }
@@ -213,27 +215,40 @@ fn install(
 }
 
 impl Connection {
-    /// Keep the connection for `hold`, answering group rekeys, then leave it; returns the reason the
-    /// disconnect event gave.
-    pub fn hold_and_leave(
-        mut self,
+    /// Keep the connection for at most `hold`, answering group rekeys, until `done` says so; checked at
+    /// least every `HOLD_SLICE`.
+    pub fn hold(
+        &mut self,
         client: &mut Client<KernelSocket>,
         hold: Duration,
+        done: &dyn Fn() -> bool,
+        clock: &dyn Fn() -> Instant,
+    ) -> Result<(), ConnectError> {
+        let until = clock() + hold;
+        while !done() && clock() < until {
+            let slice = (clock() + HOLD_SLICE).min(until);
+            while let Some(event) = client.next_event(slice, clock).map_err(step("holding the connection"))? {
+                match event {
+                    Event::ControlPortFrame { ifindex, ethertype: ETH_P_PAE, frame, .. } if ifindex == self.ifindex => {
+                        eapol(client, &mut self.supplicant, self.ifindex, self.ap, &frame)?;
+                    },
+                    Event::Disconnect { ifindex, reason, by_ap } if ifindex == self.ifindex => {
+                        return Err(ConnectError::Disconnected { step: "the hold", reason, by_ap });
+                    },
+                    _ => {},
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Leave the connection; returns the reason the disconnect event gave.
+    pub fn leave(
+        self,
+        client: &mut Client<KernelSocket>,
         limit: Duration,
         clock: &dyn Fn() -> Instant,
     ) -> Result<Option<ReasonCode>, ConnectError> {
-        let until = clock() + hold;
-        while let Some(event) = client.next_event(until, clock).map_err(step("holding the connection"))? {
-            match event {
-                Event::ControlPortFrame { ifindex, ethertype: ETH_P_PAE, frame, .. } if ifindex == self.ifindex => {
-                    eapol(client, &mut self.supplicant, self.ifindex, self.ap, &frame)?;
-                },
-                Event::Disconnect { ifindex, reason, by_ap } if ifindex == self.ifindex => {
-                    return Err(ConnectError::Disconnected { step: "the hold", reason, by_ap });
-                },
-                _ => {},
-            }
-        }
         client.disconnect(self.ifindex, ReasonCode::DeauthLeaving).map_err(step("DISCONNECT"))?;
         let deadline = clock() + limit;
         loop {

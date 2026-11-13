@@ -3,7 +3,8 @@
 //! The kernel arena, task stacks, random seed, firmware files and wall clock come from firmware services
 //! (`ferrite-wifi-efi`); the C runs on the shim's scheduler as kernel threads, polled from the main stack.
 //! Init runs the seam checks, every initcall, the firmware check, the bring-up of a PCI Wi-Fi card and
-//! every exitcall (`ferrite-wifi-start`), and the app exits to the firmware or the loader. The cards of
+//! every exitcall (`ferrite-wifi-start`), and the app exits to the firmware or the loader. Once a
+//! connection's port opens, the main loop runs IP over it (`ferrite_wifi_efi::ip`) for the hold. The cards of
 //! `ferrite_wifi_efi::pci::WANTED` are found through PCI I/O; DMA protection decides whether the arena is
 //! mapped for the card through it. Their interrupts are polled. A run that passes `RUN_LIMIT`, or stops in
 //! a stub, clears bus mastering on every card before it exits. A 1 ms firmware timer event counts ticks,
@@ -56,10 +57,13 @@ const WIFI_LIMIT: Duration = Duration::from_secs(15);
 const SCAN_LIMIT: Duration = Duration::from_secs(10);
 /// How long a connection gets from its request to the open port, and a disconnect to its event.
 const CONNECT_LIMIT: Duration = Duration::from_secs(10);
-/// How long the connection is held before it is left.
-const HOLD: Duration = Duration::from_secs(3);
+/// How long the main loop's IP holds the link after the port opens: DHCP, router pings, then answering
+/// pings and HTTP from the LAN.
+const HOLD: Duration = Duration::from_secs(30);
+/// How long init keeps the connection for the main loop at most.
+const INIT_HOLD: Duration = Duration::from_secs(40);
 /// The whole run ends here, wherever it is: start-up, a scan, a connect and its hold all fit.
-const RUN_LIMIT: Duration = Duration::from_secs(40);
+const RUN_LIMIT: Duration = Duration::from_secs(60);
 const EXIT_AFTER: Duration = Duration::from_secs(10);
 /// Exit status of a run that stopped in a stub: an OEM error code, distinct from every standard one.
 const EXIT_HALTED: Status = Status(Status::ERROR_BIT | 0x4000_0000_0000_0000 | 0x56);
@@ -309,7 +313,7 @@ fn execute(clock: Clock) -> Status {
         wifi_limit: WIFI_LIMIT,
         scan_limit: SCAN_LIMIT,
         connect_limit: CONNECT_LIMIT,
-        hold: HOLD,
+        hold: INIT_HOLD,
     };
     let init_task = match ferrite_wifi_start::start_init(start_up) {
         Ok(task) => task,
@@ -323,6 +327,10 @@ fn execute(clock: Clock) -> Status {
         return Status::ABORTED;
     };
 
+    let mut seed = [0_u8; 8];
+    let seeded = entropy::firmware_bytes(&mut seed).inspect_err(|e| log::error!("smoltcp's seed: {e}"));
+    let Ok(()) = seeded else { return Status::ABORTED };
+    let mut ip = ferrite_wifi_efi::ip::MainNet::new(u64::from_ne_bytes(seed), HOLD);
     let polled = ferrite_lkpi::pci::device_count() > 0;
     let began = clock.now();
     let mut timed_out = false;
@@ -338,8 +346,10 @@ fn execute(clock: Clock) -> Status {
             timed_out = true;
             break;
         }
-        let wait = match sched.poll(BUDGET) {
-            Ok(step) if step.runnable || sched.info(init_id).is_none() => None,
+        let step = sched.poll(BUDGET);
+        let ip_wait = ip.poll(clock.now());
+        let wait = match step {
+            Ok(step) if step.runnable || sched.info(init_id).is_none() || ip_wait == Some(Duration::ZERO) => None,
             Ok(Step { next_deadline: Some(at), .. }) => Some(at.saturating_duration_since(sched.handle().now())),
             Ok(_) if polled => Some(IRQ_POLL),
             Ok(_) => {
@@ -352,7 +362,7 @@ fn execute(clock: Clock) -> Status {
                 return Status::ABORTED;
             },
         };
-        if let Some(wait) = wait {
+        if let Some(wait) = wait.map(|wait| ip_wait.map_or(wait, |ip| ip.min(wait))) {
             PROGRESS.store(0, Ordering::Relaxed);
             clock.delay(if polled { wait.min(IRQ_POLL) } else { wait });
         }

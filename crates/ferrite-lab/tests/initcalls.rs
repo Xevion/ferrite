@@ -1,6 +1,7 @@
 //! Runs the lab binary: the Linux C runs on the shim's scheduler through the time and driver-core
-//! bring-up, the page model check, every initcall, the firmware loader, an nl80211 scan and a WPA2-PSK
-//! connection between the two simulated radios, and every exitcall, and the lab exits 0. A run that stops in a stub or on
+//! bring-up, the page model check, every initcall, the firmware loader, an nl80211 scan, a WPA2-PSK
+//! connection between the two simulated radios with DHCP, ICMP, UDP and TCP over it, and every exitcall,
+//! and the lab exits 0. A run that stops in a stub or on
 //! unimplemented data exits 86 or 87 instead.
 
 use std::process::Command;
@@ -58,8 +59,25 @@ fn every_initcall_returns_0_firmware_loads_and_every_exitcall_runs() {
     check!(stderr.contains("keys: group CCMP key 1 installed"), "{stderr}");
     check!(stderr.contains("4-way: complete; the port to 02:00:00:00:01:00 is open"), "{stderr}");
     check!(stderr.contains("lab AP: pairwise and group keys installed and the station authorized"), "{stderr}");
-    check!(stderr.contains("disconnected after holding 500 ms: reason 3 (DeauthLeaving)"), "{stderr}");
     check!(!stderr.contains("4-way: dropped a frame"), "{stderr}");
+
+    // Once the port is open, init hands both netdevs to the main loop's smoltcp through the frame seam.
+    // The AP's DHCP server leases the station 10.42.0.2/24, and the station pings the AP, gets a UDP echo
+    // back and fetches the AP's HTTP page over TCP, all over the CCMP-protected link.
+    check!(stderr.contains("dhcp: lease 10.42.0.2 (prefix /24), router 10.42.0.1"), "{stderr}");
+    for seq in 0..3 {
+        check!(stderr.contains(&format!("ping 10.42.0.1: reply from 10.42.0.1 seq {seq} after ")), "{stderr}");
+    }
+    check!(stderr.contains("ip: ping 10.42.0.1: 3 of 3 replies"), "{stderr}");
+    check!(stderr.contains("ip: udp echo through 10.42.0.1:7 came back: 20 bytes"), "{stderr}");
+    check!(stderr.contains("http: \"GET / HTTP/1.0\" from 10.42.0.2:40001"), "{stderr}");
+    check!(stderr.contains("ip: tcp: \"HTTP/1.0 200 OK\" from 10.42.0.1:80"), "{stderr}");
+    check!(stderr.contains("ip: lab IP checks passed over the encrypted link"), "{stderr}");
+    check!(stderr.contains("the main loop finished IP after "), "{stderr}");
+    check!(stderr.contains(" ms: passed"), "{stderr}");
+    check!(!stderr.contains("dropped 1") && !stderr.contains("errors 1"), "{stderr}");
+    check!(stderr.contains("disconnected after holding "), "{stderr}");
+    check!(stderr.contains("reason 3 (DeauthLeaving)"), "{stderr}");
 
     let ran =
         stderr.lines().filter(|line| line.starts_with("INFO  exitcall ") && !line.contains("exitcalls done")).count();

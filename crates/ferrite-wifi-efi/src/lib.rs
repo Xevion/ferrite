@@ -8,6 +8,7 @@ extern crate alloc;
 pub mod arena;
 pub mod firmware;
 pub mod iommu;
+pub mod ip;
 pub mod pci;
 pub mod platform;
 pub mod stacks;
