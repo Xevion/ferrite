@@ -60,10 +60,11 @@ build profile="dev": vendor
     cargo efi-build --profile {{ profile }}
     cargo efi-elf-build --profile {{ profile }}
 
-# build one UEFI app and stage it as the ESP bootloader under ./esp
+# build one UEFI app and stage it as the ESP bootloader under ./esp; wifitrace also gets regulatory.db under efi/ferrite/firmware
 stage app="ferrite-uefi": vendor
     mkdir -p esp/efi/boot
     cargo run -q -p ferrite-dev -- build {{ app }} --out esp/efi/boot/bootx64.efi
+    {{ if app == "wifitrace" { "mkdir -p esp/efi/ferrite/firmware && cp /lib/firmware/regulatory.db esp/efi/ferrite/firmware/" } else { "true" } }}
     test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
 
 # boot an app in QEMU: `just qemu`, `just qemu xhciscan serial`, `just qemu ferrite-uefi serial tap`
@@ -77,6 +78,7 @@ qemu app="ferrite-uefi" mode="gui" net="user": (stage app)
         -drive format=raw,file=fat:rw:esp \
         {{ if net == "tap" { tap_net } else { user_net } }} -device e1000,netdev=net0 \
         -device qemu-xhci \
+        -device virtio-rng-pci \
         {{ if mode == "serial" { "-nographic" } else { "-display gtk" } }}
 
 # copy the staged ESP onto a mounted FAT32 USB stick: `just stage-usb /run/media/$USER/FERRITE`

@@ -14,6 +14,8 @@ pub mod entropy;
 pub mod link;
 pub mod logger;
 pub mod pci;
+pub mod rtc;
 pub mod session;
+pub mod volume;
 pub mod watchdog;
 pub mod xhci;

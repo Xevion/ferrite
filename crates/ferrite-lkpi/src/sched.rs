@@ -43,10 +43,10 @@ use snafu::{ResultExt, Snafu};
 pub const DEFAULT_STACK_SIZE: usize = 128 * 1024;
 
 /// What the untouched part of a task stack is filled with, so the high-water mark can be measured.
-const PAINT: u64 = 0x5afe_57ac_5afe_57ac;
+pub const PAINT: u64 = 0x5afe_57ac_5afe_57ac;
 /// What the lowest words of a task stack hold; a change means the stack ran past its end.
 const CANARY: u64 = 0xca4a_17ca_ca4a_17ca;
-const CANARY_WORDS: usize = 8;
+pub const CANARY_WORDS: usize = 8;
 const WORD: usize = size_of::<u64>();
 
 /// Names one task. A slot is reused after its task exits, but never under the same id.

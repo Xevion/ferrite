@@ -6,14 +6,13 @@ use core::mem::ManuallyDrop;
 use core::time::Duration;
 
 use ferrite_hal::{Clock as _, Instant};
-use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
-use uefi::proto::device_path::DevicePath;
-use uefi::proto::loaded_image::LoadedImage;
+use uefi::boot::ScopedProtocol;
 use uefi::proto::media::file::{Directory, File, FileAttribute, FileMode, RegularFile};
 use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::{CStr16, CString16, Status, cstr16, println, system};
 
 use crate::clock::Clock;
+use crate::volume::image_volume;
 
 /// Largest amount of log text held in memory and written to the file.
 const CAP_BYTES: usize = 1 << 20;
@@ -94,24 +93,6 @@ impl LogBuffer {
 struct Backing {
     file: RegularFile,
     _volume: ManuallyDrop<ScopedProtocol<SimpleFileSystem>>,
-}
-
-/// The file system this image was loaded from, opened shared.
-///
-/// `boot::get_image_file_system` opens it exclusively, which a loader holding its own log
-/// would then refuse to every image it starts. The open is never closed, because some firmware
-/// does not track a `GetProtocol` open and fails the close.
-fn image_volume() -> uefi::Result<ManuallyDrop<ScopedProtocol<SimpleFileSystem>>> {
-    let image = boot::image_handle();
-    let device = boot::open_protocol_exclusive::<LoadedImage>(image)?
-        .device()
-        .ok_or_else(|| uefi::Error::from(Status::UNSUPPORTED))?;
-    let path = boot::open_protocol_exclusive::<DevicePath>(device)?;
-    let handle = boot::locate_device_path::<SimpleFileSystem>(&mut &*path)?;
-    let params = OpenProtocolParams { handle, agent: image, controller: None };
-    // SAFETY: a shared open of a file system; every file operation goes through its own handle.
-    let volume = unsafe { boot::open_protocol::<SimpleFileSystem>(params, OpenProtocolAttributes::GetProtocol) }?;
-    Ok(ManuallyDrop::new(volume))
 }
 
 impl Backing {

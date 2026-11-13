@@ -3,23 +3,22 @@
 //! to the end of the exitcalls.
 //!
 //! The C runs on the shim's scheduler, as it will under UEFI. kthreadd and an init thread are kernel
-//! threads; init checks a kthread round trip, runs `lx_kernel_init`, checks a sleep and a timer, runs
-//! the initcalls in order, checks firmware loading, then runs the exitcalls. The main stack only polls
-//! the scheduler until init is gone, sleeping until the timer deadline when all are parked.
+//! threads; init (`ferrite-wifi-start`, shared with the UEFI image) checks a kthread round trip, runs
+//! `lx_kernel_init`, checks a sleep and a timer, runs the initcalls in order, checks firmware loading,
+//! then runs the exitcalls. The main stack only polls the scheduler until init is gone, sleeping until
+//! the timer deadline when all are parked.
 mod fence;
 mod host;
-mod kernel;
 mod logger;
 
 use std::backtrace::Backtrace;
-use std::ffi::{CStr, c_int, c_void};
+use std::ffi::CStr;
 use std::io::Write as _;
-use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use ferrite_lkpi::sched::{NoHooks, Scheduler, Step};
-use ferrite_wifi_sys::{exitcalls, initcalls};
+use ferrite_wifi_start::StartUp;
 use log::LevelFilter;
 
 /// Exit status of a run that stopped in the halt hook, distinct from a crash or a clean exit.
@@ -39,67 +38,6 @@ fn halt(stub: &CStr) -> ! {
     // The process ends right after; a failed write has nowhere to be reported.
     let _ = writeln!(std::io::stderr().lock(), "halted in stub {}\n{backtrace}", stub.to_string_lossy());
     std::process::exit(i32::from(EXIT_HALTED))
-}
-
-/// The init thread: the seam check, then every initcall and exitcall.
-unsafe extern "C" fn init(_: *mut c_void) -> c_int {
-    match kernel::kthread_round_trip() {
-        Ok(()) => log::info!("kthread round trip through kthreadd: created, ran, stopped"),
-        Err(error) => {
-            log::error!("kthread round trip failed: {error}");
-            std::process::exit(1);
-        },
-    }
-    kernel::kernel_init();
-    match kernel::sleep_and_timer() {
-        Ok(slept) => {
-            log::info!("msleep({}) returned after {} ms; a timer_list fired", kernel::SLEEP_MS, slept.as_millis());
-        },
-        Err(error) => {
-            log::error!("time check failed: {error}");
-            std::process::exit(1);
-        },
-    }
-    match kernel::page_model() {
-        Ok(()) => log::info!(
-            "page model: two page frags shared one compound block through its head and it returned on drain; alloc_skb and kfree_skb balanced"
-        ),
-        Err(error) => {
-            log::error!("page model check failed: {error}");
-            std::process::exit(1);
-        },
-    }
-    for call in initcalls() {
-        log::info!("initcall level {} {}", call.level().to_string_lossy(), call.name().to_string_lossy());
-        // SAFETY: init is the only caller, runs the calls one at a time, and the lab links the shim.
-        let code = unsafe { call.call() };
-        log::info!("initcall {} returned {code}", call.name().to_string_lossy());
-    }
-    match kernel::firmware_round_trip(Path::new(FIRMWARE_DIR), c"regulatory.db") {
-        Ok(size) => {
-            log::info!("request_firmware(regulatory.db) returned {size} bytes; a missing file returned -ENOENT");
-        },
-        Err(error) => {
-            log::error!("firmware check failed: {error}");
-            std::process::exit(1);
-        },
-    }
-    match kernel::wait_for_regdb(REGDB_LIMIT) {
-        Ok(waited) => log::info!("regulatory.db loaded and applied by cfg80211 after {} ms", waited.as_millis()),
-        Err(error) => {
-            log::error!("regulatory.db check failed: {error}");
-            std::process::exit(1);
-        },
-    }
-    let mut ran = 0_usize;
-    for call in exitcalls() {
-        log::info!("exitcall {}", call.name().to_string_lossy());
-        // SAFETY: as above; every initcall returned, so each module is set up.
-        unsafe { call.call() };
-        ran += 1;
-    }
-    log::info!("exitcalls done: {ran} ran");
-    0
 }
 
 fn main() -> ExitCode {
@@ -137,7 +75,8 @@ fn main() -> ExitCode {
         },
     }
 
-    if let Err(error) = ferrite_lkpi::firmware::install(Box::leak(Box::new(host::FirmwareDir::new(FIRMWARE_DIR)))) {
+    let firmware: &'static host::FirmwareDir = Box::leak(Box::new(host::FirmwareDir::new(FIRMWARE_DIR)));
+    if let Err(error) = ferrite_lkpi::firmware::install(firmware) {
         log::error!("{error}");
         return ExitCode::FAILURE;
     }
@@ -149,15 +88,16 @@ fn main() -> ExitCode {
     }
 
     let mut sched = Scheduler::new(host::HostPlatform::new(), host::MmapStacks, NoHooks);
-    if let Err(error) = ferrite_lkpi::task::install(sched.handle(), kernel::tasks()) {
+    if let Err(error) = ferrite_lkpi::task::install(sched.handle(), ferrite_wifi_start::tasks()) {
         log::error!("{error}");
         return ExitCode::FAILURE;
     }
-    if let Err(code) = kernel::start_kthreadd() {
+    if let Err(code) = ferrite_wifi_start::start_kthreadd() {
         log::error!("starting kthreadd failed: {code}");
         return ExitCode::FAILURE;
     }
-    let init_task = match kernel::spawn(init, c"init", 0) {
+    let start_up = StartUp { sched: sched.handle(), firmware_reference: firmware, regdb_limit: REGDB_LIMIT };
+    let init_task = match ferrite_wifi_start::start_init(start_up) {
         Ok(task) => task,
         Err(code) => {
             log::error!("starting init failed: {code}");
@@ -185,5 +125,5 @@ fn main() -> ExitCode {
             },
         }
     }
-    ExitCode::SUCCESS
+    if ferrite_wifi_start::init_failed() { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }

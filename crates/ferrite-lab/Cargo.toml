@@ -10,6 +10,7 @@ publish.workspace = true
 corosensei.workspace = true
 ferrite-hal.workspace = true
 ferrite-lkpi.workspace = true
+ferrite-wifi-start.workspace = true
 ferrite-wifi-sys.workspace = true
 libc.workspace = true
 log.workspace = true

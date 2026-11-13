@@ -80,7 +80,7 @@ jobs:
       HOST: >-
         --workspace --exclude ferrite --exclude ferrite-uefi --exclude ferrite-recon
         --exclude ferrite-loader --exclude ferrite-wifi-sys --exclude ferrite-lab
-        --exclude ferrite-wifi-efi
+        --exclude ferrite-wifi-start --exclude ferrite-wifi-efi
     steps:
       - uses: actions/checkout@v7
 

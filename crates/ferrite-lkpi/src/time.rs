@@ -4,7 +4,7 @@
 //! The clock counts nanoseconds of the scheduler platform's `now()`. Arming the clockevent sets the
 //! scheduler's single deadline, and the scheduler wakes the designated timer task once it passes.
 
-use core::ffi::c_void;
+use core::ffi::{c_int, c_void};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
 
@@ -64,6 +64,11 @@ pub extern "sysv64" fn lx_time_set_timer_task(task: *mut c_void) {
     };
     sched.set_timer_task(id);
 }
+
+/// Stopping the tick on an idle CPU asks to join the idle load balancer, which balances between CPUs;
+/// there is one.
+#[unsafe(no_mangle)]
+pub extern "sysv64" fn nohz_balance_enter_idle(_cpu: c_int) {}
 
 /// The wall clock at start-up in nanoseconds since the Unix epoch. Stops if the app never set it.
 #[unsafe(no_mangle)]

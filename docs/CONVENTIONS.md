@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `ferrite-hal` | `no_std` | Platform traits (MMIO, PCI config, DMA, clock, delay) and the address, unit and index types every driver shares |
 | `ferrite-xhci` | `no_std` + `alloc` | xHCI Debug Capability driver, written only against `ferrite-hal` |
-| `ferrite-efi` | `no_std` + `uefi` | UEFI backends for the HAL traits, the boot-volume log, the `log` sink, unattended exit, the firmware watchdog, random identifiers, the link protocol the loader shares with its apps |
+| `ferrite-efi` | `no_std` + `uefi` | UEFI backends for the HAL traits, the boot-volume log and file reads, the `log` sink, unattended exit, the firmware watchdog, firmware RNG and RTC, the link protocol the loader shares with its apps |
 | `ferrite-testing` | std | Host-only test doubles: mock HAL, simulated DbC register file |
 | `ferrite-uefi` | `no_std`, UEFI app | Memory sweep, ratatui UI, SNP + smoltcp networking, mDNS, HTTP status page |
 | `ferrite-recon` | `no_std`, UEFI apps | `pciscan`, `xhciscan`, `dbcping`, `dbcbench` |
@@ -14,8 +14,9 @@
 | `ferrite-wire` | `no_std` + `alloc` | Message formats spoken over the DbC link (the benchmark frames and the loader's `link` protocol), shared by both ends |
 | `ferrite-lkpi` | `no_std` + `alloc` | Linux kernel API shim the Wi-Fi drivers link against; its `stubs` feature holds the generated trace-and-stop stubs |
 | `ferrite-wifi-sys` | `no_std` | Pinned Linux mac80211, cfg80211 and rtw89 C built by `build.rs`, and the tables of its initcalls |
-| `ferrite-wifi-efi` | `no_std`, UEFI app built as ELF | `wifitrace`: the Wi-Fi C on a corosensei task stack under the firmware, run until the first stub |
-| `ferrite-lab` | std | The Wi-Fi C run as a Linux process on the desktop: logger, halt hook with a backtrace, the initcall driver |
+| `ferrite-wifi-start` | `no_std` | The Wi-Fi C's kernel entry points and the init thread (seam checks, initcalls, exitcalls) that the lab and `wifitrace` share |
+| `ferrite-wifi-efi` | `no_std`, UEFI app built as ELF | The shim's platform pieces from firmware services (arena, guarded task stacks, firmware files, clock), and `wifitrace`, which runs the Wi-Fi C on them |
+| `ferrite-lab` | std | The Wi-Fi C run as a Linux process on the desktop: logger, halt hook with a backtrace, the data fence, the host platform pieces |
 | `ferrite-dev` | std | Desktop tool: `log` (DbC capture), `bench` (dbcbench peer), `run` (one-shot cycle on the laptop), `push` and `loader` (client of the resident loader), `build` (an app's `.efi`, converting ELF-built apps), `vendor` (Linux snapshot), `stubs` (generates the kernel-symbol stubs) |
 
 Planned, created when their milestone starts:

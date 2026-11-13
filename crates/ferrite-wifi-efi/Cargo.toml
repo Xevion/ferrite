@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-wifi-efi"
-description = "The Wi-Fi C under UEFI: runs the driver initcalls on a task stack until the first stub"
+description = "The Wi-Fi C under UEFI: the shim's platform pieces from firmware services, and the wifitrace app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,8 +15,9 @@ corosensei.workspace = true
 ferrite-efi = { workspace = true, features = ["panic-handler"] }
 ferrite-hal.workspace = true
 ferrite-lkpi.workspace = true
-ferrite-wifi-sys.workspace = true
+ferrite-wifi-start.workspace = true
 log.workspace = true
+snafu.workspace = true
 uefi = { workspace = true, features = ["global_allocator"] }
 
 [lints]

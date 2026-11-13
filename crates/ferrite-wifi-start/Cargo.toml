@@ -1,0 +1,22 @@
+[package]
+name = "ferrite-wifi-start"
+description = "The Wi-Fi C's start-up and self-checks, shared by the lab and the UEFI image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The C it calls is resolved by the program that links it, so a test binary of this crate alone cannot link.
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+ferrite-hal.workspace = true
+ferrite-lkpi.workspace = true
+ferrite-wifi-sys.workspace = true
+log.workspace = true
+snafu.workspace = true
+
+[lints]
+workspace = true

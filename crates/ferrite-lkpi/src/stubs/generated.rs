@@ -1284,12 +1284,6 @@ pub unsafe extern "sysv64" fn nlmsg_notify() -> ! {
     trace_and_stop(c"nlmsg_notify")
 }
 
-/// `void nohz_balance_enter_idle(int)`, declared in `linux/sched/nohz.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nohz_balance_enter_idle() -> ! {
-    trace_and_stop(c"nohz_balance_enter_idle")
-}
-
 /// `void note_interrupt(struct irq_desc *, irqreturn_t)`, declared in `linux/irq.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn note_interrupt() -> ! {

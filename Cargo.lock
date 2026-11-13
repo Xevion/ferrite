@@ -889,6 +889,7 @@ dependencies = [
  "corosensei",
  "ferrite-hal",
  "ferrite-lkpi",
+ "ferrite-wifi-start",
  "ferrite-wifi-sys",
  "libc",
  "log",
@@ -966,9 +967,21 @@ dependencies = [
  "ferrite-efi",
  "ferrite-hal",
  "ferrite-lkpi",
+ "ferrite-wifi-start",
+ "log",
+ "snafu",
+ "uefi",
+]
+
+[[package]]
+name = "ferrite-wifi-start"
+version = "0.1.0"
+dependencies = [
+ "ferrite-hal",
+ "ferrite-lkpi",
  "ferrite-wifi-sys",
  "log",
- "uefi",
+ "snafu",
 ]
 
 [[package]]
