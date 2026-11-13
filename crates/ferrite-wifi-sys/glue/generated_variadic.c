@@ -3,18 +3,6 @@
 
 extern void lx_stub_hit(const char *name) __attribute__((noreturn));
 
-/* `int _printk(const char *, ...)`, declared in `linux/printk.h`. */
-void _printk(void)
-{
-	lx_stub_hit("_printk");
-}
-
-/* `int _printk_deferred(const char *, ...)`, declared in `linux/printk.h`. */
-void _printk_deferred(void)
-{
-	lx_stub_hit("_printk_deferred");
-}
-
 /* `int add_uevent_var(struct kobj_uevent_env *, const char *, ...)`, declared in `linux/kobject.h`. */
 void add_uevent_var(void)
 {

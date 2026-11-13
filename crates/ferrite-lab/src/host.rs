@@ -92,3 +92,11 @@ impl StackSource for MmapStacks {
         }
     }
 }
+
+/// Seed bytes from the host kernel's entropy pool.
+pub fn entropy() -> Result<[u8; ferrite_lkpi::random::SEED_LEN], std::io::Error> {
+    let mut seed = [0_u8; ferrite_lkpi::random::SEED_LEN];
+    // SAFETY: the buffer is writable for its whole length.
+    let got = unsafe { libc::getrandom(seed.as_mut_ptr().cast(), seed.len(), 0) };
+    if usize::try_from(got).is_ok_and(|n| n == seed.len()) { Ok(seed) } else { Err(std::io::Error::last_os_error()) }
+}

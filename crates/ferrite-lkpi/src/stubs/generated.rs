@@ -68,12 +68,6 @@ pub unsafe extern "sysv64" fn __free_pages() -> ! {
     trace_and_stop(c"__free_pages")
 }
 
-/// `u32 __get_random_u32_below(u32)`, declared in `linux/random.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __get_random_u32_below() -> ! {
-    trace_and_stop(c"__get_random_u32_below")
-}
-
 /// `int __get_user_4(void)`, declared in `asm/uaccess.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __get_user_4() -> ! {
@@ -84,12 +78,6 @@ pub unsafe extern "sysv64" fn __get_user_4() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __get_user_8() -> ! {
     trace_and_stop(c"__get_user_8")
-}
-
-/// `struct kmem_cache *__kmem_cache_create_args(const char *, unsigned int, struct kmem_cache_args *, slab_flags_t)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __kmem_cache_create_args() -> ! {
-    trace_and_stop(c"__kmem_cache_create_args")
 }
 
 /// `void *__kvmalloc_node_noprof(size_t, unsigned long, gfp_t, int)`, declared in `linux/slab.h`.
@@ -192,12 +180,6 @@ pub unsafe extern "sysv64" fn __put_user_8() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __qdisc_calculate_pkt_len() -> ! {
     trace_and_stop(c"__qdisc_calculate_pkt_len")
-}
-
-/// `void __register_sysctl_init(const char *, const struct ctl_table *, const char *, size_t)`, declared in `linux/sysctl.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __register_sysctl_init() -> ! {
-    trace_and_stop(c"__register_sysctl_init")
 }
 
 /// `bool __skb_flow_dissect(const struct net *, const struct sk_buff *, struct flow_dissector *, void *, const void *, __be16, int, int, unsigned int)`, declared in `linux/skbuff.h`.
@@ -330,12 +312,6 @@ pub unsafe extern "sysv64" fn add_device_randomness() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn add_interrupt_randomness() -> ! {
     trace_and_stop(c"add_interrupt_randomness")
-}
-
-/// `struct inode *alloc_anon_inode(struct super_block *)`, declared in `linux/fs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn alloc_anon_inode() -> ! {
-    trace_and_stop(c"alloc_anon_inode")
 }
 
 /// `void arc4_crypt(struct arc4_ctx *, u8 *, const u8 *, unsigned int)`, declared in `crypto/arc4.h`.
@@ -645,12 +621,6 @@ pub unsafe extern "sysv64" fn cleanup_srcu_struct() -> ! {
     trace_and_stop(c"cleanup_srcu_struct")
 }
 
-/// `void clocksource_arch_init(struct clocksource *)`, declared in `linux/clocksource.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn clocksource_arch_init() -> ! {
-    trace_and_stop(c"clocksource_arch_init")
-}
-
 /// `void console_flush_on_panic(enum con_flush_mode)`, declared in `linux/console.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn console_flush_on_panic() -> ! {
@@ -757,12 +727,6 @@ pub unsafe extern "sysv64" fn csum_ipv6_magic() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn csum_partial_copy_nocheck() -> ! {
     trace_and_stop(c"csum_partial_copy_nocheck")
-}
-
-/// `int dev_proc_init(void)`, declared in `linux/net/core/dev.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn dev_proc_init() -> ! {
-    trace_and_stop(c"dev_proc_init")
 }
 
 /// `int device_create_managed_software_node(struct device *, const struct property_entry *, const struct software_node *)`, declared in `linux/property.h`.
@@ -897,12 +861,6 @@ pub unsafe extern "sysv64" fn ethtool_rss_notify() -> ! {
     trace_and_stop(c"ethtool_rss_notify")
 }
 
-/// `int execute_with_initialized_rng(struct notifier_block *)`, declared in `linux/random.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn execute_with_initialized_rng() -> ! {
-    trace_and_stop(c"execute_with_initialized_rng")
-}
-
 /// `void fd_install(unsigned int, struct file *)`, declared in `linux/file.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn fd_install() -> ! {
@@ -937,12 +895,6 @@ pub unsafe extern "sysv64" fn fput() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn free_pages() -> ! {
     trace_and_stop(c"free_pages")
-}
-
-/// `void free_percpu(void *)`, declared in `linux/percpu.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn free_percpu() -> ! {
-    trace_and_stop(c"free_percpu")
 }
 
 /// `void free_uid(struct user_struct *)`, declared in `linux/sched/user.h`.
@@ -985,30 +937,6 @@ pub unsafe extern "sysv64" fn get_option() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn get_options() -> ! {
     trace_and_stop(c"get_options")
-}
-
-/// `void get_random_bytes(void *, size_t)`, declared in `linux/random.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn get_random_bytes() -> ! {
-    trace_and_stop(c"get_random_bytes")
-}
-
-/// `u16 get_random_u16(void)`, declared in `linux/random.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn get_random_u16() -> ! {
-    trace_and_stop(c"get_random_u16")
-}
-
-/// `u32 get_random_u32(void)`, declared in `linux/random.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn get_random_u32() -> ! {
-    trace_and_stop(c"get_random_u32")
-}
-
-/// `u64 get_random_u64(void)`, declared in `linux/random.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn get_random_u64() -> ! {
-    trace_and_stop(c"get_random_u64")
 }
 
 /// `unsigned long get_state_synchronize_rcu(void)`, declared in `linux/rcutiny.h`.
@@ -1149,12 +1077,6 @@ pub unsafe extern "sysv64" fn is_free_buddy_page() -> ! {
     trace_and_stop(c"is_free_buddy_page")
 }
 
-/// `bool is_software_node(const struct fwnode_handle *)`, declared in `linux/property.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn is_software_node() -> ! {
-    trace_and_stop(c"is_software_node")
-}
-
 /// `bool is_vmalloc_addr(const void *)`, declared in `linux/mm.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn is_vmalloc_addr() -> ! {
@@ -1179,18 +1101,6 @@ pub unsafe extern "sysv64" fn kernel_param_unlock() -> ! {
     trace_and_stop(c"kernel_param_unlock")
 }
 
-/// `void kernfs_get(struct kernfs_node *)`, declared in `linux/kernfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kernfs_get() -> ! {
-    trace_and_stop(c"kernfs_get")
-}
-
-/// `void kernfs_put(struct kernfs_node *)`, declared in `linux/kernfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kernfs_put() -> ! {
-    trace_and_stop(c"kernfs_put")
-}
-
 /// `void kfree_sensitive(const void *)`, declared in `linux/slab.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn kfree_sensitive() -> ! {
@@ -1209,58 +1119,10 @@ pub unsafe extern "sysv64" fn kmalloc_size_roundup() -> ! {
     trace_and_stop(c"kmalloc_size_roundup")
 }
 
-/// `kmem_buckets *kmem_buckets_create(const char *, slab_flags_t, unsigned int, unsigned int, void (*)(void *))`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kmem_buckets_create() -> ! {
-    trace_and_stop(c"kmem_buckets_create")
-}
-
-/// `int kmem_cache_alloc_bulk_noprof(struct kmem_cache *, gfp_t, size_t, void **)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kmem_cache_alloc_bulk_noprof() -> ! {
-    trace_and_stop(c"kmem_cache_alloc_bulk_noprof")
-}
-
 /// `void *kmem_cache_alloc_from_sheaf_noprof(struct kmem_cache *, gfp_t, struct slab_sheaf *)`, declared in `linux/slab.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn kmem_cache_alloc_from_sheaf_noprof() -> ! {
     trace_and_stop(c"kmem_cache_alloc_from_sheaf_noprof")
-}
-
-/// `void *kmem_cache_alloc_lru_noprof(struct kmem_cache *, struct list_lru *, gfp_t)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kmem_cache_alloc_lru_noprof() -> ! {
-    trace_and_stop(c"kmem_cache_alloc_lru_noprof")
-}
-
-/// `void *kmem_cache_alloc_node_noprof(struct kmem_cache *, gfp_t, int)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kmem_cache_alloc_node_noprof() -> ! {
-    trace_and_stop(c"kmem_cache_alloc_node_noprof")
-}
-
-/// `void *kmem_cache_alloc_noprof(struct kmem_cache *, gfp_t)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kmem_cache_alloc_noprof() -> ! {
-    trace_and_stop(c"kmem_cache_alloc_noprof")
-}
-
-/// `void kmem_cache_destroy(struct kmem_cache *)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kmem_cache_destroy() -> ! {
-    trace_and_stop(c"kmem_cache_destroy")
-}
-
-/// `void kmem_cache_free(struct kmem_cache *, void *)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kmem_cache_free() -> ! {
-    trace_and_stop(c"kmem_cache_free")
-}
-
-/// `void kmem_cache_free_bulk(struct kmem_cache *, size_t, void **)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kmem_cache_free_bulk() -> ! {
-    trace_and_stop(c"kmem_cache_free_bulk")
 }
 
 /// `struct slab_sheaf *kmem_cache_prefill_sheaf(struct kmem_cache *, gfp_t, unsigned int)`, declared in `linux/slab.h`.
@@ -1287,12 +1149,6 @@ pub unsafe extern "sysv64" fn kmem_cache_sheaf_size() -> ! {
     trace_and_stop(c"kmem_cache_sheaf_size")
 }
 
-/// `unsigned int kmem_cache_size(struct kmem_cache *)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kmem_cache_size() -> ! {
-    trace_and_stop(c"kmem_cache_size")
-}
-
 /// `bool kmem_dump_obj(void *)`, declared in `linux/slab.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn kmem_dump_obj() -> ! {
@@ -1303,24 +1159,6 @@ pub unsafe extern "sysv64" fn kmem_dump_obj() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn kmsg_dump_desc() -> ! {
     trace_and_stop(c"kmsg_dump_desc")
-}
-
-/// `int kobject_synth_uevent(struct kobject *, const char *, size_t)`, declared in `linux/kobject.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kobject_synth_uevent() -> ! {
-    trace_and_stop(c"kobject_synth_uevent")
-}
-
-/// `int kobject_uevent(struct kobject *, enum kobject_action)`, declared in `linux/kobject.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kobject_uevent() -> ! {
-    trace_and_stop(c"kobject_uevent")
-}
-
-/// `int kobject_uevent_env(struct kobject *, enum kobject_action, char **)`, declared in `linux/kobject.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kobject_uevent_env() -> ! {
-    trace_and_stop(c"kobject_uevent_env")
 }
 
 /// `void *krealloc_node_align_noprof(const void *, size_t, unsigned long, gfp_t, int)`, declared in `linux/slab.h`.
@@ -1369,18 +1207,6 @@ pub unsafe extern "sysv64" fn metadata_dst_alloc() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn metadata_dst_free() -> ! {
     trace_and_stop(c"metadata_dst_free")
-}
-
-/// `void misc_deregister(struct miscdevice *)`, declared in `linux/miscdevice.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn misc_deregister() -> ! {
-    trace_and_stop(c"misc_deregister")
-}
-
-/// `int misc_register(struct miscdevice *)`, declared in `linux/miscdevice.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn misc_register() -> ! {
-    trace_and_stop(c"misc_register")
 }
 
 /// `void mmput(struct mm_struct *)`, declared in `linux/sched/mm.h`.
@@ -1833,12 +1659,6 @@ pub unsafe extern "sysv64" fn pcie_capability_read_word() -> ! {
     trace_and_stop(c"pcie_capability_read_word")
 }
 
-/// `void *pcpu_alloc_noprof(size_t, size_t, bool, gfp_t)`, declared in `linux/percpu.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn pcpu_alloc_noprof() -> ! {
-    trace_and_stop(c"pcpu_alloc_noprof")
-}
-
 /// `pid_t pid_vnr(struct pid *)`, declared in `linux/pid.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn pid_vnr() -> ! {
@@ -2169,18 +1989,6 @@ pub unsafe extern "sysv64" fn show_regs() -> ! {
     trace_and_stop(c"show_regs")
 }
 
-/// `int simple_pin_fs(struct file_system_type *, struct vfsmount **, int *)`, declared in `linux/fs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn simple_pin_fs() -> ! {
-    trace_and_stop(c"simple_pin_fs")
-}
-
-/// `void simple_release_fs(struct vfsmount **, int *)`, declared in `linux/fs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn simple_release_fs() -> ! {
-    trace_and_stop(c"simple_release_fs")
-}
-
 /// `int sk_attach_bpf(u32, struct sock *)`, declared in `linux/filter.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn sk_attach_bpf() -> ! {
@@ -2289,18 +2097,6 @@ pub unsafe extern "sysv64" fn sock_wake_async() -> ! {
     trace_and_stop(c"sock_wake_async")
 }
 
-/// `void software_node_notify(struct device *)`, declared in `linux/drivers/base/base.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn software_node_notify() -> ! {
-    trace_and_stop(c"software_node_notify")
-}
-
-/// `void software_node_notify_remove(struct device *)`, declared in `linux/drivers/base/base.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn software_node_notify_remove() -> ! {
-    trace_and_stop(c"software_node_notify_remove")
-}
-
 /// `ssize_t splice_to_pipe(struct pipe_inode_info *, struct splice_pipe_desc *)`, declared in `linux/splice.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn splice_to_pipe() -> ! {
@@ -2337,12 +2133,6 @@ pub unsafe extern "sysv64" fn strnlen_user() -> ! {
     trace_and_stop(c"strnlen_user")
 }
 
-/// `void swiotlb_dev_init(struct device *)`, declared in `linux/swiotlb.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn swiotlb_dev_init() -> ! {
-    trace_and_stop(c"swiotlb_dev_init")
-}
-
 /// `void switch_mm_irqs_off(struct mm_struct *, struct mm_struct *, struct task_struct *)`, declared in `asm/mmu_context.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn switch_mm_irqs_off() -> ! {
@@ -2377,150 +2167,6 @@ pub unsafe extern "sysv64" fn sys_info_parse_param() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn sysctl_sys_info_handler() -> ! {
     trace_and_stop(c"sysctl_sys_info_handler")
-}
-
-/// `int sysfs_add_file_to_group(struct kobject *, const struct attribute *, const char *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_add_file_to_group() -> ! {
-    trace_and_stop(c"sysfs_add_file_to_group")
-}
-
-/// `struct kernfs_node *sysfs_break_active_protection(struct kobject *, const struct attribute *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_break_active_protection() -> ! {
-    trace_and_stop(c"sysfs_break_active_protection")
-}
-
-/// `int sysfs_change_owner(struct kobject *, kuid_t, kgid_t)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_change_owner() -> ! {
-    trace_and_stop(c"sysfs_change_owner")
-}
-
-/// `int sysfs_create_bin_file(struct kobject *, const struct bin_attribute *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_create_bin_file() -> ! {
-    trace_and_stop(c"sysfs_create_bin_file")
-}
-
-/// `int sysfs_create_dir_ns(struct kobject *, const void *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_create_dir_ns() -> ! {
-    trace_and_stop(c"sysfs_create_dir_ns")
-}
-
-/// `int sysfs_create_file_ns(struct kobject *, const struct attribute *, const void *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_create_file_ns() -> ! {
-    trace_and_stop(c"sysfs_create_file_ns")
-}
-
-/// `int sysfs_create_group(struct kobject *, const struct attribute_group *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_create_group() -> ! {
-    trace_and_stop(c"sysfs_create_group")
-}
-
-/// `int sysfs_create_groups(struct kobject *, const struct attribute_group **)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_create_groups() -> ! {
-    trace_and_stop(c"sysfs_create_groups")
-}
-
-/// `int sysfs_create_link(struct kobject *, struct kobject *, const char *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_create_link() -> ! {
-    trace_and_stop(c"sysfs_create_link")
-}
-
-/// `void sysfs_delete_link(struct kobject *, struct kobject *, const char *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_delete_link() -> ! {
-    trace_and_stop(c"sysfs_delete_link")
-}
-
-/// `int sysfs_file_change_owner(struct kobject *, const char *, kuid_t, kgid_t)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_file_change_owner() -> ! {
-    trace_and_stop(c"sysfs_file_change_owner")
-}
-
-/// `int sysfs_groups_change_owner(struct kobject *, const struct attribute_group **, kuid_t, kgid_t)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_groups_change_owner() -> ! {
-    trace_and_stop(c"sysfs_groups_change_owner")
-}
-
-/// `int sysfs_link_change_owner(struct kobject *, struct kobject *, const char *, kuid_t, kgid_t)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_link_change_owner() -> ! {
-    trace_and_stop(c"sysfs_link_change_owner")
-}
-
-/// `int sysfs_move_dir_ns(struct kobject *, struct kobject *, const void *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_move_dir_ns() -> ! {
-    trace_and_stop(c"sysfs_move_dir_ns")
-}
-
-/// `void sysfs_remove_bin_file(struct kobject *, const struct bin_attribute *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_remove_bin_file() -> ! {
-    trace_and_stop(c"sysfs_remove_bin_file")
-}
-
-/// `void sysfs_remove_dir(struct kobject *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_remove_dir() -> ! {
-    trace_and_stop(c"sysfs_remove_dir")
-}
-
-/// `void sysfs_remove_file_ns(struct kobject *, const struct attribute *, const void *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_remove_file_ns() -> ! {
-    trace_and_stop(c"sysfs_remove_file_ns")
-}
-
-/// `bool sysfs_remove_file_self(struct kobject *, const struct attribute *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_remove_file_self() -> ! {
-    trace_and_stop(c"sysfs_remove_file_self")
-}
-
-/// `void sysfs_remove_group(struct kobject *, const struct attribute_group *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_remove_group() -> ! {
-    trace_and_stop(c"sysfs_remove_group")
-}
-
-/// `void sysfs_remove_groups(struct kobject *, const struct attribute_group **)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_remove_groups() -> ! {
-    trace_and_stop(c"sysfs_remove_groups")
-}
-
-/// `void sysfs_remove_link(struct kobject *, const char *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_remove_link() -> ! {
-    trace_and_stop(c"sysfs_remove_link")
-}
-
-/// `int sysfs_rename_dir_ns(struct kobject *, const char *, const void *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_rename_dir_ns() -> ! {
-    trace_and_stop(c"sysfs_rename_dir_ns")
-}
-
-/// `int sysfs_rename_link_ns(struct kobject *, struct kobject *, const char *, const char *, const void *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_rename_link_ns() -> ! {
-    trace_and_stop(c"sysfs_rename_link_ns")
-}
-
-/// `void sysfs_unbreak_active_protection(struct kernfs_node *)`, declared in `linux/sysfs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sysfs_unbreak_active_protection() -> ! {
-    trace_and_stop(c"sysfs_unbreak_active_protection")
 }
 
 /// `struct pid_namespace *task_active_pid_ns(struct task_struct *)`, declared in `linux/pid_namespace.h`.
@@ -2631,28 +2277,10 @@ pub unsafe extern "sysv64" fn vmalloc_to_page() -> ! {
     trace_and_stop(c"vmalloc_to_page")
 }
 
-/// `int vprintk(const char *, struct __va_list_tag *)`, declared in `linux/printk.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn vprintk() -> ! {
-    trace_and_stop(c"vprintk")
-}
-
-/// `int vprintk_emit(int, int, const struct dev_printk_info *, const char *, struct __va_list_tag *)`, declared in `linux/printk.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn vprintk_emit() -> ! {
-    trace_and_stop(c"vprintk_emit")
-}
-
 /// `void *vzalloc_noprof(unsigned long)`, declared in `linux/vmalloc.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn vzalloc_noprof() -> ! {
     trace_and_stop(c"vzalloc_noprof")
-}
-
-/// `int wait_for_random_bytes(void)`, declared in `linux/random.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn wait_for_random_bytes() -> ! {
-    trace_and_stop(c"wait_for_random_bytes")
 }
 
 /// `int xdp_do_generic_redirect(struct net_device *, struct sk_buff *, struct xdp_buff *, const struct bpf_prog *)`, declared in `linux/filter.h`.

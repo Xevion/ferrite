@@ -13,6 +13,8 @@ extern crate std;
 mod arch;
 mod halt;
 mod mem;
+mod printk;
+pub mod random;
 pub mod sched;
 #[cfg(feature = "stubs")]
 mod stubs;

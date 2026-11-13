@@ -490,7 +490,6 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	asm volatile(".pushsection lx_unimplemented,\"aw\",@nobits");
 	LX_MARK(lx_unimplemented_begin);
 	LX_DATA(__end_rodata, sizeof(__end_rodata[0]));
-	LX_DATA(__softirq_pending, sizeof(__softirq_pending));
 	LX_DATA(__start_rodata, sizeof(__start_rodata[0]));
 	LX_DATA(_totalram_pages, sizeof(_totalram_pages));
 	LX_DATA(bpf_master_redirect_enabled_key, sizeof(bpf_master_redirect_enabled_key));
@@ -506,8 +505,6 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	LX_DATA(init_uts_ns, sizeof(init_uts_ns));
 	LX_DATA(initcall_debug, sizeof(initcall_debug));
 	LX_DATA(irq_poll_cpu, sizeof(irq_poll_cpu));
-	LX_DATA(kernel_kobj, sizeof(kernel_kobj));
-	LX_DATA(loops_per_jiffy, sizeof(loops_per_jiffy));
 	LX_DATA(no_irq_chip, sizeof(no_irq_chip));
 	LX_DATA(noirqdebug, sizeof(noirqdebug));
 	LX_DATA(oops_in_progress, sizeof(oops_in_progress));
@@ -552,7 +549,6 @@ struct lx_data_symbol { const char *name; const void *address; unsigned long siz
 
 const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "__end_rodata", &__end_rodata, sizeof(__end_rodata[0]) },
-	{ "__softirq_pending", &__softirq_pending, sizeof(__softirq_pending) },
 	{ "__start_rodata", &__start_rodata, sizeof(__start_rodata[0]) },
 	{ "_totalram_pages", &_totalram_pages, sizeof(_totalram_pages) },
 	{ "bpf_master_redirect_enabled_key", &bpf_master_redirect_enabled_key, sizeof(bpf_master_redirect_enabled_key) },
@@ -571,8 +567,6 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "init_uts_ns", &init_uts_ns, sizeof(init_uts_ns) },
 	{ "initcall_debug", &initcall_debug, sizeof(initcall_debug) },
 	{ "irq_poll_cpu", &irq_poll_cpu, sizeof(irq_poll_cpu) },
-	{ "kernel_kobj", &kernel_kobj, sizeof(kernel_kobj) },
-	{ "loops_per_jiffy", &loops_per_jiffy, sizeof(loops_per_jiffy) },
 	{ "nda_policy", &nda_policy, sizeof(nda_policy[0]) },
 	{ "no_irq_chip", &no_irq_chip, sizeof(no_irq_chip) },
 	{ "noirqdebug", &noirqdebug, sizeof(noirqdebug) },
@@ -603,4 +597,4 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "uuid_index", &uuid_index, sizeof(uuid_index) },
 	{ "vmaflag_names", &vmaflag_names, sizeof(vmaflag_names[0]) },
 };
-const unsigned long lx_unimplemented_data_count = 51;
+const unsigned long lx_unimplemented_data_count = 48;

@@ -30,6 +30,7 @@ unsafe extern "C" {
     fn kthread_stop(task: *mut c_void) -> c_int;
     fn wake_up_process(task: *mut c_void) -> c_int;
     fn schedule();
+    fn lx_kernel_init();
 }
 
 /// Where the C keeps `current`, and `init_task`.
@@ -37,6 +38,12 @@ pub fn tasks() -> LinuxTasks {
     let current = NonNull::new(&raw mut current_task).unwrap_or(NonNull::dangling());
     let init = NonNull::new((&raw mut init_task).cast()).unwrap_or(NonNull::dangling());
     LinuxTasks { current, init }
+}
+
+/// The start-up that runs before the initcalls: workqueues, then the driver core.
+pub fn kernel_init() {
+    // SAFETY: called on the init task, with the scheduler installed and kthreadd running, once.
+    unsafe { lx_kernel_init() };
 }
 
 /// Create a kernel thread from the main stack and return its `task_struct`.

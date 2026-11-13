@@ -16,6 +16,8 @@ stubs = []
 corosensei.workspace = true
 ferrite-hal.workspace = true
 log.workspace = true
+rand_chacha.workspace = true
+rand_core.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]

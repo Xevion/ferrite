@@ -2,7 +2,7 @@
 //! first kernel symbol nothing implements yet: a stub function, or a variable whose storage faults.
 //!
 //! The C runs on the shim's scheduler, as it will under UEFI. kthreadd and an init thread are kernel
-//! threads; init checks a kthread round trip, then runs the initcalls in order, then the exitcalls. The
+//! threads; init checks a kthread round trip, runs `lx_kernel_init`, then the initcalls in order, then the exitcalls. The
 //! main stack only polls the scheduler until init is gone.
 
 mod fence;
@@ -42,6 +42,7 @@ unsafe extern "C" fn init(_: *mut c_void) -> c_int {
             std::process::exit(1);
         },
     }
+    kernel::kernel_init();
     for call in initcalls() {
         log::info!("initcall level {} {}", call.level().to_string_lossy(), call.name().to_string_lossy());
         // SAFETY: init is the only caller, runs the calls one at a time, and the lab links the shim.
@@ -65,6 +66,18 @@ fn main() -> ExitCode {
     if let Err(error) = fence::install() {
         log::error!("{error}");
         return ExitCode::FAILURE;
+    }
+
+    match host::entropy().map(ferrite_lkpi::random::seed) {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => {
+            log::error!("{error}");
+            return ExitCode::FAILURE;
+        },
+        Err(error) => {
+            log::error!("reading host entropy failed: {error}");
+            return ExitCode::FAILURE;
+        },
     }
 
     let mut sched = Scheduler::new(host::HostPlatform::new(), host::MmapStacks, NoHooks);
