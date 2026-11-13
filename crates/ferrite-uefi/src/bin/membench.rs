@@ -2,8 +2,10 @@
 //!
 //! It turns on AVX state, allocates the largest buffer it can (up to 1 GiB), and times each block
 //! over the whole buffer with the TSC clock, best of a few passes. Wide tiers run in interrupts-off
-//! chunks; a second table compares that guard at several chunk sizes against no guard. The tables go
-//! to the log, so to the DbC link under the loader and to `\EFI\ferrite\membench.txt`.
+//! chunks; a second table compares that guard at several chunk sizes against no guard. A scaling
+//! table runs each op's fastest kernel on 1, 2, 4 and all logical processors at once through MP
+//! Services, physical cores before their SMT siblings. The tables go to the log, so to the DbC link
+//! under the loader and to `\EFI\ferrite\membench.txt`.
 
 #![no_std]
 #![no_main]
@@ -13,6 +15,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
+use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 use core::time::Duration;
 
@@ -20,12 +23,14 @@ use ferrite_efi::bootlog::{BootLog, Echo};
 use ferrite_efi::clock::Clock;
 use ferrite_efi::cpu::{FpuControl, VectorState, VectorSupport};
 use ferrite_efi::link::Link as LoaderLink;
+use ferrite_efi::mp::{self, ControlRegisters, Mp, Processor, ProcessorNumber, STACK_PROBE};
 use ferrite_efi::watchdog::Keepalive;
 use ferrite_efi::{logger, session};
 use ferrite_hal::{Clock as _, Instant};
 use ferrite_mem::{Caps, Fault, Faults, Inversion, Kernel, Order, Prsg, Region, Stores, Tier, WIDE_CHUNK_BYTES};
 #[cfg(ferrite_app)]
 use ferrite_rt as _;
+use ferrite_uefi::cores::{self, CoreJob, CoreReport, CoreState, Slot, Spec, StartLine, Summary, Work};
 use log::LevelFilter;
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::prelude::*;
@@ -43,6 +48,15 @@ const PATTERN: u64 = 0x5a5a_a5a5_0ff0_f00f;
 const SEED: u64 = 0x6d65_6d62_656e_6368;
 const GUARD_CHUNKS: [usize; 3] = [64 << 10, 256 << 10, 1 << 20];
 const FAULT_BUDGET: u64 = 8;
+/// Passes per scaling round, even so the inversion leaves PATTERN behind.
+const MP_PASSES: u32 = 4;
+const SCALING_OPS: [Op; 6] = [Op::Fill, Op::Verify, Op::FillPrsg, Op::VerifyPrsg, Op::Invert, Op::Copy];
+/// How long the BSP waits for every AP of a round to reach the start line.
+const GATHER_PATIENCE: Duration = Duration::from_secs(2);
+/// The slowest per-core rate an AP's dispatch timeout allows for, in bytes per second.
+const AP_FLOOR_RATE: u64 = 250_000_000;
+/// The BSP's duties run at most this often during a round, so they barely slow its own share.
+const TEND_EVERY: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Op {
@@ -118,11 +132,21 @@ struct Bench<'v> {
     faults: u64,
     stopped: bool,
     skipped: usize,
+    last_tend: Instant,
+    /// The fastest kernel of each op in the main table.
+    best: Vec<(Op, Kernel, f64)>,
 }
 
 impl<'v> Bench<'v> {
     fn keep_going(&mut self) -> bool {
         let now = self.clock.now();
+        self.duties(now);
+        !self.stopped && now - self.started < BUDGET
+    }
+
+    /// The watchdog, the loader link and the log, which the BSP keeps serving while APs run.
+    fn duties(&mut self, now: Instant) {
+        self.last_tend = now;
         if let Some(watchdog) = self.watchdog.as_mut() {
             watchdog.tick(now);
         }
@@ -131,7 +155,14 @@ impl<'v> Bench<'v> {
             self.stopped |= link.stop_requested();
         }
         logger::with(BootLog::poll);
-        !self.stopped && now - self.started < BUDGET
+    }
+
+    /// [`Self::duties`], if [`TEND_EVERY`] has passed since they last ran.
+    fn tend(&mut self) {
+        let now = self.clock.now();
+        if now - self.last_tend >= TEND_EVERY {
+            self.duties(now);
+        }
     }
 
     /// Run `op` once over `region` with `kernel`, chunk by chunk.
@@ -229,12 +260,137 @@ impl<'v> Bench<'v> {
                 match cell {
                     Some(gbs) => {
                         let _ = write!(row, "{gbs:>11.2}");
+                        match self.best.iter_mut().find(|(o, ..)| *o == op) {
+                            Some(best) if best.2 < gbs => *best = (op, kernel, gbs),
+                            Some(_) => {},
+                            None => self.best.push((op, kernel, gbs)),
+                        }
                     },
                     None => row.push_str("          -"),
                 }
             }
             log::info!("{row}");
         }
+    }
+
+    /// The kernel the scaling table uses for `op`: the main table's fastest, else the widest tier.
+    fn scaling_kernel(&self, op: Op) -> Kernel {
+        if let Some(&(_, kernel, _)) = self.best.iter().find(|(o, ..)| *o == op) {
+            return kernel;
+        }
+        let stores = if op.stores() && op != Op::Invert { Stores::NonTemporal } else { Stores::Temporal };
+        let tier = self.caps.best();
+        self.caps.kernel(tier, stores).or_else(|| self.caps.kernel(tier, Stores::Temporal)).unwrap_or(Kernel::SCALAR)
+    }
+
+    /// One row per op, one column per processor count, in aggregate GB/s over [`MP_PASSES`] passes.
+    fn scaling_table(&mut self, region: &mut Region<'_>, mp: &Mp) {
+        let order = scaling_order(mp);
+        let columns = scaling_columns(&order);
+        let mut header = alloc::format!("membench: scaling GB/s {:<11}", "kernel");
+        for c in &columns {
+            let _ = write!(header, "{:>10}", c.label);
+        }
+        log::info!("{header}");
+        let mut stack = None;
+        for op in SCALING_OPS {
+            prepare(op, region);
+            let kernel = self.scaling_kernel(op);
+            let mut row = alloc::format!("membench: {:<12} {:<11}", op.name(), alloc::format!("{kernel}"));
+            for c in &columns {
+                let cpus: Vec<ProcessorNumber> = order[..c.count].iter().map(|p| p.number).collect();
+                match self.round(mp, &cpus, op, kernel, region) {
+                    Some(summary) if summary.complete() => {
+                        stack = stack.max(summary.stack_bytes);
+                        let _ = write!(row, "{:>10.2}", summary.rate());
+                    },
+                    Some(_) => row.push_str("      fail"),
+                    None => row.push_str("         -"),
+                }
+            }
+            log::info!("{row}");
+        }
+        match stack {
+            Some(bytes) if bytes >= STACK_PROBE => {
+                log::warn!("membench: scaling: an AP used all {STACK_PROBE} probed stack bytes");
+            },
+            Some(bytes) => log::info!("membench: scaling: deepest AP stack {bytes} of {STACK_PROBE} probed bytes"),
+            None => {},
+        }
+        if mp::ap_panics() > 0 {
+            log::error!("membench: scaling: {} AP panics", mp::ap_panics());
+        }
+    }
+
+    /// `op` on `cpus` at once, the BSP (always first) included; `None` when skipped.
+    fn round(
+        &mut self,
+        mp: &Mp,
+        cpus: &[ProcessorNumber],
+        op: Op,
+        kernel: Kernel,
+        region: &mut Region<'_>,
+    ) -> Option<Summary> {
+        let work = match op {
+            Op::Fill => Work::Fill { value: PATTERN },
+            Op::Verify => Work::Verify { value: PATTERN },
+            Op::Invert => Work::Invert { pattern: PATTERN },
+            Op::FillPrsg => Work::FillPrsg { seed: SEED },
+            Op::VerifyPrsg => Work::VerifyPrsg { seed: SEED },
+            Op::Copy => Work::Copy,
+            Op::FillAddress | Op::VerifyAddress => return None,
+        };
+        let parts = NonZeroUsize::new(cpus.len())?;
+        if !self.keep_going() {
+            self.skipped += 1;
+            return None;
+        }
+        let spec = Spec {
+            kernel,
+            work,
+            passes: MP_PASSES,
+            chunk_words: WIDE_CHUNK_BYTES / size_of::<u64>(),
+            clock: self.clock,
+        };
+        let line = StartLine::default();
+        let slots: Vec<Slot> = cpus.iter().map(|_| Slot::default()).collect();
+        let share = (region.bytes() / cpus.len()) as u64 * u64::from(MP_PASSES);
+        let timeout = Duration::from_secs(share / AP_FLOOR_RATE + 1) + cores::AP_PATIENCE + GATHER_PATIENCE;
+        let (vector, clock) = (self.vector, self.clock);
+        let released = cores::with_split(region, parts, op == Op::Copy, |slices| {
+            let jobs: Vec<CoreJob<'_, Clock>> =
+                slices.into_iter().zip(&slots).map(|(slice, slot)| CoreJob::new(spec, slice, &line, slot)).collect();
+            mp.scope(|scope| {
+                let mut started = 0;
+                for (job, &cpu) in jobs.iter().zip(cpus).skip(1) {
+                    match scope.start(cpu, job, timeout) {
+                        Ok(()) => started += 1,
+                        Err(e) => log::warn!("membench: scaling {}: {e}", op.name()),
+                    }
+                }
+                let released = line.gather(started, &clock, GATHER_PATIENCE, &mut || self.tend());
+                if let (Some(_), Some(own)) = (released, jobs.first()) {
+                    own.run_here(vector, &mut || self.tend());
+                }
+                while scope.running() > 0 {
+                    self.tend();
+                    core::hint::spin_loop();
+                }
+                released
+            })
+        });
+        let reports: Vec<CoreReport> = slots.iter().map(Slot::report).collect();
+        for (cpu, report) in cpus.iter().zip(&reports) {
+            if report.state != CoreState::Done {
+                log::warn!("membench: scaling {} {kernel} on {} cpus: {cpu} {}", op.name(), cpus.len(), report.state);
+            }
+            for f in &report.first {
+                log::warn!("membench: scaling {} {kernel}: {cpu} {f}", op.name());
+            }
+        }
+        let summary = Summary::of(released.unwrap_or_else(|| clock.now()), &reports);
+        self.faults += summary.faults;
+        Some(summary)
     }
 
     /// Fill and verify on the wide kernels: no guard, then the guard at each chunk size, with the
@@ -293,6 +449,44 @@ fn prepare(op: Op, region: &mut Region<'_>) {
         Op::VerifyPrsg => ferrite_mem::fill_prsg(k, region, &mut Prsg::new(SEED), 0),
         Op::Fill | Op::FillAddress | Op::FillPrsg | Op::Copy => {},
     }
+}
+
+/// The BSP, then the enabled APs with every core's first thread before any second thread.
+fn scaling_order(mp: &Mp) -> Vec<&Processor> {
+    let mut order: Vec<&Processor> = mp.processors().iter().filter(|p| p.bsp).collect();
+    let mut aps: Vec<&Processor> = mp.aps().collect();
+    aps.sort_by_key(|p| (p.location.thread, p.location.package, p.location.core, p.number));
+    order.extend(aps);
+    order
+}
+
+struct Column {
+    count: usize,
+    label: String,
+}
+
+/// 1, 2, 4 and all processors, and the physical cores alone when there are SMT siblings.
+fn scaling_columns(order: &[&Processor]) -> Vec<Column> {
+    let all = order.len();
+    let cores = order.iter().filter(|p| p.location.thread == 0).count();
+    let smt = cores > 0 && cores < all;
+    let mut counts: Vec<usize> = [1, 2, 4, all].into_iter().filter(|&n| n > 0 && n <= all).collect();
+    if smt {
+        counts.push(cores);
+    }
+    counts.sort_unstable();
+    counts.dedup();
+    counts
+        .into_iter()
+        .map(|count| {
+            let label = match count {
+                n if smt && n == all => alloc::format!("{n} all"),
+                n if smt && n == cores => alloc::format!("{n} cores"),
+                n => alloc::format!("{n}"),
+            };
+            Column { count, label }
+        })
+        .collect()
 }
 
 #[expect(
@@ -367,6 +561,8 @@ fn bench(caps: Caps, vector: Option<&VectorState>) -> Status {
         faults: 0,
         stopped: false,
         skipped: 0,
+        last_tend: clock.now(),
+        best: Vec::new(),
     };
     let kernels: Vec<String> = caps.kernels().map(|k| alloc::format!("{k}")).collect();
     log::info!(
@@ -377,9 +573,28 @@ fn bench(caps: Caps, vector: Option<&VectorState>) -> Status {
     );
     // SAFETY: the pages were just allocated for us alone and are freed only after the region's last use.
     let region = unsafe { Region::from_raw(ptr.cast::<u64>().as_ptr(), bytes / size_of::<u64>()) };
+    let mp = Mp::locate().inspect_err(|e| log::warn!("mp: {e}; the scaling table is skipped")).ok();
+    for p in mp.iter().flat_map(Mp::processors) {
+        log::info!("mp: {p}");
+    }
     let status = match region {
         Ok(mut region) => {
             bench.main_table(&mut region);
+            if let Some(mp) = &mp {
+                let before = mp.ap_control_registers();
+                bench.scaling_table(&mut region, mp);
+                let after = mp.ap_control_registers();
+                for ((cpu, was), (_, now)) in before.iter().zip(&after) {
+                    let show = |r: &Option<ControlRegisters>| {
+                        r.map_or_else(|| String::from("no answer"), |r| alloc::format!("{r}"))
+                    };
+                    if was == now {
+                        log::info!("mp: {cpu} {} before and after", show(was));
+                    } else {
+                        log::warn!("mp: {cpu} {} before, {} after", show(was), show(now));
+                    }
+                }
+            }
             bench.guard_table(&mut region);
             Status::SUCCESS
         },

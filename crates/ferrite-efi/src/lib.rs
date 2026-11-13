@@ -14,6 +14,7 @@ pub mod dma;
 pub mod entropy;
 pub mod link;
 pub mod logger;
+pub mod mp;
 pub mod pci;
 pub mod rtc;
 pub mod session;

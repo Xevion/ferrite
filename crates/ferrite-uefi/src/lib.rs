@@ -10,6 +10,7 @@ extern crate std;
 
 pub mod app;
 pub mod backend;
+pub mod cores;
 pub mod diag;
 pub mod mdns;
 pub mod net;

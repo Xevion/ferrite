@@ -92,6 +92,7 @@ fn close_timer(timer: uefi::Event) {
 }
 
 /// Records the panic in the boot log, shows it, then after ten seconds resets (under systemd-boot) or powers off.
+/// On an AP it only halts that core, which the firmware's dispatch timeout then resets.
 #[cfg(all(ferrite_app, feature = "panic-handler"))]
 #[panic_handler]
 #[expect(clippy::disallowed_macros, reason = "the panic handler is one of the two sanctioned println homes")]
@@ -101,6 +102,10 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 
     static PANICKING: AtomicBool = AtomicBool::new(false);
 
+    // An AP may not touch the logger, the console or any EFI service, so it only halts.
+    if crate::mp::on_ap() {
+        crate::mp::halt_ap();
+    }
     if !PANICKING.swap(true, Ordering::Relaxed) {
         if !logger::record_panic(info) {
             uefi::println!("[PANIC]: {info}");
