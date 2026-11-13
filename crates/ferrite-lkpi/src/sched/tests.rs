@@ -499,3 +499,50 @@ fn spawn_reports_a_stack_source_that_cannot_allocate() {
     let result = rig.sched.spawn("t", prio(120), 0, |_| {});
     assert!(let Err(SpawnError::Stack { .. }) = result);
 }
+
+/// What C calling into the shim does: reach the running task through the handle alone.
+fn block_through(handle: &SchedHandle) {
+    handle.with_current(|t| t.schedule(true)).unwrap();
+}
+
+#[test]
+fn handle_reaches_the_running_task_without_a_context_argument() {
+    let mut rig = Rig::new();
+    let handle = rig.sched.handle();
+    check!(handle.with_current(|_| ()).is_none(), "the main stack has no task");
+
+    let (events, inner) = (Rc::clone(&rig.events), handle.clone());
+    let sleeper = rig.sched.spawn("sleeper", prio(120), 0xa, move |_| {
+        block_through(&inner);
+        events.borrow_mut().push("woken");
+    });
+    let sleeper = sleeper.unwrap();
+    rig.poll();
+    check!(rig.sched.info(sleeper).unwrap().state == TaskState::Blocked);
+
+    rig.spawn("waker", 120, move |_| {
+        let id = handle.find_by_user(0xa).unwrap();
+        check!(handle.unblock(id) == Unblocked::Woken);
+    });
+    rig.poll();
+    check!(rig.events() == ["woken"]);
+}
+
+#[test]
+fn exit_deep_in_a_task_tears_it_down_and_returns_its_stack() {
+    let mut rig = Rig::new();
+    let (events, handle) = (Rc::clone(&rig.events), rig.sched.handle());
+    let id = rig.spawn("quitter", 120, move |_| {
+        events.borrow_mut().push("before");
+        handle.with_current(|t| t.exit());
+        events.borrow_mut().push("after");
+    });
+
+    let step = rig.poll();
+
+    check!(rig.events() == ["before"]);
+    check!(step.runnable == false);
+    check!(rig.sched.info(id).is_none());
+    check!(rig.sched.unblock(id) == Unblocked::Exited);
+    check!(rig.src.released.get() == 1);
+}

@@ -886,6 +886,8 @@ name = "ferrite-lab"
 version = "0.1.0"
 dependencies = [
  "assert2",
+ "corosensei",
+ "ferrite-hal",
  "ferrite-lkpi",
  "ferrite-wifi-sys",
  "libc",

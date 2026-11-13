@@ -3,6 +3,10 @@
 //! The snapshot is made by `ferrite-dev vendor`. Every flag is passed explicitly: `cc`'s own defaults
 //! (profile optimisation level, PIC, target flags) would change what the kernel headers assume.
 //!
+//! C files under `shadow/` whose path is a Linux path (`shadow/kernel/sched/core.c`) replace that Linux file:
+//! they are compiled as Linux units with the KBUILD defines of the path they shadow, and a shadowed path must
+//! not also be in `source.list`.
+//!
 //! Hand-written and generated C in `glue/` (the kernel symbols the shim defines in C) is compiled with the
 //! same flags into the same archive, after the passes below and so without the rename.
 //!
@@ -74,6 +78,75 @@ fn file_flags(text: &str) -> BTreeMap<&str, Vec<&str>> {
             Some((fields.next()?, fields.collect()))
         })
         .collect()
+}
+
+/// The KBUILD defines Kbuild gives a built-in object at `path`, a Linux path with its extension.
+fn kbuild_defines(path: &str) -> Vec<String> {
+    let (dir, name) = path.rsplit_once('/').unwrap_or((".", path));
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    vec![
+        format!("-DKBUILD_BASENAME=\"{stem}\""),
+        format!("-DKBUILD_MODNAME=\"{stem}\""),
+        format!("-D__KBUILD_MODNAME=kmod_{stem}"),
+        format!("-DKBUILD_MODFILE=\"{dir}/{stem}\""),
+    ]
+}
+
+/// The `.c` files under `dir`, as paths relative to it with `/` separators, in name order.
+fn shadow_sources(dir: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            if path.is_dir() {
+                walk(root, &path, found);
+            } else if path.extension().is_some_and(|ext| ext == "c")
+                && let Ok(relative) = path.strip_prefix(root)
+            {
+                let parts: Vec<String> =
+                    relative.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                found.push(parts.join("/"));
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(dir, dir, &mut found);
+    found.sort();
+    found
+}
+
+/// One C file compiled as a Linux unit: `path` is the Linux path it stands for, `file` where it is read from.
+struct Unit {
+    path: String,
+    file: String,
+    kbuild: Vec<String>,
+}
+
+/// Every C file to compile as a Linux unit: `source.list` from the snapshot, then the shadows.
+fn units(crate_dir: &Path, snapshot: &Path) -> Vec<Unit> {
+    let listed = source_list(&read(&crate_dir.join("source.list")));
+    let flags_text = read(&snapshot.join("kbuild-flags.txt"));
+    let per_file = file_flags(&flags_text);
+    let shadowed = shadow_sources(&crate_dir.join("shadow"));
+    let both: Vec<&str> = shadowed.iter().filter(|path| listed.contains(path)).map(String::as_str).collect();
+    if !both.is_empty() {
+        fail(&format!("shadowed files are also in source.list: {}", both.join(", ")));
+    }
+    let mut units: Vec<Unit> = listed
+        .iter()
+        .map(|source| {
+            let Some(kbuild) = per_file.get(source.as_str()) else {
+                fail(&format!("{source} is in source.list but not in the snapshot; run `just vendor`"));
+            };
+            let kbuild = kbuild.iter().map(|flag| (*flag).to_owned()).collect();
+            Unit { path: source.clone(), file: format!("linux/{source}"), kbuild }
+        })
+        .collect();
+    units.extend(shadowed.into_iter().map(|path| Unit {
+        file: format!("shadow/{path}"),
+        kbuild: kbuild_defines(&path),
+        path,
+    }));
+    units
 }
 
 /// The major version `clang --version` reports.
@@ -301,31 +374,29 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "linux") {
         flags.extend(LAB_FLAGS.map(str::to_owned));
     }
-    let sources = source_list(&read(&crate_dir.join("source.list")));
-    let flags_text = read(&snapshot.join("kbuild-flags.txt"));
-    let per_file = file_flags(&flags_text);
+    let units = units(&crate_dir, &snapshot);
+    let sources: Vec<String> = units.iter().map(|unit| unit.path.clone()).collect();
 
     let collisions = crate_dir.join("libc-collisions.txt");
     let rename = format!("--redefine-syms={}", collisions.display());
 
     let next = AtomicUsize::new(0);
-    let workers = thread::available_parallelism().map_or(1, usize::from).min(sources.len().max(1));
+    let workers = thread::available_parallelism().map_or(1, usize::from).min(units.len().max(1));
     let compile = || {
         let mut done = Vec::new();
         loop {
             let slot = next.fetch_add(1, Ordering::Relaxed);
-            let Some(source) = sources.get(slot) else { return done };
-            let Some(kbuild) = per_file.get(source.as_str()) else {
-                fail(&format!("{source} is in source.list but not in the snapshot; run `just vendor`"));
-            };
-            let dir = source.rsplit_once('/').map_or(".", |(dir, _)| dir);
+            let Some(unit) = units.get(slot) else { return done };
+            let dir = unit.path.rsplit_once('/').map_or(".", |(dir, _)| dir);
             let (include, generated) = (format!("-Ilinux/{dir}"), format!("-Ilinux/generated/{dir}"));
-            let mut extra: Vec<&str> = kbuild.clone();
+            let mut extra: Vec<&str> = unit.kbuild.iter().map(String::as_str).collect();
             extra.extend([include.as_str(), generated.as_str()]);
             let mut build = builder(&clang, &llvm, &flags, &extra);
-            build.file(format!("linux/{source}"));
-            let object =
-                build.compile_intermediates().pop().unwrap_or_else(|| fail(&format!("{source} produced no object")));
+            build.file(&unit.file);
+            let object = build
+                .compile_intermediates()
+                .pop()
+                .unwrap_or_else(|| fail(&format!("{} produced no object", unit.file)));
             run_llvm(&llvm, "llvm-objcopy", &[rename.as_ref(), DISCARD.as_ref(), object.as_os_str()]);
             let symbols = defined_symbols(&llvm, &object);
             done.push((slot, object, symbols));
@@ -345,8 +416,7 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap_or_else(|| fail("OUT_DIR is not set")));
     let table = out_dir.join("initcalls.c");
-    fs::write(&table, tables)
-        .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", table.display())));
+    fs::write(&table, tables).unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", table.display())));
     let mut build = builder(&clang, &llvm, &flags, &[]);
     build.file(&table);
     objects.extend(build.compile_intermediates());

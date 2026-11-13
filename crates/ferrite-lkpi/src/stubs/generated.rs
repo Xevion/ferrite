@@ -20,12 +20,6 @@ pub unsafe extern "sysv64" fn __alloc_pages_noprof() -> ! {
     trace_and_stop(c"__alloc_pages_noprof")
 }
 
-/// `int __cond_resched(void)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __cond_resched() -> ! {
-    trace_and_stop(c"__cond_resched")
-}
-
 /// `void __const_udelay(unsigned long)`, declared in `asm-generic/delay.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __const_udelay() -> ! {
@@ -36,12 +30,6 @@ pub unsafe extern "sysv64" fn __const_udelay() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __copy_overflow() -> ! {
     trace_and_stop(c"__copy_overflow")
-}
-
-/// `int __cpuhp_setup_state(enum cpuhp_state, const char *, bool, int (*)(unsigned int), int (*)(unsigned int), bool)`, declared in `linux/cpuhotplug.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __cpuhp_setup_state() -> ! {
-    trace_and_stop(c"__cpuhp_setup_state")
 }
 
 /// `void __dl_server_attach_root(struct sched_dl_entity *, struct rq *)`, declared in `linux/kernel/sched/sched.h`.
@@ -98,42 +86,6 @@ pub unsafe extern "sysv64" fn __get_user_8() -> ! {
     trace_and_stop(c"__get_user_8")
 }
 
-/// `void *__kmalloc_cache_node_noprof(struct kmem_cache *, gfp_t, int, size_t)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __kmalloc_cache_node_noprof() -> ! {
-    trace_and_stop(c"__kmalloc_cache_node_noprof")
-}
-
-/// `void *__kmalloc_cache_noprof(struct kmem_cache *, gfp_t, size_t)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __kmalloc_cache_noprof() -> ! {
-    trace_and_stop(c"__kmalloc_cache_noprof")
-}
-
-/// `void *__kmalloc_large_noprof(size_t, gfp_t)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __kmalloc_large_noprof() -> ! {
-    trace_and_stop(c"__kmalloc_large_noprof")
-}
-
-/// `void *__kmalloc_node_noprof(size_t, gfp_t, int)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __kmalloc_node_noprof() -> ! {
-    trace_and_stop(c"__kmalloc_node_noprof")
-}
-
-/// `void *__kmalloc_node_track_caller_noprof(size_t, gfp_t, int, unsigned long)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __kmalloc_node_track_caller_noprof() -> ! {
-    trace_and_stop(c"__kmalloc_node_track_caller_noprof")
-}
-
-/// `void *__kmalloc_noprof(size_t, gfp_t)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __kmalloc_noprof() -> ! {
-    trace_and_stop(c"__kmalloc_noprof")
-}
-
 /// `struct kmem_cache *__kmem_cache_create_args(const char *, unsigned int, struct kmem_cache_args *, slab_flags_t)`, declared in `linux/slab.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __kmem_cache_create_args() -> ! {
@@ -150,18 +102,6 @@ pub unsafe extern "sysv64" fn __kvmalloc_node_noprof() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __might_fault() -> ! {
     trace_and_stop(c"__might_fault")
-}
-
-/// `void __might_resched(const char *, int, unsigned int)`, declared in `linux/kernel.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __might_resched() -> ! {
-    trace_and_stop(c"__might_resched")
-}
-
-/// `void __might_sleep(const char *, int)`, declared in `linux/kernel.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __might_sleep() -> ! {
-    trace_and_stop(c"__might_sleep")
 }
 
 /// `int __mm_populate(unsigned long, unsigned long, int)`, declared in `linux/mm.h`.
@@ -236,12 +176,6 @@ pub unsafe extern "sysv64" fn __put_cred() -> ! {
     trace_and_stop(c"__put_cred")
 }
 
-/// `void __put_task_struct_rcu_cb(struct callback_head *)`, declared in `linux/sched/task.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __put_task_struct_rcu_cb() -> ! {
-    trace_and_stop(c"__put_task_struct_rcu_cb")
-}
-
 /// `void __put_user_4(void)`, declared in `asm/uaccess.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __put_user_4() -> ! {
@@ -264,12 +198,6 @@ pub unsafe extern "sysv64" fn __qdisc_calculate_pkt_len() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __register_sysctl_init() -> ! {
     trace_and_stop(c"__register_sysctl_init")
-}
-
-/// `void __set_task_comm(struct task_struct *, const char *, bool)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __set_task_comm() -> ! {
-    trace_and_stop(c"__set_task_comm")
 }
 
 /// `bool __skb_flow_dissect(const struct net *, const struct sk_buff *, struct flow_dissector *, void *, const void *, __be16, int, int, unsigned int)`, declared in `linux/skbuff.h`.
@@ -486,12 +414,6 @@ pub unsafe extern "sysv64" fn bpf_warn_invalid_xdp_action() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn bust_spinlocks() -> ! {
     trace_and_stop(c"bust_spinlocks")
-}
-
-/// `void call_rcu(struct callback_head *, rcu_callback_t)`, declared in `linux/rcupdate.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn call_rcu() -> ! {
-    trace_and_stop(c"call_rcu")
 }
 
 /// `int cap_settime(const struct timespec64 *, const struct timezone *)`, declared in `linux/security.h`.
@@ -837,12 +759,6 @@ pub unsafe extern "sysv64" fn csum_partial_copy_nocheck() -> ! {
     trace_and_stop(c"csum_partial_copy_nocheck")
 }
 
-/// `int default_wake_function(struct wait_queue_entry *, unsigned int, int, void *)`, declared in `linux/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn default_wake_function() -> ! {
-    trace_and_stop(c"default_wake_function")
-}
-
 /// `int dev_proc_init(void)`, declared in `linux/net/core/dev.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn dev_proc_init() -> ! {
@@ -897,12 +813,6 @@ pub unsafe extern "sysv64" fn dma_unmap_page_attrs() -> ! {
     trace_and_stop(c"dma_unmap_page_attrs")
 }
 
-/// `void do_exit(long)`, declared in `linux/kernel.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn do_exit() -> ! {
-    trace_and_stop(c"do_exit")
-}
-
 /// `unsigned long do_mmap(struct file *, unsigned long, unsigned long, unsigned long, unsigned long, vm_flags_t, unsigned long, unsigned long *, struct list_head *)`, declared in `linux/mm.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn do_mmap() -> ! {
@@ -913,12 +823,6 @@ pub unsafe extern "sysv64" fn do_mmap() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn do_no_restart_syscall() -> ! {
     trace_and_stop(c"do_no_restart_syscall")
-}
-
-/// `void do_set_cpus_allowed(struct task_struct *, const struct cpumask *)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn do_set_cpus_allowed() -> ! {
-    trace_and_stop(c"do_set_cpus_allowed")
 }
 
 /// `void do_trace_netlink_extack(const char *)`, declared in `linux/netlink.h`.
@@ -1015,12 +919,6 @@ pub unsafe extern "sysv64" fn file_ns_capable() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn file_path() -> ! {
     trace_and_stop(c"file_path")
-}
-
-/// `struct task_struct *find_task_by_vpid(pid_t)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn find_task_by_vpid() -> ! {
-    trace_and_stop(c"find_task_by_vpid")
 }
 
 /// `void finish_rcuwait(struct rcuwait *)`, declared in `linux/rcuwait.h`.
@@ -1161,18 +1059,6 @@ pub unsafe extern "sysv64" fn gnet_stats_copy_queue() -> ! {
     trace_and_stop(c"gnet_stats_copy_queue")
 }
 
-/// `int idle_cpu(int)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn idle_cpu() -> ! {
-    trace_and_stop(c"idle_cpu")
-}
-
-/// `void ignore_signals(struct task_struct *)`, declared in `linux/sched/signal.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn ignore_signals() -> ! {
-    trace_and_stop(c"ignore_signals")
-}
-
 /// `void init_dl_bw(struct dl_bw *)`, declared in `linux/kernel/sched/sched.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn init_dl_bw() -> ! {
@@ -1189,30 +1075,6 @@ pub unsafe extern "sysv64" fn init_pseudo() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn init_srcu_struct() -> ! {
     trace_and_stop(c"init_srcu_struct")
-}
-
-/// `void io_schedule(void)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn io_schedule() -> ! {
-    trace_and_stop(c"io_schedule")
-}
-
-/// `void io_schedule_finish(int)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn io_schedule_finish() -> ! {
-    trace_and_stop(c"io_schedule_finish")
-}
-
-/// `int io_schedule_prepare(void)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn io_schedule_prepare() -> ! {
-    trace_and_stop(c"io_schedule_prepare")
-}
-
-/// `long io_schedule_timeout(long)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn io_schedule_timeout() -> ! {
-    trace_and_stop(c"io_schedule_timeout")
 }
 
 /// `void iounmap(volatile void *)`, declared in `asm/io.h`.
@@ -1317,12 +1179,6 @@ pub unsafe extern "sysv64" fn kernel_param_unlock() -> ! {
     trace_and_stop(c"kernel_param_unlock")
 }
 
-/// `pid_t kernel_thread(int (*)(void *), void *, const char *, unsigned long)`, declared in `linux/sched/task.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kernel_thread() -> ! {
-    trace_and_stop(c"kernel_thread")
-}
-
 /// `void kernfs_get(struct kernfs_node *)`, declared in `linux/kernfs.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn kernfs_get() -> ! {
@@ -1333,12 +1189,6 @@ pub unsafe extern "sysv64" fn kernfs_get() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn kernfs_put() -> ! {
     trace_and_stop(c"kernfs_put")
-}
-
-/// `void kfree(const void *)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kfree() -> ! {
-    trace_and_stop(c"kfree")
 }
 
 /// `void kfree_sensitive(const void *)`, declared in `linux/slab.h`.
@@ -1845,12 +1695,6 @@ pub unsafe extern "sysv64" fn note_interrupt() -> ! {
     trace_and_stop(c"note_interrupt")
 }
 
-/// `unsigned int nr_iowait_cpu(int)`, declared in `linux/sched/stat.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nr_iowait_cpu() -> ! {
-    trace_and_stop(c"nr_iowait_cpu")
-}
-
 /// `void page_frag_free(void *)`, declared in `linux/page_frag_cache.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn page_frag_free() -> ! {
@@ -2151,12 +1995,6 @@ pub unsafe extern "sysv64" fn rcu_barrier() -> ! {
     trace_and_stop(c"rcu_barrier")
 }
 
-/// `void rcu_qs(void)`, declared in `linux/rcutiny.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn rcu_qs() -> ! {
-    trace_and_stop(c"rcu_qs")
-}
-
 /// `void rcu_sched_clock_irq(int)`, declared in `linux/rcupdate.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn rcu_sched_clock_irq() -> ! {
@@ -2167,12 +2005,6 @@ pub unsafe extern "sysv64" fn rcu_sched_clock_irq() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn rcuref_get_slowpath() -> ! {
     trace_and_stop(c"rcuref_get_slowpath")
-}
-
-/// `int rcuwait_wake_up(struct rcuwait *)`, declared in `linux/mmap_lock.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn rcuwait_wake_up() -> ! {
-    trace_and_stop(c"rcuwait_wake_up")
 }
 
 /// `void register_handler_proc(unsigned int, struct irqaction *)`, declared in `linux/kernel/irq/internals.h`.
@@ -2253,40 +2085,10 @@ pub unsafe extern "sysv64" fn sched_clock_noinstr() -> ! {
     trace_and_stop(c"sched_clock_noinstr")
 }
 
-/// `void sched_set_fifo(struct task_struct *)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sched_set_fifo() -> ! {
-    trace_and_stop(c"sched_set_fifo")
-}
-
-/// `void sched_set_fifo_low(struct task_struct *)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sched_set_fifo_low() -> ! {
-    trace_and_stop(c"sched_set_fifo_low")
-}
-
-/// `int sched_setscheduler_nocheck(struct task_struct *, int, const struct sched_param *)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sched_setscheduler_nocheck() -> ! {
-    trace_and_stop(c"sched_setscheduler_nocheck")
-}
-
 /// `void sched_tick(void)`, declared in `linux/sched.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn sched_tick() -> ! {
     trace_and_stop(c"sched_tick")
-}
-
-/// `void schedule(void)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn schedule() -> ! {
-    trace_and_stop(c"schedule")
-}
-
-/// `void schedule_preempt_disabled(void)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn schedule_preempt_disabled() -> ! {
-    trace_and_stop(c"schedule_preempt_disabled")
 }
 
 /// `int send_sigurg(struct file *)`, declared in `linux/fs.h`.
@@ -2349,12 +2151,6 @@ pub unsafe extern "sysv64" fn set_cpus_allowed_common() -> ! {
     trace_and_stop(c"set_cpus_allowed_common")
 }
 
-/// `int set_cpus_allowed_ptr(struct task_struct *, const struct cpumask *)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn set_cpus_allowed_ptr() -> ! {
-    trace_and_stop(c"set_cpus_allowed_ptr")
-}
-
 /// `void set_rq_offline(struct rq *)`, declared in `linux/kernel/sched/sched.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn set_rq_offline() -> ! {
@@ -2365,12 +2161,6 @@ pub unsafe extern "sysv64" fn set_rq_offline() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn set_rq_online() -> ! {
     trace_and_stop(c"set_rq_online")
-}
-
-/// `void set_user_nice(struct task_struct *, long)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn set_user_nice() -> ! {
-    trace_and_stop(c"set_user_nice")
 }
 
 /// `void show_regs(struct pt_regs *)`, declared in `linux/sched/debug.h`.
@@ -2769,12 +2559,6 @@ pub unsafe extern "sysv64" fn tcp_wfree() -> ! {
     trace_and_stop(c"tcp_wfree")
 }
 
-/// `int try_to_wake_up(struct task_struct *, unsigned int, int)`, declared in `linux/kernel/sched/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn try_to_wake_up() -> ! {
-    trace_and_stop(c"try_to_wake_up")
-}
-
 /// `void unpin_user_page(struct page *)`, declared in `linux/mm.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn unpin_user_page() -> ! {
@@ -2869,48 +2653,6 @@ pub unsafe extern "sysv64" fn vzalloc_noprof() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn wait_for_random_bytes() -> ! {
     trace_and_stop(c"wait_for_random_bytes")
-}
-
-/// `unsigned long wait_task_inactive(struct task_struct *, unsigned int)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn wait_task_inactive() -> ! {
-    trace_and_stop(c"wait_task_inactive")
-}
-
-/// `void wake_q_add(struct wake_q_head *, struct task_struct *)`, declared in `linux/sched/wake_q.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn wake_q_add() -> ! {
-    trace_and_stop(c"wake_q_add")
-}
-
-/// `void wake_q_add_safe(struct wake_q_head *, struct task_struct *)`, declared in `linux/sched/wake_q.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn wake_q_add_safe() -> ! {
-    trace_and_stop(c"wake_q_add_safe")
-}
-
-/// `void wake_up_nohz_cpu(int)`, declared in `linux/sched/nohz.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn wake_up_nohz_cpu() -> ! {
-    trace_and_stop(c"wake_up_nohz_cpu")
-}
-
-/// `int wake_up_process(struct task_struct *)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn wake_up_process() -> ! {
-    trace_and_stop(c"wake_up_process")
-}
-
-/// `void wake_up_q(struct wake_q_head *)`, declared in `linux/sched/wake_q.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn wake_up_q() -> ! {
-    trace_and_stop(c"wake_up_q")
-}
-
-/// `int wake_up_state(struct task_struct *, unsigned int)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn wake_up_state() -> ! {
-    trace_and_stop(c"wake_up_state")
 }
 
 /// `int xdp_do_generic_redirect(struct net_device *, struct sk_buff *, struct xdp_buff *, const struct bpf_prog *)`, declared in `linux/filter.h`.

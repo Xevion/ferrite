@@ -14,6 +14,8 @@ pub const EXIT_DATA: u8 = 87;
 /// What a shell reports for a process killed by SIGSEGV, kept for faults elsewhere.
 const EXIT_SEGV: u8 = 139;
 const PAGE: usize = 4096;
+/// Room for the handler's formatting and backtrace.
+const SIGNAL_STACK: usize = 256 * 1024;
 
 fn fenced(address: usize) -> bool {
     unimplemented_regions().iter().any(|region| region.contains(&address))
@@ -31,7 +33,14 @@ pub fn install() -> Result<(), String> {
     // SAFETY: an all-zero sigaction is a valid starting value; the fields that matter are set below.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = on_fault as *const () as usize;
-    action.sa_flags = libc::SA_SIGINFO;
+    // On its own stack, so a task that runs into its guard page is still reported.
+    action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
+    let alternate = Box::leak(vec![0_u8; SIGNAL_STACK].into_boxed_slice());
+    let stack = libc::stack_t { ss_sp: alternate.as_mut_ptr().cast(), ss_flags: 0, ss_size: alternate.len() };
+    // SAFETY: the stack is leaked, so it outlives every signal the process takes.
+    if unsafe { libc::sigaltstack(&raw const stack, std::ptr::null_mut()) } != 0 {
+        return Err(format!("installing the signal stack failed: {}", std::io::Error::last_os_error()));
+    }
     // SAFETY: `action` is initialized and the handler has the SA_SIGINFO signature.
     if unsafe { libc::sigaction(libc::SIGSEGV, &raw const action, std::ptr::null_mut()) } != 0 {
         return Err(format!("installing the SIGSEGV handler failed: {}", std::io::Error::last_os_error()));

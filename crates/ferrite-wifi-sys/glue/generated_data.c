@@ -489,32 +489,24 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 {
 	asm volatile(".pushsection lx_unimplemented,\"aw\",@nobits");
 	LX_MARK(lx_unimplemented_begin);
-	LX_DATA(__cpu_active_mask, sizeof(__cpu_active_mask));
-	LX_DATA(__cpu_online_mask, sizeof(__cpu_online_mask));
-	LX_DATA(__cpu_possible_mask, sizeof(__cpu_possible_mask));
 	LX_DATA(__end_rodata, sizeof(__end_rodata[0]));
-	LX_DATA(__preempt_count, sizeof(__preempt_count));
 	LX_DATA(__softirq_pending, sizeof(__softirq_pending));
 	LX_DATA(__start_rodata, sizeof(__start_rodata[0]));
 	LX_DATA(_totalram_pages, sizeof(_totalram_pages));
 	LX_DATA(bpf_master_redirect_enabled_key, sizeof(bpf_master_redirect_enabled_key));
 	LX_DATA(bpf_stats_enabled_key, sizeof(bpf_stats_enabled_key));
 	LX_DATA(cpu_khz, sizeof(cpu_khz));
-	LX_DATA(current_task, sizeof(current_task));
 	LX_DATA(flow_keys_basic_dissector, sizeof(flow_keys_basic_dissector));
 	LX_DATA(hardirq_stack_inuse, sizeof(hardirq_stack_inuse));
 	LX_DATA(hardirq_stack_ptr, sizeof(hardirq_stack_ptr));
 	LX_DATA(inet_protos, sizeof(inet_protos));
 	LX_DATA(init_on_alloc, sizeof(init_on_alloc));
 	LX_DATA(init_pid_ns, sizeof(init_pid_ns));
-	LX_DATA(init_task, sizeof(init_task));
 	LX_DATA(init_user_ns, sizeof(init_user_ns));
 	LX_DATA(init_uts_ns, sizeof(init_uts_ns));
 	LX_DATA(initcall_debug, sizeof(initcall_debug));
 	LX_DATA(irq_poll_cpu, sizeof(irq_poll_cpu));
 	LX_DATA(kernel_kobj, sizeof(kernel_kobj));
-	LX_DATA(kmalloc_caches, sizeof(kmalloc_caches));
-	LX_DATA(kstat, sizeof(kstat));
 	LX_DATA(loops_per_jiffy, sizeof(loops_per_jiffy));
 	LX_DATA(no_irq_chip, sizeof(no_irq_chip));
 	LX_DATA(noirqdebug, sizeof(noirqdebug));
@@ -525,7 +517,6 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	LX_DATA(pci_dev_groups, sizeof(pci_dev_groups[0]));
 	LX_DATA(phys_base, sizeof(phys_base));
 	LX_DATA(reboot_mode, sizeof(reboot_mode));
-	LX_DATA(runqueues, sizeof(runqueues));
 	LX_DATA(sched_smp_initialized, sizeof(sched_smp_initialized));
 	LX_DATA(static_key_initialized, sizeof(static_key_initialized));
 	LX_DATA(suppress_printk, sizeof(suppress_printk));
@@ -539,8 +530,6 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	asm volatile(".popsection");
 	asm volatile(".pushsection lx_unimplemented_ro,\"a\",@nobits");
 	LX_MARK(lx_unimplemented_ro_begin);
-	LX_DATA(cpu_all_bits, sizeof(cpu_all_bits));
-	LX_DATA(cpu_bit_bitmap, sizeof(cpu_bit_bitmap));
 	LX_DATA(dst_default_metrics, sizeof(dst_default_metrics));
 	LX_DATA(gfpflag_names, sizeof(gfpflag_names[0]));
 	LX_DATA(guid_index, sizeof(guid_index));
@@ -562,20 +551,13 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 struct lx_data_symbol { const char *name; const void *address; unsigned long size; };
 
 const struct lx_data_symbol lx_unimplemented_data[] = {
-	{ "__cpu_active_mask", &__cpu_active_mask, sizeof(__cpu_active_mask) },
-	{ "__cpu_online_mask", &__cpu_online_mask, sizeof(__cpu_online_mask) },
-	{ "__cpu_possible_mask", &__cpu_possible_mask, sizeof(__cpu_possible_mask) },
 	{ "__end_rodata", &__end_rodata, sizeof(__end_rodata[0]) },
-	{ "__preempt_count", &__preempt_count, sizeof(__preempt_count) },
 	{ "__softirq_pending", &__softirq_pending, sizeof(__softirq_pending) },
 	{ "__start_rodata", &__start_rodata, sizeof(__start_rodata[0]) },
 	{ "_totalram_pages", &_totalram_pages, sizeof(_totalram_pages) },
 	{ "bpf_master_redirect_enabled_key", &bpf_master_redirect_enabled_key, sizeof(bpf_master_redirect_enabled_key) },
 	{ "bpf_stats_enabled_key", &bpf_stats_enabled_key, sizeof(bpf_stats_enabled_key) },
-	{ "cpu_all_bits", &cpu_all_bits, sizeof(cpu_all_bits) },
-	{ "cpu_bit_bitmap", &cpu_bit_bitmap, sizeof(cpu_bit_bitmap) },
 	{ "cpu_khz", &cpu_khz, sizeof(cpu_khz) },
-	{ "current_task", &current_task, sizeof(current_task) },
 	{ "dst_default_metrics", &dst_default_metrics, sizeof(dst_default_metrics) },
 	{ "flow_keys_basic_dissector", &flow_keys_basic_dissector, sizeof(flow_keys_basic_dissector) },
 	{ "gfpflag_names", &gfpflag_names, sizeof(gfpflag_names[0]) },
@@ -585,14 +567,11 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "inet_protos", &inet_protos, sizeof(inet_protos) },
 	{ "init_on_alloc", &init_on_alloc, sizeof(init_on_alloc) },
 	{ "init_pid_ns", &init_pid_ns, sizeof(init_pid_ns) },
-	{ "init_task", &init_task, sizeof(init_task) },
 	{ "init_user_ns", &init_user_ns, sizeof(init_user_ns) },
 	{ "init_uts_ns", &init_uts_ns, sizeof(init_uts_ns) },
 	{ "initcall_debug", &initcall_debug, sizeof(initcall_debug) },
 	{ "irq_poll_cpu", &irq_poll_cpu, sizeof(irq_poll_cpu) },
 	{ "kernel_kobj", &kernel_kobj, sizeof(kernel_kobj) },
-	{ "kmalloc_caches", &kmalloc_caches, sizeof(kmalloc_caches) },
-	{ "kstat", &kstat, sizeof(kstat) },
 	{ "loops_per_jiffy", &loops_per_jiffy, sizeof(loops_per_jiffy) },
 	{ "nda_policy", &nda_policy, sizeof(nda_policy[0]) },
 	{ "no_irq_chip", &no_irq_chip, sizeof(no_irq_chip) },
@@ -611,7 +590,6 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "pci_dev_groups", &pci_dev_groups, sizeof(pci_dev_groups[0]) },
 	{ "phys_base", &phys_base, sizeof(phys_base) },
 	{ "reboot_mode", &reboot_mode, sizeof(reboot_mode) },
-	{ "runqueues", &runqueues, sizeof(runqueues) },
 	{ "sched_smp_initialized", &sched_smp_initialized, sizeof(sched_smp_initialized) },
 	{ "static_key_initialized", &static_key_initialized, sizeof(static_key_initialized) },
 	{ "suppress_printk", &suppress_printk, sizeof(suppress_printk) },
@@ -625,4 +603,4 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "uuid_index", &uuid_index, sizeof(uuid_index) },
 	{ "vmaflag_names", &vmaflag_names, sizeof(vmaflag_names[0]) },
 };
-const unsigned long lx_unimplemented_data_count = 62;
+const unsigned long lx_unimplemented_data_count = 51;

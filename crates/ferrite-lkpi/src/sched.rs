@@ -9,9 +9,11 @@
 //! # Shared state
 //!
 //! Tasks reach the scheduler through the [`Task`] handle, while the main loop is suspended inside
-//! `resume`. The state sits in `RefCell`s that are borrowed only for short, non-reentrant sections and
-//! never across a `resume`, a `suspend`, a body or a platform/hook callback. Execution is single
-//! threaded and cooperative, so a borrow is always released before anything else can run: a conflict
+//! `resume`. Code with no `Task` in hand (C calling into the shim) goes through a [`SchedHandle`], which
+//! shares the state by reference and never through the `&mut Scheduler` the main loop holds, and reaches
+//! the running task's own `Task` with [`SchedHandle::with_current`]. The state sits in `RefCell`s that
+//! are borrowed only for short, non-reentrant sections and never across a `resume`, a `suspend`, a body
+//! or a platform/hook callback. Execution is single threaded and cooperative, so a borrow is always released before anything else can run: a conflict
 //! is a bug and panics instead of waiting, which means the cell can never deadlock.
 //!
 //! # Teardown
@@ -29,6 +31,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt;
+use core::ptr::NonNull;
 use core::time::Duration;
 
 use corosensei::stack::Stack;
@@ -188,6 +191,14 @@ type Coro<St> = Coroutine<(), (), (), St>;
 /// The operations a running task can reach, with the platform generics erased.
 trait Core {
     fn now(&self) -> Instant;
+    /// Record the yielder of a task whose body just started.
+    fn started(&self, id: TaskId, yielder: NonNull<Yielder<(), ()>>);
+    /// The running task and its yielder; `None` on the main stack.
+    fn running(&self) -> Option<(TaskId, NonNull<Yielder<(), ()>>)>;
+    fn user(&self, id: TaskId) -> Option<usize>;
+    fn find_by_user(&self, user: usize) -> Option<TaskId>;
+    /// Mark the running task to be torn down once it next suspends.
+    fn exit(&self, id: TaskId);
     fn enter(&self, id: TaskId, block: bool);
     fn unblock(&self, id: TaskId) -> Unblocked;
     fn spawn(&self, name: String, priority: Priority, user: usize, body: Body) -> Result<TaskId, SpawnError>;
@@ -212,6 +223,19 @@ impl Task<'_> {
 
     pub const fn current(&self) -> TaskId {
         self.id
+    }
+
+    /// The `user` word this task was spawned with.
+    pub fn user(&self) -> usize {
+        self.core.user(self.id).unwrap_or_default()
+    }
+
+    /// End this task from anywhere in its call stack. Its frames are abandoned, never unwound, so
+    /// whatever they own leaks; the stack goes back to the [`StackSource`].
+    pub fn exit(&self) -> ! {
+        self.core.exit(self.id);
+        self.yielder.suspend(());
+        unreachable!("an exited task was resumed")
     }
 
     pub fn unblock(&self, id: TaskId) -> Unblocked {
@@ -305,6 +329,10 @@ struct Entry<St: Stack> {
     user: usize,
     queued: bool,
     stack: Region,
+    /// Set once the body starts; valid while the task is alive, because the coroutine owns it.
+    yielder: Option<NonNull<Yielder<(), ()>>>,
+    /// The task called `exit`; the poll that sees it suspend tears it down.
+    exiting: bool,
     /// Taken out while the task runs, and while the slot is reserved but not yet filled.
     co: Option<Coro<St>>,
 }
@@ -358,7 +386,17 @@ impl<St: Stack> State<St> {
     }
 
     fn reserve(&mut self, name: String, priority: Priority, user: usize, stack: Region) -> TaskId {
-        let entry = Entry { name, priority, state: TaskState::Runnable, user, queued: false, stack, co: None };
+        let entry = Entry {
+            name,
+            priority,
+            state: TaskState::Runnable,
+            user,
+            queued: false,
+            stack,
+            yielder: None,
+            exiting: false,
+            co: None,
+        };
         if let Some(index) = self.free.pop() {
             let slot = &mut self.slots[index as usize];
             slot.entry = Some(entry);
@@ -410,6 +448,7 @@ impl<P: Platform + 'static, S: StackSource, H: Hooks> Shared<P, S, H> {
             // SAFETY: the scheduler owns the `Shared` this points into and never frees it while a
             // task can still run: `Drop for Scheduler` abandons every coroutine first.
             let core = unsafe { &*core };
+            core.started(id, NonNull::from(yielder));
             body(&Task { core, yielder, id });
         });
         let mut st = self.state.borrow_mut();
@@ -451,6 +490,16 @@ impl<P: Platform + 'static, S: StackSource, H: Hooks> Shared<P, S, H> {
         }
         let fault = st.fault.take();
         match result {
+            CoroutineResult::Yield(()) if st.entry(id).is_some_and(|e| e.exiting) => {
+                st.release(id);
+                drop(st);
+                log::debug!("{id} exited from inside its body");
+                // SAFETY: the task is suspended for good and its slot is gone, so nothing can resume it;
+                // its frames leak, as in "Teardown" in the module docs.
+                unsafe { co.force_reset() };
+                self.stacks.borrow_mut().release(co.into_stack());
+                st = self.state.borrow_mut();
+            },
             CoroutineResult::Yield(()) => {
                 if let Some(entry) = st.entry_mut(id) {
                     entry.co = Some(co);
@@ -531,6 +580,38 @@ impl<P: Platform + 'static, S: StackSource, H: Hooks> Core for Shared<P, S, H> {
         self.platform.borrow().now()
     }
 
+    fn started(&self, id: TaskId, yielder: NonNull<Yielder<(), ()>>) {
+        if let Some(entry) = self.state.borrow_mut().entry_mut(id) {
+            entry.yielder = Some(yielder);
+        }
+    }
+
+    fn running(&self) -> Option<(TaskId, NonNull<Yielder<(), ()>>)> {
+        let st = self.state.borrow();
+        let id = st.current?;
+        Some((id, st.entry(id)?.yielder?))
+    }
+
+    fn user(&self, id: TaskId) -> Option<usize> {
+        self.state.borrow().entry(id).map(|e| e.user)
+    }
+
+    fn find_by_user(&self, user: usize) -> Option<TaskId> {
+        let st = self.state.borrow();
+        st.slots.iter().enumerate().find_map(|(index, slot)| {
+            let entry = slot.entry.as_ref()?;
+            (entry.user == user)
+                .then(|| TaskId { index: u32::try_from(index).unwrap_or(u32::MAX), generation: slot.generation })
+        })
+    }
+
+    fn exit(&self, id: TaskId) {
+        if let Some(entry) = self.state.borrow_mut().entry_mut(id) {
+            entry.exiting = true;
+            entry.state = TaskState::Blocked;
+        }
+    }
+
     fn enter(&self, id: TaskId, block: bool) {
         let now = self.now();
         self.hooks.borrow_mut().on_enter(now);
@@ -584,6 +665,49 @@ pub struct Step {
     pub next_deadline: Option<Instant>,
     /// How many task runs the step made.
     pub ran: usize,
+}
+
+/// A shared view of a [`Scheduler`], for callers that cannot be handed a [`Task`].
+///
+/// C calling the shim is one. The handle works through `&self` only, so a call from inside a running
+/// task never aliases the `&mut Scheduler` of the `poll` that is running it.
+#[derive(Clone)]
+pub struct SchedHandle {
+    core: Rc<dyn Core>,
+}
+
+impl SchedHandle {
+    /// Run `f` with the running task's own [`Task`]; `None` on the main stack.
+    pub fn with_current<R>(&self, f: impl FnOnce(&Task<'_>) -> R) -> Option<R> {
+        let (id, yielder) = self.core.running()?;
+        // SAFETY: the yielder belongs to the running task's coroutine, which is alive while it runs,
+        // and this call is on that task's stack, so the reference cannot outlive it.
+        let yielder = unsafe { yielder.as_ref() };
+        Some(f(&Task { core: &*self.core, yielder, id }))
+    }
+
+    pub fn spawn(
+        &self,
+        name: impl Into<String>,
+        priority: Priority,
+        user: usize,
+        body: impl FnOnce(&Task<'_>) + 'static,
+    ) -> Result<TaskId, SpawnError> {
+        self.core.spawn(name.into(), priority, user, Box::new(body))
+    }
+
+    pub fn unblock(&self, id: TaskId) -> Unblocked {
+        self.core.unblock(id)
+    }
+
+    pub fn set_priority(&self, id: TaskId, priority: Priority) -> Result<(), TaskGone> {
+        self.core.set_priority(id, priority)
+    }
+
+    /// The first live task spawned with this `user` word.
+    pub fn find_by_user(&self, user: usize) -> Option<TaskId> {
+        self.core.find_by_user(user)
+    }
 }
 
 /// The scheduler. It holds no globals; see the module docs for how tasks reach it.
@@ -647,12 +771,12 @@ impl<P: Platform + 'static, S: StackSource, H: Hooks> Scheduler<P, S, H> {
 
     /// The first live task spawned with this `user` word.
     pub fn find_by_user(&self, user: usize) -> Option<TaskId> {
-        let st = self.shared.state.borrow();
-        st.slots.iter().enumerate().find_map(|(index, slot)| {
-            let entry = slot.entry.as_ref()?;
-            (entry.user == user)
-                .then(|| TaskId { index: u32::try_from(index).unwrap_or(u32::MAX), generation: slot.generation })
-        })
+        self.shared.find_by_user(user)
+    }
+
+    /// A handle for code that runs inside tasks and has no [`Task`] passed to it.
+    pub fn handle(&self) -> SchedHandle {
+        SchedHandle { core: self.shared.clone() }
     }
 
     /// Bytes of the task's stack that have been touched, or `None` if it has exited.

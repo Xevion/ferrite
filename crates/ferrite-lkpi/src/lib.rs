@@ -12,8 +12,10 @@ extern crate std;
 
 mod arch;
 mod halt;
+mod mem;
 pub mod sched;
 #[cfg(feature = "stubs")]
 mod stubs;
+pub mod task;
 
 pub use halt::{HaltHook, HookAlreadySet, lx_stub_hit, set_halt_hook, trace_and_stop};
