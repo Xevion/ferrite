@@ -25,8 +25,9 @@ use uefi::{Handle, Status};
 
 use self::device::SnpDevice;
 use self::http::HttpServer;
+use crate::control::Commands;
 use crate::mdns::{self, Destination, Handled, Responder};
-use crate::sweep::SweepStatus;
+use crate::report::Snapshot;
 
 const MDNS_ADDR: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_BUFFER: usize = 1500;
@@ -259,7 +260,9 @@ impl Net {
     }
 
     /// Advance the stack to `now`. Returns how long may pass before the next poll.
-    pub fn poll(&mut self, now: Instant, sweep: &SweepStatus) -> Duration {
+    /// Requests the status page makes are queued on `commands`.
+    pub fn poll(&mut self, now: Instant, snapshot: &Snapshot<'_>, _commands: &mut Commands) -> Duration {
+        let sweep = &snapshot.status;
         let at = smol_instant(now);
         self.device.reclaim(now);
         self.status.link.up = self.device.link_up();

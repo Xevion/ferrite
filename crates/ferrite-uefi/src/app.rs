@@ -19,9 +19,11 @@ use uefi::boot::{self, EventType, TimerTrigger, Tpl};
 use uefi::proto::console::text::{Input, Key, Output, ScanCode};
 
 use crate::backend::{BackendError, UefiBackend};
+use crate::control::{Command, Commands};
 use crate::diag::{self, Diag};
 use crate::net::Net;
-use crate::sweep::{CoreChoice, Cores, Flow, Sweep, SweepStatus};
+use crate::report::Snapshot;
+use crate::sweep::{CoreChoice, Cores, Flow, Sweep};
 use crate::ui::{self, View};
 
 const SWEEP_BYTES: usize = 1 << 30;
@@ -96,6 +98,8 @@ struct Desk<'a> {
     /// The loader's link, when this app was started by the loader.
     loader: Option<LoaderLink>,
     watchdog: Option<Keepalive>,
+    /// Requests from the console, the loader's link and the status page, not yet applied.
+    commands: Commands,
 }
 
 impl<'a> App<'a> {
@@ -135,6 +139,7 @@ impl<'a> App<'a> {
             next_frame: Instant::default(),
             loader,
             watchdog,
+            commands: Commands::default(),
         };
         Ok(Self { desk, sweep: Sweep::new(SWEEP_BYTES, caps, cores), chunk_bytes: START_CHUNK_BYTES, vector })
     }
@@ -143,17 +148,22 @@ impl<'a> App<'a> {
         self.desk.clock.now()
     }
 
-    /// Run until `q` or `Esc` on the console, or until the desktop asks the loader's app to stop
-    /// (a `Stop` message or a `q` typed in `ferrite-dev push`). Logs a sweep summary on the way out.
+    /// Run until `q` or `Esc` on the console, until the desktop asks the loader's app to stop (a
+    /// `Stop` message or a `q` typed in `ferrite-dev push`), or until the status page asks to quit.
+    /// Logs a sweep summary on the way out.
     pub fn run(&mut self) {
         loop {
             let now = self.now();
-            let Some(deadline) = self.desk.duties(now, &self.sweep.status()) else { break };
+            let deadline = self.desk.duties(now, &self.sweep.snapshot());
+            if self.apply_commands() == Flow::Stop {
+                break;
+            }
+            let Some(deadline) = deadline else { continue };
             if self.sweep.split_ready(now) {
                 let desk = &mut self.desk;
-                if self.sweep.run_split(self.vector, &mut |now, status| desk.duties(now, status)) == Flow::Stop {
-                    break;
-                }
+                // A split test cut short by a command runs again from its start, once the
+                // commands are applied on the next round.
+                self.sweep.run_split(self.vector, &mut |now, snapshot| desk.duties(now, snapshot));
                 continue;
             }
             self.idle_until(deadline);
@@ -168,6 +178,22 @@ impl<'a> App<'a> {
             sweep.analysis
         );
         self.sweep.check_cores();
+    }
+
+    /// Apply the queued commands in order; [`Flow::Stop`] when one of them was [`Command::Quit`].
+    fn apply_commands(&mut self) -> Flow {
+        let mut flow = Flow::Continue;
+        for command in self.desk.commands.drain() {
+            log::info!("app: {command:?}");
+            match command {
+                Command::Pause => self.sweep.pause(),
+                Command::Resume => self.sweep.resume(),
+                Command::Restart(preset) => self.sweep.restart(preset),
+                Command::Cores(choice) => self.sweep.set_cores(choice),
+                Command::Quit => flow = Flow::Stop,
+            }
+        }
+        flow
     }
 
     /// Sweep until `deadline` (at least one chunk), or wait on the timer and key
@@ -207,21 +233,27 @@ impl<'a> App<'a> {
 
 impl Desk<'_> {
     /// One round of the duties: re-arm the watchdog, poll the network, read keys and the loader's
-    /// stop, draw when a frame is due, log. Returns when they are next due, or `None` to stop.
-    fn duties(&mut self, now: Instant, sweep: &SweepStatus) -> Option<Instant> {
+    /// stop, draw when a frame is due, log. Returns when they are next due, or `None` when a queued
+    /// command has to cut the sweep short.
+    fn duties(&mut self, now: Instant, snapshot: &Snapshot<'_>) -> Option<Instant> {
         if let Some(watchdog) = self.watchdog.as_mut() {
             watchdog.tick(now);
         }
-        let net_wait = self.net.as_mut().map_or(FRAME_INTERVAL, |net| net.poll(now, sweep));
+        let commands = &mut self.commands;
+        let net_wait = self.net.as_mut().map_or(FRAME_INTERVAL, |net| net.poll(now, snapshot, commands));
         if self.quit_requested() || self.desktop_stop_requested() {
-            return None;
+            self.commands.push(Command::Quit);
         }
+        let sweep = &snapshot.status;
         let net = self.net.as_ref().map(Net::status);
         if now >= self.next_frame {
             self.draw(View { sweep: *sweep, net, net_err: self.net_err });
             self.next_frame = now + FRAME_INTERVAL;
         }
         self.diag.tick(now, net.as_ref(), sweep);
+        if self.commands.interrupting() {
+            return None;
+        }
         Some((now + net_wait).min(self.next_frame))
     }
 

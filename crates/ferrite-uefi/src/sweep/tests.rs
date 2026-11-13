@@ -192,7 +192,7 @@ fn faults_merged_from_several_cores_keep_their_finder_and_classify_together() {
     let cpus = [0, 5, 7];
     let mut tally = Tally::default();
     let mut absorbed = vec![0; seats.len()];
-    absorb(&mut tally, &seats, &mut absorbed, &cpus, kind.name());
+    absorb(&mut tally, &seats, &mut absorbed, &cpus, kind.name(), 0);
     let base = SweepStatus { cpus: 3, mode: Mode::Split, ..SweepStatus::IDLE };
     let total = seats.iter().map(Seat::done).sum();
     let status = live(&base, &seats, &tally, 2, (0, total, total));
@@ -204,6 +204,51 @@ fn faults_merged_from_several_cores_keep_their_finder_and_classify_together() {
     check!(status.first_fault_cpu == 5);
     check!(status.first_fault_test == "solid bits");
     check!(status.analysis == Classification::StuckBits { mask: 1 << 7 });
-    absorb(&mut tally, &seats, &mut absorbed, &cpus, kind.name());
+    absorb(&mut tally, &seats, &mut absorbed, &cpus, kind.name(), 0);
     check!(tally.stats.faults() == 3, "a fault is absorbed once");
+}
+
+#[test]
+fn history_records_every_test_and_each_finished_pass() {
+    let mut sweep = sweep_of_words(2048);
+    let tests_per_pass = sweep.status().position.1;
+    let mut ms = 0;
+    while sweep.status().passes < 2 {
+        ms += 1;
+        sweep.step(16 << 10, Instant::from_epoch(Duration::from_millis(ms)), None);
+    }
+    // The last test of pass 1 is recorded once the next step notices the change.
+    sweep.step(64, Instant::from_epoch(Duration::from_millis(ms + 1)), None);
+    let history = &sweep.history;
+    check!(history.passes.iter().map(|p| p.pass).collect::<Vec<_>>() == vec![0, 1]);
+    check!(history.tests.len() == 2 * tests_per_pass);
+    check!(history.latest_tests().count() == tests_per_pass);
+    check!(history.latest_tests().all(|r| r.pass == 1));
+}
+
+#[test]
+fn restart_clears_results_and_switches_the_preset() {
+    let mut sweep = sweep_of_words(2048);
+    while sweep.status().passes < 1 {
+        sweep.step(16 << 10, Instant::default(), None);
+    }
+    sweep.restart(Preset::Quick);
+    let status = sweep.status();
+    check!(status.passes == 0);
+    check!(status.position.0 == 1);
+    check!(status.preset == Preset::Quick);
+    check!(sweep.history.tests.is_empty());
+}
+
+#[test]
+fn a_paused_sweep_does_no_work_until_resumed() {
+    let mut sweep = sweep_of_words(2048);
+    sweep.pause();
+    let before = sweep.status();
+    sweep.step(64 << 10, Instant::default(), None);
+    check!(!sweep.has_work(Instant::default()));
+    check!(sweep.status() == before);
+    sweep.resume();
+    sweep.step(64 << 10, Instant::default(), None);
+    check!(sweep.status() != before);
 }

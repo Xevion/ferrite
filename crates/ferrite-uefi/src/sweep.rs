@@ -7,6 +7,7 @@
 //! run inside [`VectorState::wide`], in chunks of at most [`WIDE_CHUNK_BYTES`], since the
 //! firmware's interrupt entry does not save the upper halves of the vector registers.
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -25,6 +26,7 @@ use ferrite_mem::{Caps, Fault, Faults, Region, WIDE_CHUNK_BYTES};
 use uefi::boot::{self, AllocateType, MemoryType};
 
 use crate::crew::{AP_PATIENCE, Crew, Job, Seat, SeatState, Turn};
+use crate::report::{self, CpuInfo, FAULT_LOG, FaultRecord, History, Snapshot, TestRecord};
 
 const PAGE: usize = 4096;
 const WORD: usize = size_of::<u64>();
@@ -66,6 +68,9 @@ pub struct SweepStatus {
     /// The firmware's number of the processor that found the first fault.
     pub first_fault_cpu: usize,
     pub analysis: Classification,
+    pub preset: Preset,
+    /// Sweeping is paused by request.
+    pub paused: bool,
 }
 
 impl fmt::Display for SweepStatus {
@@ -96,6 +101,8 @@ impl SweepStatus {
         first_fault_test: "",
         first_fault_cpu: 0,
         analysis: Classification::Clean,
+        preset: Preset::Standard,
+        paused: false,
     };
 }
 
@@ -138,6 +145,27 @@ impl Cores {
         log::info!("sweep: split tests on {} of {} logical processors ({choice:?})", cpus.len(), mp.processors().len());
         let before = mp.ap_control_registers();
         Some(Self { mp, clock, cpus, before, deepest_stack: 0 })
+    }
+
+    /// Run split tests on the processors `choice` picks from the next test on.
+    pub fn rechoose(&mut self, choice: CoreChoice) {
+        self.cpus = choose(self.mp.processors(), choice);
+        log::info!("sweep: split tests on {} logical processors ({choice:?})", self.cpus.len());
+    }
+
+    fn infos(&self) -> Vec<CpuInfo> {
+        let processors = self.mp.processors();
+        self.cpus
+            .iter()
+            .filter_map(|&n| processors.iter().find(|p| p.number == n))
+            .map(|p| CpuInfo {
+                number: p.number.get(),
+                package: p.location.package,
+                core: p.location.core,
+                thread: p.location.thread,
+                bsp: p.bsp,
+            })
+            .collect()
     }
 
     fn bsp(&self) -> usize {
@@ -235,26 +263,39 @@ struct Run {
     _buffer: Buffer,
 }
 
-/// A fault recorded in full, with the test and the processor that found it.
-#[derive(Clone, Copy, Debug)]
-struct Found {
-    fault: Fault,
-    test: &'static str,
-    cpu: usize,
+impl Run {
+    /// The suite over `buffer`; `None`, freeing the buffer, when it cannot be a region.
+    fn new(buffer: Buffer, kernels: Kernels, config: Config, preset: Preset) -> Option<Self> {
+        // SAFETY: the buffer is ours alone and outlives the suite (field order in `Run`).
+        match unsafe { Region::from_raw(buffer.base.as_ptr(), buffer.words) } {
+            Ok(region) => {
+                log::info!("sweep: {} bytes at {}, kernels {kernels}, {preset:?}", buffer.bytes(), region.base());
+                Some(Self { suite: Suite::new(region, kernels, config, preset), _buffer: buffer })
+            },
+            Err(e) => {
+                log::error!("sweep: unusable buffer: {e}");
+                None
+            },
+        }
+    }
 }
 
 #[derive(Default)]
 struct Tally {
     faults: u64,
-    first: Option<Found>,
+    first: Option<FaultRecord>,
+    /// The latest faults kept in full, newest last.
+    recent: VecDeque<FaultRecord>,
     stats: FaultStats,
 }
 
 impl Tally {
-    /// Feed a fault kept in full into the statistics, remembering the first one and its finder.
-    fn record(&mut self, fault: Fault, test: &'static str, cpu: usize) {
+    /// Feed a fault kept in full into the statistics and the log, remembering the first one.
+    fn record(&mut self, fault: Fault, test: &'static str, cpu: usize, pass: u64) {
         self.stats.record(&fault);
-        self.first.get_or_insert(Found { fault, test, cpu });
+        let found = FaultRecord { fault, test, cpu, pass };
+        self.first.get_or_insert(found);
+        report::push_bounded(&mut self.recent, found, FAULT_LOG);
     }
 }
 
@@ -264,6 +305,8 @@ struct Current {
     test: &'static str,
     pass: u64,
     started: Instant,
+    work_bytes: u64,
+    faults_at_start: u64,
 }
 
 /// Whether the sweep goes on after [`Sweep::run_split`].
@@ -275,7 +318,7 @@ pub enum Flow {
 
 /// The BSP's duties during a split test: given the time and the sweep's status, it returns when
 /// it is next due, or `None` to stop the sweep.
-pub type Duties<'d> = dyn FnMut(Instant, &SweepStatus) -> Option<Instant> + 'd;
+pub type Duties<'d> = dyn FnMut(Instant, &Snapshot<'_>) -> Option<Instant> + 'd;
 
 pub struct Sweep {
     run: Option<Run>,
@@ -284,6 +327,8 @@ pub struct Sweep {
     waiting: Option<Instant>,
     current: Option<Current>,
     cores: Option<Cores>,
+    history: History,
+    paused: bool,
 }
 
 impl Sweep {
@@ -303,25 +348,56 @@ impl Sweep {
         preset: Preset,
         cores: Option<Cores>,
     ) -> Self {
-        let run = buffer.and_then(|buffer| {
-            // SAFETY: the buffer is ours alone and outlives the suite (field order in `Run`).
-            match unsafe { Region::from_raw(buffer.base.as_ptr(), buffer.words) } {
-                Ok(region) => {
-                    log::info!("sweep: {} bytes at {}, kernels {kernels}", buffer.bytes(), region.base());
-                    Some(Run { suite: Suite::new(region, kernels, config, preset), _buffer: buffer })
-                },
-                Err(e) => {
-                    log::error!("sweep: unusable buffer: {e}");
-                    None
-                },
-            }
-        });
-        Self { run, tally: Tally::default(), waiting: None, current: None, cores }
+        let run = buffer.and_then(|buffer| Run::new(buffer, kernels, config, preset));
+        let mut history = History::default();
+        history.set_cpus(cores.as_ref().map_or_default(Cores::infos));
+        Self { run, tally: Tally::default(), waiting: None, current: None, cores, history, paused: false }
     }
 
     /// Whether a step now would do work.
     pub fn has_work(&self, now: Instant) -> bool {
-        self.run.is_some() && self.waiting.is_none_or(|until| now >= until)
+        self.run.is_some() && !self.paused && self.waiting.is_none_or(|until| now >= until)
+    }
+
+    pub const fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Stop sweeping until [`Sweep::resume`]. A test part-way through on this core carries on from
+    /// where it was; a split test is only ever paused between tests, and starts over.
+    pub fn pause(&mut self) {
+        if !self.paused {
+            log::info!("sweep: paused in {}", self.status());
+            self.paused = true;
+        }
+    }
+
+    pub fn resume(&mut self) {
+        if self.paused {
+            log::info!("sweep: resumed");
+            self.paused = false;
+        }
+    }
+
+    /// Throw away every result and start again from pass 0 with `preset`, over the same buffer.
+    pub fn restart(&mut self, preset: Preset) {
+        log::info!("sweep: restarting with {preset:?} after {}", self.status());
+        if let Some(Run { suite, _buffer: buffer }) = self.run.take() {
+            let (kernels, config) = (suite.kernels(), suite.config());
+            self.run = Run::new(buffer, kernels, config, preset);
+        }
+        self.tally = Tally::default();
+        self.waiting = None;
+        self.current = None;
+        self.history.reset();
+    }
+
+    /// Run split tests on the processors `choice` picks from the next test on.
+    pub fn set_cores(&mut self, choice: CoreChoice) {
+        if let Some(cores) = self.cores.as_mut() {
+            cores.rechoose(choice);
+            self.history.set_cpus(cores.infos());
+        }
     }
 
     /// When the suite next has work, if it is waiting.
@@ -352,9 +428,12 @@ impl Sweep {
         if self.waiting.is_some_and(|until| now < until) {
             return;
         }
+        if self.paused {
+            return;
+        }
         self.waiting = None;
-        let bytes = run.suite.region().bytes();
-        note(&mut self.current, run.suite.test().kind().name(), run.suite.passes(), now, bytes);
+        self.history.start(now, self.tally.faults);
+        note(&mut self.current, &mut self.history, self.tally.faults, &run.suite, now);
         let cpu = self.cores.as_ref().map_or(0, Cores::bsp);
         let guard = vector.filter(|_| run.suite.kernels().is_wide());
         let piece = if guard.is_some() { WIDE_CHUNK_BYTES } else { chunk_bytes };
@@ -365,7 +444,7 @@ impl Sweep {
             left -= budget;
             let test = run.suite.test().kind().name();
             let tally = &mut self.tally;
-            let mut sink = |f: Fault| tally.record(f, test, cpu);
+            let mut sink = |f: Fault| tally.record(f, test, cpu, pass);
             let mut faults = Faults::new(REPORTS_PER_STEP, &mut sink);
             let suite = &mut run.suite;
             let progress = match guard {
@@ -385,18 +464,27 @@ impl Sweep {
     /// status whenever the instant it last returned has come. A core that fails is left out and
     /// the test runs again without it; with only the BSP left, the test is left to [`Sweep::step`].
     pub fn run_split(&mut self, vector: Option<&VectorState>, duties: &mut Duties<'_>) -> Flow {
-        let Self { run: Some(run), tally, current, cores: Some(cores), .. } = self else { return Flow::Continue };
+        let Self { run: Some(run), tally, current, cores: Some(cores), history, .. } = self else {
+            return Flow::Continue;
+        };
         let started = cores.clock.now();
         let (kind, pass, bytes) = (run.suite.test().kind(), run.suite.passes(), run.suite.region().bytes());
-        note(current, kind.name(), pass, started, bytes);
+        history.start(started, tally.faults);
+        note(current, history, tally.faults, &run.suite, started);
         *current = None;
+        let faults_at_start = tally.faults;
         loop {
-            match attempt(run, tally, cores, vector, duties) {
+            match attempt(run, tally, cores, history, vector, duties) {
                 Attempt::Done => {
-                    let took = cores.clock.now() - started;
+                    let now = cores.clock.now();
+                    let took = now - started;
                     let n = cores.cpus.len();
                     log::info!("sweep: pass {pass} {kind} took {} ms over {bytes} bytes on {n} cpus", took.as_millis());
+                    let work_bytes = run.suite.test().total().saturating_mul(WORD as u64);
                     run.suite.finish_test();
+                    let faults = tally.faults - faults_at_start;
+                    let record = TestRecord { pass, test: kind.name(), cpus: n, took, work_bytes, faults };
+                    history.finish_test(record, run.suite.passes(), now, tally.faults);
                     return Flow::Continue;
                 },
                 Attempt::Stopped => return Flow::Stop,
@@ -407,6 +495,7 @@ impl Sweep {
                         log::error!("sweep: {kind} failed on no core in particular; the BSP runs alone from now");
                         cores.cpus.truncate(1);
                     }
+                    history.set_cpus(cores.infos());
                     if cores.cpus.len() <= 1 {
                         log::warn!("sweep: {kind} again on the BSP alone");
                         return Flow::Continue;
@@ -429,7 +518,13 @@ impl Sweep {
         let Some(run) = self.run.as_ref() else { return SweepStatus::IDLE };
         let cpus = self.cpus_for(run.suite.test().kind());
         let mode = if cpus > 1 { Mode::Split } else { Mode::Single };
-        status_of(&run.suite, &self.tally, mode, cpus)
+        SweepStatus { paused: self.paused, ..status_of(&run.suite, &self.tally, mode, cpus) }
+    }
+
+    /// The status with the history and the latest faults, for the screen and the status page.
+    #[must_use]
+    pub fn snapshot(&self) -> Snapshot<'_> {
+        Snapshot { status: self.status(), history: &self.history, faults: &self.tally.recent }
     }
 }
 
@@ -453,18 +548,39 @@ fn status_of(suite: &Suite<'_>, tally: &Tally, mode: Mode, cpus: usize) -> Sweep
         first_fault_test: tally.first.map_or("", |f| f.test),
         first_fault_cpu: tally.first.map_or(0, |f| f.cpu),
         analysis: tally.stats.classification(),
+        preset: suite.preset(),
+        paused: false,
     }
 }
 
-/// Log the test in `current` once `test` of `pass` is a different one, and start timing that.
-fn note(current: &mut Option<Current>, test: &'static str, pass: u64, now: Instant, bytes: usize) {
+/// Log and record the test in `current` once the suite's test is a different one, and start
+/// timing that.
+fn note(current: &mut Option<Current>, history: &mut History, faults: u64, suite: &Suite<'_>, now: Instant) {
+    let (test, pass) = (suite.test().kind().name(), suite.passes());
+    let start = Current {
+        test,
+        pass,
+        started: now,
+        work_bytes: suite.test().total().saturating_mul(WORD as u64),
+        faults_at_start: faults,
+    };
     match *current {
         Some(c) if c.test != test || c.pass != pass => {
-            let took = (now - c.started).as_millis();
-            log::info!("sweep: pass {} {} took {took} ms over {bytes} bytes on 1 cpu", c.pass, c.test);
-            *current = Some(Current { test, pass, started: now });
+            let took = now - c.started;
+            let bytes = suite.region().bytes();
+            log::info!("sweep: pass {} {} took {} ms over {bytes} bytes on 1 cpu", c.pass, c.test, took.as_millis());
+            let record = TestRecord {
+                pass: c.pass,
+                test: c.test,
+                cpus: 1,
+                took,
+                work_bytes: c.work_bytes,
+                faults: faults - c.faults_at_start,
+            };
+            history.finish_test(record, pass, now, faults);
+            *current = Some(start);
         },
-        None => *current = Some(Current { test, pass, started: now }),
+        None => *current = Some(start),
         Some(_) => {},
     }
 }
@@ -484,10 +600,10 @@ fn ap_timeout(test: &Test) -> Duration {
 }
 
 /// Move the faults the seats kept since the last call into `tally`, each with its processor.
-fn absorb(tally: &mut Tally, seats: &[Seat], absorbed: &mut [usize], cpus: &[usize], test: &'static str) {
+fn absorb(tally: &mut Tally, seats: &[Seat], absorbed: &mut [usize], cpus: &[usize], test: &'static str, pass: u64) {
     for ((seat, taken), &cpu) in seats.iter().zip(absorbed.iter_mut()).zip(cpus) {
         for fault in seat.kept_from(*taken) {
-            tally.record(fault, test, cpu);
+            tally.record(fault, test, cpu, pass);
             *taken += 1;
         }
     }
@@ -516,6 +632,7 @@ fn attempt(
     run: &mut Run,
     tally: &mut Tally,
     cores: &mut Cores,
+    history: &History,
     vector: Option<&VectorState>,
     duties: &mut Duties<'_>,
 ) -> Attempt {
@@ -547,8 +664,9 @@ fn attempt(
     let mut stop_asked = false;
     let panics = mp::ap_panics();
     let mut tend = |now: Instant, tally: &mut Tally| {
-        absorb(tally, &seats, &mut absorbed, &cpu_ids, test_name);
-        duties(now, &live(&base, &seats, tally, faults_before, (pass_done, pass_total, test_total)))
+        absorb(tally, &seats, &mut absorbed, &cpu_ids, test_name, pass);
+        let status = live(&base, &seats, tally, faults_before, (pass_done, pass_total, test_total));
+        duties(now, &Snapshot { status, history, faults: &tally.recent })
     };
     let live_seats = cores.mp.scope(|scope| {
         let mut started = Vec::new();
@@ -631,7 +749,7 @@ fn attempt(
         live
     });
     drop(tend);
-    absorb(tally, &seats, &mut absorbed, &cpu_ids, test_name);
+    absorb(tally, &seats, &mut absorbed, &cpu_ids, test_name, pass);
     tally.faults = faults_before.saturating_add(seats.iter().map(Seat::faults).sum());
     for seat in &seats[1..] {
         if let Some(bytes) = seat.stack_bytes()
