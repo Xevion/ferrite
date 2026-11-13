@@ -6,6 +6,7 @@
 //! sent when the lease changes. DNS-SD (`PTR`/`SRV`/`TXT`) is not served.
 
 use alloc::vec::Vec;
+use core::fmt::{self, Write as _};
 use core::time::Duration;
 
 use ferrite_hal::Instant;
@@ -77,6 +78,25 @@ impl PartialEq for Label<'_> {
 }
 
 impl Eq for Label<'_> {}
+
+/// Labels joined by dots, bytes outside printable ASCII (and dots inside a label) escaped as `\ddd`.
+impl fmt::Display for Name<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, label) in self.labels.iter().enumerate() {
+            if i > 0 {
+                f.write_char('.')?;
+            }
+            for &b in label.as_bytes() {
+                if b.is_ascii_graphic() && b != b'.' && b != b'\\' {
+                    f.write_char(char::from(b))?;
+                } else {
+                    write!(f, "\\{b:03}")?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// A DNS name whose wire form is at most 255 bytes.
 #[derive(Clone, Copy, Debug)]

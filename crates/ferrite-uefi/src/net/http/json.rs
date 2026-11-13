@@ -249,26 +249,11 @@ impl ToJson for Counters {
     }
 }
 
-/// The mDNS hostname, labels joined by dots.
-struct Hostname;
-
-impl fmt::Display for Hostname {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, label) in mdns::HOST.labels().iter().enumerate() {
-            if i > 0 {
-                f.write_char('.')?;
-            }
-            f.write_str(core::str::from_utf8(label.as_bytes()).map_err(|_| fmt::Error)?)?;
-        }
-        Ok(())
-    }
-}
-
 impl ToJson for NetStatus {
     fn to_json(&self, out: &mut String) {
         let link = &self.link;
         Object::new(out)
-            .field("hostname", &Text(Hostname))
+            .field("hostname", &Text(mdns::HOST))
             .field("mac", &Text(link.mac))
             .field("link_up", &link.up)
             .field("address", &link.address.map(Text))

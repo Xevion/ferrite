@@ -23,9 +23,6 @@ use crate::gfx::text::{Face, Fonts, Style};
 use crate::gfx::{Canvas, Fill, Rect, Rgb};
 use crate::report::TestRecord;
 
-/// The name the mDNS responder answers for ([`crate::mdns::HOST`]).
-const MDNS_NAME: &str = "ferrite.local";
-
 pub struct Pen<'d> {
     pub canvas: &'d mut Canvas,
     pub fonts: &'d mut Fonts,
@@ -524,7 +521,8 @@ pub fn net(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     }
     let b = p.mid(l.text.small, rest.y, rest.h);
     let tail = format!(
-        "{MDNS_NAME} \u{b7} gateway {} \u{b7} dns {}",
+        "{} \u{b7} gateway {} \u{b7} dns {}",
+        crate::mdns::HOST,
         crate::net::OptAddr(link.gateway),
         crate::net::OptAddr(link.dns)
     );
