@@ -1,10 +1,11 @@
 //! The Linux C the lab drives directly: thread creation, and the kthread round trip that checks the
 //! scheduler seam before the initcalls run.
 
-use std::ffi::{CStr, c_char, c_int, c_ulong, c_void};
+use std::ffi::{CStr, c_char, c_int, c_uint, c_ulong, c_void};
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use ferrite_lkpi::task::LinuxTasks;
 
@@ -31,6 +32,12 @@ unsafe extern "C" {
     fn wake_up_process(task: *mut c_void) -> c_int;
     fn schedule();
     fn lx_kernel_init();
+    static jiffies: c_ulong;
+    fn msleep(msecs: c_uint);
+    fn __msecs_to_jiffies(msecs: c_uint) -> c_ulong;
+    fn timer_init_key(timer: *mut TimerList, func: TimerFn, flags: c_uint, name: *const c_char, key: *mut c_void);
+    fn mod_timer(timer: *mut TimerList, expires: c_ulong) -> c_int;
+    fn timer_delete_sync(timer: *mut TimerList) -> c_int;
 }
 
 /// Where the C keeps `current`, and `init_task`.
@@ -113,4 +120,55 @@ pub fn kthread_round_trip() -> Result<(), ProbeError> {
     // SAFETY: the thread only exits once told to, so the task_struct is still live.
     let code = unsafe { kthread_stop(task) };
     if code == PROBE_RESULT { Ok(()) } else { Err(ProbeError::Result(code)) }
+}
+
+type TimerFn = unsafe extern "C" fn(*mut TimerList);
+
+/// Storage for a `struct timer_list` (40 bytes in this config), with room to spare; only the C reads it.
+#[repr(C, align(8))]
+pub struct TimerList([u64; 8]);
+
+/// How long the time check sleeps, and how far ahead its timer is due.
+pub const SLEEP_MS: c_uint = 20;
+const TIMER_MS: c_uint = 10;
+
+static TIMER_FIRED: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C" fn timer_fired(_: *mut TimerList) {
+    TIMER_FIRED.store(true, Ordering::Relaxed);
+}
+
+#[derive(Debug)]
+pub enum TimeError {
+    Short(Duration),
+    TimerNeverFired,
+}
+
+impl fmt::Display for TimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Short(slept) => write!(f, "msleep({SLEEP_MS}) returned after {} us", slept.as_micros()),
+            Self::TimerNeverFired => write!(f, "a timer_list due in {TIMER_MS} ms had not fired after the sleep"),
+        }
+    }
+}
+
+/// `msleep` from a kernel thread must take at least as long in host time, and a `timer_list` due before
+/// it ends must have fired on the timer task.
+pub fn sleep_and_timer() -> Result<Duration, TimeError> {
+    let mut timer = TimerList([0; 8]);
+    // SAFETY: called on a task after the time bring-up; the timer is deleted before its storage goes.
+    let slept = unsafe {
+        timer_init_key(&raw mut timer, timer_fired, 0, c"lab-timer".as_ptr(), std::ptr::null_mut());
+        mod_timer(&raw mut timer, jiffies.wrapping_add(__msecs_to_jiffies(TIMER_MS)));
+        let start = Instant::now();
+        msleep(SLEEP_MS);
+        let slept = start.elapsed();
+        timer_delete_sync(&raw mut timer);
+        slept
+    };
+    if slept < Duration::from_millis(u64::from(SLEEP_MS)) {
+        return Err(TimeError::Short(slept));
+    }
+    if TIMER_FIRED.load(Ordering::Relaxed) { Ok(slept) } else { Err(TimeError::TimerNeverFired) }
 }

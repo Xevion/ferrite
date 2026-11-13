@@ -2,8 +2,8 @@
 //! first kernel symbol nothing implements yet: a stub function, or a variable whose storage faults.
 //!
 //! The C runs on the shim's scheduler, as it will under UEFI. kthreadd and an init thread are kernel
-//! threads; init checks a kthread round trip, runs `lx_kernel_init`, then the initcalls in order, then the exitcalls. The
-//! main stack only polls the scheduler until init is gone.
+//! threads; init checks a kthread round trip, runs `lx_kernel_init`, checks a sleep and a timer, then the initcalls in order, then the exitcalls. The
+//! main stack only polls the scheduler until init is gone, sleeping until the timer deadline when all are parked.
 
 mod fence;
 mod host;
@@ -14,9 +14,9 @@ use std::backtrace::Backtrace;
 use std::ffi::{CStr, c_int, c_void};
 use std::io::Write as _;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use ferrite_lkpi::sched::{NoHooks, Scheduler};
+use ferrite_lkpi::sched::{NoHooks, Scheduler, Step};
 use ferrite_wifi_sys::{exitcalls, initcalls};
 use log::LevelFilter;
 
@@ -43,6 +43,15 @@ unsafe extern "C" fn init(_: *mut c_void) -> c_int {
         },
     }
     kernel::kernel_init();
+    match kernel::sleep_and_timer() {
+        Ok(slept) => {
+            log::info!("msleep({}) returned after {} ms; a timer_list fired", kernel::SLEEP_MS, slept.as_millis());
+        },
+        Err(error) => {
+            log::error!("time check failed: {error}");
+            std::process::exit(1);
+        },
+    }
     for call in initcalls() {
         log::info!("initcall level {} {}", call.level().to_string_lossy(), call.name().to_string_lossy());
         // SAFETY: init is the only caller, runs the calls one at a time, and the lab links the shim.
@@ -80,6 +89,12 @@ fn main() -> ExitCode {
         },
     }
 
+    let wall = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    if let Err(error) = ferrite_lkpi::time::set_boot_wall_clock(wall) {
+        log::error!("{error}");
+        return ExitCode::FAILURE;
+    }
+
     let mut sched = Scheduler::new(host::HostPlatform::new(), host::MmapStacks, NoHooks);
     if let Err(error) = ferrite_lkpi::task::install(sched.handle(), kernel::tasks()) {
         log::error!("{error}");
@@ -104,6 +119,9 @@ fn main() -> ExitCode {
     while sched.info(init_id).is_some() {
         match sched.poll(BUDGET) {
             Ok(step) if step.runnable || sched.info(init_id).is_none() => {},
+            Ok(Step { next_deadline: Some(at), .. }) => {
+                std::thread::sleep(at.saturating_duration_since(sched.handle().now()));
+            },
             Ok(_) => {
                 log::error!("every task is blocked and nothing will wake one; init never finished");
                 return ExitCode::FAILURE;

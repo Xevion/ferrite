@@ -204,6 +204,7 @@ trait Core {
     fn spawn(&self, name: String, priority: Priority, user: usize, body: Body) -> Result<TaskId, SpawnError>;
     fn set_priority(&self, id: TaskId, priority: Priority) -> Result<(), TaskGone>;
     fn arm_timer(&self, at: Option<Instant>);
+    fn set_timer_task(&self, id: TaskId);
 }
 
 /// A running task's view of the scheduler, passed to its body.
@@ -654,6 +655,10 @@ impl<P: Platform + 'static, S: StackSource, H: Hooks> Core for Shared<P, S, H> {
     fn arm_timer(&self, at: Option<Instant>) {
         self.state.borrow_mut().deadline = at;
     }
+
+    fn set_timer_task(&self, id: TaskId) {
+        self.state.borrow_mut().timer_task = Some(id);
+    }
 }
 
 /// What one `poll` did.
@@ -708,6 +713,20 @@ impl SchedHandle {
     pub fn find_by_user(&self, user: usize) -> Option<TaskId> {
         self.core.find_by_user(user)
     }
+
+    pub fn now(&self) -> Instant {
+        self.core.now()
+    }
+
+    /// Set the one timer deadline, or cancel it; see [`Task::arm_timer`].
+    pub fn arm_timer(&self, at: Option<Instant>) {
+        self.core.arm_timer(at);
+    }
+
+    /// The task woken when the armed deadline passes.
+    pub fn set_timer_task(&self, id: TaskId) {
+        self.core.set_timer_task(id);
+    }
 }
 
 /// The scheduler. It holds no globals; see the module docs for how tasks reach it.
@@ -752,7 +771,7 @@ impl<P: Platform + 'static, S: StackSource, H: Hooks> Scheduler<P, S, H> {
 
     /// The task woken when the armed deadline passes.
     pub fn set_timer_task(&mut self, id: TaskId) {
-        self.shared.state.borrow_mut().timer_task = Some(id);
+        self.shared.set_timer_task(id);
     }
 
     /// The task woken when the platform reports pending interrupts.

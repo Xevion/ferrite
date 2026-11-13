@@ -20,6 +20,7 @@
 #include <uapi/linux/sched/types.h>
 
 #include <lx/task.h>
+#include <lx/time.h>
 
 #include "sched.h"
 #include "../workqueue_internal.h"
@@ -44,6 +45,8 @@ static void __schedule(void)
 asmlinkage __visible void __sched schedule(void)
 {
 	struct task_struct *tsk = current;
+
+	lx_time_update_jiffies();
 
 	if (tsk->__state && (tsk->flags & PF_WQ_WORKER))
 		wq_worker_sleeping(tsk);
@@ -231,3 +234,16 @@ void __might_sleep(const char *file, int line)
 	__might_resched(file, line, 0);
 }
 EXPORT_SYMBOL(__might_sleep);
+
+/* CPU time is not accounted, and the tick has no run queue to rebalance. */
+void account_process_tick(struct task_struct *p, int user_tick)
+{
+}
+
+void account_idle_ticks(unsigned long ticks)
+{
+}
+
+void sched_tick(void)
+{
+}

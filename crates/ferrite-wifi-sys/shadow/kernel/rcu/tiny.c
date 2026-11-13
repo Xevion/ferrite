@@ -33,3 +33,8 @@ void rcu_qs(void)
 		head->func(head);
 	}
 }
+
+/* Grace periods come from schedule(), not the tick. */
+void rcu_sched_clock_irq(int user)
+{
+}

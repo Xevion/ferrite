@@ -112,12 +112,15 @@ drivers/base/driver.c
 drivers/base/faux.c
 drivers/base/platform.c
 drivers/base/property.c
+drivers/base/syscore.c
 drivers/net/loopback.c
 drivers/pci/pci-driver.c
 net/core/datagram.c
 net/core/dev.c
 net/core/dev_addr_lists.c
 net/core/dev_api.c
+net/core/gen_estimator.c
+net/core/gen_stats.c
 net/core/gro.c
 net/core/hotdata.c
 net/core/link_watch.c
@@ -130,6 +133,8 @@ net/core/xdp.c
 net/ethernet/eth.c
 net/ethtool/common.c
 net/rfkill/core.c
+net/sched/sch_api.c
+net/sched/sch_fifo.c
 net/sched/sch_generic.c
 net/sched/sch_mq.c
 

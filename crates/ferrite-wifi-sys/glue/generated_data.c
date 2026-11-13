@@ -289,6 +289,7 @@
 #include <linux/clk/clk-conf.h>
 #include <linux/iommu.h>
 #include <linux/phy.h>
+#include <linux/suspend.h>
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/io.h>
@@ -301,7 +302,6 @@
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <net/netdev_lock.h>
-#include <linux/suspend.h>
 #include "linux/drivers/pci/pci.h"
 #include "linux/drivers/pci/pcie/portdrv.h"
 #include <linux/poll.h>
@@ -348,6 +348,8 @@
 #include <linux/phy_link_topology.h>
 #include "linux/net/core/dev.h"
 #include "linux/net/core/net-sysfs.h"
+#include <net/gen_stats.h>
+#include <linux/gen_stats.h>
 #include <net/psp.h>
 #include <linux/skbuff_ref.h>
 #include <linux/cache.h>
@@ -404,6 +406,7 @@
 #include <linux/rfkill.h>
 #include <linux/miscdevice.h>
 #include "linux/net/rfkill/rfkill.h"
+#include <net/tc_wrapper.h>
 #include <linux/skb_array.h>
 #include <net/mac80211.h>
 #include "linux/net/mac80211/ieee80211_i.h"
@@ -496,14 +499,11 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	LX_DATA(bpf_stats_enabled_key, sizeof(bpf_stats_enabled_key));
 	LX_DATA(cpu_khz, sizeof(cpu_khz));
 	LX_DATA(flow_keys_basic_dissector, sizeof(flow_keys_basic_dissector));
-	LX_DATA(hardirq_stack_inuse, sizeof(hardirq_stack_inuse));
-	LX_DATA(hardirq_stack_ptr, sizeof(hardirq_stack_ptr));
 	LX_DATA(inet_protos, sizeof(inet_protos));
 	LX_DATA(init_on_alloc, sizeof(init_on_alloc));
 	LX_DATA(init_pid_ns, sizeof(init_pid_ns));
 	LX_DATA(init_user_ns, sizeof(init_user_ns));
 	LX_DATA(init_uts_ns, sizeof(init_uts_ns));
-	LX_DATA(initcall_debug, sizeof(initcall_debug));
 	LX_DATA(irq_poll_cpu, sizeof(irq_poll_cpu));
 	LX_DATA(no_irq_chip, sizeof(no_irq_chip));
 	LX_DATA(noirqdebug, sizeof(noirqdebug));
@@ -515,13 +515,11 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	LX_DATA(phys_base, sizeof(phys_base));
 	LX_DATA(reboot_mode, sizeof(reboot_mode));
 	LX_DATA(sched_smp_initialized, sizeof(sched_smp_initialized));
-	LX_DATA(static_key_initialized, sizeof(static_key_initialized));
 	LX_DATA(suppress_printk, sizeof(suppress_printk));
 	LX_DATA(sysctl_net_busy_read, sizeof(sysctl_net_busy_read));
 	LX_DATA(sysctl_sched_base_slice, sizeof(sysctl_sched_base_slice));
 	LX_DATA(sysctl_sched_features, sizeof(sysctl_sched_features));
 	LX_DATA(sysctl_sched_tunable_scaling, sizeof(sysctl_sched_tunable_scaling));
-	LX_DATA(system_state, sizeof(system_state));
 	LX_DATA(udp_tunnel_nic_ops, sizeof(udp_tunnel_nic_ops));
 	LX_MARK(lx_unimplemented_end);
 	asm volatile(".popsection");
@@ -558,14 +556,11 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "flow_keys_basic_dissector", &flow_keys_basic_dissector, sizeof(flow_keys_basic_dissector) },
 	{ "gfpflag_names", &gfpflag_names, sizeof(gfpflag_names[0]) },
 	{ "guid_index", &guid_index, sizeof(guid_index) },
-	{ "hardirq_stack_inuse", &hardirq_stack_inuse, sizeof(hardirq_stack_inuse) },
-	{ "hardirq_stack_ptr", &hardirq_stack_ptr, sizeof(hardirq_stack_ptr) },
 	{ "inet_protos", &inet_protos, sizeof(inet_protos) },
 	{ "init_on_alloc", &init_on_alloc, sizeof(init_on_alloc) },
 	{ "init_pid_ns", &init_pid_ns, sizeof(init_pid_ns) },
 	{ "init_user_ns", &init_user_ns, sizeof(init_user_ns) },
 	{ "init_uts_ns", &init_uts_ns, sizeof(init_uts_ns) },
-	{ "initcall_debug", &initcall_debug, sizeof(initcall_debug) },
 	{ "irq_poll_cpu", &irq_poll_cpu, sizeof(irq_poll_cpu) },
 	{ "nda_policy", &nda_policy, sizeof(nda_policy[0]) },
 	{ "no_irq_chip", &no_irq_chip, sizeof(no_irq_chip) },
@@ -585,16 +580,14 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "phys_base", &phys_base, sizeof(phys_base) },
 	{ "reboot_mode", &reboot_mode, sizeof(reboot_mode) },
 	{ "sched_smp_initialized", &sched_smp_initialized, sizeof(sched_smp_initialized) },
-	{ "static_key_initialized", &static_key_initialized, sizeof(static_key_initialized) },
 	{ "suppress_printk", &suppress_printk, sizeof(suppress_printk) },
 	{ "sysctl_net_busy_read", &sysctl_net_busy_read, sizeof(sysctl_net_busy_read) },
 	{ "sysctl_sched_base_slice", &sysctl_sched_base_slice, sizeof(sysctl_sched_base_slice) },
 	{ "sysctl_sched_features", &sysctl_sched_features, sizeof(sysctl_sched_features) },
 	{ "sysctl_sched_tunable_scaling", &sysctl_sched_tunable_scaling, sizeof(sysctl_sched_tunable_scaling) },
 	{ "sysctl_vals", &sysctl_vals, sizeof(sysctl_vals[0]) },
-	{ "system_state", &system_state, sizeof(system_state) },
 	{ "udp_tunnel_nic_ops", &udp_tunnel_nic_ops, sizeof(udp_tunnel_nic_ops) },
 	{ "uuid_index", &uuid_index, sizeof(uuid_index) },
 	{ "vmaflag_names", &vmaflag_names, sizeof(vmaflag_names[0]) },
 };
-const unsigned long lx_unimplemented_data_count = 48;
+const unsigned long lx_unimplemented_data_count = 43;

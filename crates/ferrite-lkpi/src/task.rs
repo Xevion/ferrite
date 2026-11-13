@@ -27,8 +27,8 @@ pub struct LinuxTasks {
     pub init: NonNull<c_void>,
 }
 
-struct Installed {
-    sched: SchedHandle,
+pub(crate) struct Installed {
+    pub(crate) sched: SchedHandle,
     tasks: LinuxTasks,
 }
 
@@ -59,7 +59,7 @@ pub fn install(sched: SchedHandle, tasks: LinuxTasks) -> Result<(), AlreadyInsta
     Ok(())
 }
 
-fn installed(call: &CStr) -> &'static Installed {
+pub(crate) fn installed(call: &CStr) -> &'static Installed {
     let raw = INSTALLED.load(Ordering::Acquire);
     if raw.is_null() {
         log::error!("{} called before a scheduler was installed", call.to_string_lossy());

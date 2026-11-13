@@ -80,12 +80,6 @@ pub unsafe extern "sysv64" fn __get_user_8() -> ! {
     trace_and_stop(c"__get_user_8")
 }
 
-/// `void *__kvmalloc_node_noprof(size_t, unsigned long, gfp_t, int)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __kvmalloc_node_noprof() -> ! {
-    trace_and_stop(c"__kvmalloc_node_noprof")
-}
-
 /// `void __might_fault(const char *, int)`, declared in `linux/kernel.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __might_fault() -> ! {
@@ -176,12 +170,6 @@ pub unsafe extern "sysv64" fn __put_user_8() -> ! {
     trace_and_stop(c"__put_user_8")
 }
 
-/// `void __qdisc_calculate_pkt_len(struct sk_buff *, const struct qdisc_size_table *)`, declared in `net/sch_generic.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __qdisc_calculate_pkt_len() -> ! {
-    trace_and_stop(c"__qdisc_calculate_pkt_len")
-}
-
 /// `bool __skb_flow_dissect(const struct net *, const struct sk_buff *, struct flow_dissector *, void *, const void *, __be16, int, int, unsigned int)`, declared in `linux/skbuff.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __skb_flow_dissect() -> ! {
@@ -248,12 +236,6 @@ pub unsafe extern "sysv64" fn __virt_addr_valid() -> ! {
     trace_and_stop(c"__virt_addr_valid")
 }
 
-/// `void *__vmalloc_noprof(unsigned long, gfp_t)`, declared in `linux/vmalloc.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __vmalloc_noprof() -> ! {
-    trace_and_stop(c"__vmalloc_noprof")
-}
-
 /// `size_t _copy_from_iter(void *, size_t, struct iov_iter *)`, declared in `linux/uio.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn _copy_from_iter() -> ! {
@@ -282,18 +264,6 @@ pub unsafe extern "sysv64" fn _copy_to_user() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn access_process_vm() -> ! {
     trace_and_stop(c"access_process_vm")
-}
-
-/// `void account_idle_ticks(unsigned long)`, declared in `linux/kernel_stat.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn account_idle_ticks() -> ! {
-    trace_and_stop(c"account_idle_ticks")
-}
-
-/// `void account_process_tick(struct task_struct *, int)`, declared in `linux/kernel_stat.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn account_process_tick() -> ! {
-    trace_and_stop(c"account_process_tick")
 }
 
 /// `void ack_bad_irq(unsigned int)`, declared in `asm/hardirq.h`.
@@ -891,12 +861,6 @@ pub unsafe extern "sysv64" fn fput() -> ! {
     trace_and_stop(c"fput")
 }
 
-/// `void free_pages(unsigned long, unsigned int)`, declared in `linux/gfp.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn free_pages() -> ! {
-    trace_and_stop(c"free_pages")
-}
-
 /// `void free_uid(struct user_struct *)`, declared in `linux/sched/user.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn free_uid() -> ! {
@@ -913,18 +877,6 @@ pub unsafe extern "sysv64" fn full_name_hash() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn gcd() -> ! {
     trace_and_stop(c"gcd")
-}
-
-/// `void gen_kill_estimator(struct net_rate_estimator **)`, declared in `net/gen_stats.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn gen_kill_estimator() -> ! {
-    trace_and_stop(c"gen_kill_estimator")
-}
-
-/// `unsigned long get_free_pages_noprof(gfp_t, unsigned int)`, declared in `linux/gfp.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn get_free_pages_noprof() -> ! {
-    trace_and_stop(c"get_free_pages_noprof")
 }
 
 /// `int get_option(char **, int *)`, declared in `linux/string.h`.
@@ -955,36 +907,6 @@ pub unsafe extern "sysv64" fn get_task_mm() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn gfp_pfmemalloc_allowed() -> ! {
     trace_and_stop(c"gfp_pfmemalloc_allowed")
-}
-
-/// `void gnet_stats_add_basic(struct gnet_stats_basic_sync *, struct gnet_stats_basic_sync *, struct gnet_stats_basic_sync *, bool)`, declared in `net/gen_stats.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn gnet_stats_add_basic() -> ! {
-    trace_and_stop(c"gnet_stats_add_basic")
-}
-
-/// `void gnet_stats_add_queue(struct gnet_stats_queue *, const struct gnet_stats_queue *, const struct gnet_stats_queue *)`, declared in `net/gen_stats.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn gnet_stats_add_queue() -> ! {
-    trace_and_stop(c"gnet_stats_add_queue")
-}
-
-/// `void gnet_stats_basic_sync_init(struct gnet_stats_basic_sync *)`, declared in `net/gen_stats.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn gnet_stats_basic_sync_init() -> ! {
-    trace_and_stop(c"gnet_stats_basic_sync_init")
-}
-
-/// `int gnet_stats_copy_basic(struct gnet_dump *, struct gnet_stats_basic_sync *, struct gnet_stats_basic_sync *, bool)`, declared in `net/gen_stats.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn gnet_stats_copy_basic() -> ! {
-    trace_and_stop(c"gnet_stats_copy_basic")
-}
-
-/// `int gnet_stats_copy_queue(struct gnet_dump *, struct gnet_stats_queue *, struct gnet_stats_queue *, __u32)`, declared in `net/gen_stats.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn gnet_stats_copy_queue() -> ! {
-    trace_and_stop(c"gnet_stats_copy_queue")
 }
 
 /// `void init_dl_bw(struct dl_bw *)`, declared in `linux/kernel/sched/sched.h`.
@@ -1059,34 +981,10 @@ pub unsafe extern "sysv64" fn ipv6_ext_hdr() -> ! {
     trace_and_stop(c"ipv6_ext_hdr")
 }
 
-/// `bool irq_work_needs_cpu(void)`, declared in `linux/irq_work.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn irq_work_needs_cpu() -> ! {
-    trace_and_stop(c"irq_work_needs_cpu")
-}
-
-/// `void irq_work_tick(void)`, declared in `linux/irq_work.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn irq_work_tick() -> ! {
-    trace_and_stop(c"irq_work_tick")
-}
-
 /// `bool is_free_buddy_page(const struct page *)`, declared in `linux/page-flags.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn is_free_buddy_page() -> ! {
     trace_and_stop(c"is_free_buddy_page")
-}
-
-/// `bool is_vmalloc_addr(const void *)`, declared in `linux/mm.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn is_vmalloc_addr() -> ! {
-    trace_and_stop(c"is_vmalloc_addr")
-}
-
-/// `int is_vmalloc_or_module_addr(const void *)`, declared in `linux/mm.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn is_vmalloc_or_module_addr() -> ! {
-    trace_and_stop(c"is_vmalloc_or_module_addr")
 }
 
 /// `void kernel_param_lock(struct module *)`, declared in `linux/moduleparam.h`.
@@ -1101,22 +999,10 @@ pub unsafe extern "sysv64" fn kernel_param_unlock() -> ! {
     trace_and_stop(c"kernel_param_unlock")
 }
 
-/// `void kfree_sensitive(const void *)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kfree_sensitive() -> ! {
-    trace_and_stop(c"kfree_sensitive")
-}
-
 /// `void kill_anon_super(struct super_block *)`, declared in `linux/fs.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn kill_anon_super() -> ! {
     trace_and_stop(c"kill_anon_super")
-}
-
-/// `size_t kmalloc_size_roundup(size_t)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kmalloc_size_roundup() -> ! {
-    trace_and_stop(c"kmalloc_size_roundup")
 }
 
 /// `void *kmem_cache_alloc_from_sheaf_noprof(struct kmem_cache *, gfp_t, struct slab_sheaf *)`, declared in `linux/slab.h`.
@@ -1161,40 +1047,10 @@ pub unsafe extern "sysv64" fn kmsg_dump_desc() -> ! {
     trace_and_stop(c"kmsg_dump_desc")
 }
 
-/// `void *krealloc_node_align_noprof(const void *, size_t, unsigned long, gfp_t, int)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn krealloc_node_align_noprof() -> ! {
-    trace_and_stop(c"krealloc_node_align_noprof")
-}
-
-/// `size_t ksize(const void *)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn ksize() -> ! {
-    trace_and_stop(c"ksize")
-}
-
-/// `void kvfree(const void *)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kvfree() -> ! {
-    trace_and_stop(c"kvfree")
-}
-
 /// `void kvfree_call_rcu(struct callback_head *, void *)`, declared in `linux/rcupdate.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn kvfree_call_rcu() -> ! {
     trace_and_stop(c"kvfree_call_rcu")
-}
-
-/// `void *kvrealloc_node_align_noprof(const void *, size_t, unsigned long, gfp_t, int)`, declared in `linux/slab.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kvrealloc_node_align_noprof() -> ! {
-    trace_and_stop(c"kvrealloc_node_align_noprof")
-}
-
-/// `struct page *lx_virt_to_page(const void *)`, declared in `asm/page.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn lx_virt_to_page() -> ! {
-    trace_and_stop(c"lx_virt_to_page")
 }
 
 /// `struct metadata_dst *metadata_dst_alloc(u8, enum metadata_type, gfp_t)`, declared in `net/dst_metadata.h`.
@@ -1305,20 +1161,6 @@ pub unsafe extern "sysv64" fn nl80211_build_scan_msg() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn nl80211_common_reg_change_event() -> ! {
     trace_and_stop(c"nl80211_common_reg_change_event")
-}
-
-/// `void nl80211_exit(void)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_exit() -> ! {
-    trace_and_stop(c"nl80211_exit")
-}
-
-/// `int nl80211_init(void)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_init() -> ! {
-    trace_and_stop(c"nl80211_init")
 }
 
 /// `void nl80211_michael_mic_failure(struct cfg80211_registered_device *, struct net_device *, const u8 *, enum nl80211_key_type, int, const u8 *, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
@@ -1701,22 +1543,10 @@ pub unsafe extern "sysv64" fn printk_legacy_allow_panic_sync() -> ! {
     trace_and_stop(c"printk_legacy_allow_panic_sync")
 }
 
-/// `int proc_alloc_inum(unsigned int *)`, declared in `linux/proc_ns.h`.
+/// `struct proc_dir_entry *proc_create_single_data(const char *, umode_t, struct proc_dir_entry *, int (*)(struct seq_file *, void *), void *)`, declared in `linux/proc_fs.h`.
 #[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn proc_alloc_inum() -> ! {
-    trace_and_stop(c"proc_alloc_inum")
-}
-
-/// `struct proc_dir_entry *proc_create_net_data(const char *, umode_t, struct proc_dir_entry *, const struct seq_operations *, unsigned int, void *)`, declared in `linux/proc_fs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn proc_create_net_data() -> ! {
-    trace_and_stop(c"proc_create_net_data")
-}
-
-/// `struct proc_dir_entry *proc_create_seq_private(const char *, umode_t, struct proc_dir_entry *, const struct seq_operations *, unsigned int, void *)`, declared in `linux/proc_fs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn proc_create_seq_private() -> ! {
-    trace_and_stop(c"proc_create_seq_private")
+pub unsafe extern "sysv64" fn proc_create_single_data() -> ! {
+    trace_and_stop(c"proc_create_single_data")
 }
 
 /// `int proc_dointvec(const struct ctl_table *, int, void *, size_t *, loff_t *)`, declared in `linux/sysctl.h`.
@@ -1743,12 +1573,6 @@ pub unsafe extern "sysv64" fn proc_doulongvec_minmax() -> ! {
     trace_and_stop(c"proc_doulongvec_minmax")
 }
 
-/// `void proc_free_inum(unsigned int)`, declared in `linux/proc_ns.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn proc_free_inum() -> ! {
-    trace_and_stop(c"proc_free_inum")
-}
-
 /// `int put_cmsg(struct msghdr *, int, int, int, void *)`, declared in `linux/socket.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn put_cmsg() -> ! {
@@ -1767,36 +1591,6 @@ pub unsafe extern "sysv64" fn put_unused_fd() -> ! {
     trace_and_stop(c"put_unused_fd")
 }
 
-/// `void qdisc_hash_add(struct Qdisc *, bool)`, declared in `net/pkt_sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn qdisc_hash_add() -> ! {
-    trace_and_stop(c"qdisc_hash_add")
-}
-
-/// `void qdisc_hash_del(struct Qdisc *)`, declared in `net/pkt_sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn qdisc_hash_del() -> ! {
-    trace_and_stop(c"qdisc_hash_del")
-}
-
-/// `int qdisc_offload_dump_helper(struct Qdisc *, enum tc_setup_type, void *)`, declared in `net/sch_generic.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn qdisc_offload_dump_helper() -> ! {
-    trace_and_stop(c"qdisc_offload_dump_helper")
-}
-
-/// `void qdisc_offload_graft_helper(struct net_device *, struct Qdisc *, struct Qdisc *, struct Qdisc *, enum tc_setup_type, void *, struct netlink_ext_ack *)`, declared in `net/sch_generic.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn qdisc_offload_graft_helper() -> ! {
-    trace_and_stop(c"qdisc_offload_graft_helper")
-}
-
-/// `void qdisc_put_stab(struct qdisc_size_table *)`, declared in `net/pkt_sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn qdisc_put_stab() -> ! {
-    trace_and_stop(c"qdisc_put_stab")
-}
-
 /// `void raw_spin_rq_lock_nested(struct rq *, int)`, declared in `linux/kernel/sched/sched.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn raw_spin_rq_lock_nested() -> ! {
@@ -1813,12 +1607,6 @@ pub unsafe extern "sysv64" fn raw_spin_rq_unlock() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn rcu_barrier() -> ! {
     trace_and_stop(c"rcu_barrier")
-}
-
-/// `void rcu_sched_clock_irq(int)`, declared in `linux/rcupdate.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn rcu_sched_clock_irq() -> ! {
-    trace_and_stop(c"rcu_sched_clock_irq")
 }
 
 /// `bool rcuref_get_slowpath(rcuref_t *)`, declared in `linux/rcuref.h`.
@@ -1851,22 +1639,10 @@ pub unsafe extern "sysv64" fn register_irq_proc() -> ! {
     trace_and_stop(c"register_irq_proc")
 }
 
-/// `void register_syscore(struct syscore *)`, declared in `linux/syscore_ops.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn register_syscore() -> ! {
-    trace_and_stop(c"register_syscore")
-}
-
 /// `void release_firmware(const struct firmware *)`, declared in `linux/firmware.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn release_firmware() -> ! {
     trace_and_stop(c"release_firmware")
-}
-
-/// `void remove_proc_entry(const char *, struct proc_dir_entry *)`, declared in `linux/proc_fs.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn remove_proc_entry() -> ! {
-    trace_and_stop(c"remove_proc_entry")
 }
 
 /// `int request_firmware(const struct firmware **, const char *, struct device *)`, declared in `linux/firmware.h`.
@@ -1897,18 +1673,6 @@ pub unsafe extern "sysv64" fn reuseport_detach_sock() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn reuseport_update_incoming_cpu() -> ! {
     trace_and_stop(c"reuseport_update_incoming_cpu")
-}
-
-/// `u64 sched_clock_noinstr(void)`, declared in `linux/sched/clock.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sched_clock_noinstr() -> ! {
-    trace_and_stop(c"sched_clock_noinstr")
-}
-
-/// `void sched_tick(void)`, declared in `linux/sched.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn sched_tick() -> ! {
-    trace_and_stop(c"sched_tick")
 }
 
 /// `int send_sigurg(struct file *)`, declared in `linux/fs.h`.
@@ -2247,24 +2011,6 @@ pub unsafe extern "sysv64" fn update_group_capacity() -> ! {
     trace_and_stop(c"update_group_capacity")
 }
 
-/// `void update_vsyscall(struct timekeeper *)`, declared in `linux/timekeeper_internal.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn update_vsyscall() -> ! {
-    trace_and_stop(c"update_vsyscall")
-}
-
-/// `void update_vsyscall_tz(void)`, declared in `linux/timekeeper_internal.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn update_vsyscall_tz() -> ! {
-    trace_and_stop(c"update_vsyscall_tz")
-}
-
-/// `void vfree(const void *)`, declared in `linux/vmalloc.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn vfree() -> ! {
-    trace_and_stop(c"vfree")
-}
-
 /// `bool vmalloc_dump_obj(void *)`, declared in `linux/vmalloc.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn vmalloc_dump_obj() -> ! {
@@ -2275,12 +2021,6 @@ pub unsafe extern "sysv64" fn vmalloc_dump_obj() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn vmalloc_to_page() -> ! {
     trace_and_stop(c"vmalloc_to_page")
-}
-
-/// `void *vzalloc_noprof(unsigned long)`, declared in `linux/vmalloc.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn vzalloc_noprof() -> ! {
-    trace_and_stop(c"vzalloc_noprof")
 }
 
 /// `int xdp_do_generic_redirect(struct net_device *, struct sk_buff *, struct xdp_buff *, const struct bpf_prog *)`, declared in `linux/filter.h`.

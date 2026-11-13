@@ -13,3 +13,9 @@ EXPORT_SYMBOL(loops_per_jiffy);
 /* NULL as in Genode: kernel/ksysfs.c is not built, and a NULL parent puts a kobject at the root of a sysfs nobody sees. */
 struct kobject *kernel_kobj;
 EXPORT_SYMBOL(kernel_kobj);
+
+#include <linux/jump_label.h>
+
+/* True as jump_label_init would leave it: without JUMP_LABEL a static key is a plain counter, usable at once. */
+bool static_key_initialized = true;
+EXPORT_SYMBOL_GPL(static_key_initialized);
