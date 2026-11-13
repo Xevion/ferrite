@@ -1,6 +1,6 @@
 //! Finding which workspace package owns a binary, from `cargo metadata` output.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use snafu::{ResultExt, Snafu};
@@ -17,29 +17,44 @@ pub enum MetadataError {
     AmbiguousBin { app: String, packages: Vec<String> },
 
     #[snafu(display(
-        "package `{package}` sets metadata.ferrite.target to `{target}`; use {UEFI_TRIPLE} or {NONE_TRIPLE}"
+        "package `{package}` sets metadata.ferrite.target to `{target}`; use {UEFI_TRIPLE} or {ELF_TRIPLE}"
     ))]
     UnknownTarget { package: String, target: String },
 }
 
 const UEFI_TRIPLE: &str = "x86_64-unknown-uefi";
-const NONE_TRIPLE: &str = "x86_64-unknown-none";
+const ELF_TRIPLE: &str = "x86_64-unknown-linux-gnu";
 
 /// What an app is built for, from `[package.metadata.ferrite] target` in its manifest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppTarget {
     /// The default: `x86_64-unknown-uefi`, whose linker writes the `.efi` itself.
     Uefi,
-    /// `x86_64-unknown-none`, for apps that link ELF objects; the build converts the ELF into the `.efi`.
-    None,
+    /// `x86_64-unknown-linux-gnu` without its libc, as a static PIE with the flags of `.cargo/app.toml`: for
+    /// SSE and AVX, and for apps that link ELF objects. The build converts the ELF into the `.efi`.
+    Elf,
 }
+
+/// The cargo `--config` file of ELF app builds, relative to the workspace root.
+pub const APP_CONFIG: &str = ".cargo/app.toml";
+/// The target directory `APP_CONFIG` sets, under the workspace's, so host artifacts of the same triple stay apart.
+const APP_TARGET_DIR: &str = "app";
 
 impl AppTarget {
     pub const fn triple(self) -> &'static str {
         match self {
             Self::Uefi => UEFI_TRIPLE,
-            Self::None => NONE_TRIPLE,
+            Self::Elf => ELF_TRIPLE,
         }
+    }
+
+    /// Where a debug build of this kind lands, given the workspace's target directory.
+    pub fn out_dir(self, target_directory: &Path) -> PathBuf {
+        let base = match self {
+            Self::Uefi => target_directory.to_owned(),
+            Self::Elf => target_directory.join(APP_TARGET_DIR),
+        };
+        base.join(self.triple()).join("debug")
     }
 }
 
@@ -54,6 +69,7 @@ pub struct App<'a> {
 pub struct Metadata {
     packages: Vec<Package>,
     pub target_directory: PathBuf,
+    pub workspace_root: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,7 +96,7 @@ impl Package {
         let target = self.metadata.as_ref().and_then(|m| m.ferrite.as_ref()).and_then(|f| f.target.as_deref());
         match target {
             None | Some(UEFI_TRIPLE) => Ok(AppTarget::Uefi),
-            Some(NONE_TRIPLE) => Ok(AppTarget::None),
+            Some(ELF_TRIPLE) => Ok(AppTarget::Elf),
             Some(other) => Err(MetadataError::UnknownTarget { package: self.name.clone(), target: other.to_owned() }),
         }
     }
@@ -145,7 +161,7 @@ mod tests {
                 {"name": "ferrite-uefi", "kind": ["bin"], "crate_types": ["bin"]},
                 {"name": "ferrite_uefi", "kind": ["lib"], "crate_types": ["lib"]}]},
             {"name": "ferrite-wifi-efi", "id": "path+file:///w/crates/ferrite-wifi-efi#0.1.0", "version": "0.1.0",
-             "metadata": {"ferrite": {"target": "x86_64-unknown-none"}},
+             "metadata": {"ferrite": {"target": "x86_64-unknown-linux-gnu"}},
              "targets": [{"name": "wifitrace", "kind": ["bin"], "crate_types": ["bin"]}]},
             {"name": "ferrite-wire", "id": "path+file:///w/crates/ferrite-wire#0.1.0", "version": "0.1.0",
              "metadata": null,
@@ -154,6 +170,7 @@ mod tests {
         ],
         "workspace_members": [],
         "target_directory": "/w/target",
+        "workspace_root": "/w",
         "version": 1
     }"#;
 
@@ -161,7 +178,7 @@ mod tests {
     #[case::recon_bin("dbcbench", "ferrite-recon", AppTarget::Uefi)]
     #[case::another_recon_bin("pciscan", "ferrite-recon", AppTarget::Uefi)]
     #[case::bin_named_like_its_package("ferrite-uefi", "ferrite-uefi", AppTarget::Uefi)]
-    #[case::built_as_elf("wifitrace", "ferrite-wifi-efi", AppTarget::None)]
+    #[case::built_as_elf("wifitrace", "ferrite-wifi-efi", AppTarget::Elf)]
     fn the_owning_package_and_its_target_are_found(
         #[case] app: &str,
         #[case] package: &str,
@@ -184,7 +201,7 @@ mod tests {
 
     #[test]
     fn a_binary_in_two_packages_is_ambiguous() {
-        let json = r#"{"target_directory": "/t", "packages": [
+        let json = r#"{"target_directory": "/t", "workspace_root": "/", "packages": [
             {"name": "a", "targets": [{"name": "tool", "kind": ["bin"]}]},
             {"name": "b", "targets": [{"name": "tool", "kind": ["bin"]}]}]}"#;
         assert!(let Ok(metadata) = Metadata::parse(json));
@@ -194,7 +211,7 @@ mod tests {
 
     #[test]
     fn an_unknown_target_is_refused() {
-        let json = r#"{"target_directory": "/t", "packages": [
+        let json = r#"{"target_directory": "/t", "workspace_root": "/", "packages": [
             {"name": "a", "metadata": {"ferrite": {"target": "aarch64-unknown-uefi"}},
              "targets": [{"name": "tool", "kind": ["bin"]}]}]}"#;
         assert!(let Ok(metadata) = Metadata::parse(json));

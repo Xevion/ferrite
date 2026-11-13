@@ -4,11 +4,12 @@
 
 | Crate | Mode | Contents |
 | --- | --- | --- |
+| `ferrite-rt` | `no_std` | `memcpy`, `memmove`, `memset`, `memcmp`, `bcmp`, `strlen` and unwinder stubs for the ELF-built apps, which link no libc |
 | `ferrite-hal` | `no_std` | Platform traits (MMIO, PCI config, DMA, clock, delay) and the address, unit and index types every driver shares |
 | `ferrite-xhci` | `no_std` + `alloc` | xHCI Debug Capability driver, written only against `ferrite-hal` |
 | `ferrite-efi` | `no_std` + `uefi` | UEFI backends for the HAL traits, the boot-volume log and file reads, the `log` sink, unattended exit, the firmware watchdog, firmware RNG and RTC, the link protocol the loader shares with its apps |
 | `ferrite-testing` | std | Host-only test doubles: mock HAL, simulated DbC register file |
-| `ferrite-uefi` | `no_std`, UEFI app | Memory sweep, ratatui UI, SNP + smoltcp networking, mDNS, HTTP status page |
+| `ferrite-uefi` | `no_std`, UEFI app built as ELF | Memory sweep, ratatui UI, SNP + smoltcp networking, mDNS, HTTP status page |
 | `ferrite-recon` | `no_std`, UEFI apps | `pciscan`, `xhciscan`, `dbcping`, `dbcbench` |
 | `ferrite-loader` | `no_std`, UEFI app | Resident loader: keeps the DbC up, receives pushed `.efi` images and runs them under a watchdog |
 | `ferrite-wire` | `no_std` + `alloc` | Message formats spoken over the DbC link (the benchmark frames and the loader's `link` protocol), shared by both ends |
@@ -40,17 +41,25 @@ build. Std-only helpers for a shared crate go in a separate std crate instead.
 ### Building
 
 There is no default target. UEFI builds go through aliases in
-`.cargo/config.toml` (`cargo efi-check`, `cargo efi-clippy`, `cargo efi-build`);
+`.cargo/config.toml` (`cargo efi-check`, `cargo efi-clippy`, `cargo efi-build` for
+the apps on `x86_64-unknown-uefi`, `cargo efi-app-*` for the ELF-built ones);
 plain `cargo check` and `cargo nextest run` cover the host-buildable crates.
 `just check`, `just lint` and `just test` run both sides.
 
-An app that links the Linux C, which is ELF, is built for
-`x86_64-unknown-none` instead (`cargo efi-elf-check`, `cargo efi-elf-clippy`)
-and says so in its manifest with `[package.metadata.ferrite] target =
-"x86_64-unknown-none"`. `ferrite-dev build <app>` builds either kind and
-converts the ELF into the `.efi`, leaving the ELF beside it for resolving
-addresses; `just stage`, `push` and `run` go through it. That target is soft
-float, so such an app has no SSE.
+`ferrite-uefi` and `wifitrace` are built for `x86_64-unknown-linux-gnu` instead,
+`no_std` and without libc, so they have SSE and AVX (the UEFI target is soft
+float) and can link the Linux C, which is ELF. They say so with
+`[package.metadata.ferrite] target = "x86_64-unknown-linux-gnu"`. Their flags
+live in `.cargo/app.toml`, loaded only by `--config` (the `efi-app-*` aliases and
+`ferrite-dev build`), with its own target directory `target/app`, so host builds
+of the same triple and their artifacts are untouched. Such a build sets
+`--cfg ferrite_app` (so does the UEFI target), which shared code and build
+scripts test instead of `target_os`; the link flags come from the app's
+`build.rs`, gated on it. `ferrite-rt` provides the libc symbols they need.
+`just app-deps` (part of `just lint`) fails if their trees gain `getrandom`,
+`libc`, `rustix` or a `std` feature. `ferrite-dev build <app>` builds either kind
+and converts the ELF into the `.efi`, leaving the ELF beside it for resolving
+addresses; `just stage`, `push` and `run` go through it.
 
 Dev-profile optimisation is set per package, each with a stated reason; there is
 no blanket `[profile.dev.package."*"]`. Generic and inline code is compiled at

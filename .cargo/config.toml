@@ -1,14 +1,13 @@
 [alias]
-efi-build = "build --target x86_64-unknown-uefi -p ferrite-uefi -p ferrite-recon -p ferrite-loader"
-efi-check = "check --target x86_64-unknown-uefi -p ferrite-uefi -p ferrite-recon -p ferrite-loader"
-efi-clippy = "clippy --target x86_64-unknown-uefi -p ferrite-uefi -p ferrite-recon -p ferrite-loader"
-# Apps that link the Linux C, which is ELF: built for x86_64-unknown-none, then converted to a .efi
-# by `ferrite-dev build`.
-efi-elf-build = "build --target x86_64-unknown-none -p ferrite-wifi-efi"
-efi-elf-check = "check --target x86_64-unknown-none -p ferrite-wifi-efi"
-efi-elf-clippy = "clippy --target x86_64-unknown-none -p ferrite-wifi-efi"
+efi-build = "build --target x86_64-unknown-uefi -p ferrite-recon -p ferrite-loader"
+efi-check = "check --target x86_64-unknown-uefi -p ferrite-recon -p ferrite-loader"
+efi-clippy = "clippy --target x86_64-unknown-uefi -p ferrite-recon -p ferrite-loader"
+# Apps built as static-PIE ELF for x86_64-unknown-linux-gnu with the flags of .cargo/app.toml, then
+# converted to a .efi by `ferrite-dev build`.
+efi-app-build = "build --config .cargo/app.toml -p ferrite-uefi -p ferrite-wifi-efi"
+efi-app-check = "check --config .cargo/app.toml -p ferrite-uefi -p ferrite-wifi-efi"
+efi-app-clippy = "clippy --config .cargo/app.toml -p ferrite-uefi -p ferrite-wifi-efi"
 
-# x86_64-unknown-none is soft float and the task switch saves no vector registers, so the
-# RustCrypto primitives keep to their portable code instead of AES-NI and SHA extensions.
-[target.x86_64-unknown-none]
-rustflags = ["--cfg", "aes_backend=\"soft\"", "--cfg", "sha1_backend=\"soft\""]
+# Lets the shared crates tell an app build from a host build: the UEFI target is only ever an app.
+[target.x86_64-unknown-uefi]
+rustflags = ["--cfg", "ferrite_app"]

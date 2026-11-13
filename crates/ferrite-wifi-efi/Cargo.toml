@@ -6,15 +6,16 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Built as an ELF and converted to a .efi by ferrite-dev, because the C it links is ELF.
+# Built as a static-PIE ELF and converted to a .efi by ferrite-dev, because the C it links is ELF.
 [package.metadata.ferrite]
-target = "x86_64-unknown-none"
+target = "x86_64-unknown-linux-gnu"
 
 [dependencies]
 corosensei.workspace = true
 ferrite-efi = { workspace = true, features = ["panic-handler"] }
 ferrite-hal.workspace = true
 ferrite-lkpi.workspace = true
+ferrite-rt.workspace = true
 ferrite-netif.workspace = true
 ferrite-wifi-start.workspace = true
 log.workspace = true

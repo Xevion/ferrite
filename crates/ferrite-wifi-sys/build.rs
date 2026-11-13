@@ -10,7 +10,8 @@
 //! Hand-written and generated C in `glue/` (the kernel symbols the shim defines in C) is compiled with the
 //! same flags into the same archive, after the passes below and so without the rename.
 //!
-//! On a Linux target the C is also built with unwind tables and debug info, for the lab's backtraces.
+//! For the lab (a Linux build without `ferrite_app`) the C is also built with unwind tables and debug info,
+//! for its backtraces.
 //!
 //! Two passes run over each object before archiving: the symbols of `libc-collisions.txt` are renamed so
 //! they cannot bind to the host libc, and the initcall and exitcall pointers the shadow `linux/init.h`
@@ -40,7 +41,7 @@ const INITCALL_PREFIX: &str = "__lx_initcall_";
 const EXITCALL_PREFIX: &str = "__lx_exitcall_";
 
 /// What the lab, the Linux process this C runs in, adds so a backtrace can walk through C frames and name
-/// them. The target OS selects it: the lab is the only Linux build, and the UEFI build has no use for it.
+/// them. A Linux build that is not a bare-metal app (`ferrite_app`) is the lab; the UEFI build has no use for it.
 const LAB_FLAGS: [&str; 3] = ["-g", "-fno-omit-frame-pointer", "-fasynchronous-unwind-tables"];
 
 /// The C always targets bare `x86_64`: `x86_64-unknown-uefi` is LLP64 with the MS ABI, which the kernel
@@ -400,7 +401,8 @@ fn main() {
     }
 
     let mut flags = global_flags(&read(&crate_dir.join("cflags.txt")));
-    let lab = env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "linux");
+    let lab =
+        env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "linux") && env::var_os("CARGO_CFG_FERRITE_APP").is_none();
     if lab {
         flags.extend(LAB_FLAGS.map(str::to_owned));
     }

@@ -28,9 +28,11 @@ use core::time::Duration;
 
 use ferrite_efi::bootlog::{BootLog, Echo};
 use ferrite_efi::clock::Clock;
+use ferrite_efi::cpu::{FpuControl, VectorSupport};
 use ferrite_efi::{entropy, logger, rtc, session};
 use ferrite_hal::{Clock as _, Delay as _};
 use ferrite_lkpi::sched::{DEFAULT_STACK_SIZE, NoHooks, Scheduler, Step};
+use ferrite_rt as _;
 use ferrite_wifi_efi::arena;
 use ferrite_wifi_efi::firmware::VolumeFirmware;
 use ferrite_wifi_efi::iommu::{self, DmaPath};
@@ -154,8 +156,15 @@ fn halt(stub: &CStr) -> ! {
 
 #[entry]
 fn main() -> Status {
+    let fpu = FpuControl::read();
     let helpers = uefi::helpers::init();
     logger::init(BootLog::open("wifitrace", Echo::Console), LevelFilter::Info);
+    if !fpu.sse_ready() {
+        log::error!("cpu: the firmware left SSE disabled, stopping: {fpu}");
+        logger::with(|log| session::finish(log, EXIT_AFTER));
+        return Status::UNSUPPORTED;
+    }
+    log::info!("cpu: {fpu}; {}", VectorSupport::probe());
     if let Err(e) = helpers {
         log::warn!("uefi helpers init failed: {e}");
     }

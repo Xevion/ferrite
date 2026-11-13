@@ -1011,6 +1011,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-rt"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "rstest 0.28.0",
+]
+
+[[package]]
 name = "ferrite-testing"
 version = "0.1.0"
 dependencies = [
@@ -1024,6 +1032,7 @@ dependencies = [
  "assert2",
  "ferrite-efi",
  "ferrite-hal",
+ "ferrite-rt",
  "log",
  "ratatui",
  "ratatui-core",
@@ -1042,6 +1051,7 @@ dependencies = [
  "ferrite-hal",
  "ferrite-lkpi",
  "ferrite-netif",
+ "ferrite-rt",
  "ferrite-wifi-start",
  "log",
  "smoltcp",

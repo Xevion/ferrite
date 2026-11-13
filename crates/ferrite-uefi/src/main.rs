@@ -4,7 +4,10 @@
 use core::time::Duration;
 
 use ferrite_efi::bootlog::{BootLog, Echo};
+use ferrite_efi::cpu::{FpuControl, VectorSupport};
 use ferrite_efi::{logger, session};
+#[cfg(ferrite_app)]
+use ferrite_rt as _;
 use ferrite_uefi::app::App;
 use ferrite_uefi::diag;
 use log::LevelFilter;
@@ -15,9 +18,16 @@ const EXIT_WAIT: Duration = Duration::ZERO;
 
 #[entry]
 fn main() -> Status {
+    let fpu = FpuControl::read();
     // The log comes first so a hang or failure in anything below is recorded.
     logger::init(BootLog::open(diag::LOG_NAME, Echo::Silent), LevelFilter::Debug);
     diag::milestone("boot: entry reached");
+    if !fpu.sse_ready() {
+        log::error!("cpu: the firmware left SSE disabled, stopping: {fpu}");
+        logger::with(|log| session::finish(log, EXIT_WAIT));
+        return Status::UNSUPPORTED;
+    }
+    log::info!("cpu: {fpu}; {}", VectorSupport::probe());
     if let Err(e) = uefi::helpers::init() {
         log::warn!("boot: uefi helpers init failed: {e}");
     }

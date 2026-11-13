@@ -21,20 +21,25 @@ default:
 check: vendor
     cargo check --all-targets
     cargo efi-check
-    cargo efi-elf-check
+    cargo efi-app-check
 
 # clippy over the host crates and the UEFI apps, plus unused-dependency check
 lint: vendor
     cargo clippy --all-targets
     cargo clippy -p ferrite-uefi -p ferrite-recon --lib --tests
     cargo efi-clippy
-    cargo efi-elf-clippy
+    cargo efi-app-clippy
+    just app-deps
     cargo machete
 
 # run the unit tests on the host
 test *args: vendor
     cargo nextest run {{ args }}
     cargo nextest run -p ferrite-uefi -p ferrite-recon --lib {{ args }}
+
+# fail if an ELF-built app pulls in a crate that would call a libc it does not have
+app-deps:
+    ! cargo tree --config .cargo/app.toml -p ferrite-uefi -p ferrite-wifi-efi -e normal --prefix none -f '{p} [{f}]' | grep -E '^(getrandom|libc|rustix) |[[,]std[],]'
 
 format:
     cargo fmt --all
@@ -58,7 +63,7 @@ vendor *args:
 # build every UEFI app (debug, or `just build release`); the ELF-built ones become a .efi through `just stage`
 build profile="dev": vendor
     cargo efi-build --profile {{ profile }}
-    cargo efi-elf-build --profile {{ profile }}
+    cargo efi-app-build --profile {{ profile }}
 
 # build one UEFI app and stage it as the ESP bootloader under ./esp; wifitrace also gets regulatory.db, the 8265 firmware and the WPA_ lines of .env (as wifi.env) under efi/ferrite/firmware
 stage app="ferrite-uefi": vendor

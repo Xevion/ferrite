@@ -2,9 +2,9 @@
 resolver = "3"
 members = ["crates/*"]
 # Host-buildable crates. The UEFI binaries are built through the `efi-*`
-# aliases in .cargo/config.toml, which pass `--target x86_64-unknown-uefi`.
+# aliases in .cargo/config.toml.
 # ferrite-wifi-sys needs its Linux snapshot, which the Justfile recipes make first with `just vendor`.
-default-members = ["crates/ferrite-hal", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-wire", "crates/ferrite-dev", "crates/ferrite-wifi-sys", "crates/ferrite-nl80211", "crates/ferrite-netif", "crates/ferrite-wpa", "crates/ferrite-lkpi", "crates/ferrite-wifi-start", "crates/ferrite-lab", "crates/ferrite-linux"]
+default-members = ["crates/ferrite-hal", "crates/ferrite-rt", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-wire", "crates/ferrite-dev", "crates/ferrite-wifi-sys", "crates/ferrite-nl80211", "crates/ferrite-netif", "crates/ferrite-wpa", "crates/ferrite-lkpi", "crates/ferrite-wifi-start", "crates/ferrite-lab", "crates/ferrite-linux"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,7 @@ publish = false
 ferrite-efi = { path = "crates/ferrite-efi" }
 ferrite-hal = { path = "crates/ferrite-hal" }
 ferrite-lkpi = { path = "crates/ferrite-lkpi" }
+ferrite-rt = { path = "crates/ferrite-rt" }
 ferrite-netif = { path = "crates/ferrite-netif" }
 ferrite-nl80211 = { path = "crates/ferrite-nl80211" }
 ferrite-wifi-start = { path = "crates/ferrite-wifi-start" }
@@ -79,6 +80,8 @@ trivial_numeric_casts = "warn"
 unsafe_op_in_unsafe_fn = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
 redundant_lifetimes = "warn"
+# Set by the app builds: .cargo/app.toml and the UEFI target in .cargo/config.toml.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(ferrite_app)"] }
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

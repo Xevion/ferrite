@@ -13,7 +13,7 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use crate::config::Config;
 use crate::efi_image::{self, EfiImageError};
 use crate::link::LinkOptions;
-use crate::metadata::{App, AppTarget, Metadata, MetadataError};
+use crate::metadata::{APP_CONFIG, App, AppTarget, Metadata, MetadataError};
 use crate::runner::{Cmd, CmdOutput, OutputMode};
 
 pub const RECOVERY: &str = "If the target is hung: hold the power button until it turns off, then press it once. It boots its default OS by itself.";
@@ -181,8 +181,8 @@ pub fn execute(env: &impl Env, config: &Config, plan: &RunPlan) -> Result<RunRes
 
 /// Build `app` for its target and return the path of its `.efi`.
 ///
-/// An app built for `x86_64-unknown-none` is converted from the linked ELF, which stays next to the
-/// `.efi` for resolving addresses.
+/// An app built as ELF (`x86_64-unknown-linux-gnu`) is converted from the linked ELF, which stays next to
+/// the `.efi` for resolving addresses.
 pub fn build_app(env: &impl Env, app: &str) -> Result<PathBuf, RunError> {
     if !valid_app_name(app) {
         return Err(RunError::BadAppName { app: app.to_owned() });
@@ -193,10 +193,11 @@ pub fn build_app(env: &impl Env, app: &str) -> Result<PathBuf, RunError> {
     let App { package, target } = metadata.app(app).context(PackageSnafu { app })?;
 
     env.say(&format!("building {app} ({package}, {})", target.triple()));
-    checked(env, "build", &Commands::build(app, package, target), OutputMode::Passthrough)?;
-    let out_dir = metadata.target_directory.join(target.triple()).join("debug");
+    let build = Commands::build(app, package, target, &metadata.workspace_root);
+    checked(env, "build", &build, OutputMode::Passthrough)?;
+    let out_dir = target.out_dir(&metadata.target_directory);
     let efi = out_dir.join(format!("{app}.efi"));
-    if target == AppTarget::None {
+    if target == AppTarget::Elf {
         efi_image::convert_file(&out_dir.join(app), &efi).context(ConvertSnafu { app })?;
     }
     Ok(efi)
@@ -364,8 +365,15 @@ impl<'a> Commands<'a> {
         Cmd::new("cargo", ["metadata", "--format-version", "1", "--no-deps"])
     }
 
-    fn build(app: &str, package: &str, target: AppTarget) -> Cmd {
-        Cmd::new("cargo", ["build", "--target", target.triple(), "-p", package, "--bin", app])
+    fn build(app: &str, package: &str, target: AppTarget, workspace_root: &Path) -> Cmd {
+        let target_args = match target {
+            AppTarget::Uefi => ["--target".to_owned(), target.triple().to_owned()],
+            AppTarget::Elf => ["--config".to_owned(), workspace_root.join(APP_CONFIG).to_string_lossy().into_owned()],
+        };
+        let mut args = vec!["build".to_owned()];
+        args.extend(target_args);
+        args.extend(["-p", package, "--bin", app].map(str::to_owned));
+        Cmd::new("cargo", args)
     }
 
     fn upload(&self, efi: &Path) -> Cmd {
@@ -464,7 +472,7 @@ mod tests {
 
     use super::*;
 
-    const METADATA: &str = r#"{"target_directory": "/w/target", "packages": [
+    const METADATA: &str = r#"{"target_directory": "/w/target", "workspace_root": "/w", "packages": [
         {"name": "ferrite-recon", "targets": [{"name": "dbcping", "kind": ["bin"]}, {"name": "dbcbench", "kind": ["bin"]}]}]}"#;
 
     const DEPLOY: &str = "ssh -o BatchMode=yes target sudo -n /usr/local/sbin/ferrite-esp";

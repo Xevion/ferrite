@@ -23,7 +23,7 @@ suite before (or instead of) booting an operating system.
 ## Quickstart
 
 ```bash
-just build                        # compile every .efi (x86_64-unknown-uefi)
+just build                        # compile every UEFI app
 just qemu                         # boot the main app in QEMU with a graphical window (needs OVMF)
 just qemu ferrite-uefi serial     # boot headless, console mirrored to your terminal
 just qemu xhciscan serial         # any app by name: ferrite-uefi, pciscan, xhciscan, dbcping, dbcbench

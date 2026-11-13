@@ -1,8 +1,9 @@
-//! Turning a static-PIE ELF built for `x86_64-unknown-none` into a PE32+ UEFI application.
+//! Turning a static-PIE ELF built for `x86_64-unknown-linux-gnu` into a PE32+ UEFI application.
 //!
-//! The apps that link the Linux C are built for `x86_64-unknown-none`, because the C is ELF with the
-//! System V ABI and the PE linker of `x86_64-unknown-uefi` takes no ELF objects. The linked ELF is turned
-//! into the image the firmware loads here, as gnu-efi and systemd do with their `elf2efi`.
+//! Apps are built as ELF without libc (the flags of `.cargo/app.toml`) because that target has SSE and
+//! AVX, where `x86_64-unknown-uefi` is soft float, and because the Linux C is ELF with the System V ABI,
+//! which the PE linker of `x86_64-unknown-uefi` does not take. The linked ELF is turned into the image the
+//! firmware loads here, as gnu-efi and systemd do with their `elf2efi`.
 //!
 //! Each `PT_LOAD` segment becomes one PE section on the same pages. The whole image moves up by the
 //! page or pages the PE headers take, which RIP-relative code does not notice; the absolute pointers
@@ -333,7 +334,7 @@ mod tests {
         Segment { vaddr, mem_size, access, data: vec![0; file_len] }
     }
 
-    /// The layout of a real `x86_64-unknown-none` link: read-only data from 0, then text, relro and data.
+    /// The layout of a real static-PIE app link: read-only data from 0, then text, relro and data.
     fn linked() -> Vec<Segment> {
         vec![
             segment(0x2cb0, 0x3665, Access::ReadExecute, 0x3665),

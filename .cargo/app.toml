@@ -1,0 +1,15 @@
+# Bare-metal app builds for x86_64-unknown-linux-gnu. Loaded only through `--config .cargo/app.toml`
+# (the `efi-app-*` aliases and `ferrite-dev build`), so host builds of the same triple never see it.
+[build]
+target = "x86_64-unknown-linux-gnu"
+target-dir = "target/app"
+
+# `ferrite_app` marks a bare-metal app build. Firmware interrupts land on our stacks, so no red zone.
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "--cfg", "ferrite_app",
+    "-C", "panic=abort",
+    "-C", "no-redzone=yes",
+    "-C", "relocation-model=pie",
+    "-C", "target-feature=+crt-static",
+]

@@ -145,7 +145,7 @@ pub fn with<R>(f: impl FnOnce(&mut BootLog) -> R) -> Option<R> {
 }
 
 /// Save a panic message to the log file now. Returns whether the console already showed it.
-#[cfg(all(any(target_os = "uefi", target_os = "none"), feature = "panic-handler"))]
+#[cfg(all(ferrite_app, feature = "panic-handler"))]
 pub(crate) fn record_panic(info: &core::panic::PanicInfo<'_>) -> bool {
     use crate::bootlog::Echo;
 

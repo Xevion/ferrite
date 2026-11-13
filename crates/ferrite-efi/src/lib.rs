@@ -9,6 +9,7 @@ extern crate std;
 
 pub mod bootlog;
 pub mod clock;
+pub mod cpu;
 pub mod dma;
 pub mod entropy;
 pub mod link;
