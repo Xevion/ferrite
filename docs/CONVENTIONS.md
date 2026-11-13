@@ -13,9 +13,9 @@
 | `ferrite-loader` | `no_std`, UEFI app | Resident loader: keeps the DbC up, receives pushed `.efi` images and runs them under a watchdog |
 | `ferrite-wire` | `no_std` + `alloc` | Message formats spoken over the DbC link (the benchmark frames and the loader's `link` protocol), shared by both ends |
 | `ferrite-lkpi` | `no_std` + `alloc` | Linux kernel API shim the Wi-Fi drivers link against; its `stubs` feature holds the generated trace-and-stop stubs |
-| `ferrite-wifi-sys` | `no_std` | Pinned Linux mac80211, cfg80211 and rtw89 C built by `build.rs`, and the tables of its initcalls |
+| `ferrite-wifi-sys` | `no_std` | Pinned Linux mac80211, cfg80211, rtw89 and iwlwifi C built by `build.rs`, and the tables of its initcalls |
 | `ferrite-wifi-start` | `no_std` | The Wi-Fi C's kernel entry points and the init thread (seam checks, initcalls, exitcalls) that the lab and `wifitrace` share |
-| `ferrite-wifi-efi` | `no_std`, UEFI app built as ELF | The shim's platform pieces from firmware services (arena, guarded task stacks, firmware files, clock), and `wifitrace`, which runs the Wi-Fi C on them |
+| `ferrite-wifi-efi` | `no_std`, UEFI app built as ELF | The shim's platform pieces from firmware services (arena, guarded task stacks, firmware files, clock, PCI I/O devices, the DMA protection probe), and `wifitrace`, which runs the Wi-Fi C on them |
 | `ferrite-lab` | std | The Wi-Fi C run as a Linux process on the desktop: logger, halt hook with a backtrace, the data fence, the host platform pieces |
 | `ferrite-dev` | std | Desktop tool: `log` (DbC capture), `bench` (dbcbench peer), `run` (one-shot cycle on the laptop), `push` and `loader` (client of the resident loader), `build` (an app's `.efi`, converting ELF-built apps), `vendor` (Linux snapshot), `stubs` (generates the kernel-symbol stubs) |
 

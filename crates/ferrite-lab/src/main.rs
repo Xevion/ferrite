@@ -27,6 +27,8 @@ const EXIT_HALTED: u8 = 86;
 const FIRMWARE_DIR: &str = "/lib/firmware";
 /// How long cfg80211 gets to load `regulatory.db` after its initcalls.
 const REGDB_LIMIT: Duration = Duration::from_secs(2);
+/// How long a PCI Wi-Fi card gets to register its interface; the lab has none yet.
+const WIFI_LIMIT: Duration = Duration::from_secs(10);
 /// How long one poll step may run tasks before the main loop gets the CPU back.
 const BUDGET: Duration = Duration::from_millis(10);
 /// The kernel's memory: every page, slab object and vmalloc block.
@@ -81,6 +83,11 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if let Err(error) = ferrite_lkpi::pci::install(&host::NoPci) {
+        log::error!("{error}");
+        return ExitCode::FAILURE;
+    }
+
     let wall = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
     if let Err(error) = ferrite_lkpi::time::set_boot_wall_clock(wall) {
         log::error!("{error}");
@@ -96,7 +103,12 @@ fn main() -> ExitCode {
         log::error!("starting kthreadd failed: {code}");
         return ExitCode::FAILURE;
     }
-    let start_up = StartUp { sched: sched.handle(), firmware_reference: firmware, regdb_limit: REGDB_LIMIT };
+    let start_up = StartUp {
+        sched: sched.handle(),
+        firmware_reference: firmware,
+        regdb_limit: REGDB_LIMIT,
+        wifi_limit: WIFI_LIMIT,
+    };
     let init_task = match ferrite_wifi_start::start_init(start_up) {
         Ok(task) => task,
         Err(code) => {

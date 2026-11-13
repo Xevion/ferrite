@@ -1,7 +1,7 @@
 //! The Wi-Fi C's start-up, shared by the lab and the UEFI image: the C entry points the programs call
 //! directly, and the init thread that checks each seam before it runs the initcalls and exitcalls.
 //!
-//! A program installs the shim (scheduler, arena, random seed, firmware provider, wall clock), starts
+//! A program installs the shim (scheduler, arena, random seed, firmware provider, PCI devices, wall clock), starts
 //! kthreadd with [`start_kthreadd`] and the init thread with [`start_init`], then polls its scheduler
 //! until the init task is gone and asks [`init_failed`] how it went. The C is resolved by the program's
 //! link, so this crate links only into a program that also links `ferrite-wifi-sys` and `ferrite-lkpi`.
@@ -13,7 +13,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::ffi::{CStr, c_char, c_int, c_uint, c_ulong, c_void};
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use core::time::Duration;
 
 use ferrite_hal::Instant;
@@ -62,6 +62,10 @@ unsafe extern "C" {
     fn page_frag_cache_drain(cache: *mut PageFragCache);
     fn __alloc_skb(size: c_uint, gfp: c_uint, flags: c_int, node: c_int) -> *mut c_void;
     fn sk_skb_reason_drop(sk: *mut c_void, skb: *mut c_void, reason: c_uint);
+    fn lx_pci_driver_name(index: c_ulong) -> *const c_char;
+    fn lx_wireless_ctl(op: c_int, name: *mut c_char) -> c_int;
+    static lx_irq_polls: c_ulong;
+    static lx_irq_unhandled: c_ulong;
 }
 
 /// `struct firmware`.
@@ -106,6 +110,8 @@ pub struct StartUp {
     pub firmware_reference: &'static dyn FirmwareProvider,
     /// How long cfg80211 gets to load `regulatory.db` after its initcalls.
     pub regdb_limit: Duration,
+    /// How long a PCI Wi-Fi card gets from its probe to a registered wireless interface.
+    pub wifi_limit: Duration,
 }
 
 /// Create the init thread, which runs the checks and every initcall and exitcall, and return its
@@ -125,6 +131,25 @@ pub fn init_failed() -> bool {
     INIT_FAILED.load(Ordering::Acquire)
 }
 
+/// The step the init thread is in, for a program that stops it from outside.
+static STAGE: AtomicPtr<u8> = AtomicPtr::new(c"starting".as_ptr().cast_mut().cast());
+
+fn enter(stage: &'static CStr) {
+    STAGE.store(stage.as_ptr().cast_mut().cast(), Ordering::Release);
+}
+
+/// The step the init thread last entered.
+pub fn stage() -> &'static CStr {
+    // SAFETY: only `enter` stores, always a static C string.
+    unsafe { CStr::from_ptr(STAGE.load(Ordering::Acquire).cast()) }
+}
+
+/// Polled interrupt runs, and runs whose handlers all said `IRQ_NONE`.
+pub fn irq_counts() -> (u64, u64) {
+    // SAFETY: plain counters the C bumps on the same thread.
+    unsafe { (lx_irq_polls, lx_irq_unhandled) }
+}
+
 /// The init thread: the seam checks, then every initcall and exitcall.
 unsafe extern "C" fn init(arg: *mut c_void) -> c_int {
     // SAFETY: `start_init` passed the pointer of a leaked `StartUp` and nothing else uses it.
@@ -137,9 +162,11 @@ unsafe extern "C" fn init(arg: *mut c_void) -> c_int {
     }
 }
 
-/// Run every step in order; true when all passed. A failed check is logged and stops the run.
+/// Run every step in order; true when all passed. A failed check is logged and stops the run, except
+/// that a failed Wi-Fi card bring-up still runs the exitcalls, so its driver is removed.
 fn run(start_up: &StartUp) -> bool {
     let clock = || start_up.sched.now();
+    enter(c"kthread round trip");
     match kthread_round_trip() {
         Ok(()) => log::info!("kthread round trip through kthreadd: created, ran, stopped"),
         Err(error) => {
@@ -147,6 +174,7 @@ fn run(start_up: &StartUp) -> bool {
             return false;
         },
     }
+    enter(c"kernel start-up");
     // SAFETY: called on the init task, with the scheduler installed and kthreadd running, once.
     unsafe { lx_kernel_init() };
     match sleep_and_timer(&clock) {
@@ -165,12 +193,14 @@ fn run(start_up: &StartUp) -> bool {
             return false;
         },
     }
+    enter(c"initcalls (PCI probes run here)");
     for call in initcalls() {
         log::info!("initcall level {} {}", call.level().to_string_lossy(), call.name().to_string_lossy());
         // SAFETY: init is the only caller, runs the calls one at a time, and the program links the shim.
         let code = unsafe { call.call() };
         log::info!("initcall {} returned {code}", call.name().to_string_lossy());
     }
+    enter(c"firmware check");
     match firmware_round_trip(start_up.firmware_reference, REGDB) {
         Ok(size) => {
             log::info!("request_firmware(regulatory.db) returned {size} bytes; a missing file returned -ENOENT");
@@ -180,6 +210,7 @@ fn run(start_up: &StartUp) -> bool {
             return false;
         },
     }
+    enter(c"regulatory.db wait");
     match wait_for_regdb(&clock, start_up.regdb_limit) {
         Ok(waited) => log::info!("regulatory.db loaded and applied by cfg80211 after {} ms", waited.as_millis()),
         Err(error) => {
@@ -187,6 +218,8 @@ fn run(start_up: &StartUp) -> bool {
             return false;
         },
     }
+    let wifi = pci_wifi(&clock, start_up.wifi_limit);
+    enter(c"exitcalls (driver removal)");
     let mut ran = 0_usize;
     for call in exitcalls() {
         log::info!("exitcall {}", call.name().to_string_lossy());
@@ -195,7 +228,108 @@ fn run(start_up: &StartUp) -> bool {
         ran += 1;
     }
     log::info!("exitcalls done: {ran} ran");
-    true
+    let (polls, unhandled) = irq_counts();
+    log::info!("polled IRQs: {polls} handler runs, {unhandled} answered IRQ_NONE");
+    enter(c"done");
+    wifi
+}
+
+const ENODEV: c_int = 19;
+const IFNAMSIZ: usize = 16;
+const WIFI_POLL_MS: c_uint = 50;
+
+#[derive(Clone, Copy)]
+enum WirelessOp {
+    Find = 0,
+    Up = 1,
+    Down = 2,
+}
+
+/// Run `op` on the first wireless interface: its name and the C's result.
+fn wireless(op: WirelessOp) -> (alloc::string::String, c_int) {
+    let mut name: [c_char; IFNAMSIZ] = [0; IFNAMSIZ];
+    // SAFETY: called on a task after the initcalls; `name` has IFNAMSIZ bytes and comes back terminated.
+    let code = unsafe { lx_wireless_ctl(op as c_int, name.as_mut_ptr()) };
+    // SAFETY: zeroed and written with a terminated copy of at most IFNAMSIZ bytes.
+    let name = unsafe { CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned();
+    (name, code)
+}
+
+fn driver_of(index: usize) -> Option<alloc::string::String> {
+    // SAFETY: returns NULL or a driver name that lives as long as the driver is registered.
+    let name = unsafe { lx_pci_driver_name(index as c_ulong) };
+    // SAFETY: as above, read at once.
+    (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned())
+}
+
+/// Each PCI Wi-Fi card the platform gave the drivers must be bound after the initcalls, and the first
+/// must register a wireless interface (its INIT firmware ran and the NVM was read) and come up (its
+/// RUNTIME firmware is alive), then go down again before the exitcalls remove the driver. True when
+/// there is no card, or every step passed; each step is logged.
+fn pci_wifi(clock: &dyn Fn() -> Instant, limit: Duration) -> bool {
+    let count = ferrite_lkpi::pci::device_count();
+    if count == 0 {
+        log::info!("no PCI Wi-Fi card was handed to the drivers");
+        return true;
+    }
+    let bound: alloc::vec::Vec<Option<alloc::string::String>> = (0..count).map(driver_of).collect();
+    for (index, driver) in bound.iter().enumerate() {
+        match driver {
+            Some(driver) => log::info!("PCI device {index}: probed and bound to {driver}"),
+            None => {
+                log::error!(
+                    "PCI device {index}: no driver bound after the initcalls (probe failed or nothing matched)"
+                );
+            },
+        }
+    }
+    if bound.iter().any(Option::is_none) {
+        return false;
+    }
+    enter(c"waiting for the wireless interface (firmware load, INIT image, NVM)");
+    let start = clock();
+    let name = loop {
+        let (name, code) = wireless(WirelessOp::Find);
+        if code == 0 {
+            break name;
+        }
+        if code != -ENODEV {
+            log::error!("looking for the wireless interface failed: {code}");
+            return false;
+        }
+        if driver_of(0).is_none() {
+            log::error!(
+                "PCI device 0: the driver unbound after {} ms (firmware load or start failed)",
+                (clock() - start).as_millis()
+            );
+            return false;
+        }
+        if clock() - start >= limit {
+            log::error!("no wireless interface after {} ms; the driver is still bound", (clock() - start).as_millis());
+            return false;
+        }
+        // SAFETY: on a task after the time bring-up.
+        unsafe { msleep(WIFI_POLL_MS) };
+    };
+    log::info!(
+        "wireless interface {name} registered after {} ms: INIT firmware ran and the NVM was read",
+        (clock() - start).as_millis()
+    );
+    enter(c"bringing the wireless interface up (RUNTIME image)");
+    let up_start = clock();
+    let (_, code) = wireless(WirelessOp::Up);
+    if code != 0 {
+        log::error!(
+            "dev_open({name}) returned {code} after {} ms: the RUNTIME firmware did not come up",
+            (clock() - up_start).as_millis()
+        );
+        return false;
+    }
+    log::info!("{name} is up after {} ms: the RUNTIME firmware is alive", (clock() - up_start).as_millis());
+    enter(c"bringing the wireless interface down");
+    let (_, code) = wireless(WirelessOp::Down);
+    log::info!("{name} down ({code})");
+    code == 0
 }
 
 static PROBE_RAN: AtomicBool = AtomicBool::new(false);

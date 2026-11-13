@@ -22,3 +22,13 @@ void nl80211_exit(void)
 void nl80211_common_reg_change_event(enum nl80211_commands cmd_id, struct regulatory_request *request)
 {
 }
+
+/* Wiphy and interface lifecycle events, likewise with no listener. */
+void nl80211_notify_wiphy(struct cfg80211_registered_device *rdev, enum nl80211_commands cmd)
+{
+}
+
+void nl80211_notify_iface(struct cfg80211_registered_device *rdev, struct wireless_dev *wdev,
+			  enum nl80211_commands cmd)
+{
+}

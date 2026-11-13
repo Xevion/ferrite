@@ -66,8 +66,14 @@ fn load(name: &CStr) -> Result<Box<[u8]>, c_int> {
     match provider().load(name) {
         // Linux's kernel_read_file refuses an empty file the same way.
         Ok(bytes) if bytes.is_empty() => Err(-EINVAL),
-        Ok(bytes) => Ok(bytes.into_boxed_slice()),
-        Err(FirmwareError::NotFound { .. }) => Err(-ENOENT),
+        Ok(bytes) => {
+            log::info!("firmware request {name}: {} bytes", bytes.len());
+            Ok(bytes.into_boxed_slice())
+        },
+        Err(FirmwareError::NotFound { .. }) => {
+            log::info!("firmware request {name}: not found");
+            Err(-ENOENT)
+        },
         Err(error) => {
             log::warn!("{error}");
             Err(-EIO)

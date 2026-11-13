@@ -205,6 +205,7 @@ trait Core {
     fn set_priority(&self, id: TaskId, priority: Priority) -> Result<(), TaskGone>;
     fn arm_timer(&self, at: Option<Instant>);
     fn set_timer_task(&self, id: TaskId);
+    fn set_irq_task(&self, id: TaskId);
 }
 
 /// A running task's view of the scheduler, passed to its body.
@@ -659,6 +660,10 @@ impl<P: Platform + 'static, S: StackSource, H: Hooks> Core for Shared<P, S, H> {
     fn set_timer_task(&self, id: TaskId) {
         self.state.borrow_mut().timer_task = Some(id);
     }
+
+    fn set_irq_task(&self, id: TaskId) {
+        self.state.borrow_mut().irq_task = Some(id);
+    }
 }
 
 /// What one `poll` did.
@@ -727,6 +732,11 @@ impl SchedHandle {
     pub fn set_timer_task(&self, id: TaskId) {
         self.core.set_timer_task(id);
     }
+
+    /// The task woken when the platform reports pending interrupts.
+    pub fn set_irq_task(&self, id: TaskId) {
+        self.core.set_irq_task(id);
+    }
 }
 
 /// The scheduler. It holds no globals; see the module docs for how tasks reach it.
@@ -776,7 +786,7 @@ impl<P: Platform + 'static, S: StackSource, H: Hooks> Scheduler<P, S, H> {
 
     /// The task woken when the platform reports pending interrupts.
     pub fn set_irq_task(&mut self, id: TaskId) {
-        self.shared.state.borrow_mut().irq_task = Some(id);
+        self.shared.set_irq_task(id);
     }
 
     pub fn unblock(&mut self, id: TaskId) -> Unblocked {

@@ -14,7 +14,8 @@ use super::kernel::Tree;
 use super::{IoSnafu, NotCSnafu, VendorError, exec};
 
 /// Expands `obj-y` into the `.o` files it builds (their composite's name travelling with each) and the
-/// subdirectories it descends into, and prints them with the directory's flags.
+/// subdirectories it descends into, and prints them with the directory's flags. `subdir-ccflags-y` applies
+/// to the directory and every one below it, so a parent's arrive as `INHERIT`.
 const WRAPPER: &str = "\
 include $(KCONFIG)
 src := $(SRC)
@@ -25,7 +26,8 @@ else
 include $(TREE)/$(OBJDIR)/Makefile
 endif
 resolve = $(foreach o,$(1),$(if $(filter %/,$(o)),,$(if $($(o:.o=)-y)$($(o:.o=)-objs),$(call resolve,$($(o:.o=)-y) $($(o:.o=)-objs)),$(o))))
-$(foreach t,$(filter-out %/,$(obj-y)),$(foreach l,$(call resolve,$(t)),$(info LEAF|$(t:.o=)|$(l)|$(ccflags-y) $(CFLAGS_$(l)))))
+$(foreach t,$(filter-out %/,$(obj-y)),$(foreach l,$(call resolve,$(t)),$(info LEAF|$(t:.o=)|$(l)|$(INHERIT) $(subdir-ccflags-y) $(ccflags-y) $(CFLAGS_$(l)))))
+$(info SUB|$(subdir-ccflags-y))
 $(foreach d,$(filter %/,$(obj-y)),$(info DIR|$(d)))
 dump:
 \t@:
@@ -42,8 +44,14 @@ pub struct KbuildFile {
 /// A parsed line of the wrapper's output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Line<'a> {
-    Leaf { module: &'a str, object: &'a str, ccflags: Vec<&'a str> },
+    Leaf {
+        module: &'a str,
+        object: &'a str,
+        ccflags: Vec<&'a str>,
+    },
     Dir(&'a str),
+    /// The directory's `subdir-ccflags-y`, which its subdirectories inherit.
+    Sub(&'a str),
 }
 
 fn parse_dump(output: &str) -> Vec<Line<'_>> {
@@ -56,6 +64,7 @@ fn parse_dump(output: &str) -> Vec<Line<'_>> {
                     Some(Line::Leaf { module, object, ccflags: flags.split_whitespace().collect() })
                 },
                 ("DIR", Some(dir), None, None) => Some(Line::Dir(dir)),
+                ("SUB", Some(flags), None, None) => Some(Line::Sub(flags)),
                 _ => None,
             }
         })
@@ -83,19 +92,22 @@ pub fn evaluate(tree: &Tree, work: &Path, dirs: &[String]) -> Result<Vec<KbuildF
     fs::write(&wrapper, WRAPPER).context(IoSnafu { what: "write", path: &wrapper })?;
     let mut files: Vec<KbuildFile> = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut pending: Vec<String> = dirs.iter().rev().cloned().collect();
-    while let Some(dir) = pending.pop() {
+    let mut pending: Vec<(String, String)> = dirs.iter().rev().map(|dir| (dir.clone(), String::new())).collect();
+    while let Some((dir, inherit)) = pending.pop() {
         let mut make = Command::new("make");
         make.args(["-s", "--no-print-directory", "-f"]).arg(&wrapper).arg("dump");
         make.arg(format!("KCONFIG={}", tree.dotconfig().display()));
         make.arg(format!("TREE={}", tree.src.display()));
         make.arg(format!("OBJDIR={dir}"));
         make.arg(format!("SRC=linux/{dir}"));
+        make.arg(format!("INHERIT={inherit}"));
         let output = exec(&mut make, &format!("evaluate the Kbuild file of {dir}"))?;
         let mut subdirs = Vec::new();
+        let mut below = inherit.clone();
         for line in parse_dump(&output) {
             match line {
                 Line::Dir(sub) => subdirs.push(format!("{dir}/{}", sub.trim_end_matches('/'))),
+                Line::Sub(flags) => format!("{inherit} {}", flags.trim()).trim().clone_into(&mut below),
                 Line::Leaf { module, object, ccflags } => {
                     let stem = object.trim_end_matches(".o");
                     let source = format!("{dir}/{stem}.c");
@@ -108,7 +120,7 @@ pub fn evaluate(tree: &Tree, work: &Path, dirs: &[String]) -> Result<Vec<KbuildF
                 },
             }
         }
-        pending.extend(subdirs.into_iter().rev());
+        pending.extend(subdirs.into_iter().rev().map(|sub| (sub, below.clone())));
     }
     Ok(files)
 }
@@ -152,7 +164,7 @@ mod tests {
 
     #[test]
     fn the_wrappers_output_is_parsed_into_leaves_and_directories() {
-        let output = "LEAF|mac80211|main.o|-DDEBUG -Inet/x\nLEAF|rtw89_core|core.o| \nDIR|tests/\nnoise\n";
+        let output = "LEAF|mac80211|main.o|-DDEBUG -Inet/x\nLEAF|rtw89_core|core.o| \nDIR|tests/\nSUB|-I x/..\nnoise\n";
         let lines = parse_dump(output);
         assert!(
             lines
@@ -160,6 +172,7 @@ mod tests {
                     Line::Leaf { module: "mac80211", object: "main.o", ccflags: vec!["-DDEBUG", "-Inet/x"] },
                     Line::Leaf { module: "rtw89_core", object: "core.o", ccflags: vec![] },
                     Line::Dir("tests/"),
+                    Line::Sub("-I x/.."),
                 ]
         );
     }

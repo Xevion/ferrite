@@ -1,5 +1,5 @@
-//! The scheduler's platform in a Linux process: the std clock, no interrupts, and mmap'd task stacks
-//! with a no-access guard page below each.
+//! The scheduler's platform in a Linux process: the std clock, no interrupts, mmap'd task stacks
+//! with a no-access guard page below each, and an empty PCI device list.
 
 use std::io::ErrorKind;
 use std::num::NonZeroUsize;
@@ -10,6 +10,7 @@ use corosensei::stack::{Stack, StackPointer};
 use ferrite_hal::{BusAddr, Instant};
 use ferrite_lkpi::firmware::{FirmwareError, FirmwareProvider};
 use ferrite_lkpi::mem::{ARENA_ALIGN, Arena, ArenaError};
+use ferrite_lkpi::pci::{PciDevice, PciError, PciPlatform, Width};
 use ferrite_lkpi::sched::{Platform, StackAllocError, StackSource};
 
 const PAGE: usize = 4096;
@@ -178,5 +179,30 @@ impl FirmwareProvider for FirmwareDir {
             Err(error) if error.kind() == ErrorKind::NotFound => Err(FirmwareError::NotFound { name: name.to_owned() }),
             Err(error) => Err(FirmwareError::Unreadable { name: name.to_owned(), reason: error.to_string() }),
         }
+    }
+}
+
+/// No PCI devices yet; the VFIO-assigned card will be the first.
+pub struct NoPci;
+
+impl PciPlatform for NoPci {
+    fn devices(&self) -> &[PciDevice] {
+        &[]
+    }
+
+    fn config_read(&self, index: usize, _: u16, _: Width) -> Result<u32, PciError> {
+        Err(PciError::NoDevice { index })
+    }
+
+    fn config_write(&self, index: usize, _: u16, _: Width, _: u32) -> Result<(), PciError> {
+        Err(PciError::NoDevice { index })
+    }
+
+    fn enable(&self, index: usize) -> Result<(), PciError> {
+        Err(PciError::NoDevice { index })
+    }
+
+    fn set_bus_master(&self, index: usize, _: bool) -> Result<(), PciError> {
+        Err(PciError::NoDevice { index })
     }
 }

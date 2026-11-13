@@ -5,14 +5,14 @@ use core::ffi::{c_char, c_int};
 
 use log::Level;
 
-/// The `log` level of a kernel level: 0 to 3 are errors, 4 a warning, and the rest routine detail.
+/// The `log` level of a kernel level: 0 to 3 are errors, 4 a warning, notice and info are info (what a
+/// console at the default level 7 prints), and debug is debug.
 const fn level(kernel: c_int) -> Level {
     match kernel {
         ..=3 => Level::Error,
         4 => Level::Warn,
-        5 => Level::Info,
-        6 => Level::Debug,
-        _ => Level::Trace,
+        5 | 6 => Level::Info,
+        _ => Level::Debug,
     }
 }
 

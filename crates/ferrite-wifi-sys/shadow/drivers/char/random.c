@@ -17,6 +17,15 @@ void get_random_bytes(void *buf, size_t len)
 }
 EXPORT_SYMBOL(get_random_bytes);
 
+u8 get_random_u8(void)
+{
+	u8 value;
+
+	lx_random_bytes(&value, sizeof(value));
+	return value;
+}
+EXPORT_SYMBOL(get_random_u8);
+
 u16 get_random_u16(void)
 {
 	u16 value;
@@ -72,3 +81,14 @@ int execute_with_initialized_rng(struct notifier_block *nb)
 	return 0;
 }
 EXPORT_SYMBOL(execute_with_initialized_rng);
+
+/* The generator is seeded from platform entropy at start-up, so device and interrupt data add nothing. */
+void add_device_randomness(const void *buf, size_t len)
+{
+}
+EXPORT_SYMBOL(add_device_randomness);
+
+void add_interrupt_randomness(int irq)
+{
+}
+EXPORT_SYMBOL_GPL(add_interrupt_randomness);

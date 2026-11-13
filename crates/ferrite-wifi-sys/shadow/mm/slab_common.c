@@ -456,6 +456,100 @@ void kmem_cache_free_bulk(struct kmem_cache *s, size_t size, void **p)
 }
 EXPORT_SYMBOL(kmem_cache_free_bulk);
 
+/*
+ * Sheaves, which the maple tree preallocates its nodes in: here a plain
+ * array of objects taken from the cache up front, so a later allocation
+ * under GFP_NOWAIT cannot fail.
+ */
+struct slab_sheaf {
+	unsigned int capacity;
+	unsigned int size;
+	void *objects[];
+};
+
+static struct slab_sheaf *sheaf_alloc(unsigned int capacity, gfp_t gfp)
+{
+	struct slab_sheaf *sheaf = kmalloc(struct_size(sheaf, objects, capacity), gfp & ~__GFP_ZERO);
+
+	if (sheaf) {
+		sheaf->capacity = capacity;
+		sheaf->size = 0;
+	}
+	return sheaf;
+}
+
+static int sheaf_fill(struct kmem_cache *s, gfp_t gfp, struct slab_sheaf *sheaf, unsigned int size)
+{
+	while (sheaf->size < size) {
+		void *object = slab_alloc(s, gfp & ~__GFP_ZERO);
+
+		if (!object)
+			return -ENOMEM;
+		sheaf->objects[sheaf->size++] = object;
+	}
+	return 0;
+}
+
+struct slab_sheaf *kmem_cache_prefill_sheaf(struct kmem_cache *s, gfp_t gfp, unsigned int size)
+{
+	struct slab_sheaf *sheaf = sheaf_alloc(size, gfp);
+
+	if (sheaf && sheaf_fill(s, gfp, sheaf, size)) {
+		kmem_cache_return_sheaf(s, gfp, sheaf);
+		return NULL;
+	}
+	return sheaf;
+}
+EXPORT_SYMBOL(kmem_cache_prefill_sheaf);
+
+int kmem_cache_refill_sheaf(struct kmem_cache *s, gfp_t gfp, struct slab_sheaf **sheafp, unsigned int size)
+{
+	struct slab_sheaf *sheaf = *sheafp;
+
+	if (!sheaf) {
+		*sheafp = kmem_cache_prefill_sheaf(s, gfp, size);
+		return *sheafp ? 0 : -ENOMEM;
+	}
+	if (sheaf->capacity < size) {
+		struct slab_sheaf *bigger = sheaf_alloc(size, gfp);
+
+		if (!bigger)
+			return -ENOMEM;
+		memcpy(bigger->objects, sheaf->objects, sheaf->size * sizeof(void *));
+		bigger->size = sheaf->size;
+		kfree(sheaf);
+		*sheafp = sheaf = bigger;
+	}
+	return sheaf_fill(s, gfp, sheaf, size);
+}
+EXPORT_SYMBOL(kmem_cache_refill_sheaf);
+
+void kmem_cache_return_sheaf(struct kmem_cache *s, gfp_t gfp, struct slab_sheaf *sheaf)
+{
+	kmem_cache_free_bulk(s, sheaf->size, sheaf->objects);
+	kfree(sheaf);
+}
+EXPORT_SYMBOL(kmem_cache_return_sheaf);
+
+void *kmem_cache_alloc_from_sheaf_noprof(struct kmem_cache *s, gfp_t gfp, struct slab_sheaf *sheaf)
+{
+	void *object;
+
+	if (!sheaf->size)
+		return NULL;
+	object = sheaf->objects[--sheaf->size];
+	if (gfp & __GFP_ZERO)
+		memset(object, 0, s->object_size);
+	return object;
+}
+EXPORT_SYMBOL(kmem_cache_alloc_from_sheaf_noprof);
+
+unsigned int kmem_cache_sheaf_size(struct slab_sheaf *sheaf)
+{
+	return sheaf->size;
+}
+EXPORT_SYMBOL(kmem_cache_sheaf_size);
+
 /* NULL asks for the default kmalloc buckets, the only ones there are. */
 kmem_buckets *kmem_buckets_create(const char *name, slab_flags_t flags, unsigned int useroffset,
 				  unsigned int usersize, void (*ctor)(void *))

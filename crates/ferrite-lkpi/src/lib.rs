@@ -15,6 +15,7 @@ mod buddy;
 pub mod firmware;
 mod halt;
 pub mod mem;
+pub mod pci;
 mod printk;
 pub mod random;
 pub mod sched;

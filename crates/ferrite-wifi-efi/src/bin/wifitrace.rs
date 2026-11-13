@@ -2,15 +2,23 @@
 //!
 //! The kernel arena, task stacks, random seed, firmware files and wall clock come from firmware services
 //! (`ferrite-wifi-efi`); the C runs on the shim's scheduler as kernel threads, polled from the main stack.
-//! Init runs the seam checks, every initcall, the firmware check and every exitcall (`ferrite-wifi-start`),
-//! and the app exits to the firmware or the loader. A 1 ms firmware timer event counts ticks, so firmware
-//! interrupts keep landing on task stacks; its notify only bumps a counter and never runs Linux code.
+//! Init runs the seam checks, every initcall, the firmware check, the bring-up of a PCI Wi-Fi card and
+//! every exitcall (`ferrite-wifi-start`), and the app exits to the firmware or the loader. The cards of
+//! `ferrite_wifi_efi::pci::WANTED` are found through PCI I/O; DMA protection decides whether the arena is
+//! mapped for the card through it. Their interrupts are polled. A run that passes `RUN_LIMIT`, or stops in
+//! a stub, clears bus mastering on every card before it exits. A 1 ms firmware timer event counts ticks,
+//! so firmware interrupts keep landing on task stacks; its notify only bumps a counter and never runs
+//! Linux code.
 //!
 //! The lab's no-access fence over unimplemented kernel data has no UEFI counterpart yet: here that data is
 //! plain zeroed storage in its own section.
 
 #![no_std]
 #![no_main]
+
+extern crate alloc;
+
+use alloc::boxed::Box;
 
 use core::ffi::{CStr, c_char, c_void};
 use core::ptr::NonNull;
@@ -24,7 +32,9 @@ use ferrite_hal::{Clock as _, Delay as _};
 use ferrite_lkpi::sched::{DEFAULT_STACK_SIZE, NoHooks, Scheduler, Step};
 use ferrite_wifi_efi::arena;
 use ferrite_wifi_efi::firmware::VolumeFirmware;
-use ferrite_wifi_efi::platform::UefiPlatform;
+use ferrite_wifi_efi::iommu::{self, DmaPath};
+use ferrite_wifi_efi::pci::UefiPci;
+use ferrite_wifi_efi::platform::{IRQ_POLL, UefiPlatform};
 use ferrite_wifi_efi::stacks::PageStacks;
 use ferrite_wifi_start::StartUp;
 use log::LevelFilter;
@@ -39,6 +49,10 @@ const TICK: Duration = Duration::from_millis(1);
 const BUDGET: Duration = Duration::from_millis(10);
 /// How long cfg80211 gets to load `regulatory.db` after its initcalls; FAT reads on real media are slow.
 const REGDB_LIMIT: Duration = Duration::from_secs(5);
+/// How long a card gets from probe to a registered interface: firmware read, INIT image, NVM.
+const WIFI_LIMIT: Duration = Duration::from_secs(15);
+/// The whole run ends here, wherever it is.
+const RUN_LIMIT: Duration = Duration::from_secs(20);
 const EXIT_AFTER: Duration = Duration::from_secs(10);
 /// Exit status of a run that stopped in a stub: an OEM error code, distinct from every standard one.
 const EXIT_HALTED: Status = Status(Status::ERROR_BIT | 0x4000_0000_0000_0000 | 0x56);
@@ -61,7 +75,10 @@ fn halted() -> Option<&'static CStr> {
 /// main stack, where nothing can switch away, it saves the log and exits to the firmware itself.
 fn halt(stub: &CStr) -> ! {
     let first = HALTED.swap(stub.as_ptr().cast_mut(), Ordering::AcqRel).is_null();
-    log::error!("halted in stub {}", stub.to_string_lossy());
+    log::error!("halted in stub {} during {}", stub.to_string_lossy(), ferrite_wifi_start::stage().to_string_lossy());
+    if first {
+        ferrite_lkpi::pci::park_all();
+    }
     let on_task = ferrite_lkpi::task::lx_task_current() != ferrite_wifi_start::tasks().init.as_ptr();
     if first && on_task {
         loop {
@@ -107,8 +124,14 @@ fn run() -> Status {
         return Status::ABORTED;
     }
 
-    let Some((arena, pages)) = allocate_arena() else { return Status::OUT_OF_RESOURCES };
+    let pci: &'static UefiPci = Box::leak(Box::new(UefiPci::discover()));
+    let path = iommu::probe().decide();
+    let Some((arena, pages)) = allocate_arena(path, pci) else { return Status::OUT_OF_RESOURCES };
     if let Err(e) = ferrite_lkpi::mem::install(arena) {
+        log::error!("{e}");
+        return Status::ABORTED;
+    }
+    if let Err(e) = ferrite_lkpi::pci::install(pci) {
         log::error!("{e}");
         return Status::ABORTED;
     }
@@ -150,8 +173,31 @@ fn run() -> Status {
     status
 }
 
-/// The kernel arena, from the first size in `ARENA_SIZES` the firmware has room for.
-fn allocate_arena() -> Option<(ferrite_lkpi::mem::Arena, arena::ArenaPages)> {
+/// The kernel arena, from the first size in `ARENA_SIZES` the firmware has room for, mapped for the
+/// card through its PCI I/O when DMA protection is on. If that mapping fails the card is withheld from
+/// the drivers, since its DMA would be blocked, and the arena is the identity one.
+fn allocate_arena(path: DmaPath, pci: &'static UefiPci) -> Option<(ferrite_lkpi::mem::Arena, arena::ArenaPages)> {
+    match (path, pci.io(0)) {
+        (DmaPath::PciIoMap, Some(io)) => {
+            log::info!("DMA protection is on: the kernel arena is mapped for the card through PCI I/O");
+            for size in ARENA_SIZES {
+                match arena::allocate_mapped(io, size) {
+                    Ok(found) => return Some(found),
+                    Err(e) => log::warn!("{e}"),
+                }
+            }
+            log::error!("no kernel arena could be mapped for the card; the card is withheld from the drivers");
+            pci.withhold();
+        },
+        (DmaPath::PciIoMap, None) => {
+            log::info!("DMA protection is on, but there is no card to map for: identity kernel arena");
+        },
+        (DmaPath::Identity, _) => log::info!("no DMA protection found: identity kernel arena"),
+    }
+    identity_arena()
+}
+
+fn identity_arena() -> Option<(ferrite_lkpi::mem::Arena, arena::ArenaPages)> {
     for (index, size) in ARENA_SIZES.into_iter().enumerate() {
         match arena::allocate(size) {
             Ok(found) => {
@@ -185,7 +231,12 @@ fn execute(clock: Clock) -> Status {
         log::error!("starting kthreadd failed: {code}");
         return Status::ABORTED;
     }
-    let start_up = StartUp { sched: sched.handle(), firmware_reference: &VolumeFirmware, regdb_limit: REGDB_LIMIT };
+    let start_up = StartUp {
+        sched: sched.handle(),
+        firmware_reference: &VolumeFirmware,
+        regdb_limit: REGDB_LIMIT,
+        wifi_limit: WIFI_LIMIT,
+    };
     let init_task = match ferrite_wifi_start::start_init(start_up) {
         Ok(task) => task,
         Err(code) => {
@@ -198,23 +249,39 @@ fn execute(clock: Clock) -> Status {
         return Status::ABORTED;
     };
 
+    let polled = ferrite_lkpi::pci::device_count() > 0;
     let began = clock.now();
+    let mut timed_out = false;
     while sched.info(init_id).is_some() && halted().is_none() {
-        match sched.poll(BUDGET) {
-            Ok(step) if step.runnable || sched.info(init_id).is_none() => {},
-            Ok(Step { next_deadline: Some(at), .. }) => {
-                clock.delay(at.saturating_duration_since(sched.handle().now()));
-            },
+        if clock.now() - began >= RUN_LIMIT {
+            log::error!(
+                "run limit of {} s reached during {}; init is {:?}",
+                RUN_LIMIT.as_secs(),
+                ferrite_wifi_start::stage().to_string_lossy(),
+                sched.info(init_id).map(|info| info.state)
+            );
+            timed_out = true;
+            break;
+        }
+        let wait = match sched.poll(BUDGET) {
+            Ok(step) if step.runnable || sched.info(init_id).is_none() => None,
+            Ok(Step { next_deadline: Some(at), .. }) => Some(at.saturating_duration_since(sched.handle().now())),
+            Ok(_) if polled => Some(IRQ_POLL),
             Ok(_) => {
                 log::error!("every task is blocked and nothing will wake one; init never finished");
                 return Status::ABORTED;
             },
             Err(e) => {
                 log::error!("{e}");
+                ferrite_lkpi::pci::park_all();
                 return Status::ABORTED;
             },
+        };
+        if let Some(wait) = wait {
+            clock.delay(if polled { wait.min(IRQ_POLL) } else { wait });
         }
     }
+    ferrite_lkpi::pci::park_all();
 
     let stacks = stack_stats.report();
     log::info!(
@@ -224,12 +291,16 @@ fn execute(clock: Clock) -> Status {
         stacks.deepest,
         stacks.size,
     );
+    let (polls, unhandled) = ferrite_wifi_start::irq_counts();
     log::info!(
-        "run took {} ms; {} timer ticks; {} kernel pages free",
+        "run took {} ms; {} timer ticks; {} kernel pages free; {polls} polled IRQ handler runs, {unhandled} IRQ_NONE",
         (clock.now() - began).as_millis(),
         TICKS.load(Ordering::Relaxed),
         ferrite_lkpi::mem::free_page_count().unwrap_or(0),
     );
+    if timed_out {
+        return Status::TIMEOUT;
+    }
     match halted() {
         Some(stub) => {
             log::error!("the run stopped in stub {}", stub.to_string_lossy());

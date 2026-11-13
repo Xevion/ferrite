@@ -19,6 +19,12 @@ void *__vmalloc_noprof(unsigned long size, gfp_t gfp)
 }
 EXPORT_SYMBOL(__vmalloc_noprof);
 
+void *vmalloc_noprof(unsigned long size)
+{
+	return __vmalloc_noprof(size, GFP_KERNEL);
+}
+EXPORT_SYMBOL(vmalloc_noprof);
+
 void *vzalloc_noprof(unsigned long size)
 {
 	return __vmalloc_noprof(size, GFP_KERNEL | __GFP_ZERO);

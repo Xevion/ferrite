@@ -157,6 +157,8 @@
 #include <linux/kvm_para.h>
 #include "linux/kernel/workqueue_internal.h"
 #include <trace/events/workqueue.h>
+#include <linux/dma-mapping.h>
+#include <linux/dmapool.h>
 #include <linux/highmem.h>
 #include <linux/kmemleak.h>
 #include <linux/mempool.h>
@@ -286,7 +288,6 @@
 #include <linux/device/driver.h>
 #include <linux/device/faux.h>
 #include <linux/platform_device.h>
-#include <linux/dma-mapping.h>
 #include <linux/memblock.h>
 #include <linux/clk/clk-conf.h>
 #include <linux/iommu.h>
@@ -485,6 +486,64 @@
 #include "linux/drivers/net/wireless/realtek/rtw89/rtw8852c_rfk.h"
 #include "linux/drivers/net/wireless/realtek/rtw89/rtw8852c_table.h"
 #include "linux/drivers/net/wireless/realtek/rtw89/rtw8852c_rfk_table.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-config.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/file.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-prph.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/txq.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-drv.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/runtime.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/dbg.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/debugfs.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/system.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/rx.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/datapath.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-io.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-fh.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/pcie/gen1_2/internal.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-csr.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-debug.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-trans.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-agn-hw.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/alive.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/mac.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/mac-cfg.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-devtrace.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-modparams.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-nvm-utils.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-utils.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-phy-db.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-nvm-parse.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/acpi.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/pcie/iwl-context-info.h"
+#include <linux/dmi.h>
+#include "linux/drivers/net/wireless/intel/iwlwifi/pcie/iwl-context-info-v2.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/pcie/utils.h"
+#include <linux/wait.h>
+#include <linux/gfp.h>
+#include <net/ip6_checksum.h>
+#include <net/tso.h>
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/commands.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/debug.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-scd.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/tx.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/mei/iwl-mei.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/img.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/notif-wait.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/rs.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/pnvm.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/nvm-reg.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/uefi.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/regulatory.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/mvm/mvm.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/mvm/time-sync.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/iwl-op-mode.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/mvm/time-event.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/mvm/testmode.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/mvm/fw-api.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/mvm/rs.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/mvm/sta.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/mvm/debugfs.h"
+#include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/coex.h"
 
 #define LX_MARK(name) asm volatile(".globl " #name "\n.balign 4096\n" #name ":")
 #define LX_DATA(sym, size) asm volatile(".globl " #sym "\n.type " #sym ",@object\n.balign %c1\n" \
@@ -502,12 +561,12 @@ __attribute__((used)) static void lx_unimplemented_layout(void)
 	LX_DATA(cpu_khz, sizeof(cpu_khz));
 	LX_DATA(flow_keys_basic_dissector, sizeof(flow_keys_basic_dissector));
 	LX_DATA(inet_protos, sizeof(inet_protos));
+	LX_DATA(init_on_free, sizeof(init_on_free));
 	LX_DATA(init_pid_ns, sizeof(init_pid_ns));
 	LX_DATA(init_user_ns, sizeof(init_user_ns));
 	LX_DATA(init_uts_ns, sizeof(init_uts_ns));
 	LX_DATA(irq_poll_cpu, sizeof(irq_poll_cpu));
 	LX_DATA(no_irq_chip, sizeof(no_irq_chip));
-	LX_DATA(noirqdebug, sizeof(noirqdebug));
 	LX_DATA(oops_in_progress, sizeof(oops_in_progress));
 	LX_DATA(panic_reboot_mode, sizeof(panic_reboot_mode));
 	LX_DATA(pci_bus_groups, sizeof(pci_bus_groups[0]));
@@ -556,13 +615,13 @@ const struct lx_data_symbol lx_unimplemented_data[] = {
 	{ "gfpflag_names", &gfpflag_names, sizeof(gfpflag_names[0]) },
 	{ "guid_index", &guid_index, sizeof(guid_index) },
 	{ "inet_protos", &inet_protos, sizeof(inet_protos) },
+	{ "init_on_free", &init_on_free, sizeof(init_on_free) },
 	{ "init_pid_ns", &init_pid_ns, sizeof(init_pid_ns) },
 	{ "init_user_ns", &init_user_ns, sizeof(init_user_ns) },
 	{ "init_uts_ns", &init_uts_ns, sizeof(init_uts_ns) },
 	{ "irq_poll_cpu", &irq_poll_cpu, sizeof(irq_poll_cpu) },
 	{ "nda_policy", &nda_policy, sizeof(nda_policy[0]) },
 	{ "no_irq_chip", &no_irq_chip, sizeof(no_irq_chip) },
-	{ "noirqdebug", &noirqdebug, sizeof(noirqdebug) },
 	{ "nosteal_pipe_buf_ops", &nosteal_pipe_buf_ops, sizeof(nosteal_pipe_buf_ops) },
 	{ "oops_in_progress", &oops_in_progress, sizeof(oops_in_progress) },
 	{ "pageflag_names", &pageflag_names, sizeof(pageflag_names[0]) },

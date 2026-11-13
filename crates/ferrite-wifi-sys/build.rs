@@ -307,9 +307,31 @@ fn glue_sources(dir: &Path) -> Vec<PathBuf> {
     sources
 }
 
+/// The `-I` directories Kbuild gives any unit, once each, as `-I<dir>` arguments. Generated glue includes
+/// driver-private headers, which find their siblings through their directory's `ccflags-y` (`-I$(src)`).
+fn kbuild_include_dirs(per_file: &BTreeMap<&str, Vec<&str>>) -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
+    for flags in per_file.values() {
+        let mut args = flags.iter();
+        while let Some(arg) = args.next() {
+            let dir = match arg.strip_prefix("-I") {
+                Some("") => args.next().copied(),
+                Some(dir) => Some(dir),
+                None => None,
+            };
+            if let Some(dir) = dir.map(|dir| format!("-I{dir}"))
+                && !dirs.contains(&dir)
+            {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
 /// Compile each glue file as a unit of a module named `glue`; headers outside the include roots are
 /// reachable as `"linux/..."` from the crate directory.
-fn glue_objects(crate_dir: &Path, clang: &Path, llvm: &Path, flags: &[String]) -> Vec<PathBuf> {
+fn glue_objects(crate_dir: &Path, clang: &Path, llvm: &Path, flags: &[String], includes: &[String]) -> Vec<PathBuf> {
     glue_sources(&crate_dir.join("glue"))
         .into_iter()
         .flat_map(|source| {
@@ -321,7 +343,7 @@ fn glue_objects(crate_dir: &Path, clang: &Path, llvm: &Path, flags: &[String]) -
                 format!("-DKBUILD_MODFILE=\"glue/{stem}\""),
                 "-I.".to_owned(),
             ];
-            let extra: Vec<&str> = defines.iter().map(String::as_str).collect();
+            let extra: Vec<&str> = defines.iter().chain(includes).map(String::as_str).collect();
             let mut build = builder(clang, llvm, flags, &extra);
             build.file(&source);
             build.compile_intermediates()
@@ -421,7 +443,8 @@ fn main() {
     build.file(&table);
     objects.extend(build.compile_intermediates());
     println!("cargo:rustc-env=FERRITE_WIFI_INITCALLS={}", table.display());
-    objects.extend(glue_objects(&crate_dir, &clang, &llvm, &flags));
+    let includes = kbuild_include_dirs(&file_flags(&read(&snapshot.join("kbuild-flags.txt"))));
+    objects.extend(glue_objects(&crate_dir, &clang, &llvm, &flags, &includes));
 
     let archive = builder(&clang, &llvm, &[], &[]).create_archive(ARCHIVE, &objects);
     println!("cargo:rustc-env=FERRITE_WIFI_ARCHIVE={}", archive.display());
