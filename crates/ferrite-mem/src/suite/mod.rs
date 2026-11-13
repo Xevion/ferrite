@@ -1,0 +1,340 @@
+//! The memory tests, each a steppable state machine, and the suite that runs them pass after pass.
+//!
+//! A test is a fixed list of phases (a fill, a verify, an inversion, a block move over a window,
+//! a wait), each a walk over the region or part of it. [`Test::step`] does one bounded chunk of one
+//! phase and never crosses a phase boundary, so the caller can interleave its own work between
+//! steps, and can run steps of the AVX tiers with interrupts off in short chunks. Each phase picks
+//! its kernel from [`Kernels`]: pure stores the fill kernel, read-check-write steps the
+//! read-modify-write kernel, reads the verify kernel.
+//!
+//! Most tests are memtest86+'s, the rest come from ferrite's pattern set. Rowhammer is deferred: picking
+//! aggressor rows next to a victim needs the DRAM address mapping (channel, rank, bank, row), which
+//! nothing here knows yet.
+
+use core::fmt;
+use core::time::Duration;
+
+use ferrite_hal::Instant;
+
+use crate::caps::{Caps, Kernel, Stores};
+use crate::fault::Faults;
+use crate::region::Region;
+
+mod plan;
+mod run;
+#[cfg(test)]
+mod tests;
+
+pub use run::{Progress, Test};
+
+/// Preset tiers, cumulative: a preset runs every test of its tier and the tiers below it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
+pub enum Preset {
+    /// A fast sanity check.
+    Quick,
+    /// The default run.
+    Standard,
+    /// Every test, including the slow and the opt-in ones (bit fade).
+    Thorough,
+    /// Tests that may induce faults as a side effect; none exist yet (rowhammer is deferred).
+    Destructive,
+}
+
+/// A class of fault a test is designed to find.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
+pub enum FaultClass {
+    /// A cell stuck at 0 or 1 whatever is written.
+    StuckAt,
+    /// A cell that fails to make a commanded 0 to 1 or 1 to 0 transition.
+    Transition,
+    /// A write to, or a transition in, one cell disturbs another.
+    Coupling,
+    /// The address decoder maps two addresses to one cell, or a cell to no address.
+    AddressDecoder,
+    /// A cell loses its charge before it is refreshed.
+    Retention,
+    /// Activations of an aggressor row flip bits in a neighbouring row; no test targets it yet.
+    RowDisturbance,
+    /// The memory interface: signal integrity at read/write turnarounds, marginal training, supply droop.
+    Interface,
+}
+
+/// Every test, in the order a pass runs them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::VariantArray)]
+pub enum TestKind {
+    /// memtest86+ test 0. memtest86+ runs it with the cache off; here every access is followed by a
+    /// `clflush`, so each read still comes from DRAM.
+    AddressWalk,
+    /// memtest86+ test 2: own address over the whole region, then checked, and again complemented.
+    OwnAddress,
+    SolidBits,
+    Checkerboard,
+    MarchCMinus,
+    /// memtest86+ test 3.
+    BusStress,
+    /// memtest86+ test 4.
+    MovingInversions,
+    /// memtest86+ test 5; every fourth round is one random word everywhere rather than a sequence.
+    MovingInversionsRandom,
+    /// memtest86+ test 6.
+    MovingInversions8Bit,
+    WalkingOnes,
+    WalkingZeros,
+    /// memtest86+ test 7.
+    Modulo20,
+    /// memtest86+ test 8.
+    BlockMove,
+    /// memtest86+ test 9.
+    MovingInversions64Bit,
+    /// memtest86+ test 1: own address, filled and checked one window at a time.
+    OwnAddressWindow,
+    /// memtest86+ test 10.
+    BitFade,
+}
+
+impl TestKind {
+    pub const ALL: &'static [Self] = <Self as strum::VariantArray>::VARIANTS;
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AddressWalk => "address, walking ones",
+            Self::OwnAddress => "address, own address",
+            Self::SolidBits => "solid bits",
+            Self::Checkerboard => "checkerboard",
+            Self::MarchCMinus => "march c-",
+            Self::BusStress => "bus stress, r/w turnaround",
+            Self::MovingInversions => "moving inversions, 1s and 0s",
+            Self::MovingInversionsRandom => "moving inversions, random",
+            Self::MovingInversions8Bit => "moving inversions, 8-bit",
+            Self::WalkingOnes => "walking ones",
+            Self::WalkingZeros => "walking zeros",
+            Self::Modulo20 => "modulo 20, random",
+            Self::BlockMove => "block move",
+            Self::MovingInversions64Bit => "moving inversions, 64-bit shifting",
+            Self::OwnAddressWindow => "address, own address in window",
+            Self::BitFade => "bit fade",
+        }
+    }
+
+    #[must_use]
+    pub const fn fault_classes(self) -> &'static [FaultClass] {
+        use FaultClass::{AddressDecoder, Coupling, Interface, Retention, StuckAt, Transition};
+        match self {
+            Self::AddressWalk | Self::OwnAddress | Self::OwnAddressWindow => &[AddressDecoder],
+            Self::SolidBits => &[StuckAt],
+            Self::Checkerboard | Self::WalkingOnes | Self::WalkingZeros | Self::BlockMove => &[StuckAt, Coupling],
+            Self::MarchCMinus => &[StuckAt, Transition, AddressDecoder, Coupling],
+            Self::BusStress => &[Interface],
+            Self::MovingInversions
+            | Self::MovingInversionsRandom
+            | Self::MovingInversions8Bit
+            | Self::MovingInversions64Bit => &[StuckAt, Transition, Coupling],
+            Self::Modulo20 => &[StuckAt, Coupling, AddressDecoder],
+            Self::BitFade => &[Retention],
+        }
+    }
+
+    /// The lowest preset that runs the test.
+    #[must_use]
+    pub const fn preset(self) -> Preset {
+        match self {
+            Self::AddressWalk | Self::OwnAddress | Self::SolidBits | Self::Checkerboard => Preset::Quick,
+            Self::OwnAddressWindow | Self::BitFade => Preset::Thorough,
+            _ => Preset::Standard,
+        }
+    }
+
+    /// The tests `preset` runs, in order.
+    pub fn sequence(preset: Preset) -> impl Iterator<Item = Self> + Clone {
+        Self::ALL.iter().copied().filter(move |k| k.preset() <= preset)
+    }
+}
+
+impl fmt::Display for TestKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Repetition counts and sizes. Where memtest86+ has a count it is named; some defaults are lower.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Config {
+    /// Mixed with the test and the pass number into every random pattern, so a pass is reproducible.
+    pub seed: u64,
+    /// Up-and-down inversion pairs per pattern for 1s and 0s (memtest86+: 6).
+    pub fixed_iterations: u32,
+    /// Inversion pairs per pattern for the 8-bit patterns (memtest86+: 3).
+    pub byte_iterations: u32,
+    /// Fill and two inversions per round (memtest86+: 128).
+    pub random_rounds: u32,
+    /// Inversion pairs per bit offset for the 64-bit shifting pattern (memtest86+: 1).
+    pub shifting_iterations: u32,
+    /// Rounds of the 20 offsets (memtest86+: 8).
+    pub modulo_rounds: u32,
+    /// Moves per window (memtest86+: 81).
+    pub move_iterations: u32,
+    /// Fill and verify sweeps (memtest86+: 32).
+    pub bus_iterations: u32,
+    /// How long each bit-fade round leaves memory untouched.
+    pub fade: Duration,
+    pub address_window_bytes: usize,
+    pub move_window_bytes: usize,
+}
+
+impl Config {
+    pub const DEFAULT: Self = Self {
+        seed: 0x6665_7272_6974_6521,
+        fixed_iterations: 6,
+        byte_iterations: 3,
+        random_rounds: 32,
+        shifting_iterations: 1,
+        modulo_rounds: 1,
+        move_iterations: 81,
+        bus_iterations: 32,
+        fade: Duration::from_secs(120),
+        address_window_bytes: 2 << 20,
+        move_window_bytes: 1 << 20,
+    };
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The kernel for each kind of phase.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Kernels {
+    /// Pure stores: fills and copies.
+    pub fill: Kernel,
+    /// Pure loads.
+    pub verify: Kernel,
+    /// Read, check and rewrite.
+    pub rmw: Kernel,
+}
+
+impl Kernels {
+    /// Non-temporal stores of the widest tier for fills (they skip the read-for-ownership), its
+    /// temporal kernel for the rest (an inversion rewrites lines it has just read, which non-temporal
+    /// stores would evict).
+    #[must_use]
+    pub fn for_caps(caps: Caps) -> Self {
+        let best = caps.best();
+        let temporal = caps.kernel(best, Stores::Temporal).unwrap_or(Kernel::SCALAR);
+        Self { fill: caps.kernel(best, Stores::NonTemporal).unwrap_or(temporal), verify: temporal, rmw: temporal }
+    }
+
+    /// One kernel for everything.
+    #[must_use]
+    pub const fn uniform(kernel: Kernel) -> Self {
+        Self { fill: kernel, verify: kernel, rmw: kernel }
+    }
+
+    /// Whether any of them uses YMM or ZMM registers.
+    #[must_use]
+    pub const fn is_wide(&self) -> bool {
+        self.fill.tier().is_wide() || self.verify.tier().is_wide() || self.rmw.tier().is_wide()
+    }
+}
+
+impl fmt::Display for Kernels {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fill {}, verify {}, rmw {}", self.fill, self.verify, self.rmw)
+    }
+}
+
+/// The tests of a preset run in order over one region, pass after pass.
+#[derive(Debug)]
+pub struct Suite<'a> {
+    region: Region<'a>,
+    kernels: Kernels,
+    config: Config,
+    preset: Preset,
+    test: Test,
+    passes: u64,
+    /// Work of the tests already done in this pass, and of the whole pass.
+    pass_done: u64,
+    pass_total: u64,
+}
+
+impl<'a> Suite<'a> {
+    #[must_use]
+    pub fn new(region: Region<'a>, kernels: Kernels, config: Config, preset: Preset) -> Self {
+        let first = TestKind::sequence(preset).next().unwrap_or(TestKind::AddressWalk);
+        let pass_total = TestKind::sequence(preset).map(|k| Test::new(k, config, 0, &region).total()).sum();
+        let test = Test::new(first, config, 0, &region);
+        Self { region, kernels, config, preset, test, passes: 0, pass_done: 0, pass_total }
+    }
+
+    /// Run one bounded chunk of the current test, moving on to the next test (or pass) at its end.
+    pub fn step(&mut self, budget_bytes: usize, now: Instant, faults: &mut Faults<'_>) -> Progress {
+        match self.test.step(&mut self.region, &self.kernels, budget_bytes, now, faults) {
+            Progress::Done => {
+                self.next_test();
+                Progress::Running
+            },
+            progress => progress,
+        }
+    }
+
+    fn next_test(&mut self) {
+        let kind = self.test.kind();
+        self.pass_done += self.test.total();
+        let next = if let Some(next) = TestKind::sequence(self.preset).skip_while(|&k| k != kind).nth(1) {
+            next
+        } else {
+            self.passes += 1;
+            self.pass_done = 0;
+            TestKind::sequence(self.preset).next().unwrap_or(kind)
+        };
+        self.test = Test::new(next, self.config, self.passes, &self.region);
+    }
+
+    #[must_use]
+    pub const fn test(&self) -> &Test {
+        &self.test
+    }
+
+    /// Passes completed.
+    #[must_use]
+    pub const fn passes(&self) -> u64 {
+        self.passes
+    }
+
+    /// The current test's 1-based position in the preset, and how many tests it has.
+    #[must_use]
+    pub fn position(&self) -> (usize, usize) {
+        let kind = self.test.kind();
+        let index = TestKind::sequence(self.preset).position(|k| k == kind).unwrap_or(0);
+        (index + 1, TestKind::sequence(self.preset).count())
+    }
+
+    /// Progress through the current pass, 0 to 100.
+    #[must_use]
+    pub fn percent(&self) -> u16 {
+        percent(self.pass_done + self.test.done(), self.pass_total)
+    }
+
+    #[must_use]
+    pub const fn region(&self) -> &Region<'a> {
+        &self.region
+    }
+
+    #[must_use]
+    pub const fn kernels(&self) -> Kernels {
+        self.kernels
+    }
+
+    #[must_use]
+    pub const fn preset(&self) -> Preset {
+        self.preset
+    }
+}
+
+fn percent(done: u64, total: u64) -> u16 {
+    if total == 0 { 0 } else { (u128::from(done.min(total)) * 100 / u128::from(total)) as u16 }
+}

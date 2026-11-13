@@ -143,7 +143,7 @@ pub enum XsaveError {
     NoXsave,
 }
 
-/// AVX (and AVX-512) state turned on by this app; CR4 and XCR0 go back to the firmware's values on drop.
+/// AVX (and AVX-512) state turned on by this app; CR4, XCR0 and MXCSR go back to the firmware's values on drop.
 ///
 /// The loader and later apps run after us, so nothing we change may outlive the app. A panic resets
 /// the machine instead of returning, so it needs no restore.
@@ -153,6 +153,8 @@ pub struct VectorState {
     saved_cr4: u64,
     saved_xcr0: u64,
     xcr0: u64,
+    /// The app's float maths leave exception flags (precision) set, which the next image would inherit.
+    saved_mxcsr: u32,
 }
 
 impl VectorState {
@@ -185,7 +187,7 @@ impl VectorState {
             // components are only added with AVX, as XSETBV requires.
             unsafe { write_xcr0(xcr0) };
         }
-        Ok(Self { saved_cr4, saved_xcr0, xcr0 })
+        Ok(Self { saved_cr4, saved_xcr0, xcr0, saved_mxcsr: read_mxcsr() })
     }
 
     /// XCR0 as the firmware left it, and as it is now.
@@ -221,6 +223,8 @@ impl VectorState {
 
 impl Drop for VectorState {
     fn drop(&mut self) {
+        // SAFETY: the value was read from MXCSR, so it has no reserved bits set.
+        unsafe { write_mxcsr(self.saved_mxcsr) };
         if self.xcr0 != self.saved_xcr0 {
             // SAFETY: CR4.OSXSAVE is still set and the saved value was valid XCR0 before.
             unsafe { write_xcr0(self.saved_xcr0) };
@@ -243,6 +247,21 @@ impl fmt::Display for VectorState {
             self.xcr0
         )
     }
+}
+
+/// MXCSR; SSE runs, since this crate is compiled with it.
+fn read_mxcsr() -> u32 {
+    let mut value = 0_u32;
+    // SAFETY: stmxcsr only stores four bytes to `value`.
+    unsafe { core::arch::asm!("stmxcsr [{}]", in(reg) &raw mut value, options(nostack, preserves_flags)) };
+    value
+}
+
+/// # Safety
+/// `value` must have no reserved MXCSR bit set, or `ldmxcsr` faults.
+unsafe fn write_mxcsr(value: u32) {
+    // SAFETY: the caller's contract.
+    unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &raw const value, options(nostack, preserves_flags, readonly)) };
 }
 
 fn read_cr4() -> u64 {

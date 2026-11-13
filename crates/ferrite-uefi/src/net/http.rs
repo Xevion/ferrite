@@ -88,8 +88,8 @@ pub fn status_page(net: &NetStatus, sweep: &SweepStatus) -> String {
         || String::from("no faults"),
         |f| {
             format!(
-                "{} FAULTS, first at {}: expected {:#018x}, read {:#018x}",
-                sweep.faults, f.addr, f.expected, f.actual
+                "{} FAULTS, first at {} in {}: expected {:#018x}, read {:#018x}; {}",
+                sweep.faults, f.addr, sweep.first_fault_test, f.expected, f.actual, sweep.analysis
             )
         },
     );
@@ -100,14 +100,17 @@ pub fn status_page(net: &NetStatus, sweep: &SweepStatus) -> String {
          <h1>ferrite-uefi</h1>\
          <p>bare-metal memory tester (spike), no OS underneath</p>\
          <ul><li>ip: {ip}</li><li>mac: {}</li>\
-         <li>sweep: {} MiB, pattern {:#04x} {}, {}%</li>\
+         <li>sweep: {} MiB ({}), test {} ({}/{}) {}%, pass {}%</li>\
          <li>pass {}, {verdict}</li>\
          <li>mdns queries: {}, http responses: {}</li></ul>\
          </body></html>",
         link.mac,
         sweep.bytes >> 20,
-        sweep.pattern,
-        sweep.phase,
+        sweep.tier,
+        sweep.test,
+        sweep.position.0,
+        sweep.position.1,
+        sweep.test_percent,
         sweep.percent,
         sweep.passes,
         c.mdns_queries,

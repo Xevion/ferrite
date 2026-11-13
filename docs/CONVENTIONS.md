@@ -8,9 +8,9 @@
 | `ferrite-hal` | `no_std` | Platform traits (MMIO, PCI config, DMA, clock, delay) and the address, unit and index types every driver shares |
 | `ferrite-xhci` | `no_std` + `alloc` | xHCI Debug Capability driver, written only against `ferrite-hal` |
 | `ferrite-efi` | `no_std` + `uefi` | UEFI backends for the HAL traits, the boot-volume log and file reads, the `log` sink, unattended exit, the firmware watchdog, firmware RNG and RTC, the link protocol the loader shares with its apps |
-| `ferrite-mem` | `no_std` | Memory-test building blocks (fills, verifies, own-address and PRSG patterns, moving-inversion steps, block copies) at the scalar, `rep` string, SSE2, AVX2 and AVX-512 tiers, over a typed `Region` |
+| `ferrite-mem` | `no_std` | Memory-test building blocks (fills, verifies, own-address, PRSG and shifting patterns, moving-inversion steps, block copies) at the scalar, `rep` string, SSE2, AVX2 and AVX-512 tiers, over a typed `Region`; the test suite built from them (memtest86+'s tests and ferrite's patterns as steppable state machines) and stuck-bit versus coupling analysis |
 | `ferrite-testing` | std | Host-only test doubles: mock HAL, simulated DbC register file |
-| `ferrite-uefi` | `no_std`, UEFI app built as ELF | Memory sweep, ratatui UI, SNP + smoltcp networking, mDNS, HTTP status page; `membench`, the throughput of every `ferrite-mem` block per tier |
+| `ferrite-uefi` | `no_std`, UEFI app built as ELF | Memory sweep (the `ferrite-mem` suite), ratatui UI, SNP + smoltcp networking, mDNS, HTTP status page; `membench`, the throughput of every `ferrite-mem` block per tier |
 | `ferrite-recon` | `no_std`, UEFI apps | `pciscan`, `xhciscan`, `dbcping`, `dbcbench` |
 | `ferrite-loader` | `no_std`, UEFI app | Resident loader: keeps the DbC up, receives pushed `.efi` images and runs them under a watchdog |
 | `ferrite-wire` | `no_std` + `alloc` | Message formats spoken over the DbC link (the benchmark frames and the loader's `link` protocol), shared by both ends |
@@ -123,7 +123,7 @@ an `#[expect(clippy::disallowed_*)]`; everything else goes through it.
 
 | Banned | Home |
 | --- | --- |
-| `read_volatile` / `write_volatile` | the DMA slice type, the sweep's word accesses, `ferrite-mem`'s block accesses, the ExitBootServices hook that clears DCE (no protocol calls are allowed there) |
+| `read_volatile` / `write_volatile` | the DMA slice type, `ferrite-mem`'s block and word accesses, the ExitBootServices hook that clears DCE (no protocol calls are allowed there) |
 | `_rdtsc` | `ferrite_efi::clock` |
 | `uefi::boot::stall` | the UEFI `Delay` impl; loops wait on events |
 | `uefi::runtime::reset` | `ferrite_efi::session` |

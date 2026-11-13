@@ -19,12 +19,13 @@
 
 use core::arch::asm;
 use core::arch::x86_64::{
-    __m128i, __m256i, __m512i, _mm_add_epi64, _mm_and_si128, _mm_cmpeq_epi8, _mm_movemask_epi8, _mm_set_epi64x,
-    _mm_set1_epi64x, _mm_slli_epi64, _mm_srli_epi64, _mm_stream_si128, _mm_xor_si128, _mm256_add_epi64,
-    _mm256_and_si256, _mm256_cmpeq_epi64, _mm256_movemask_epi8, _mm256_set_epi64x, _mm256_set1_epi64x,
-    _mm256_slli_epi64, _mm256_srli_epi64, _mm256_stream_si256, _mm256_xor_si256, _mm512_add_epi64,
-    _mm512_cmpneq_epi64_mask, _mm512_set_epi64, _mm512_set1_epi64, _mm512_slli_epi64, _mm512_srli_epi64,
-    _mm512_stream_si512, _mm512_xor_si512,
+    __m128i, __m256i, __m512i, _mm_add_epi64, _mm_and_si128, _mm_clflush, _mm_cmpeq_epi8, _mm_cvtsi32_si128,
+    _mm_mfence, _mm_movemask_epi8, _mm_or_si128, _mm_set_epi64x, _mm_set1_epi64x, _mm_sll_epi64, _mm_slli_epi64,
+    _mm_srl_epi64, _mm_srli_epi64, _mm_stream_si128, _mm_xor_si128, _mm256_add_epi64, _mm256_and_si256,
+    _mm256_cmpeq_epi64, _mm256_movemask_epi8, _mm256_or_si256, _mm256_set_epi64x, _mm256_set1_epi64x, _mm256_sll_epi64,
+    _mm256_slli_epi64, _mm256_srl_epi64, _mm256_srli_epi64, _mm256_stream_si256, _mm256_xor_si256, _mm512_add_epi64,
+    _mm512_cmpneq_epi64_mask, _mm512_or_si512, _mm512_set_epi64, _mm512_set1_epi64, _mm512_sll_epi64,
+    _mm512_slli_epi64, _mm512_srl_epi64, _mm512_srli_epi64, _mm512_stream_si512, _mm512_xor_si512,
 };
 use core::mem::transmute;
 use core::ptr;
@@ -49,6 +50,69 @@ pub trait Block: Copy {
     unsafe fn add(a: Self, b: Self) -> Self;
     /// One xorshift64 step per lane.
     unsafe fn xorshift(a: Self) -> Self;
+    /// Each lane shifted left by `n` bits, `n < 64`.
+    unsafe fn shl(a: Self, n: u32) -> Self;
+    unsafe fn shr(a: Self, n: u32) -> Self;
+    unsafe fn or(a: Self, b: Self) -> Self;
+
+    /// One xorshift64 step backwards per lane: each `x ^= x << k` is undone by XOR-ing in the shifts
+    /// by every multiple of `k`, doubled up so a few steps cover all 64 bits.
+    #[inline(always)]
+    unsafe fn unxorshift(x: Self) -> Self {
+        // SAFETY: the caller has the tier's features.
+        unsafe {
+            let undo = |x: Self, shifts: &[u32], left: bool| {
+                shifts.iter().fold(x, |x, &n| Self::xor(x, if left { Self::shl(x, n) } else { Self::shr(x, n) }))
+            };
+            let x = undo(x, &[17, 34], true);
+            let x = undo(x, &[7, 14, 28, 56], false);
+            undo(x, &[13, 26, 52], true)
+        }
+    }
+
+    /// Each lane rotated left by `n` bits, `0 < n < 64`.
+    #[inline(always)]
+    unsafe fn rotl(a: Self, n: u32) -> Self {
+        // SAFETY: the caller has the tier's features.
+        unsafe { Self::or(Self::shl(a, n), Self::shr(a, 64 - n)) }
+    }
+
+    #[inline(always)]
+    unsafe fn rotr(a: Self, n: u32) -> Self {
+        // SAFETY: the caller has the tier's features.
+        unsafe { Self::or(Self::shr(a, n), Self::shl(a, 64 - n)) }
+    }
+}
+
+/// One word of memory under test, for the tests that work a word at a time.
+///
+/// # Safety
+/// `p` is an aligned word inside a region.
+#[inline(always)]
+pub unsafe fn read_word(p: *const u64) -> u64 {
+    // SAFETY: the caller's contract.
+    unsafe { ptr::read_volatile(p) }
+}
+
+/// # Safety
+/// As [`read_word`].
+#[inline(always)]
+pub unsafe fn write_word(p: *mut u64, v: u64) {
+    // SAFETY: the caller's contract.
+    unsafe { ptr::write_volatile(p, v) };
+}
+
+/// Write back and evict the line holding `p`, and wait for that: its next load comes from DRAM.
+///
+/// # Safety
+/// As [`read_word`].
+#[inline(always)]
+pub unsafe fn flush_word(p: *const u64) {
+    // SAFETY: the caller's contract; CLFLUSH and MFENCE are SSE2, the x86-64 baseline.
+    unsafe {
+        _mm_clflush(p.cast());
+        _mm_mfence();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +173,21 @@ impl Block for Scalar {
     #[inline(always)]
     unsafe fn xorshift(a: Self) -> Self {
         Self(a.0.map(prsg::xorshift))
+    }
+
+    #[inline(always)]
+    unsafe fn shl(a: Self, n: u32) -> Self {
+        Self(a.0.map(|x| x << n))
+    }
+
+    #[inline(always)]
+    unsafe fn shr(a: Self, n: u32) -> Self {
+        Self(a.0.map(|x| x >> n))
+    }
+
+    #[inline(always)]
+    unsafe fn or(a: Self, b: Self) -> Self {
+        Self(core::array::from_fn(|i| a.0[i] | b.0[i]))
     }
 }
 
@@ -188,6 +267,24 @@ impl Block for Sse2 {
             x = _mm_xor_si128(x, _mm_srli_epi64::<7>(x));
             _mm_xor_si128(x, _mm_slli_epi64::<17>(x))
         }))
+    }
+
+    #[inline(always)]
+    unsafe fn shl(a: Self, n: u32) -> Self {
+        // SAFETY: as `splat`.
+        Self(a.0.map(|x| unsafe { _mm_sll_epi64(x, _mm_cvtsi32_si128(n as i32)) }))
+    }
+
+    #[inline(always)]
+    unsafe fn shr(a: Self, n: u32) -> Self {
+        // SAFETY: as `splat`.
+        Self(a.0.map(|x| unsafe { _mm_srl_epi64(x, _mm_cvtsi32_si128(n as i32)) }))
+    }
+
+    #[inline(always)]
+    unsafe fn or(a: Self, b: Self) -> Self {
+        // SAFETY: as `splat`.
+        Self(core::array::from_fn(|i| unsafe { _mm_or_si128(a.0[i], b.0[i]) }))
     }
 }
 
@@ -269,6 +366,30 @@ impl Block for Avx2 {
         // SAFETY: as `splat`.
         unsafe { Self([xorshift256(a.0[0]), xorshift256(a.0[1])]) }
     }
+
+    #[inline(always)]
+    unsafe fn shl(a: Self, n: u32) -> Self {
+        // SAFETY: as `splat`.
+        unsafe {
+            let n = _mm_cvtsi32_si128(n as i32);
+            Self([_mm256_sll_epi64(a.0[0], n), _mm256_sll_epi64(a.0[1], n)])
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn shr(a: Self, n: u32) -> Self {
+        // SAFETY: as `splat`.
+        unsafe {
+            let n = _mm_cvtsi32_si128(n as i32);
+            Self([_mm256_srl_epi64(a.0[0], n), _mm256_srl_epi64(a.0[1], n)])
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn or(a: Self, b: Self) -> Self {
+        // SAFETY: as `splat`.
+        unsafe { Self([_mm256_or_si256(a.0[0], b.0[0]), _mm256_or_si256(a.0[1], b.0[1])]) }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -339,6 +460,24 @@ impl Block for Avx512 {
             x = _mm512_xor_si512(x, _mm512_srli_epi64::<7>(x));
             Self(_mm512_xor_si512(x, _mm512_slli_epi64::<17>(x)))
         }
+    }
+
+    #[inline(always)]
+    unsafe fn shl(a: Self, n: u32) -> Self {
+        // SAFETY: as `splat`.
+        Self(unsafe { _mm512_sll_epi64(a.0, _mm_cvtsi32_si128(n as i32)) })
+    }
+
+    #[inline(always)]
+    unsafe fn shr(a: Self, n: u32) -> Self {
+        // SAFETY: as `splat`.
+        Self(unsafe { _mm512_srl_epi64(a.0, _mm_cvtsi32_si128(n as i32)) })
+    }
+
+    #[inline(always)]
+    unsafe fn or(a: Self, b: Self) -> Self {
+        // SAFETY: as `splat`.
+        Self(unsafe { _mm512_or_si512(a.0, b.0) })
     }
 }
 

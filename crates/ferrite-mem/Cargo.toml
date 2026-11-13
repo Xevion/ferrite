@@ -1,12 +1,13 @@
 [package]
 name = "ferrite-mem"
-description = "Memory-test building blocks: fills, verifies, moving-inversion steps and copies at every SIMD tier"
+description = "Memory-test building blocks at every SIMD tier, and the test suite built from them"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ferrite-hal.workspace = true
 snafu.workspace = true
 strum.workspace = true
 

@@ -72,19 +72,30 @@ fn sweep_gauge(sweep: &SweepStatus) -> Gauge<'static> {
     Gauge::default()
         .block(Block::default().borders(Borders::ALL).title(" memory sweep "))
         .gauge_style(Style::new().fg(Color::Green).bg(Color::Black))
-        .percent(sweep.percent)
-        .label(format!("{:#04x} {} {}%", sweep.pattern, sweep.phase, sweep.percent))
+        .percent(sweep.percent.min(100))
+        .label(format!(
+            "{} ({}/{}) {}%, pass {}%",
+            sweep.test, sweep.position.0, sweep.position.1, sweep.test_percent, sweep.percent
+        ))
 }
 
 fn sweep_summary(sweep: &SweepStatus) -> Paragraph<'static> {
     let mut spans = vec![
         Span::styled(format!(" {} MiB ", sweep.bytes >> 20), Style::new().fg(Color::DarkGray)),
+        Span::styled(format!("{}  ", sweep.tier), Style::new().fg(Color::DarkGray)),
         Span::styled(format!("pass {}  ", sweep.passes), Style::new().fg(Color::White)),
     ];
     match sweep.first_fault {
         None => spans.push(Span::styled("no faults", Style::new().fg(Color::Green))),
         Some(f) => spans.push(Span::styled(
-            format!("{} FAULTS (first @ {}, bits {:#x})", sweep.faults, f.addr, f.expected ^ f.actual),
+            format!(
+                "{} FAULTS (first @ {} in {}, bits {:#x}; {})",
+                sweep.faults,
+                f.addr,
+                sweep.first_fault_test,
+                f.expected ^ f.actual,
+                sweep.analysis
+            ),
             Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
     }

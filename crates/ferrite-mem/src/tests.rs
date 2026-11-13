@@ -7,27 +7,27 @@ use rstest::rstest;
 use super::*;
 
 /// Every kernel the host can run; tiers it lacks are skipped.
-fn kernels() -> Vec<Kernel> {
+pub fn kernels() -> Vec<Kernel> {
     // SAFETY: the flags come from the host's own feature detection.
     let caps = unsafe { Caps::new(std::is_x86_feature_detected!("avx2"), std::is_x86_feature_detected!("avx512f")) };
     caps.kernels().collect()
 }
 
 /// A 64-byte-aligned host buffer of `words` words.
-struct Buf {
+pub struct Buf {
     backing: Vec<u64>,
     offset: usize,
     words: usize,
 }
 
 impl Buf {
-    fn new(words: usize) -> Self {
+    pub fn new(words: usize) -> Self {
         let backing = vec![0; words + BLOCK_WORDS];
         let offset = backing.as_ptr().align_offset(BLOCK_BYTES);
         Self { backing, offset, words }
     }
 
-    fn region(&mut self) -> Region<'_> {
+    pub fn region(&mut self) -> Region<'_> {
         // SAFETY: the buffer is ours, and no reference into it is used while the region lives.
         unsafe { Region::from_raw(self.backing.as_mut_ptr().add(self.offset), self.words) }.unwrap()
     }

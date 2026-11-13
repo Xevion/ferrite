@@ -47,11 +47,11 @@ impl Diag {
         {
             self.fault_logged = true;
             milestone(&alloc::format!(
-                "sweep: FAULT at {}: expected {:#018x}, read {:#018x} (pattern {:#04x}, pass {})",
+                "sweep: FAULT at {}: expected {:#018x}, read {:#018x} ({}, pass {})",
                 fault.addr,
                 fault.expected,
                 fault.actual,
-                sweep.pattern,
+                sweep.first_fault_test,
                 sweep.passes
             ));
         }

@@ -1,89 +1,111 @@
 use alloc::vec;
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use assert2::{assert, check};
+use ferrite_mem::Kernel;
 
 use super::*;
 
+/// Small counts and windows, so a pass over a small buffer is quick.
+const CFG: Config = Config {
+    fixed_iterations: 1,
+    byte_iterations: 1,
+    random_rounds: 4,
+    modulo_rounds: 1,
+    move_iterations: 2,
+    bus_iterations: 2,
+    address_window_bytes: 4 << 10,
+    move_window_bytes: 4 << 10,
+    ..Config::DEFAULT
+};
+
 fn sweep_of_words(words: usize) -> Sweep {
-    Sweep::with_buffer(vec![0; words])
+    Sweep::with_buffer(Some(Buffer::host(words)), Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard)
 }
 
-/// Step with `chunk_bytes` until `passes` full passes are done, recording every status.
-fn run_passes(sweep: &mut Sweep, chunk_bytes: usize, passes: u64) -> Vec<SweepStatus> {
-    let mut seen = vec![sweep.status()];
-    while sweep.status().passes < passes {
-        sweep.step(chunk_bytes);
+#[test]
+fn tests_and_percent_advance_through_passes() {
+    let mut sweep = sweep_of_words(2048);
+    let mut seen: Vec<SweepStatus> = vec![sweep.status()];
+    while sweep.status().passes < 2 {
+        sweep.step(16 << 10, Instant::default(), None);
         seen.push(sweep.status());
     }
-    seen
-}
-
-#[test]
-fn phases_and_patterns_cycle_over_passes() {
-    let mut sweep = sweep_of_words(10);
-    let seen = run_passes(&mut sweep, 3 * WORD, 2);
-    let mut transitions: Vec<(u8, Phase, u64)> = seen.iter().map(|s| (s.pattern, s.phase, s.passes)).collect();
-    transitions.dedup();
-    let one_pass = |pass| PATTERNS.into_iter().flat_map(move |p| [(p, Phase::Write, pass), (p, Phase::Verify, pass)]);
-    let expected: Vec<_> = one_pass(0).chain(one_pass(1)).chain([(0x00, Phase::Write, 2)]).collect();
-    check!(transitions == expected);
-}
-
-#[test]
-fn percent_is_monotonic_within_a_pass_and_never_100() {
-    let mut sweep = sweep_of_words(37);
-    let seen = run_passes(&mut sweep, 5 * WORD, 3);
     for pair in seen.windows(2) {
         let [before, after] = pair else { unreachable!() };
         if before.passes == after.passes {
             check!(after.percent >= before.percent);
+            check!(after.position.0 >= before.position.0);
         } else {
-            check!(after.percent == 0);
+            check!(after.position.0 == 1);
         }
     }
-    check!(seen.iter().all(|s| s.percent <= 99));
-    check!(seen.iter().any(|s| s.percent >= 90));
+    let n = seen[0].position.1;
+    let mut tests: Vec<_> = seen.iter().filter(|s| s.passes == 0).map(|s| s.position.0).collect();
+    tests.dedup();
+    check!(tests == (1..=n).collect::<Vec<_>>());
+    check!(seen.iter().all(|s| s.faults == 0 && s.first_fault.is_none()));
 }
 
 #[test]
-fn chunk_smaller_than_a_word_still_progresses() {
-    let mut sweep = sweep_of_words(4);
-    sweep.step(1);
-    check!(sweep.offset == 1);
-}
-
-#[test]
-fn corrupted_word_is_reported_with_its_address() {
-    let mut sweep = sweep_of_words(8);
-    sweep.step(8 * WORD);
-    sweep.step(8 * WORD);
-    sweep.step(8 * WORD);
-    let status = sweep.status();
-    assert!(status.pattern == 0xFF);
-    assert!(status.phase == Phase::Verify);
-
-    let actual = 0xFFFF_FFFF_FFEF_FFFF;
-    sweep.buf[3] = actual;
-    sweep.step(5 * WORD);
-    sweep.step(5 * WORD);
-
+fn a_corrupted_word_is_counted_and_reported_with_its_test() {
+    let mut sweep = sweep_of_words(2048);
+    let base = sweep.run.as_ref().map(|r| r.suite.region().base()).unwrap();
+    // Solid bits fills and then verifies, so a word changed between steps reads back wrong.
+    while sweep.status().test != "solid bits" {
+        sweep.step(64, Instant::default(), None);
+    }
+    sweep.step(64 << 10, Instant::default(), None);
+    let word = 100;
+    let ptr = sweep.run.as_ref().map(|r| r.suite.region().base().get() as *mut u64).unwrap();
+    // SAFETY: inside the host buffer; no step runs while it is written.
+    let expected = unsafe { ptr.add(word).read() };
+    // SAFETY: as above.
+    unsafe { ptr.add(word).write(expected ^ 1 << 7) };
+    while sweep.status().test == "solid bits" {
+        sweep.step(64 << 10, Instant::default(), None);
+    }
     let status = sweep.status();
     check!(status.faults == 1);
-    let expected = Fault { addr: CpuAddr::of(&raw const sweep.buf[3]), expected: u64::MAX, actual };
-    check!(status.first_fault == Some(expected));
-    check!(status.phase == Phase::Write);
+    assert!(let Some(fault) = status.first_fault);
+    check!(fault.addr.get() == base.get() + word * WORD);
+    check!(fault.expected == expected);
+    check!(fault.actual == expected ^ 1 << 7);
+    check!(status.first_fault_test == "solid bits");
+    check!(status.analysis == Classification::StuckBits { mask: 1 << 7 });
 }
 
 #[test]
-fn empty_buffer_has_no_work() {
-    let mut sweep = sweep_of_words(0);
-    sweep.step(4096);
+fn a_waiting_suite_does_no_work_until_its_time() {
+    let fade = Duration::from_secs(5);
+    let mut sweep = Sweep::with_buffer(
+        Some(Buffer::host(1024)),
+        Kernels::uniform(Kernel::SCALAR),
+        Config { fade, ..CFG },
+        Preset::Thorough,
+    );
+    let t0 = Instant::default();
+    while sweep.waiting_until().is_none() {
+        sweep.step(64 << 10, t0, None);
+    }
+    check!(sweep.status().test == "bit fade");
+    check!(sweep.waiting_until() == Some(t0 + fade));
+    check!(!sweep.has_work(t0));
+    let before = sweep.status();
+    sweep.step(64 << 10, t0, None);
+    check!(sweep.status() == before);
+    check!(sweep.has_work(t0 + fade));
+}
+
+#[test]
+fn no_buffer_means_no_work() {
+    let mut sweep = Sweep::with_buffer(None, Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard);
+    sweep.step(4096, Instant::default(), None);
     let status = sweep.status();
-    check!(!sweep.has_work());
-    check!(status.percent == 0);
-    check!(status.passes == 0);
+    check!(!sweep.has_work(Instant::default()));
     check!(status.bytes == 0);
+    check!(status.passes == 0);
 }
 
 #[test]
@@ -91,10 +113,10 @@ fn allocation_halves_until_it_fits() {
     let mut tried = Vec::new();
     let buf = alloc_largest(64 << 10, 4 << 10, |bytes| {
         tried.push(bytes);
-        (bytes <= 10 << 10).then(|| vec![0; bytes / WORD])
+        (bytes <= 10 << 10).then_some(bytes)
     });
     check!(tried == [64 << 10, 32 << 10, 16 << 10, 8 << 10]);
-    check!(buf.len() * WORD == 8 << 10);
+    check!(buf == Some(8 << 10));
 }
 
 #[test]
@@ -102,8 +124,8 @@ fn allocation_gives_up_below_the_minimum() {
     let mut tried = Vec::new();
     let buf = alloc_largest(24 << 10, 8 << 10, |bytes| {
         tried.push(bytes);
-        None
+        None::<usize>
     });
     check!(tried == [24 << 10, 12 << 10, 8 << 10]);
-    check!(buf.is_empty());
+    check!(buf.is_none());
 }

@@ -102,3 +102,23 @@ impl Region<'_> {
         })
     }
 }
+
+#[cfg(test)]
+impl Region<'_> {
+    /// Word `word`, read past the kernels, for tests that inject faults while a test holds the region.
+    pub(crate) fn peek(&self, word: usize) -> u64 {
+        assert!(word < self.words);
+        // SAFETY: in bounds, and the region is ours.
+        unsafe { self.base.add(word).read() }
+    }
+
+    pub(crate) fn poke(&mut self, word: usize, value: u64) {
+        assert!(word < self.words);
+        // SAFETY: as `peek`.
+        unsafe { self.base.add(word).write(value) };
+    }
+
+    pub(crate) fn addr(&self, word: usize) -> CpuAddr {
+        CpuAddr::of(self.base.as_ptr().wrapping_add(word))
+    }
+}

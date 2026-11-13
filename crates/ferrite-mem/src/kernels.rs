@@ -7,6 +7,7 @@ use core::arch::x86_64::_mm_sfence;
 
 use crate::block::{Block, Words};
 use crate::fault::{CpuAddr, Fault, Faults};
+use crate::ops::{Inversion, Order};
 use crate::region::{BLOCK_BYTES, BLOCK_WORDS};
 
 #[inline(always)]
@@ -179,6 +180,275 @@ pub unsafe fn copy<B: Block, const NT: bool>(src: *mut u64, dst: *mut u64, block
     fence::<NT>();
 }
 
+/// Which per-lane sequence a sequence kernel steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeqKind {
+    /// xorshift64, forwards and inverted.
+    Prsg,
+    /// A rotation by one block's worth of words (8 bits).
+    Rotate,
+}
+
+/// One block's step of a sequence, both ways.
+trait Walk<B: Block> {
+    unsafe fn next(s: B) -> B;
+    unsafe fn prev(s: B) -> B;
+}
+
+struct XorShift;
+
+impl<B: Block> Walk<B> for XorShift {
+    #[inline(always)]
+    unsafe fn next(s: B) -> B {
+        // SAFETY: the caller has the tier's features.
+        unsafe { B::xorshift(s) }
+    }
+
+    #[inline(always)]
+    unsafe fn prev(s: B) -> B {
+        // SAFETY: as `next`.
+        unsafe { B::unxorshift(s) }
+    }
+}
+
+struct Rotate;
+
+impl<B: Block> Walk<B> for Rotate {
+    #[inline(always)]
+    unsafe fn next(s: B) -> B {
+        // SAFETY: the caller has the tier's features.
+        unsafe { B::rotl(s, BLOCK_WORDS as u32) }
+    }
+
+    #[inline(always)]
+    unsafe fn prev(s: B) -> B {
+        // SAFETY: as `next`.
+        unsafe { B::rotr(s, BLOCK_WORDS as u32) }
+    }
+}
+
+#[inline(always)]
+unsafe fn fill_seq<B: Block, G: Walk<B>, const NT: bool>(base: *mut u64, blocks: usize, lanes: &mut Words, key: u64) {
+    // SAFETY: as `fill_const`.
+    unsafe {
+        let mut s = B::from_words(*lanes);
+        let k = B::splat(key);
+        for b in 0..blocks {
+            put::<B, NT>(base.add(b * BLOCK_WORDS), B::xor(s, k));
+            s = G::next(s);
+        }
+        *lanes = s.to_words();
+    }
+    fence::<NT>();
+}
+
+/// Check each block against the sequence XOR `step.expect` and rewrite it XOR `step.write`.
+/// Ascending starts with `lanes` at the first block and leaves them past the last; descending
+/// starts past the last block, steps back before each one, and leaves them at the first.
+#[inline(always)]
+unsafe fn invert_seq<B: Block, G: Walk<B>, const NT: bool>(
+    base: *mut u64,
+    blocks: usize,
+    lanes: &mut Words,
+    step: Inversion,
+    faults: &mut Faults<'_>,
+) {
+    // SAFETY: as `fill_const`.
+    unsafe {
+        let (e, w) = (B::splat(step.expect), B::splat(step.write));
+        let mut s = B::from_words(*lanes);
+        match step.order {
+            Order::Ascending => {
+                for i in 0..blocks {
+                    let p = base.add(i * BLOCK_WORDS);
+                    check(p, B::xor(s, e), faults);
+                    put::<B, NT>(p, B::xor(s, w));
+                    s = G::next(s);
+                }
+            },
+            Order::Descending => {
+                for i in (0..blocks).rev() {
+                    s = G::prev(s);
+                    let p = base.add(i * BLOCK_WORDS);
+                    check(p, B::xor(s, e), faults);
+                    put::<B, NT>(p, B::xor(s, w));
+                }
+            },
+        }
+        *lanes = s.to_words();
+    }
+    fence::<NT>();
+}
+
+/// Every `n`-th word, the one with index `offset` modulo `n`, of a chunk whose first word has
+/// index `first` modulo `n`. `n` is at least a block, so a block holds at most one of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stride {
+    pub n: usize,
+    pub offset: usize,
+    pub first: usize,
+}
+
+impl Stride {
+    /// Index of the first selected word in the chunk.
+    const fn start(self) -> usize {
+        (self.offset + self.n - self.first % self.n) % self.n
+    }
+}
+
+/// Store `value` in every word except those `stride` selects, which are left untouched.
+#[inline(always)]
+unsafe fn fill_except<B: Block, const NT: bool>(base: *mut u64, blocks: usize, stride: Stride, value: u64) {
+    // SAFETY: as `fill_const`.
+    unsafe {
+        let v = B::splat(value);
+        let mut skip = stride.start();
+        for b in 0..blocks {
+            let p = base.add(b * BLOCK_WORDS);
+            if skip >= BLOCK_WORDS {
+                put::<B, NT>(p, v);
+                skip -= BLOCK_WORDS;
+            } else {
+                for i in (0..BLOCK_WORDS).filter(|&i| i != skip) {
+                    crate::block::write_word(p.add(i), value);
+                }
+                skip += stride.n - BLOCK_WORDS;
+            }
+        }
+    }
+    fence::<NT>();
+}
+
+/// Store `value` in the words `stride` selects, and only those.
+///
+/// # Safety
+/// `base` and `words` describe a region.
+pub unsafe fn fill_stride(base: *mut u64, words: usize, stride: Stride, value: u64) {
+    for w in (stride.start()..words).step_by(stride.n) {
+        // SAFETY: `w < words`.
+        unsafe { crate::block::write_word(base.add(w), value) };
+    }
+}
+
+/// Check that the words `stride` selects hold `value`.
+///
+/// # Safety
+/// As [`fill_stride`].
+pub unsafe fn verify_stride(base: *mut u64, words: usize, stride: Stride, value: u64, faults: &mut Faults<'_>) {
+    for w in (stride.start()..words).step_by(stride.n) {
+        // SAFETY: `w < words`.
+        let (p, actual) = unsafe { (base.add(w), crate::block::read_word(base.add(w))) };
+        if actual != value {
+            faults.record(Fault { addr: CpuAddr::of(p), expected: value, actual });
+        }
+    }
+}
+
+/// The block-move pattern: each 16-word group is four `a`, two `!a`, four `a`, two `!a`, two
+/// `a`, two `!a`, with `a` a single one bit rotated left once per group. `first_group` is the
+/// index of the group at `base`; the region's last group may be a single block.
+///
+/// # Safety
+/// As [`fill_stride`], with `blocks` the region's blocks.
+pub unsafe fn fill_move_pattern(base: *mut u64, blocks: usize, first_group: usize) {
+    for b in 0..blocks {
+        let a = 1_u64.rotate_left(((first_group + b / 2) % 64) as u32);
+        let (x, y) = (a, !a);
+        let words = if b % 2 == 0 { [x, x, x, x, y, y, x, x] } else { [x, x, y, y, x, x, y, y] };
+        // SAFETY: block `b` is inside the region.
+        unsafe {
+            put::<crate::block::Scalar, false>(base.add(b * BLOCK_WORDS), crate::block::Scalar::from_words(words));
+        };
+    }
+}
+
+/// Check that the two words of each aligned pair are equal, reporting the second against the first.
+///
+/// # Safety
+/// As [`fill_move_pattern`].
+pub unsafe fn verify_pairs(base: *mut u64, blocks: usize, faults: &mut Faults<'_>) {
+    for b in 0..blocks {
+        // SAFETY: block `b` is inside the region.
+        let (p, words) = unsafe {
+            let p = base.add(b * BLOCK_WORDS);
+            (p, crate::block::Scalar::load(p).to_words())
+        };
+        for (i, pair) in words.as_chunks::<2>().0.iter().enumerate() {
+            if pair[0] != pair[1] {
+                let addr = CpuAddr::of(p.wrapping_add(2 * i + 1));
+                faults.record(Fault { addr, expected: pair[0], actual: pair[1] });
+            }
+        }
+    }
+}
+
+/// Word accesses for the address walk, which must reach DRAM rather than the caches.
+pub trait Cells {
+    /// # Safety
+    /// `p` is an aligned word inside a region.
+    unsafe fn write(&mut self, p: *mut u64, v: u64);
+    /// # Safety
+    /// As `write`.
+    unsafe fn read(&mut self, p: *mut u64) -> u64;
+}
+
+/// Each access is followed by a flush of its line, so the next read of a word misses every cache.
+pub struct Dram;
+
+impl Cells for Dram {
+    unsafe fn write(&mut self, p: *mut u64, v: u64) {
+        // SAFETY: the caller's contract.
+        unsafe {
+            crate::block::write_word(p, v);
+            crate::block::flush_word(p);
+        }
+    }
+
+    unsafe fn read(&mut self, p: *mut u64) -> u64 {
+        // SAFETY: the caller's contract.
+        unsafe {
+            let v = crate::block::read_word(p);
+            crate::block::flush_word(p);
+            v
+        }
+    }
+}
+
+/// Walking ones on the address: for each pair of addresses `anchor` and `anchor + 2^k` (and the
+/// anchor itself), write the first with its address XOR `invert`, the second with the complement
+/// of its own, and check that the first kept its value. `anchor` is `span_bytes`-aligned.
+///
+/// # Safety
+/// `anchor..anchor + span_bytes` is inside a region.
+pub unsafe fn address_walk<C: Cells>(
+    cells: &mut C,
+    anchor: *mut u64,
+    span_bytes: usize,
+    invert: u64,
+    faults: &mut Faults<'_>,
+) {
+    let offsets = || core::iter::once(0).chain((3..usize::BITS).map(|k| 1 << k).take_while(move |&o| o < span_bytes));
+    for o1 in offsets() {
+        let p1 = anchor.wrapping_byte_add(o1);
+        let expect = invert ^ p1.addr() as u64;
+        // SAFETY: every offset is inside the span.
+        unsafe { cells.write(p1, expect) };
+        for o2 in offsets().filter(|&o2| o2 != o1) {
+            let p2 = anchor.wrapping_byte_add(o2);
+            // SAFETY: as above.
+            let actual = unsafe {
+                cells.write(p2, !invert ^ p2.addr() as u64);
+                cells.read(p1)
+            };
+            if actual != expect {
+                faults.record(Fault { addr: CpuAddr::of(p1), expected: expect, actual });
+                // SAFETY: as above.
+                unsafe { cells.write(p1, expect) };
+            }
+        }
+    }
+}
+
 /// `rep stosq` over the region.
 pub unsafe fn rep_fill(base: *mut u64, blocks: usize, value: u64) {
     // SAFETY: the region is `blocks * 8` writable words; DF is clear per the ABI.
@@ -262,6 +532,46 @@ macro_rules! tier {
             pub unsafe fn copy<const NT: bool>(src: *mut u64, dst: *mut u64, blocks: usize) {
                 // SAFETY: as `fill_const`.
                 unsafe { super::copy::<$block, NT>(src, dst, blocks) }
+            }
+            #[target_feature(enable = $feature)]
+            pub unsafe fn fill_seq<const NT: bool>(
+                base: *mut u64,
+                blocks: usize,
+                kind: SeqKind,
+                lanes: &mut Words,
+                key: u64,
+            ) {
+                // SAFETY: as `fill_const`.
+                unsafe {
+                    match kind {
+                        SeqKind::Prsg => super::fill_seq::<$block, XorShift, NT>(base, blocks, lanes, key),
+                        SeqKind::Rotate => super::fill_seq::<$block, Rotate, NT>(base, blocks, lanes, key),
+                    }
+                }
+            }
+
+            #[target_feature(enable = $feature)]
+            pub unsafe fn invert_seq<const NT: bool>(
+                base: *mut u64,
+                blocks: usize,
+                kind: SeqKind,
+                lanes: &mut Words,
+                step: Inversion,
+                faults: &mut Faults<'_>,
+            ) {
+                // SAFETY: as `fill_const`.
+                unsafe {
+                    match kind {
+                        SeqKind::Prsg => super::invert_seq::<$block, XorShift, NT>(base, blocks, lanes, step, faults),
+                        SeqKind::Rotate => super::invert_seq::<$block, Rotate, NT>(base, blocks, lanes, step, faults),
+                    }
+                }
+            }
+
+            #[target_feature(enable = $feature)]
+            pub unsafe fn fill_except<const NT: bool>(base: *mut u64, blocks: usize, stride: Stride, value: u64) {
+                // SAFETY: as `fill_const`.
+                unsafe { super::fill_except::<$block, NT>(base, blocks, stride, value) }
             }
         }
     };

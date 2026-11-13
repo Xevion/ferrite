@@ -4,8 +4,9 @@
 use core::time::Duration;
 
 use ferrite_efi::bootlog::{BootLog, Echo};
-use ferrite_efi::cpu::{FpuControl, VectorSupport};
+use ferrite_efi::cpu::{FpuControl, VectorState, VectorSupport};
 use ferrite_efi::{logger, session};
+use ferrite_mem::Caps;
 #[cfg(ferrite_app)]
 use ferrite_rt as _;
 use ferrite_uefi::app::App;
@@ -28,6 +29,20 @@ fn main() -> Status {
         return Status::UNSUPPORTED;
     }
     log::info!("cpu: {fpu}; {}", VectorSupport::probe());
+    // Restored below on every return; a panic resets the machine instead.
+    let vector = VectorState::enable()
+        .inspect(|v| log::info!("cpu: vector state on, {v}"))
+        .inspect_err(|e| log::warn!("cpu: {e}; sweeping with the baseline tiers"))
+        .ok();
+    let caps = match vector {
+        Some(_) => {
+            let support = VectorSupport::probe();
+            // SAFETY: the probe reads CPUID and XCR0 as they are now, after enabling.
+            unsafe { Caps::new(support.avx2_usable(), support.avx512f_usable()) }
+        },
+        // Without our state the wide tiers would run unguarded, so they stay off.
+        None => Caps::BASELINE,
+    };
     if let Err(e) = uefi::helpers::init() {
         log::warn!("boot: uefi helpers init failed: {e}");
     }
@@ -36,7 +51,7 @@ fn main() -> Status {
         if let Err(e) = output.reset(false) {
             log::warn!("console: reset failed: {e}");
         }
-        system::with_stdin(|input| match App::new(input, output) {
+        system::with_stdin(|input| match App::new(input, output, vector.as_ref(), caps) {
             Ok(mut app) => {
                 app.run();
                 Status::SUCCESS
@@ -48,6 +63,11 @@ fn main() -> Status {
         })
     });
     diag::milestone("exit");
+    // Before `finish`, which may reset the machine.
+    if let Some(vector) = vector {
+        drop(vector);
+        log::info!("cpu: vector state restored; {}", FpuControl::read());
+    }
     logger::with(|log| session::finish(log, EXIT_WAIT));
     status
 }

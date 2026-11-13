@@ -981,6 +981,7 @@ name = "ferrite-mem"
 version = "0.1.0"
 dependencies = [
  "assert2",
+ "ferrite-hal",
  "rstest 0.28.0",
  "snafu",
  "strum",

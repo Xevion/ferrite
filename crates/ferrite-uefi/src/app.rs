@@ -5,9 +5,11 @@ use alloc::format;
 use core::time::Duration;
 
 use ferrite_efi::clock::Clock;
+use ferrite_efi::cpu::VectorState;
 use ferrite_efi::link::Link as LoaderLink;
 use ferrite_efi::watchdog::Keepalive;
 use ferrite_hal::{Clock as _, Instant};
+use ferrite_mem::Caps;
 use ratatui::Terminal;
 use uefi::Event;
 use uefi::boot::{self, EventType, TimerTrigger, Tpl};
@@ -19,13 +21,16 @@ use crate::net::Net;
 use crate::sweep::Sweep;
 use crate::ui::{self, View};
 
-const SWEEP_BYTES: usize = 64 << 20;
+const SWEEP_BYTES: usize = 1 << 30;
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 /// Sweep chunks are sized to take about this long, so the network is polled in time.
 const SWEEP_SLICE: Duration = Duration::from_millis(1);
 const MIN_CHUNK_BYTES: usize = 64 << 10;
 const MAX_CHUNK_BYTES: usize = 4 << 20;
 const START_CHUNK_BYTES: usize = 256 << 10;
+/// A suite pause shorter than this (a bus-stress gap) is spun through rather than slept, since the
+/// firmware timer that wakes a wait ticks far more coarsely.
+const SHORT_WAIT: Duration = Duration::from_millis(2);
 /// Under the loader the firmware watchdog is armed for `WATCHDOG` and re-armed every
 /// `WATCHDOG_REARM`, so a long sweep never trips it and a hung loop does.
 const WATCHDOG: Duration = Duration::from_secs(60);
@@ -77,10 +82,18 @@ pub struct App<'a> {
     /// The loader's link, when this app was started by the loader.
     loader: Option<LoaderLink>,
     watchdog: Option<Keepalive>,
+    /// AVX state, enabled by the caller for the app's lifetime; wide sweep steps run inside its guard.
+    vector: Option<&'a VectorState>,
 }
 
 impl<'a> App<'a> {
-    pub fn new(input: &'a mut Input, output: &'a mut Output) -> Result<Self, BackendError> {
+    /// `caps` must allow the wide tiers only when `vector` is present.
+    pub fn new(
+        input: &'a mut Input,
+        output: &'a mut Output,
+        vector: Option<&'a VectorState>,
+        caps: Caps,
+    ) -> Result<Self, BackendError> {
         let terminal = Terminal::new(UefiBackend::new(output))?;
         let clock = Clock::start();
         let (net, net_err) = match Net::setup(clock.now()) {
@@ -102,7 +115,7 @@ impl<'a> App<'a> {
             clock,
             net,
             net_err,
-            sweep: Sweep::new(SWEEP_BYTES),
+            sweep: Sweep::new(SWEEP_BYTES, caps),
             chunk_bytes: START_CHUNK_BYTES,
             diag: Diag::new(),
             waiter,
@@ -110,6 +123,7 @@ impl<'a> App<'a> {
             draw_failures: 0,
             loader,
             watchdog,
+            vector,
         })
     }
 
@@ -130,11 +144,12 @@ impl<'a> App<'a> {
             let net_wait = self.net.as_mut().map_or(FRAME_INTERVAL, |net| net.poll(now, &sweep));
             if self.quit_requested() || self.desktop_stop_requested() {
                 log::info!(
-                    "sweep: stopping after {} passes over {} bytes ({} bytes tested), {} errors",
+                    "sweep: stopping after {} passes over {} bytes ({} bytes tested), in {sweep}, {} errors, {}",
                     sweep.passes,
                     sweep.bytes,
                     sweep.passes.saturating_mul(sweep.bytes as u64),
-                    sweep.faults
+                    sweep.faults,
+                    sweep.analysis
                 );
                 return;
             }
@@ -177,8 +192,13 @@ impl<'a> App<'a> {
     /// Sweep until `deadline` (at least one chunk), or wait on the timer and key
     /// events when there is nothing to sweep. Without events the loop just spins.
     fn idle_until(&mut self, deadline: Instant) {
-        if !self.sweep.has_work() {
-            let timeout = deadline - self.now();
+        let now = self.now();
+        if !self.sweep.has_work(now) {
+            let wake = self.sweep.waiting_until().map_or(deadline, |until| until.min(deadline));
+            if wake - now < SHORT_WAIT && self.sweep.waiting_until().is_some() {
+                return;
+            }
+            let timeout = wake - now;
             if let Some(waiter) = self.waiter.as_mut()
                 && let Err(e) = waiter.wait(timeout)
             {
@@ -189,7 +209,7 @@ impl<'a> App<'a> {
         }
         loop {
             let start = self.now();
-            self.sweep.step(self.chunk_bytes);
+            self.sweep.step(self.chunk_bytes, start, self.vector);
             let end = self.now();
             let took = end - start;
             if took < SWEEP_SLICE {
@@ -197,7 +217,7 @@ impl<'a> App<'a> {
             } else if took > SWEEP_SLICE * 2 {
                 self.chunk_bytes = (self.chunk_bytes / 2).max(MIN_CHUNK_BYTES);
             }
-            if end >= deadline {
+            if end >= deadline || !self.sweep.has_work(end) {
                 return;
             }
         }

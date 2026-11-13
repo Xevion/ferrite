@@ -4,9 +4,10 @@ use snafu::Snafu;
 
 use crate::caps::{Kernel, Stores, Tier};
 use crate::fault::Faults;
-use crate::kernels::{self, avx2, avx512, scalar, sse2};
+use crate::kernels::{self, SeqKind, Stride, avx2, avx512, scalar, sse2};
 use crate::prsg::Prsg;
 use crate::region::Region;
+use crate::rotating::Rotating;
 
 /// Calls `$op` of the kernel's tier, with `NT` from its store kind where the op stores.
 macro_rules! dispatch {
@@ -81,6 +82,7 @@ pub enum Order {
 }
 
 /// One moving-inversions pass: every word should hold `expect` and is then overwritten with `write`.
+/// For the sequence steps both are keys, XOR-ed with the sequence word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Inversion {
     pub expect: u64,
@@ -93,6 +95,38 @@ pub struct Inversion {
 pub fn invert(kernel: Kernel, region: &mut Region<'_>, step: Inversion, faults: &mut Faults<'_>) {
     let descending = step.order == Order::Descending;
     dispatch!(kernel, invert, stores, (region.ptr(), region.blocks(), step.expect, step.write, descending, faults));
+}
+
+/// [`invert`] against the PRSG sequence, with `step`'s values as keys.
+///
+/// Each block is checked against the sequence XOR `step.expect`, then written XOR `step.write`. Ascending, `prsg` starts at the region's first block and ends past
+/// its last; descending, it starts past the last block and ends at the first, stepping backwards.
+pub fn invert_prsg(kernel: Kernel, region: &mut Region<'_>, prsg: &mut Prsg, step: Inversion, faults: &mut Faults<'_>) {
+    let lanes = &mut prsg.lanes;
+    dispatch!(kernel, invert_seq, stores, (region.ptr(), region.blocks(), SeqKind::Prsg, lanes, step, faults));
+}
+
+/// Store the shifting pattern from `rot`'s current block on, XOR `key`, and advance `rot` past the region.
+pub fn fill_rotating(kernel: Kernel, region: &mut Region<'_>, rot: &mut Rotating, key: u64) {
+    let lanes = &mut rot.lanes;
+    dispatch!(kernel, fill_seq, stores, (region.ptr(), region.blocks(), SeqKind::Rotate, lanes, key));
+}
+
+/// [`invert_prsg`] for the shifting pattern.
+pub fn invert_rotating(
+    kernel: Kernel,
+    region: &mut Region<'_>,
+    rot: &mut Rotating,
+    step: Inversion,
+    faults: &mut Faults<'_>,
+) {
+    let lanes = &mut rot.lanes;
+    dispatch!(kernel, invert_seq, stores, (region.ptr(), region.blocks(), SeqKind::Rotate, lanes, step, faults));
+}
+
+/// Store `value` in every word but those `stride` selects.
+pub fn fill_except(kernel: Kernel, region: &mut Region<'_>, stride: Stride, value: u64) {
+    dispatch!(kernel, fill_except, stores, (region.ptr(), region.blocks(), stride, value));
 }
 
 #[derive(Debug, Snafu, PartialEq, Eq)]
