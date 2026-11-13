@@ -22,7 +22,7 @@ use alloc::boxed::Box;
 
 use core::ffi::{CStr, c_char, c_void};
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 
 use ferrite_efi::bootlog::{BootLog, Echo};
@@ -38,8 +38,9 @@ use ferrite_wifi_efi::platform::{IRQ_POLL, UefiPlatform};
 use ferrite_wifi_efi::stacks::PageStacks;
 use ferrite_wifi_start::StartUp;
 use log::LevelFilter;
-use uefi::boot::{self, EventType, TimerTrigger, Tpl};
+use uefi::boot::{self, EventType, OpenProtocolAttributes, OpenProtocolParams, TimerTrigger, Tpl};
 use uefi::prelude::*;
+use uefi::proto::loaded_image::LoadedImage;
 
 /// Kernel memory, with fallbacks for firmware that cannot spare a 4 MiB-aligned range below 4 GiB of the
 /// first size. The run uses a small fraction of 64 MiB; rtw89 and iwlwifi buffers fit in it with room.
@@ -57,12 +58,60 @@ const EXIT_AFTER: Duration = Duration::from_secs(10);
 /// Exit status of a run that stopped in a stub: an OEM error code, distinct from every standard one.
 const EXIT_HALTED: Status = Status(Status::ERROR_BIT | 0x4000_0000_0000_0000 | 0x56);
 
+/// Ticks without a main-loop step after which a task is taken to be spinning.
+const STALL_TICKS: u64 = 3000;
+/// How far above the timer notify's own frame the interrupted stack is scanned, and how many code
+/// addresses found there are reported.
+const STALL_SCAN: usize = 32 << 10;
+const STALL_FRAMES: usize = 32;
+
 static TICKS: AtomicU64 = AtomicU64::new(0);
+/// The tick of the main loop's last step; 0 outside the polling loop.
+static PROGRESS: AtomicU64 = AtomicU64::new(0);
+static STALL_REPORTED: AtomicBool = AtomicBool::new(false);
+/// This image's load address and size, for telling code addresses on a stack apart.
+static IMAGE_BASE: AtomicUsize = AtomicUsize::new(0);
+static IMAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
 /// The stub that stopped the run, null until one does.
 static HALTED: AtomicPtr<c_char> = AtomicPtr::new(core::ptr::null_mut());
 
 unsafe extern "efiapi" fn tick(_: uefi::Event, _: Option<NonNull<c_void>>) {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    let last = PROGRESS.load(Ordering::Relaxed);
+    if last != 0 && now - last > STALL_TICKS && !STALL_REPORTED.swap(true, Ordering::Relaxed) {
+        report_stall(now - last);
+    }
+}
+
+/// A task has kept the CPU for `STALL_TICKS` without yielding, so the run limit can never fire. From the
+/// timer notify that interrupted it: log where it is, as code addresses found on the interrupted stack
+/// (offsets into the image, the first ones nearest the spin), and take bus mastering off the cards. The
+/// loader's watchdog ends the run.
+fn report_stall(ticks: u64) {
+    let (base, size) = (IMAGE_BASE.load(Ordering::Relaxed), IMAGE_SIZE.load(Ordering::Relaxed));
+    let rsp: usize;
+    // SAFETY: reads the stack pointer into a register; no memory or flags are touched.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+    let mut frames = alloc::vec::Vec::with_capacity(STALL_FRAMES);
+    let mut at = rsp;
+    while at < rsp + STALL_SCAN && frames.len() < STALL_FRAMES {
+        // SAFETY: firmware memory is identity mapped and readable; the scan stays within 32 KiB above
+        // the current frame, inside the interrupted task's stack or the memory just past it.
+        let word = unsafe { (at as *const usize).read() };
+        if base != 0 && (base..base + size).contains(&word) {
+            frames.push(word - base);
+        }
+        at += size_of::<usize>();
+    }
+    log::error!(
+        "no main-loop step for {ticks} ms during {}: a task is spinning without yielding",
+        ferrite_wifi_start::stage().to_string_lossy()
+    );
+    log::error!(
+        "stall: image base {base:#x}, tick at +{:#x}; code addresses on the stack: {frames:x?}",
+        tick as *const () as usize - base
+    );
+    ferrite_lkpi::pci::park_all();
 }
 
 fn halted() -> Option<&'static CStr> {
@@ -112,6 +161,7 @@ fn run() -> Status {
         return Status::ABORTED;
     }
     let started = Clock::start();
+    record_image();
 
     let mut seed = [0_u8; ferrite_lkpi::random::SEED_LEN];
     if let Err(e) = entropy::firmware_bytes(&mut seed) {
@@ -218,6 +268,21 @@ fn identity_arena() -> Option<(ferrite_lkpi::mem::Arena, arena::ArenaPages)> {
     None
 }
 
+/// Note where the image is loaded, for the stall report.
+fn record_image() {
+    let params = OpenProtocolParams { handle: boot::image_handle(), agent: boot::image_handle(), controller: None };
+    // SAFETY: a shared open of this image's own LoadedImage, read once and dropped.
+    match unsafe { boot::open_protocol::<LoadedImage>(params, OpenProtocolAttributes::GetProtocol) } {
+        Ok(image) => {
+            let (base, size) = image.info();
+            IMAGE_BASE.store(base as usize, Ordering::Relaxed);
+            IMAGE_SIZE.store(size as usize, Ordering::Relaxed);
+            log::info!("image loaded at {:#x}, {size:#x} bytes", base as usize);
+        },
+        Err(e) => log::warn!("reading this image's load address failed: {e}; a stall report will lack addresses"),
+    }
+}
+
 /// Start kthreadd and init on a scheduler and poll it until init is gone.
 fn execute(clock: Clock) -> Status {
     let stacks = PageStacks::new(DEFAULT_STACK_SIZE);
@@ -253,6 +318,7 @@ fn execute(clock: Clock) -> Status {
     let began = clock.now();
     let mut timed_out = false;
     while sched.info(init_id).is_some() && halted().is_none() {
+        PROGRESS.store(TICKS.load(Ordering::Relaxed).max(1), Ordering::Relaxed);
         if clock.now() - began >= RUN_LIMIT {
             log::error!(
                 "run limit of {} s reached during {}; init is {:?}",
@@ -278,9 +344,11 @@ fn execute(clock: Clock) -> Status {
             },
         };
         if let Some(wait) = wait {
+            PROGRESS.store(0, Ordering::Relaxed);
             clock.delay(if polled { wait.min(IRQ_POLL) } else { wait });
         }
     }
+    PROGRESS.store(0, Ordering::Relaxed);
     ferrite_lkpi::pci::park_all();
 
     let stacks = stack_stats.report();
