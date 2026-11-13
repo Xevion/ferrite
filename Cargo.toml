@@ -44,6 +44,7 @@ log = "0.4.33"
 nusb = "0.2.9"
 object = { version = "0.41.0", default-features = false, features = ["read_core", "elf", "write_std", "pe"] }
 parking_lot = "0.13.0"
+picoserve = { version = "0.20.1", default-features = false, features = ["alloc"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 rand_chacha = { version = "0.10.0", default-features = false }
 rand_core = "0.10.1"

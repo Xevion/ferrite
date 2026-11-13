@@ -15,6 +15,8 @@ ferrite-efi.workspace = true
 ferrite-hal.workspace = true
 ferrite-mem.workspace = true
 log.workspace = true
+# The status page and its API, over our own smoltcp sockets.
+picoserve.workspace = true
 ratatui.workspace = true
 ratatui-core.workspace = true
 # Answers ping, as a liveness check.

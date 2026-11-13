@@ -261,8 +261,7 @@ impl Net {
 
     /// Advance the stack to `now`. Returns how long may pass before the next poll.
     /// Requests the status page makes are queued on `commands`.
-    pub fn poll(&mut self, now: Instant, snapshot: &Snapshot<'_>, _commands: &mut Commands) -> Duration {
-        let sweep = &snapshot.status;
+    pub fn poll(&mut self, now: Instant, snapshot: &Snapshot<'_>, commands: &mut Commands) -> Duration {
         let at = smol_instant(now);
         self.device.reclaim(now);
         self.status.link.up = self.device.link_up();
@@ -271,9 +270,10 @@ impl Net {
         let changed = self.iface.poll(at, &mut self.device, &mut self.sockets) == PollResult::SocketStateChanged;
         self.poll_dhcp(now);
 
-        let snapshot = &self.status;
-        let served = self.http.poll(&mut self.sockets, now, || http::status_page(snapshot, sweep));
-        self.status.counters.http_responses = self.status.counters.http_responses.wrapping_add(served);
+        let served = self.http.poll(&mut self.sockets, now, snapshot, self.status, commands);
+        self.status.counters.http_responses = self.status.counters.http_responses.wrapping_add(served.responses);
+        // Send what the connections just queued now rather than a poll later.
+        self.iface.poll_egress(at, &mut self.device, &mut self.sockets);
         self.serve_mdns(now);
 
         let stats = self.device.stats;
@@ -283,7 +283,7 @@ impl Net {
         counters.tx_errors = stats.tx_errors;
         counters.tx_stale_reclaims = stats.tx_stale_reclaims;
 
-        if changed || stats.rx_frames != rx_before {
+        if changed || stats.rx_frames != rx_before || served.busy {
             return BUSY_POLL;
         }
         self.iface.poll_delay(at, &self.sockets).map_or(IDLE_POLL, |d| Duration::from(d).min(IDLE_POLL))
