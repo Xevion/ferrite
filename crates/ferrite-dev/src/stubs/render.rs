@@ -54,12 +54,25 @@ pub fn rust_stubs(imports: &[Import]) -> String {
         if let Class::Seam { cut } = &import.class {
             let _ = writeln!(out, "/// Defined only in the cut `{cut}`.");
         }
+        let ident = rust_ident(symbol);
         let _ = write!(
             out,
-            "#[unsafe(no_mangle)]\npub unsafe extern \"sysv64\" fn {symbol}() -> ! {{\n    trace_and_stop(c\"{symbol}\")\n}}\n"
+            "#[unsafe(no_mangle)]\npub unsafe extern \"sysv64\" fn {ident}() -> ! {{\n    trace_and_stop(c\"{symbol}\")\n}}\n"
         );
     }
     out
+}
+
+/// `symbol` as a Rust identifier: a C name that is a Rust keyword (`yield`) is written raw, which
+/// leaves the exported symbol unchanged.
+fn rust_ident(symbol: &str) -> String {
+    const KEYWORDS: [&str; 49] = [
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn",
+        "for", "gen", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+        "static", "struct", "trait", "true", "type", "unsafe", "use", "where", "while", "abstract", "become", "box",
+        "do", "final", "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+    ];
+    if KEYWORDS.contains(&symbol) { format!("r#{symbol}") } else { symbol.to_owned() }
 }
 
 /// `glue/generated_data.c`: storage for each variable, sized and aligned by its declared type, between
@@ -154,6 +167,7 @@ mod tests {
             import("page_offset_base", Class::Data { read_only: true, open_array: true }, "", Some("asm/page_64.h")),
             import("__x86_return_thunk", Class::Unknown, "", None),
             import("memcpy", Class::Host, "", None),
+            import("yield", Class::Function, "void yield(void)", Some("linux/sched.h")),
         ]
     }
 
@@ -167,6 +181,7 @@ mod tests {
         check!(text.contains("/// Defined only in the cut `net/wireless/nl80211.c`.\n"));
         check!(!text.contains("_printk"));
         check!(!text.contains("memcpy"));
+        check!(text.contains("fn r#yield() -> ! {\n    trace_and_stop(c\"yield\")\n}"));
     }
 
     #[test]
