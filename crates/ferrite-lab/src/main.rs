@@ -31,6 +31,10 @@ const REGDB_LIMIT: Duration = Duration::from_secs(2);
 const WIFI_LIMIT: Duration = Duration::from_secs(10);
 /// How long the simulated radios' scan gets to end.
 const SCAN_LIMIT: Duration = Duration::from_secs(10);
+/// How long the lab station gets from its connect request to the open port.
+const CONNECT_LIMIT: Duration = Duration::from_secs(10);
+/// How long the lab holds the connection before it disconnects.
+const HOLD: Duration = Duration::from_millis(500);
 /// How long one poll step may run tasks before the main loop gets the CPU back.
 const BUDGET: Duration = Duration::from_millis(10);
 /// The kernel's memory: every page, slab object and vmalloc block.
@@ -111,6 +115,8 @@ fn main() -> ExitCode {
         regdb_limit: REGDB_LIMIT,
         wifi_limit: WIFI_LIMIT,
         scan_limit: SCAN_LIMIT,
+        connect_limit: CONNECT_LIMIT,
+        hold: HOLD,
     };
     let init_task = match ferrite_wifi_start::start_init(start_up) {
         Ok(task) => task,

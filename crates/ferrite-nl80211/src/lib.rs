@@ -13,5 +13,6 @@ extern crate std;
 
 pub mod client;
 pub mod genl;
+pub mod mlme;
 pub mod netlink;
 pub mod nl80211;

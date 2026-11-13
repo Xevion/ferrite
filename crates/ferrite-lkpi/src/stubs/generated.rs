@@ -122,12 +122,6 @@ pub unsafe extern "sysv64" fn __skb_flow_dissect() -> ! {
     trace_and_stop(c"__skb_flow_dissect")
 }
 
-/// `void __skb_get_hash_net(const struct net *, struct sk_buff *)`, declared in `linux/skbuff.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn __skb_get_hash_net() -> ! {
-    trace_and_stop(c"__skb_get_hash_net")
-}
-
 /// `u32 __skb_get_poff(const struct sk_buff *, const void *, const struct flow_keys_basic *, int)`, declared in `linux/skbuff.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn __skb_get_poff() -> ! {

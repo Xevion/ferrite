@@ -4,7 +4,7 @@ members = ["crates/*"]
 # Host-buildable crates. The UEFI binaries are built through the `efi-*`
 # aliases in .cargo/config.toml, which pass `--target x86_64-unknown-uefi`.
 # ferrite-wifi-sys needs its Linux snapshot, which the Justfile recipes make first with `just vendor`.
-default-members = ["crates/ferrite-hal", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-wire", "crates/ferrite-dev", "crates/ferrite-wifi-sys", "crates/ferrite-nl80211", "crates/ferrite-lkpi", "crates/ferrite-wifi-start", "crates/ferrite-lab", "crates/ferrite-linux"]
+default-members = ["crates/ferrite-hal", "crates/ferrite-xhci", "crates/ferrite-efi", "crates/ferrite-testing", "crates/ferrite-wire", "crates/ferrite-dev", "crates/ferrite-wifi-sys", "crates/ferrite-nl80211", "crates/ferrite-wpa", "crates/ferrite-lkpi", "crates/ferrite-wifi-start", "crates/ferrite-lab", "crates/ferrite-linux"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,14 +22,18 @@ ferrite-wifi-sys = { path = "crates/ferrite-wifi-sys" }
 ferrite-recon = { path = "crates/ferrite-recon" }
 ferrite-testing = { path = "crates/ferrite-testing" }
 ferrite-wire = { path = "crates/ferrite-wire" }
+ferrite-wpa = { path = "crates/ferrite-wpa" }
 ferrite-xhci = { path = "crates/ferrite-xhci" }
 
+aes = { version = "0.9.4", default-features = false }
+aes-kw = { version = "0.3.1", default-features = false }
 arbitrary-int = { version = "2.2.0", default-features = false }
 bitbybit = "2.0.1"
 cc = "1.11.1"
 clap = { version = "4.6.7", features = ["derive"] }
 corosensei = { version = "0.3.4", default-features = false }
 crc32fast = { version = "1.5.5", default-features = false }
+hmac = { version = "0.13.0", default-features = false }
 humantime = "2.4.0"
 jiff = "0.2.43"
 libc = "0.2.191"
@@ -37,6 +41,7 @@ log = "0.4.33"
 nusb = "0.2.9"
 object = { version = "0.41.0", default-features = false, features = ["read_core", "elf", "write_std", "pe"] }
 parking_lot = "0.13.0"
+pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 rand_chacha = { version = "0.10.0", default-features = false }
 rand_core = "0.10.1"
 ratatui = { version = "0.30.2", default-features = false }
@@ -44,6 +49,7 @@ ratatui-core = "0.1.2"
 rustix = { version = "1.1.6", features = ["event", "fs", "pty", "std", "termios"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha1 = { version = "0.11.0", default-features = false }
 sha2 = "0.11.1"
 signal-hook = { version = "0.4.6", default-features = false }
 smoltcp = { version = "0.13.1", default-features = false, features = [

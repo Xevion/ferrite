@@ -8,7 +8,7 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::time::Duration;
 
 use ferrite_hal::Instant;
-use ferrite_nl80211::client::{ApConfig, Client, ClientError, ScanEnd, Socket};
+use ferrite_nl80211::client::{Client, ClientError, ScanEnd, Socket};
 use ferrite_nl80211::genl::GroupId;
 use ferrite_nl80211::netlink::Errno;
 use ferrite_nl80211::nl80211::{Bss, Frequency, IfType, Interface, SsidDisplay};
@@ -88,6 +88,8 @@ pub enum ScanError {
     Aborted { name: String, waited: Duration },
     #[snafu(display("the scan on {name} did not end within {} ms", limit.as_millis()))]
     Expired { name: String, limit: Duration },
+    #[snafu(display("creating a kthread failed: {code}"))]
+    Thread { code: isize },
 }
 
 impl From<ClientError> for ScanError {
@@ -150,21 +152,17 @@ pub fn find(client: &mut Client<KernelSocket>, name: &str) -> Result<Interface, 
         .ok_or_else(|| ScanError::NoInterface { name: name.into() })
 }
 
-/// Make `name` an AP interface beaconing the open network `ssid` on 2412 MHz. `up` brings it up
-/// between the type change and the start, as hostapd's interface setup does.
-pub fn start_ap(
+/// Make `name` an AP interface and bring it up between the type change and the start, as hostapd's
+/// interface setup does; `up` brings it up.
+pub fn prepare_ap(
     client: &mut Client<KernelSocket>,
     name: &str,
-    ssid: &[u8],
     up: impl FnOnce() -> Result<(), c_int>,
-) -> Result<(), ScanError> {
+) -> Result<Interface, ScanError> {
     let interface = find(client, name)?;
     client.set_iftype(interface.ifindex, IfType::Ap)?;
     up().map_err(|code| ScanError::Nl80211 {
         source: ClientError::Kernel { what: "dev_open of the AP", errno: Errno(code), text: None },
     })?;
-    let ap = ApConfig { ssid, frequency: Frequency(2412), beacon_interval: 10, channel: 1 };
-    client.start_ap(interface.ifindex, interface.mac, &ap)?;
-    log::info!("nl80211: {name} ({}) beacons the open network \"{}\" on 2412 MHz", interface.mac, SsidDisplay(ssid));
-    Ok(())
+    Ok(interface)
 }

@@ -207,6 +207,10 @@ impl<'a> Attr<'a> {
         self.fixed().map(u32::from_ne_bytes)
     }
 
+    pub fn u64(&self) -> Result<u64, DecodeError> {
+        self.fixed().map(u64::from_ne_bytes)
+    }
+
     pub fn i32(&self) -> Result<i32, DecodeError> {
         self.fixed().map(i32::from_ne_bytes)
     }
@@ -304,6 +308,22 @@ impl Builder {
     }
 
     #[must_use]
+    pub fn u8(self, kind: u16, value: u8) -> Self {
+        self.attr(kind, &[value])
+    }
+
+    #[must_use]
+    pub fn u16(self, kind: u16, value: u16) -> Self {
+        self.attr(kind, &value.to_ne_bytes())
+    }
+
+    /// An `NLA_FLAG`: present means true.
+    #[must_use]
+    pub fn flag(self, kind: u16) -> Self {
+        self.attr(kind, &[])
+    }
+
+    #[must_use]
     pub fn u32(self, kind: u16, value: u32) -> Self {
         self.attr(kind, &value.to_ne_bytes())
     }
@@ -353,6 +373,7 @@ impl fmt::Display for Errno {
             12 => "ENOMEM",
             16 => "EBUSY",
             19 => "ENODEV",
+            107 => "ENOTCONN",
             22 => "EINVAL",
             95 => "EOPNOTSUPP",
             105 => "ENOBUFS",

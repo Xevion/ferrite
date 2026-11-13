@@ -19,12 +19,28 @@ pub enum Command {
     GetInterface,
     SetInterface,
     NewInterface,
+    SetKey,
+    NewKey,
     StartAp,
     StopAp,
+    SetStation,
+    NewStation,
     GetScan,
     TriggerScan,
     NewScanResults,
     ScanAborted,
+    Authenticate,
+    Associate,
+    Deauthenticate,
+    Disassociate,
+    Connect,
+    Disconnect,
+    RegisterFrame,
+    Frame,
+    FrameTxStatus,
+    PortAuthorized,
+    ControlPortFrame,
+    ControlPortFrameTxStatus,
     Unknown(u8),
 }
 
@@ -34,12 +50,28 @@ impl Command {
             5 => Self::GetInterface,
             6 => Self::SetInterface,
             7 => Self::NewInterface,
+            10 => Self::SetKey,
+            11 => Self::NewKey,
             15 => Self::StartAp,
             16 => Self::StopAp,
+            18 => Self::SetStation,
+            19 => Self::NewStation,
             32 => Self::GetScan,
             33 => Self::TriggerScan,
             34 => Self::NewScanResults,
             35 => Self::ScanAborted,
+            37 => Self::Authenticate,
+            38 => Self::Associate,
+            39 => Self::Deauthenticate,
+            40 => Self::Disassociate,
+            46 => Self::Connect,
+            48 => Self::Disconnect,
+            58 => Self::RegisterFrame,
+            59 => Self::Frame,
+            60 => Self::FrameTxStatus,
+            125 => Self::PortAuthorized,
+            129 => Self::ControlPortFrame,
+            139 => Self::ControlPortFrameTxStatus,
             other => Self::Unknown(other),
         }
     }
@@ -49,12 +81,28 @@ impl Command {
             Self::GetInterface => 5,
             Self::SetInterface => 6,
             Self::NewInterface => 7,
+            Self::SetKey => 10,
+            Self::NewKey => 11,
             Self::StartAp => 15,
             Self::StopAp => 16,
+            Self::SetStation => 18,
+            Self::NewStation => 19,
             Self::GetScan => 32,
             Self::TriggerScan => 33,
             Self::NewScanResults => 34,
             Self::ScanAborted => 35,
+            Self::Authenticate => 37,
+            Self::Associate => 38,
+            Self::Deauthenticate => 39,
+            Self::Disassociate => 40,
+            Self::Connect => 46,
+            Self::Disconnect => 48,
+            Self::RegisterFrame => 58,
+            Self::Frame => 59,
+            Self::FrameTxStatus => 60,
+            Self::PortAuthorized => 125,
+            Self::ControlPortFrame => 129,
+            Self::ControlPortFrameTxStatus => 139,
             Self::Unknown(raw) => raw,
         }
     }
@@ -67,17 +115,50 @@ pub mod attr {
     pub const IFNAME: u16 = 4;
     pub const IFTYPE: u16 = 5;
     pub const MAC: u16 = 6;
+    pub const KEY_DATA: u16 = 7;
+    pub const KEY_IDX: u16 = 8;
+    pub const KEY_CIPHER: u16 = 9;
+    pub const KEY_SEQ: u16 = 10;
     pub const BEACON_INTERVAL: u16 = 12;
     pub const DTIM_PERIOD: u16 = 13;
     pub const BEACON_HEAD: u16 = 14;
     pub const BEACON_TAIL: u16 = 15;
+    pub const STA_AID: u16 = 16;
+    pub const STA_LISTEN_INTERVAL: u16 = 18;
+    pub const STA_SUPPORTED_RATES: u16 = 19;
     pub const WIPHY_FREQ: u16 = 38;
     pub const WIPHY_CHANNEL_TYPE: u16 = 39;
+    pub const IE: u16 = 42;
     pub const SCAN_FREQUENCIES: u16 = 44;
     pub const BSS: u16 = 47;
+    pub const FRAME: u16 = 51;
     pub const SSID: u16 = 52;
     pub const AUTH_TYPE: u16 = 53;
+    pub const REASON_CODE: u16 = 54;
+    pub const KEY_TYPE: u16 = 55;
+    pub const TIMED_OUT: u16 = 65;
+    pub const STA_FLAGS2: u16 = 67;
+    pub const CONTROL_PORT: u16 = 68;
+    pub const PRIVACY: u16 = 70;
+    pub const DISCONNECTED_BY_AP: u16 = 71;
+    pub const STATUS_CODE: u16 = 72;
+    pub const CIPHER_SUITES_PAIRWISE: u16 = 73;
+    pub const CIPHER_SUITE_GROUP: u16 = 74;
+    pub const WPA_VERSIONS: u16 = 75;
+    pub const AKM_SUITES: u16 = 76;
+    pub const KEY: u16 = 80;
+    pub const COOKIE: u16 = 88;
+    pub const FRAME_MATCH: u16 = 91;
+    pub const ACK: u16 = 92;
+    pub const FRAME_TYPE: u16 = 101;
+    pub const CONTROL_PORT_ETHERTYPE: u16 = 102;
+    pub const CONTROL_PORT_NO_ENCRYPT: u16 = 103;
     pub const HIDDEN_SSID: u16 = 126;
+    pub const DONT_WAIT_FOR_ACK: u16 = 142;
+    pub const STA_CAPABILITY: u16 = 171;
+    pub const SOCKET_OWNER: u16 = 204;
+    pub const CONTROL_PORT_OVER_NL80211: u16 = 264;
+    pub const CONTROL_PORT_NO_PREAUTH: u16 = 286;
 }
 
 /// `enum nl80211_bss` values used here.
@@ -260,6 +341,8 @@ pub struct Bss {
     /// Empty for a hidden network, or one whose elements carried no SSID.
     pub ssid: Vec<u8>,
     pub security: Security,
+    /// The RSN element, whole, which a 4-way handshake's message 3 must repeat.
+    pub rsn: Option<Vec<u8>>,
 }
 
 /// IEEE 802.11 element ids.
@@ -304,7 +387,12 @@ impl Bss {
         let (Some(bssid), Some(frequency)) = (bssid, frequency) else { return Ok(None) };
         let ies = ies.or(beacon_ies).unwrap_or_default();
         let ssid = elements(ies).find(|(id, _)| *id == ELEMENT_SSID).map_or_default(|(_, data)| data.to_vec());
-        Ok(Some(Self { bssid, frequency, signal, ssid, security: security(ies, capability) }))
+        let rsn = elements(ies).find(|(id, _)| *id == ELEMENT_RSN).map(|(_, data)| {
+            let mut element = alloc::vec![ELEMENT_RSN, data.len() as u8];
+            element.extend_from_slice(data);
+            element
+        });
+        Ok(Some(Self { bssid, frequency, signal, ssid, security: security(ies, capability), rsn }))
     }
 }
 

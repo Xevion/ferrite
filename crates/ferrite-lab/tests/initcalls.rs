@@ -1,6 +1,6 @@
 //! Runs the lab binary: the Linux C runs on the shim's scheduler through the time and driver-core
-//! bring-up, the page model check, every initcall, the firmware loader, an nl80211 scan between the two
-//! simulated radios and every exitcall, and the lab exits 0. A run that stops in a stub or on
+//! bring-up, the page model check, every initcall, the firmware loader, an nl80211 scan and a WPA2-PSK
+//! connection between the two simulated radios, and every exitcall, and the lab exits 0. A run that stops in a stub or on
 //! unimplemented data exits 86 or 87 instead.
 
 use std::process::Command;
@@ -42,10 +42,24 @@ fn every_initcall_returns_0_firmware_loads_and_every_exitcall_runs() {
 
     // The scan goes through nl80211 over netlink sockets, ends on the scan group and finds the AP.
     check!(stderr.contains("initcall init_mac80211_hwsim returned 0"), "{stderr}");
-    check!(stderr.contains("beacons the open network \"ferrite-lab\" on 2412 MHz"), "{stderr}");
+    check!(
+        stderr.contains("beacons the WPA2-PSK network \"ferrite-lab\" on 2412 MHz; group key 1 installed"),
+        "{stderr}"
+    );
     check!(stderr.contains("nl80211: scan on wlan0 done after "), "{stderr}");
-    check!(stderr.contains("BSS 02:00:00:00:01:00 2412 MHz"), "{stderr}");
-    check!(stderr.contains("the scan on wlan0 found wlan1's network \"ferrite-lab\""), "{stderr}");
+    check!(stderr.contains("BSS 02:00:00:00:01:00 2412 MHz -30.00 dBm RSN \"ferrite-lab\""), "{stderr}");
+    check!(stderr.contains("the scan on wlan0 found wlan1's network \"ferrite-lab\" (RSN)"), "{stderr}");
+
+    // wlan0 connects to wlan1's AP, the 4-way handshake runs in Rust on both sides, keys are installed
+    // on both, the port opens, and the disconnect is announced.
+    check!(stderr.contains("connect: associated after "), "{stderr}");
+    check!(stderr.contains("(status 0)"), "{stderr}");
+    check!(stderr.contains("keys: pairwise CCMP key installed for 02:00:00:00:01:00"), "{stderr}");
+    check!(stderr.contains("keys: group CCMP key 1 installed"), "{stderr}");
+    check!(stderr.contains("4-way: complete; the port to 02:00:00:00:01:00 is open"), "{stderr}");
+    check!(stderr.contains("lab AP: pairwise and group keys installed and the station authorized"), "{stderr}");
+    check!(stderr.contains("disconnected after holding 500 ms: reason 3 (DeauthLeaving)"), "{stderr}");
+    check!(!stderr.contains("4-way: dropped a frame"), "{stderr}");
 
     let ran =
         stderr.lines().filter(|line| line.starts_with("INFO  exitcall ") && !line.contains("exitcalls done")).count();

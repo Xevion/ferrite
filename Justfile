@@ -60,11 +60,11 @@ build profile="dev": vendor
     cargo efi-build --profile {{ profile }}
     cargo efi-elf-build --profile {{ profile }}
 
-# build one UEFI app and stage it as the ESP bootloader under ./esp; wifitrace also gets regulatory.db and the 8265 firmware under efi/ferrite/firmware
+# build one UEFI app and stage it as the ESP bootloader under ./esp; wifitrace also gets regulatory.db, the 8265 firmware and the WPA_ lines of .env (as wifi.env) under efi/ferrite/firmware
 stage app="ferrite-uefi": vendor
     mkdir -p esp/efi/boot
     cargo run -q -p ferrite-dev -- build {{ app }} --out esp/efi/boot/bootx64.efi
-    {{ if app == "wifitrace" { "mkdir -p esp/efi/ferrite/firmware && cp /lib/firmware/regulatory.db esp/efi/ferrite/firmware/ && cp /lib/firmware/iwlwifi-8265-36.ucode esp/efi/ferrite/firmware/" } else { "true" } }}
+    {{ if app == "wifitrace" { "mkdir -p esp/efi/ferrite/firmware && cp /lib/firmware/regulatory.db esp/efi/ferrite/firmware/ && cp /lib/firmware/iwlwifi-8265-36.ucode esp/efi/ferrite/firmware/ && if test -f .env; then grep -E '^WPA_(SSID|PASSPHRASE)=' .env > esp/efi/ferrite/firmware/wifi.env || true; fi" } else { "true" } }}
     test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
 
 # boot an app in QEMU: `just qemu`, `just qemu xhciscan serial`, `just qemu ferrite-uefi serial tap`

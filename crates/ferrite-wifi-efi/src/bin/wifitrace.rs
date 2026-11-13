@@ -54,8 +54,12 @@ const REGDB_LIMIT: Duration = Duration::from_secs(5);
 const WIFI_LIMIT: Duration = Duration::from_secs(15);
 /// How long a scan gets from its trigger to its end on the scan group; a full 8265 sweep takes a few seconds.
 const SCAN_LIMIT: Duration = Duration::from_secs(10);
-/// The whole run ends here, wherever it is.
-const RUN_LIMIT: Duration = Duration::from_secs(20);
+/// How long a connection gets from its request to the open port, and a disconnect to its event.
+const CONNECT_LIMIT: Duration = Duration::from_secs(10);
+/// How long the connection is held before it is left.
+const HOLD: Duration = Duration::from_secs(3);
+/// The whole run ends here, wherever it is: start-up, a scan, a connect and its hold all fit.
+const RUN_LIMIT: Duration = Duration::from_secs(40);
 const EXIT_AFTER: Duration = Duration::from_secs(10);
 /// Exit status of a run that stopped in a stub: an OEM error code, distinct from every standard one.
 const EXIT_HALTED: Status = Status(Status::ERROR_BIT | 0x4000_0000_0000_0000 | 0x56);
@@ -304,6 +308,8 @@ fn execute(clock: Clock) -> Status {
         regdb_limit: REGDB_LIMIT,
         wifi_limit: WIFI_LIMIT,
         scan_limit: SCAN_LIMIT,
+        connect_limit: CONNECT_LIMIT,
+        hold: HOLD,
     };
     let init_task = match ferrite_wifi_start::start_init(start_up) {
         Ok(task) => task,

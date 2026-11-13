@@ -1,0 +1,25 @@
+[package]
+name = "ferrite-wpa"
+description = "WPA2-PSK supplicant: key derivation, EAPOL-Key frames and the 4-way and group key handshakes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# The authenticator side of the handshakes, for the lab's access point and the tests.
+authenticator = []
+
+[dependencies]
+aes-kw.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+sha1.workspace = true
+snafu.workspace = true
+
+[dev-dependencies]
+assert2.workspace = true
+ferrite-wpa = { path = ".", features = ["authenticator"] }
+
+[lints]
+workspace = true

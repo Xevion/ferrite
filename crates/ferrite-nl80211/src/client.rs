@@ -1,9 +1,15 @@
-//! An nl80211 client over any netlink socket, doing what `iw` does for a scan.
+//! An nl80211 client over any netlink socket, doing what `iw` does for a scan and what iwd does for a
+//! connection.
 //!
 //! Two sockets: requests and their replies go over one, and the other joins the "scan" multicast group,
-//! so a dump's replies and the notifications never share a queue. A request without a dump asks for an
-//! ack and ends at it; a dump ends at `NLMSG_DONE`. Messages of another sequence number are skipped.
+//! so a dump's replies and scan notifications never share a queue. A request without a dump asks for an
+//! ack and ends at it; a dump ends at `NLMSG_DONE`. The request socket is also the connection owner:
+//! EAPOL frames over the control port, registered management frames and their transmit status are
+//! unicast to it, and it joins the "mlme" group for connect and disconnect events. Those arrive
+//! interleaved with replies, so an exchange keeps every message of another sequence number, in order,
+//! for [`Client::next_event`].
 
+use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -12,6 +18,7 @@ use ferrite_hal::Instant;
 use snafu::{OptionExt, ResultExt, Snafu};
 
 use crate::genl::{self, Family, GenlError, GenlMessage, GroupId};
+use crate::mlme::{self, Event, ReasonCode};
 use crate::netlink::{self, DecodeError, Errno, ErrorMessage, Flags, MessageType};
 use crate::nl80211::{self, Bss, Command, Frequency, IfIndex, IfType, Interface, MacAddr, attr};
 
@@ -63,14 +70,67 @@ pub enum ScanEnd {
     Aborted,
 }
 
-/// An open network to start on an AP interface.
+/// The cipher and AKM suite selectors nl80211 takes, and the WPA version bit.
+pub const CIPHER_CCMP: u32 = 0x000f_ac04;
+pub const AKM_PSK: u32 = 0x000f_ac02;
+const WPA_VERSION_2: u32 = 2;
+/// `NL80211_STA_FLAG_*` bits.
+const STA_FLAG_AUTHORIZED: u32 = 1 << 1;
+const STA_FLAG_AUTHENTICATED: u32 = 1 << 5;
+const STA_FLAG_ASSOCIATED: u32 = 1 << 7;
+/// `enum nl80211_key_attributes` and `nl80211_key_default_types`.
+mod key_attr {
+    pub const DATA: u16 = 1;
+    pub const IDX: u16 = 2;
+    pub const CIPHER: u16 = 3;
+    pub const SEQ: u16 = 4;
+    pub const DEFAULT: u16 = 5;
+    pub const TYPE: u16 = 7;
+    pub const DEFAULT_TYPES: u16 = 8;
+    pub const DEFAULT_TYPE_MULTICAST: u16 = 2;
+}
+const KEYTYPE_GROUP: u32 = 0;
+const KEYTYPE_PAIRWISE: u32 = 1;
+
+/// A network to start on an AP interface: open, or WPA2-PSK with CCMP when `rsn` holds the RSN element.
 pub struct ApConfig<'a> {
     pub ssid: &'a [u8],
+    pub rsn: Option<&'a [u8]>,
     pub frequency: Frequency,
     /// In TU (1024 us); cfg80211 takes 10 to 10000.
     pub beacon_interval: u16,
     /// The 802.11 channel number the DS Parameter Set element names.
     pub channel: u8,
+}
+
+/// A WPA2-PSK connection, as iwd asks for one: the supplicant runs in userspace and EAPOL goes over
+/// nl80211 to this socket.
+pub struct ConnectParams<'a> {
+    pub ssid: &'a [u8],
+    pub bssid: Option<MacAddr>,
+    pub frequency: Option<Frequency>,
+    /// The RSN element for the association request.
+    pub rsn: &'a [u8],
+}
+
+/// A key for `NL80211_CMD_NEW_KEY`.
+pub struct KeyParams<'a> {
+    /// The peer for a pairwise key; `None` for a group key.
+    pub peer: Option<MacAddr>,
+    pub index: u8,
+    pub cipher: u32,
+    pub data: &'a [u8],
+    /// The receive sequence counter to start from, 6 bytes for CCMP.
+    pub seq: Option<&'a [u8]>,
+}
+
+/// A station an AP admits after association (`NL80211_CMD_NEW_STATION`).
+pub struct StationParams<'a> {
+    pub mac: MacAddr,
+    pub aid: u16,
+    pub listen_interval: u16,
+    pub capability: u16,
+    pub supported_rates: &'a [u8],
 }
 
 pub struct Client<S: Socket> {
@@ -79,13 +139,15 @@ pub struct Client<S: Socket> {
     family: Family,
     seq: u32,
     buf: Vec<u8>,
+    /// Messages for the request socket that were not replies, oldest first.
+    pending: VecDeque<Vec<u8>>,
 }
 
 impl<S: Socket> Client<S> {
     /// Resolve nl80211 through the controller and join its scan group on `events`.
     pub fn connect(mut requests: S, mut events: S) -> Result<Self, ClientError> {
         let mut buf = vec![0; RECV_BUFFER];
-        let replies =
+        let (replies, _) =
             exchange(&mut requests, &mut buf, &genl::get_family(1, nl80211::FAMILY_NAME), 1, false, "GETFAMILY")?;
         let reply = replies.first().context(NoFamilySnafu { name: nl80211::FAMILY_NAME })?;
         let message = GenlMessage::parse(&reply.payload).context(DecodeSnafu { what: "GETFAMILY" })?;
@@ -94,7 +156,7 @@ impl<S: Socket> Client<S> {
             .group(nl80211::SCAN_GROUP)
             .context(NoGroupSnafu { family: nl80211::FAMILY_NAME, group: nl80211::SCAN_GROUP })?;
         events.join(group).map_err(|errno| ClientError::Join { group: nl80211::SCAN_GROUP, errno })?;
-        Ok(Self { requests, events, family, seq: 1, buf })
+        Ok(Self { requests, events, family, seq: 1, buf, pending: VecDeque::new() })
     }
 
     pub const fn family(&self) -> &Family {
@@ -116,7 +178,176 @@ impl<S: Socket> Client<S> {
         let seq = self.next_seq();
         let flags = if dump { Flags::DUMP } else { Flags::ACK };
         let message = attrs(nl80211::request(self.family.id, flags, seq, cmd)).finish();
-        exchange(&mut self.requests, &mut self.buf, &message, seq, dump, what)
+        let (replies, stashed) = exchange(&mut self.requests, &mut self.buf, &message, seq, dump, what)?;
+        self.pending.extend(stashed.into_iter().map(|reply| reply.payload));
+        Ok(replies)
+    }
+
+    /// Join the "mlme" group on the request socket, so connect and disconnect events arrive in order
+    /// with the frames the connection owner receives.
+    pub fn join_mlme(&mut self) -> Result<(), ClientError> {
+        let group = self
+            .family
+            .group(mlme::MLME_GROUP)
+            .context(NoGroupSnafu { family: nl80211::FAMILY_NAME, group: mlme::MLME_GROUP })?;
+        self.requests.join(group).map_err(|errno| ClientError::Join { group: mlme::MLME_GROUP, errno })
+    }
+
+    /// The next notification for the request socket, until `deadline` on `clock`.
+    pub fn next_event(&mut self, deadline: Instant, clock: &dyn Fn() -> Instant) -> Result<Option<Event>, ClientError> {
+        const WHAT: &str = "an nl80211 event";
+        loop {
+            if let Some(payload) = self.pending.pop_front() {
+                let (cmd, message) = nl80211::parse(&payload).context(DecodeSnafu { what: WHAT })?;
+                return Event::parse(cmd, &message).map(Some).context(DecodeSnafu { what: WHAT });
+            }
+            let left = deadline.saturating_duration_since(clock());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            let Some(len) =
+                self.requests.recv(&mut self.buf, left).map_err(|errno| ClientError::Recv { what: WHAT, errno })?
+            else {
+                return Ok(None);
+            };
+            for message in netlink::messages(&self.buf[..len]) {
+                let message = message.context(DecodeSnafu { what: WHAT })?;
+                if message.kind == self.family.id.message_type() {
+                    self.pending.push_back(message.payload.to_vec());
+                }
+            }
+        }
+    }
+
+    /// Ask cfg80211's SME to authenticate and associate (`NL80211_CMD_CONNECT`) for WPA2-PSK with
+    /// CCMP, owning the connection and taking EAPOL over nl80211.
+    pub fn connect_network(&mut self, ifindex: IfIndex, params: &ConnectParams<'_>) -> Result<(), ClientError> {
+        self.run(Command::Connect, false, "CONNECT", |b| {
+            let mut b = b.u32(attr::IFINDEX, ifindex.raw()).attr(attr::SSID, params.ssid);
+            if let Some(bssid) = params.bssid {
+                b = b.attr(attr::MAC, &bssid.0);
+            }
+            if let Some(frequency) = params.frequency {
+                b = b.u32(attr::WIPHY_FREQ, frequency.0);
+            }
+            b.u32(attr::AUTH_TYPE, 0)
+                .attr(attr::IE, params.rsn)
+                .flag(attr::PRIVACY)
+                .u32(attr::WPA_VERSIONS, WPA_VERSION_2)
+                .u32(attr::AKM_SUITES, AKM_PSK)
+                .u32(attr::CIPHER_SUITES_PAIRWISE, CIPHER_CCMP)
+                .u32(attr::CIPHER_SUITE_GROUP, CIPHER_CCMP)
+                .flag(attr::CONTROL_PORT)
+                .flag(attr::CONTROL_PORT_OVER_NL80211)
+                .flag(attr::CONTROL_PORT_NO_PREAUTH)
+                .flag(attr::SOCKET_OWNER)
+        })
+        .map(drop)
+    }
+
+    /// Leave the network (`NL80211_CMD_DISCONNECT`).
+    pub fn disconnect(&mut self, ifindex: IfIndex, reason: ReasonCode) -> Result<(), ClientError> {
+        self.run(Command::Disconnect, false, "DISCONNECT", |b| {
+            b.u32(attr::IFINDEX, ifindex.raw()).u16(attr::REASON_CODE, reason.raw())
+        })
+        .map(drop)
+    }
+
+    /// Send an EAPOL frame (802.1X header on) to `dest` over the control port.
+    pub fn send_eapol(&mut self, ifindex: IfIndex, dest: MacAddr, frame: &[u8]) -> Result<(), ClientError> {
+        self.run(Command::ControlPortFrame, false, "CONTROL_PORT_FRAME", |b| {
+            b.u32(attr::IFINDEX, ifindex.raw())
+                .attr(attr::FRAME, frame)
+                .attr(attr::MAC, &dest.0)
+                .u16(attr::CONTROL_PORT_ETHERTYPE, ETH_P_PAE)
+                .flag(attr::DONT_WAIT_FOR_ACK)
+        })
+        .map(drop)
+    }
+
+    /// Install a key (`NL80211_CMD_NEW_KEY`).
+    pub fn new_key(&mut self, ifindex: IfIndex, key: &KeyParams<'_>) -> Result<(), ClientError> {
+        let what = if key.peer.is_some() { "NEW_KEY (pairwise)" } else { "NEW_KEY (group)" };
+        self.run(Command::NewKey, false, what, |b| {
+            let mut b = b.u32(attr::IFINDEX, ifindex.raw());
+            if let Some(peer) = key.peer {
+                b = b.attr(attr::MAC, &peer.0);
+            }
+            b.nest(attr::KEY, |n| {
+                let n = n
+                    .attr(key_attr::DATA, key.data)
+                    .u8(key_attr::IDX, key.index)
+                    .u32(key_attr::CIPHER, key.cipher)
+                    .u32(key_attr::TYPE, if key.peer.is_some() { KEYTYPE_PAIRWISE } else { KEYTYPE_GROUP });
+                match key.seq {
+                    Some(seq) => n.attr(key_attr::SEQ, seq),
+                    None => n,
+                }
+            })
+        })
+        .map(drop)
+    }
+
+    /// Make group key `index` the default for multicast (`NL80211_CMD_SET_KEY`).
+    pub fn set_default_multicast_key(&mut self, ifindex: IfIndex, index: u8) -> Result<(), ClientError> {
+        self.run(Command::SetKey, false, "SET_KEY (default multicast)", |b| {
+            b.u32(attr::IFINDEX, ifindex.raw()).nest(attr::KEY, |n| {
+                n.u8(key_attr::IDX, index)
+                    .flag(key_attr::DEFAULT)
+                    .nest(key_attr::DEFAULT_TYPES, |t| t.flag(key_attr::DEFAULT_TYPE_MULTICAST))
+            })
+        })
+        .map(drop)
+    }
+
+    /// Open the 802.1X port for `peer` (`NL80211_CMD_SET_STATION` with `STA_FLAG_AUTHORIZED`): the AP
+    /// on a station interface, or a station on an AP interface.
+    pub fn authorize(&mut self, ifindex: IfIndex, peer: MacAddr) -> Result<(), ClientError> {
+        self.run(Command::SetStation, false, "SET_STATION (authorized)", |b| {
+            b.u32(attr::IFINDEX, ifindex.raw())
+                .attr(attr::MAC, &peer.0)
+                .attr(attr::STA_FLAGS2, &sta_flags(STA_FLAG_AUTHORIZED, STA_FLAG_AUTHORIZED))
+        })
+        .map(drop)
+    }
+
+    /// Admit an associated station on an AP interface, not yet authorized.
+    pub fn new_station(&mut self, ifindex: IfIndex, station: &StationParams<'_>) -> Result<(), ClientError> {
+        let state = STA_FLAG_AUTHENTICATED | STA_FLAG_ASSOCIATED;
+        self.run(Command::NewStation, false, "NEW_STATION", |b| {
+            b.u32(attr::IFINDEX, ifindex.raw())
+                .attr(attr::MAC, &station.mac.0)
+                .u16(attr::STA_AID, station.aid)
+                .u16(attr::STA_LISTEN_INTERVAL, station.listen_interval)
+                .u16(attr::STA_CAPABILITY, station.capability)
+                .attr(attr::STA_SUPPORTED_RATES, station.supported_rates)
+                .attr(attr::STA_FLAGS2, &sta_flags(state | STA_FLAG_AUTHORIZED, state))
+        })
+        .map(drop)
+    }
+
+    /// Have management frames of `frame_type` (the frame control field) delivered to this socket.
+    pub fn register_frame(&mut self, ifindex: IfIndex, frame_type: u16) -> Result<(), ClientError> {
+        self.run(Command::RegisterFrame, false, "REGISTER_FRAME", |b| {
+            b.u32(attr::IFINDEX, ifindex.raw()).u16(attr::FRAME_TYPE, frame_type).attr(attr::FRAME_MATCH, &[])
+        })
+        .map(drop)
+    }
+
+    /// Transmit a management frame (`NL80211_CMD_FRAME`); its cookie names the transmit status.
+    pub fn send_frame(&mut self, ifindex: IfIndex, frame: &[u8]) -> Result<u64, ClientError> {
+        let replies =
+            self.run(Command::Frame, false, "FRAME", |b| b.u32(attr::IFINDEX, ifindex.raw()).attr(attr::FRAME, frame))?;
+        for reply in &replies {
+            let (_, message) = nl80211::parse(&reply.payload).context(DecodeSnafu { what: "FRAME" })?;
+            for a in netlink::attrs(message.attrs) {
+                let a = a.context(DecodeSnafu { what: "FRAME" })?;
+                if a.kind == attr::COOKIE {
+                    return a.u64().context(DecodeSnafu { what: "FRAME" });
+                }
+            }
+        }
+        Ok(0)
     }
 
     /// Every wireless interface with a netdev (`NL80211_CMD_GET_INTERFACE` dump).
@@ -141,19 +372,34 @@ impl<S: Socket> Client<S> {
     }
 
     /// Start beaconing an open network on an AP interface (`NL80211_CMD_START_AP`).
+    ///
+    /// With an RSN element the network is WPA2-PSK: the element is the beacon's tail, the privacy bit is
+    /// set, and EAPOL goes over nl80211 to this socket, which owns the AP.
     pub fn start_ap(&mut self, ifindex: IfIndex, mac: MacAddr, ap: &ApConfig<'_>) -> Result<(), ClientError> {
         let head = beacon_head(mac, ap);
         self.run(Command::StartAp, false, "START_AP", |b| {
-            b.u32(attr::IFINDEX, ifindex.raw())
+            let b = b
+                .u32(attr::IFINDEX, ifindex.raw())
                 .attr(attr::BEACON_HEAD, &head)
-                .attr(attr::BEACON_TAIL, &[])
+                .attr(attr::BEACON_TAIL, ap.rsn.unwrap_or_default())
                 .u32(attr::BEACON_INTERVAL, u32::from(ap.beacon_interval))
                 .u32(attr::DTIM_PERIOD, 1)
                 .attr(attr::SSID, ap.ssid)
                 .u32(attr::HIDDEN_SSID, 0)
                 .u32(attr::AUTH_TYPE, 0)
                 .u32(attr::WIPHY_FREQ, ap.frequency.0)
-                .u32(attr::WIPHY_CHANNEL_TYPE, 0)
+                .u32(attr::WIPHY_CHANNEL_TYPE, 0);
+            if ap.rsn.is_none() {
+                return b;
+            }
+            b.flag(attr::PRIVACY)
+                .u32(attr::WPA_VERSIONS, WPA_VERSION_2)
+                .u32(attr::AKM_SUITES, AKM_PSK)
+                .u32(attr::CIPHER_SUITES_PAIRWISE, CIPHER_CCMP)
+                .u32(attr::CIPHER_SUITE_GROUP, CIPHER_CCMP)
+                .flag(attr::CONTROL_PORT)
+                .flag(attr::CONTROL_PORT_OVER_NL80211)
+                .flag(attr::SOCKET_OWNER)
         })
         .map(drop)
     }
@@ -217,6 +463,17 @@ impl<S: Socket> Client<S> {
     }
 }
 
+/// The Ethernet type of EAPOL.
+const ETH_P_PAE: u16 = 0x888e;
+
+/// `struct nl80211_sta_flag_update`.
+fn sta_flags(mask: u32, set: u32) -> [u8; 8] {
+    let mut bytes = [0; 8];
+    bytes[..4].copy_from_slice(&mask.to_ne_bytes());
+    bytes[4..].copy_from_slice(&set.to_ne_bytes());
+    bytes
+}
+
 fn bss_list(replies: &[Reply]) -> Result<Vec<Bss>, ClientError> {
     let mut found = Vec::new();
     for reply in replies {
@@ -229,7 +486,8 @@ fn bss_list(replies: &[Reply]) -> Result<Vec<Bss>, ClientError> {
 }
 
 /// Send `message` and collect the replies of sequence `seq`: up to the ack, or for a dump up to
-/// `NLMSG_DONE`, over as many datagrams as it takes.
+/// `NLMSG_DONE`, over as many datagrams as it takes. Protocol messages of other sequences come back
+/// second, in order.
 fn exchange<S: Socket>(
     socket: &mut S,
     buf: &mut [u8],
@@ -237,16 +495,16 @@ fn exchange<S: Socket>(
     seq: u32,
     dump: bool,
     what: &'static str,
-) -> Result<Vec<Reply>, ClientError> {
+) -> Result<(Vec<Reply>, Vec<Reply>), ClientError> {
     socket.send(message).map_err(|errno| ClientError::Send { what, errno })?;
-    let mut collector = Collector { seq, dump, what, replies: Vec::new() };
+    let mut collector = Collector { seq, dump, what, replies: Vec::new(), stashed: Vec::new() };
     loop {
         let len = socket
             .recv(buf, REPLY_TIMEOUT)
             .map_err(|errno| ClientError::Recv { what, errno })?
             .context(TimeoutSnafu { what, timeout: REPLY_TIMEOUT })?;
         if collector.datagram(&buf[..len])? {
-            return Ok(collector.replies);
+            return Ok((collector.replies, collector.stashed));
         }
     }
 }
@@ -256,6 +514,7 @@ struct Collector {
     dump: bool,
     what: &'static str,
     replies: Vec<Reply>,
+    stashed: Vec<Reply>,
 }
 
 impl Collector {
@@ -265,7 +524,11 @@ impl Collector {
         for message in netlink::messages(bytes) {
             let message = message.context(DecodeSnafu { what })?;
             if message.seq != self.seq {
-                log::debug!("{what}: skipped a message of sequence {}", message.seq);
+                if let MessageType::Protocol(_) = message.kind {
+                    self.stashed.push(Reply { payload: message.payload.to_vec() });
+                } else {
+                    log::debug!("{what}: skipped a message of sequence {}", message.seq);
+                }
                 continue;
             }
             match message.kind {
@@ -296,7 +559,7 @@ impl Collector {
 }
 
 /// A beacon's fixed part, as hostapd builds it: the management header, timestamp, interval,
-/// capability (ESS), then SSID, supported rates and DS Parameter Set elements.
+/// capability (ESS, and privacy for an RSN network), then SSID, supported rates and DS Parameter Set elements.
 fn beacon_head(mac: MacAddr, ap: &ApConfig<'_>) -> Vec<u8> {
     let mut head = Vec::with_capacity(64 + ap.ssid.len());
     head.extend_from_slice(&[0x80, 0x00, 0x00, 0x00]);
@@ -306,7 +569,8 @@ fn beacon_head(mac: MacAddr, ap: &ApConfig<'_>) -> Vec<u8> {
     head.extend_from_slice(&[0, 0]);
     head.extend_from_slice(&[0; 8]);
     head.extend_from_slice(&ap.beacon_interval.to_le_bytes());
-    head.extend_from_slice(&0x0001_u16.to_le_bytes());
+    let capability: u16 = if ap.rsn.is_some() { 0x0011 } else { 0x0001 };
+    head.extend_from_slice(&capability.to_le_bytes());
     head.push(0);
     head.push(ap.ssid.len() as u8);
     head.extend_from_slice(ap.ssid);
@@ -334,7 +598,7 @@ mod tests {
         [include_bytes!("../testdata/get-scan-dump-0.bin"), include_bytes!("../testdata/get-scan-dump-1.bin")];
 
     fn collect(seq: u32, datagrams: &[&[u8]]) -> (Vec<Reply>, Vec<bool>) {
-        let mut collector = Collector { seq, dump: true, what: "test", replies: Vec::new() };
+        let mut collector = Collector { seq, dump: true, what: "test", replies: Vec::new(), stashed: Vec::new() };
         let done = datagrams.iter().map(|datagram| collector.datagram(datagram).unwrap()).collect();
         (collector.replies, done)
     }
@@ -377,6 +641,26 @@ mod tests {
     }
 
     #[test]
+    fn a_notification_between_a_request_and_its_ack_is_kept_for_next_event() {
+        let connect = include_bytes!("../testdata/connect-event.bin");
+        let mut ack = Vec::new();
+        ack.extend_from_slice(&36_u32.to_ne_bytes());
+        ack.extend_from_slice(&2_u16.to_ne_bytes());
+        ack.extend_from_slice(&0x100_u16.to_ne_bytes());
+        ack.extend_from_slice(&7_u32.to_ne_bytes());
+        ack.extend_from_slice(&5_u32.to_ne_bytes());
+        ack.extend_from_slice(&0_i32.to_ne_bytes());
+        ack.extend_from_slice(&[0; 16]);
+        let mut collector =
+            Collector { seq: 7, dump: false, what: "NEW_KEY", replies: Vec::new(), stashed: Vec::new() };
+        check!(collector.datagram(connect).unwrap() == false);
+        check!(collector.datagram(&ack).unwrap());
+        check!(collector.replies.is_empty());
+        check!(collector.stashed.len() == 1);
+        check!(nl80211::parse(&collector.stashed[0].payload).unwrap().0 == Command::Connect);
+    }
+
+    #[test]
     fn a_kernel_error_ends_the_exchange_with_its_errno() {
         // NLMSG_ERROR, capped, -EBUSY, echoing a request header of sequence 9.
         let mut datagram = Vec::new();
@@ -387,7 +671,8 @@ mod tests {
         datagram.extend_from_slice(&5_u32.to_ne_bytes());
         datagram.extend_from_slice(&(-16_i32).to_ne_bytes());
         datagram.extend_from_slice(&[0; 16]);
-        let mut collector = Collector { seq: 9, dump: false, what: "TRIGGER_SCAN", replies: Vec::new() };
+        let mut collector =
+            Collector { seq: 9, dump: false, what: "TRIGGER_SCAN", replies: Vec::new(), stashed: Vec::new() };
         assert!(let Err(ClientError::Kernel { errno: Errno(-16), .. }) = collector.datagram(&datagram));
     }
 }

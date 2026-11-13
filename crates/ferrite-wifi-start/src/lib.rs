@@ -10,6 +10,8 @@
 
 extern crate alloc;
 
+mod connect;
+mod lab_ap;
 mod scan;
 
 use alloc::boxed::Box;
@@ -116,6 +118,10 @@ pub struct StartUp {
     pub wifi_limit: Duration,
     /// How long a scan gets from its trigger to the scan group announcing its end.
     pub scan_limit: Duration,
+    /// How long a connection gets from its request to the port opening, and a disconnect to its event.
+    pub connect_limit: Duration,
+    /// How long a connection is held before it is left.
+    pub hold: Duration,
 }
 
 /// Create the init thread, which runs the checks and every initcall and exitcall, and return its
@@ -222,7 +228,7 @@ fn run(start_up: &StartUp) -> bool {
             return false;
         },
     }
-    let wifi = pci_wifi(&clock, start_up.wifi_limit, start_up.scan_limit);
+    let wifi = pci_wifi(&clock, start_up);
     enter(c"exitcalls (driver removal)");
     let mut ran = 0_usize;
     for call in exitcalls() {
@@ -271,11 +277,12 @@ fn driver_of(index: usize) -> Option<alloc::string::String> {
 /// RUNTIME firmware is alive) and scan through nl80211, then go down again before the exitcalls remove
 /// the driver. With no card, the simulated radios run the same scan instead. True when every step
 /// passed; each step is logged.
-fn pci_wifi(clock: &dyn Fn() -> Instant, limit: Duration, scan_limit: Duration) -> bool {
+fn pci_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
+    let (limit, scan_limit) = (start_up.wifi_limit, start_up.scan_limit);
     let count = ferrite_lkpi::pci::device_count();
     if count == 0 {
         log::info!("no PCI Wi-Fi card was handed to the drivers");
-        return simulated_wifi(clock, scan_limit);
+        return simulated_wifi(clock, start_up);
     }
     let bound: alloc::vec::Vec<Option<alloc::string::String>> = (0..count).map(driver_of).collect();
     for (index, driver) in bound.iter().enumerate() {
@@ -332,8 +339,14 @@ fn pci_wifi(clock: &dyn Fn() -> Instant, limit: Duration, scan_limit: Duration) 
     }
     log::info!("{name} is up after {} ms: the RUNTIME firmware is alive", (clock() - up_start).as_millis());
     enter(c"scanning through nl80211");
-    let scanned = match scan::connect().and_then(|mut client| scan::scan(&mut client, &name, &[], scan_limit, clock)) {
-        Ok(_) => true,
+    let scanned = match scan::connect().and_then(|mut client| {
+        let report = scan::scan(&mut client, &name, &[], scan_limit, clock)?;
+        Ok((client, report))
+    }) {
+        Ok((mut client, report)) => {
+            join_from_credentials(&mut client, &name, &report.bsses, start_up, clock);
+            true
+        },
         Err(error) => {
             log::error!("nl80211 scan failed: {error}");
             false
@@ -345,13 +358,109 @@ fn pci_wifi(clock: &dyn Fn() -> Instant, limit: Duration, scan_limit: Duration) 
     scanned && code == 0
 }
 
-/// The SSID the lab's second simulated radio beacons, which the first one's scan must find.
+/// The file on the firmware volume with the network to join, in `.env` lines.
+const CREDENTIALS_FILE: &str = "wifi.env";
+
+/// Join the network `wifi.env` names, if the scan found it, and leave it again. A failure is logged with
+/// its step and does not fail the run, so the teardown still runs.
+fn join_from_credentials(
+    client: &mut ferrite_nl80211::client::Client<scan::KernelSocket>,
+    name: &str,
+    bsses: &[ferrite_nl80211::nl80211::Bss],
+    start_up: &StartUp,
+    clock: &dyn Fn() -> Instant,
+) {
+    use ferrite_nl80211::nl80211::{Security, SsidDisplay};
+    let text = match start_up.firmware_reference.load(CREDENTIALS_FILE) {
+        Ok(text) => text,
+        Err(error) => {
+            log::info!("no credentials ({error}); the connect is skipped");
+            return;
+        },
+    };
+    let credentials = match ferrite_wpa::env::Credentials::from_env(&text) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            log::warn!("{CREDENTIALS_FILE}: {error}; the connect is skipped");
+            return;
+        },
+    };
+    let ssid = credentials.ssid.as_bytes();
+    log::info!("credentials for \"{}\": passphrase of {} characters", SsidDisplay(ssid), credentials.passphrase.len());
+    let Some(bss) = bsses
+        .iter()
+        .filter(|bss| bss.ssid == ssid && bss.security == Security::Rsn)
+        .max_by_key(|bss| bss.signal.map_or(i32::MIN, |s| s.0))
+    else {
+        log::warn!("the scan found no RSN BSS named \"{}\"; the connect is skipped", SsidDisplay(ssid));
+        return;
+    };
+    let signal = bss.signal.map_or_else(|| alloc::string::String::from("?"), |s| alloc::format!("{s}"));
+    log::info!("connecting to {} on {} MHz at {signal}", bss.bssid, bss.frequency.0);
+    let derive = clock();
+    let pmk = ferrite_wpa::kdf::Pmk::from_passphrase(&credentials.passphrase, &credentials.ssid);
+    log::info!("PMK derived in {} ms", (clock() - derive).as_millis());
+    let _ = join(client, name, bss, pmk, start_up, clock);
+}
+
+/// Connect `name` to `bss`, hold the connection and leave it; true when every step passed.
+fn join(
+    client: &mut ferrite_nl80211::client::Client<scan::KernelSocket>,
+    name: &str,
+    bss: &ferrite_nl80211::nl80211::Bss,
+    pmk: ferrite_wpa::kdf::Pmk,
+    start_up: &StartUp,
+    clock: &dyn Fn() -> Instant,
+) -> bool {
+    enter(c"connecting (association and the 4-way handshake)");
+    let interface = match scan::find(client, name) {
+        Ok(interface) => interface,
+        Err(error) => {
+            log::error!("connect: {error}");
+            return false;
+        },
+    };
+    let connection =
+        match connect::connect(client, interface.ifindex, interface.mac, bss, pmk, start_up.connect_limit, clock) {
+            Ok(connection) => connection,
+            Err(error) => {
+                log::error!("connect failed: {error}");
+                return false;
+            },
+        };
+    log::info!(
+        "connected to {} on {} MHz: associated after {} ms, 4-way handshake done {} ms later; keys installed",
+        connection.ap,
+        bss.frequency.0,
+        connection.associated_after.as_millis(),
+        connection.handshake_after.as_millis()
+    );
+    enter(c"holding the connection, then disconnecting");
+    match connection.hold_and_leave(client, start_up.hold, start_up.connect_limit, clock) {
+        Ok(reason) => {
+            log::info!(
+                "disconnected after holding {} ms: reason {}",
+                start_up.hold.as_millis(),
+                reason.map_or_else(|| alloc::string::String::from("none"), |r| alloc::format!("{r}"))
+            );
+            true
+        },
+        Err(error) => {
+            log::error!("leaving the connection failed: {error}");
+            false
+        },
+    }
+}
+
+/// The SSID and passphrase of the lab's WPA2-PSK network, which the second simulated radio serves.
 const LAB_SSID: &[u8] = b"ferrite-lab";
+const LAB_PASSPHRASE: &[u8] = b"ferrite lab passphrase";
 
 /// The wireless interfaces present without a PCI card: none on a real machine, the lab's two
-/// `mac80211_hwsim` radios otherwise. The second becomes an open AP, the first scans for it on
-/// 2.4 GHz channel 1, and both go down again.
-fn simulated_wifi(clock: &dyn Fn() -> Instant, scan_limit: Duration) -> bool {
+/// `mac80211_hwsim` radios otherwise. The second becomes a WPA2-PSK AP run by [`lab_ap`] on its own
+/// thread, the first scans for it on 2.4 GHz channel 1, connects, holds and disconnects, and both go
+/// down again.
+fn simulated_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
     let (first, code) = wireless(WirelessOp::Find, 0);
     if code == -ENODEV {
         log::info!("no wireless interface is registered; the nl80211 scan is skipped");
@@ -362,41 +471,75 @@ fn simulated_wifi(clock: &dyn Fn() -> Instant, scan_limit: Duration) -> bool {
         log::error!("the simulated radios registered only {first}");
         return false;
     }
-    enter(c"scanning simulated radios through nl80211");
-    let result = scan::connect().and_then(|mut client| {
-        scan::start_ap(&mut client, &second, LAB_SSID, || match wireless(WirelessOp::Up, 1).1 {
+    let (Ok(ssid), Ok(passphrase)) =
+        (ferrite_wpa::kdf::Ssid::new(LAB_SSID), ferrite_wpa::kdf::Passphrase::new(LAB_PASSPHRASE))
+    else {
+        log::error!("the lab credentials are invalid");
+        return false;
+    };
+    let pmk = ferrite_wpa::kdf::Pmk::from_passphrase(&passphrase, &ssid);
+    enter(c"starting the lab AP through nl80211");
+    let ap = scan::connect().and_then(|mut ap_client| {
+        let interface = scan::prepare_ap(&mut ap_client, &second, || match wireless(WirelessOp::Up, 1).1 {
             0 => Ok(()),
             code => Err(code),
         })?;
-        let (_, code) = wireless(WirelessOp::Up, 0);
-        if code != 0 {
-            log::error!("dev_open({first}) returned {code}");
-        }
-        let channel_1 = [ferrite_nl80211::nl80211::Frequency(2412)];
-        scan::scan(&mut client, &first, &channel_1, scan_limit, clock)
+        lab_ap::start(ap_client, start_up.sched.clone(), interface.ifindex, interface.mac, LAB_SSID, pmk.clone())
     });
-    for nth in [0, 1] {
-        let (name, code) = wireless(WirelessOp::Down, nth);
-        log::info!("{name} down ({code})");
-    }
-    match result {
-        Ok(report) if report.bsses.iter().any(|bss| bss.ssid == LAB_SSID) => {
-            log::info!(
-                "the scan on {first} found {second}'s network \"{}\" after {} ms",
-                ferrite_nl80211::nl80211::SsidDisplay(LAB_SSID),
-                report.took.as_millis()
-            );
-            true
+    let ap = match ap {
+        Ok(ap) => ap,
+        Err(error) => {
+            log::error!("starting the lab AP failed: {error}");
+            for nth in [0, 1] {
+                wireless(WirelessOp::Down, nth);
+            }
+            return false;
         },
-        Ok(_) => {
-            log::error!("the scan on {first} did not find {second}'s network");
-            false
+    };
+    enter(c"scanning simulated radios through nl80211");
+    let (_, code) = wireless(WirelessOp::Up, 0);
+    if code != 0 {
+        log::error!("dev_open({first}) returned {code}");
+    }
+    let channel_1 = [ferrite_nl80211::nl80211::Frequency(2412)];
+    let result = scan::connect().and_then(|mut client| {
+        let report = scan::scan(&mut client, &first, &channel_1, start_up.scan_limit, clock)?;
+        Ok((client, report))
+    });
+    let passed = match result {
+        Ok((mut client, report)) => {
+            if let Some(bss) = report.bsses.iter().find(|bss| bss.ssid == LAB_SSID) {
+                log::info!(
+                    "the scan on {first} found {second}'s network \"{}\" ({}) after {} ms",
+                    ferrite_nl80211::nl80211::SsidDisplay(LAB_SSID),
+                    bss.security,
+                    report.took.as_millis()
+                );
+                let joined = join(&mut client, &first, bss, pmk, start_up, clock);
+                let ap_side =
+                    lab_ap::PORT_OPEN.load(Ordering::Acquire) && lab_ap::GROUP_KEY_INSTALLED.load(Ordering::Acquire);
+                if ap_side {
+                    log::info!("lab AP: pairwise and group keys installed and the station authorized");
+                } else {
+                    log::error!("lab AP: the station was never authorized");
+                }
+                joined && ap_side
+            } else {
+                log::error!("the scan on {first} did not find {second}'s network");
+                false
+            }
         },
         Err(error) => {
             log::error!("nl80211 scan failed: {error}");
             false
         },
+    };
+    ap.stop();
+    for nth in [0, 1] {
+        let (name, code) = wireless(WirelessOp::Down, nth);
+        log::info!("{name} down ({code})");
     }
+    passed
 }
 
 static PROBE_RAN: AtomicBool = AtomicBool::new(false);
