@@ -206,6 +206,7 @@
 #include "linux/crypto/skcipher.h"
 #include <linux/bitmap.h>
 #include <linux/bsearch.h>
+#include <linux/string.h>
 #include <linux/crc32.h>
 #include "linux/generated/lib/crc/crc32table.h"
 #include <linux/unaligned.h>
@@ -251,7 +252,6 @@
 #include <linux/dcache.h>
 #include <linux/sort.h>
 #include <linux/bits.h>
-#include <linux/string.h>
 #include <asm/page.h>
 #include <asm/rwonce.h>
 #include <linux/string_helpers.h>

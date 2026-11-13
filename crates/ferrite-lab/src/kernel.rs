@@ -3,6 +3,7 @@
 
 use std::ffi::{CStr, c_char, c_int, c_uint, c_ulong, c_void};
 use std::fmt;
+use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -38,6 +39,19 @@ unsafe extern "C" {
     fn timer_init_key(timer: *mut TimerList, func: TimerFn, flags: c_uint, name: *const c_char, key: *mut c_void);
     fn mod_timer(timer: *mut TimerList, expires: c_ulong) -> c_int;
     fn timer_delete_sync(timer: *mut TimerList) -> c_int;
+    fn request_firmware(firmware: *mut *const Firmware, name: *const c_char, device: *mut c_void) -> c_int;
+    fn release_firmware(firmware: *const Firmware);
+    fn rtnl_lock();
+    fn rtnl_unlock();
+    fn freq_reg_info(wiphy: *mut c_void, center_freq_khz: u32) -> *const c_void;
+}
+
+/// `struct firmware`.
+#[repr(C)]
+struct Firmware {
+    size: usize,
+    data: *const u8,
+    private: *mut c_void,
 }
 
 /// Where the C keeps `current`, and `init_task`.
@@ -171,4 +185,112 @@ pub fn sleep_and_timer() -> Result<Duration, TimeError> {
         return Err(TimeError::Short(slept));
     }
     if TIMER_FIRED.load(Ordering::Relaxed) { Ok(slept) } else { Err(TimeError::TimerNeverFired) }
+}
+
+const ENOENT: c_int = 2;
+const REGDB_POLL_MS: c_uint = 10;
+
+#[derive(Debug)]
+pub enum FirmwareError {
+    Read(std::io::Error),
+    Request(c_int),
+    Size { got: usize, want: usize },
+    Bytes,
+    MissingFile(c_int),
+}
+
+impl fmt::Display for FirmwareError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read(error) => write!(f, "reading the reference file failed: {error}"),
+            Self::Request(code) => write!(f, "request_firmware failed: {code}"),
+            Self::Size { got, want } => write!(f, "request_firmware returned {got} bytes, the file has {want}"),
+            Self::Bytes => write!(f, "request_firmware returned bytes that differ from the file"),
+            Self::MissingFile(code) => write!(f, "a request for a missing file returned {code}, not -{ENOENT}"),
+        }
+    }
+}
+
+/// `request_firmware` of `name` must return the bytes of the same file below `root`, and of a name
+/// that is not there, -ENOENT. Returns the size.
+pub fn firmware_round_trip(root: &Path, name: &CStr) -> Result<usize, FirmwareError> {
+    let want = std::fs::read(root.join(name.to_string_lossy().as_ref())).map_err(FirmwareError::Read)?;
+    let mut firmware: *const Firmware = std::ptr::null();
+    // SAFETY: called on a task with the provider installed; a null device is allowed.
+    let code = unsafe { request_firmware(&raw mut firmware, name.as_ptr(), std::ptr::null_mut()) };
+    if code != 0 {
+        return Err(FirmwareError::Request(code));
+    }
+    // SAFETY: the call succeeded, so `firmware` is a live `struct firmware` until released.
+    let got = unsafe { std::slice::from_raw_parts((*firmware).data, (*firmware).size) };
+    let result = if got.len() != want.len() {
+        Err(FirmwareError::Size { got: got.len(), want: want.len() })
+    } else if got != want {
+        Err(FirmwareError::Bytes)
+    } else {
+        Ok(got.len())
+    };
+    // SAFETY: the pointer came from the successful request above and is released once.
+    unsafe { release_firmware(firmware) };
+    let size = result?;
+
+    let mut missing: *const Firmware = std::ptr::null();
+    // SAFETY: as above.
+    let code =
+        unsafe { request_firmware(&raw mut missing, c"ferrite-lab-no-such-file.bin".as_ptr(), std::ptr::null_mut()) };
+    if code != -ENOENT || !missing.is_null() {
+        return Err(FirmwareError::MissingFile(code));
+    }
+    Ok(size)
+}
+
+/// Whether the regulatory domain in force has a rule for 868 MHz. cfg80211's built-in world domain
+/// starts at 2.4 GHz; the "00" domain in `regulatory.db` adds 755 to 928 MHz.
+fn regdomain_has_sub_ghz_rule() -> bool {
+    /// Room for a `struct wiphy`, whose `regd` is NULL when zeroed, so the global domain answers.
+    #[repr(C, align(16))]
+    struct Wiphy([u8; 8192]);
+    let mut wiphy = Wiphy([0; 8192]);
+    // SAFETY: called on a task after cfg80211_init; the zeroed wiphy has no regd of its own.
+    let rule = unsafe {
+        rtnl_lock();
+        let rule = freq_reg_info((&raw mut wiphy).cast(), 868_000);
+        rtnl_unlock();
+        rule
+    };
+    (rule as usize) < usize::MAX - MAX_ERRNO
+}
+
+#[derive(Debug)]
+pub enum RegdbError {
+    AlreadyLoaded,
+    NotLoaded(Duration),
+}
+
+impl fmt::Display for RegdbError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyLoaded => write!(f, "the regulatory domain had the database's rule before it was loaded"),
+            Self::NotLoaded(waited) => {
+                write!(f, "the regulatory domain had no database rule after {} ms", waited.as_millis())
+            },
+        }
+    }
+}
+
+/// cfg80211 asks for `regulatory.db` from a work item once its init has run. Sleep on this task so
+/// the scheduler runs that work, until the domain in force has the database's rule; returns how long.
+pub fn wait_for_regdb(limit: Duration) -> Result<Duration, RegdbError> {
+    if regdomain_has_sub_ghz_rule() {
+        return Err(RegdbError::AlreadyLoaded);
+    }
+    let start = Instant::now();
+    while start.elapsed() < limit {
+        // SAFETY: called on a task after the time bring-up.
+        unsafe { msleep(REGDB_POLL_MS) };
+        if regdomain_has_sub_ghz_rule() {
+            return Ok(start.elapsed());
+        }
+    }
+    Err(RegdbError::NotLoaded(start.elapsed()))
 }

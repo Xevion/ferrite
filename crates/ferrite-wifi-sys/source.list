@@ -68,6 +68,7 @@ crypto/shash.c
 crypto/skcipher.c
 lib/bitmap.c
 lib/bsearch.c
+lib/cmdline.c
 lib/crc/crc32-main.c
 lib/crypto/aes.c
 lib/crypto/gf128mul.c

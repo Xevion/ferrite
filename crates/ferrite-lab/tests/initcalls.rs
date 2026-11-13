@@ -1,17 +1,13 @@
 //! Runs the lab binary: the Linux C runs on the shim's scheduler through the time and driver-core
-//! bring-up, the initcalls and the exitcalls until it reaches something nothing implements, and the lab
-//! names where. When that gets an implementation, the run moves on to the next one and these
-//! expectations move with it.
+//! bring-up, every initcall, the firmware loader and every exitcall, and the lab exits 0. A run that
+//! stops in a stub or on unimplemented data exits 86 or 87 instead.
 
 use std::process::Command;
 
 use assert2::check;
 
-/// The lab's status when it stops in a stub.
-const EXIT_HALTED: i32 = 86;
-
 #[test]
-fn every_initcall_returns_0_and_the_exitcalls_run_until_a_kernel_parameter_lookup() {
+fn every_initcall_returns_0_firmware_loads_and_every_exitcall_runs() {
     let output = Command::new(env!("CARGO_BIN_EXE_ferrite-lab")).output().expect("run the lab binary");
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -27,8 +23,20 @@ fn every_initcall_returns_0_and_the_exitcalls_run_until_a_kernel_parameter_looku
         check!(stderr.contains(&format!("initcall {call} returned 0")), "{call} did not return 0:\n{stderr}");
     }
 
-    // Unregistering the PCI driver asks the kernel command line about async probing.
-    check!(output.status.code() == Some(EXIT_HALTED), "stopped elsewhere:\n{stderr}");
+    // regulatory.db is the size of the file on disk, a missing name is -ENOENT, and cfg80211 loaded it.
+    let size = std::fs::metadata("/lib/firmware/regulatory.db").expect("regulatory.db in /lib/firmware").len();
+    check!(
+        stderr.contains(&format!(
+            "request_firmware(regulatory.db) returned {size} bytes; a missing file returned -ENOENT"
+        )),
+        "{stderr}"
+    );
+    check!(stderr.contains("regulatory.db loaded and applied by cfg80211 after "), "{stderr}");
+
+    let ran =
+        stderr.lines().filter(|line| line.starts_with("INFO  exitcall ") && !line.contains("exitcalls done")).count();
+    check!(ran > 0);
+    check!(stderr.contains(&format!("exitcalls done: {ran} ran")), "not every exitcall ran:\n{stderr}");
     check!(stderr.contains("exitcall rtw89_8852ce_driver_exit"), "{stderr}");
-    check!(stderr.contains("halted in stub parse_option_str"), "{stderr}");
+    check!(output.status.code() == Some(0), "the lab did not exit 0:\n{stderr}");
 }

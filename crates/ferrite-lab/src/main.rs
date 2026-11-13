@@ -1,10 +1,11 @@
 //! The Wi-Fi stack as a Linux process: the pinned Linux C linked against `ferrite-lkpi`, run until the
-//! first kernel symbol nothing implements yet: a stub function, or a variable whose storage faults.
+//! first kernel symbol nothing implements yet (a stub function, or a variable whose storage faults), or
+//! to the end of the exitcalls.
 //!
 //! The C runs on the shim's scheduler, as it will under UEFI. kthreadd and an init thread are kernel
-//! threads; init checks a kthread round trip, runs `lx_kernel_init`, checks a sleep and a timer, then the initcalls in order, then the exitcalls. The
-//! main stack only polls the scheduler until init is gone, sleeping until the timer deadline when all are parked.
-
+//! threads; init checks a kthread round trip, runs `lx_kernel_init`, checks a sleep and a timer, runs
+//! the initcalls in order, checks firmware loading, then runs the exitcalls. The main stack only polls
+//! the scheduler until init is gone, sleeping until the timer deadline when all are parked.
 mod fence;
 mod host;
 mod kernel;
@@ -13,6 +14,7 @@ mod logger;
 use std::backtrace::Backtrace;
 use std::ffi::{CStr, c_int, c_void};
 use std::io::Write as _;
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
@@ -23,6 +25,10 @@ use log::LevelFilter;
 /// Exit status of a run that stopped in the halt hook, distinct from a crash or a clean exit.
 const EXIT_HALTED: u8 = 86;
 /// How long one poll step may run tasks before the main loop gets the CPU back.
+/// Where the lab finds firmware files.
+const FIRMWARE_DIR: &str = "/lib/firmware";
+/// How long cfg80211 gets to load `regulatory.db` after its initcalls.
+const REGDB_LIMIT: Duration = Duration::from_secs(2);
 const BUDGET: Duration = Duration::from_millis(10);
 
 /// Print the stub that was hit and where from, then end the process.
@@ -58,11 +64,30 @@ unsafe extern "C" fn init(_: *mut c_void) -> c_int {
         let code = unsafe { call.call() };
         log::info!("initcall {} returned {code}", call.name().to_string_lossy());
     }
+    match kernel::firmware_round_trip(Path::new(FIRMWARE_DIR), c"regulatory.db") {
+        Ok(size) => {
+            log::info!("request_firmware(regulatory.db) returned {size} bytes; a missing file returned -ENOENT");
+        },
+        Err(error) => {
+            log::error!("firmware check failed: {error}");
+            std::process::exit(1);
+        },
+    }
+    match kernel::wait_for_regdb(REGDB_LIMIT) {
+        Ok(waited) => log::info!("regulatory.db loaded and applied by cfg80211 after {} ms", waited.as_millis()),
+        Err(error) => {
+            log::error!("regulatory.db check failed: {error}");
+            std::process::exit(1);
+        },
+    }
+    let mut ran = 0_usize;
     for call in exitcalls() {
         log::info!("exitcall {}", call.name().to_string_lossy());
         // SAFETY: as above; every initcall returned, so each module is set up.
         unsafe { call.call() };
+        ran += 1;
     }
+    log::info!("exitcalls done: {ran} ran");
     0
 }
 
@@ -87,6 +112,11 @@ fn main() -> ExitCode {
             log::error!("reading host entropy failed: {error}");
             return ExitCode::FAILURE;
         },
+    }
+
+    if let Err(error) = ferrite_lkpi::firmware::install(Box::leak(Box::new(host::FirmwareDir::new(FIRMWARE_DIR)))) {
+        log::error!("{error}");
+        return ExitCode::FAILURE;
     }
 
     let wall = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();

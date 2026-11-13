@@ -11,6 +11,7 @@ extern crate alloc;
 extern crate std;
 
 mod arch;
+pub mod firmware;
 mod halt;
 mod mem;
 mod page;

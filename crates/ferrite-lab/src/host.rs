@@ -1,11 +1,14 @@
 //! The scheduler's platform in a Linux process: the std clock, no interrupts, and mmap'd task stacks
 //! with a no-access guard page below each.
 
+use std::io::ErrorKind;
 use std::num::NonZeroUsize;
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant as StdInstant;
 
 use corosensei::stack::{Stack, StackPointer};
 use ferrite_hal::Instant;
+use ferrite_lkpi::firmware::{FirmwareError, FirmwareProvider};
 use ferrite_lkpi::sched::{Platform, StackAllocError, StackSource};
 
 const PAGE: usize = 4096;
@@ -99,4 +102,34 @@ pub fn entropy() -> Result<[u8; ferrite_lkpi::random::SEED_LEN], std::io::Error>
     // SAFETY: the buffer is writable for its whole length.
     let got = unsafe { libc::getrandom(seed.as_mut_ptr().cast(), seed.len(), 0) };
     if usize::try_from(got).is_ok_and(|n| n == seed.len()) { Ok(seed) } else { Err(std::io::Error::last_os_error()) }
+}
+
+/// Firmware files read from a directory, `/lib/firmware` in the lab.
+pub struct FirmwareDir {
+    root: PathBuf,
+}
+
+impl FirmwareDir {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+}
+
+impl FirmwareProvider for FirmwareDir {
+    fn load(&self, name: &str) -> Result<Vec<u8>, FirmwareError> {
+        let relative = Path::new(name);
+        let confined = !name.is_empty() && relative.components().all(|part| matches!(part, Component::Normal(_)));
+        if !confined {
+            log::warn!("refusing firmware name {name:?}: not a path below the firmware directory");
+            return Err(FirmwareError::NotFound { name: name.to_owned() });
+        }
+        match std::fs::read(self.root.join(relative)) {
+            Ok(bytes) => {
+                log::debug!("firmware {name}: {} bytes", bytes.len());
+                Ok(bytes)
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => Err(FirmwareError::NotFound { name: name.to_owned() }),
+            Err(error) => Err(FirmwareError::Unreadable { name: name.to_owned(), reason: error.to_string() }),
+        }
+    }
 }

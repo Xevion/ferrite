@@ -879,24 +879,6 @@ pub unsafe extern "sysv64" fn gcd() -> ! {
     trace_and_stop(c"gcd")
 }
 
-/// `int get_option(char **, int *)`, declared in `linux/string.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn get_option() -> ! {
-    trace_and_stop(c"get_option")
-}
-
-/// `char *get_options(const char *, int, int *)`, declared in `linux/string.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn get_options() -> ! {
-    trace_and_stop(c"get_options")
-}
-
-/// `unsigned long get_state_synchronize_rcu(void)`, declared in `linux/rcutiny.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn get_state_synchronize_rcu() -> ! {
-    trace_and_stop(c"get_state_synchronize_rcu")
-}
-
 /// `struct mm_struct *get_task_mm(struct task_struct *)`, declared in `linux/sched/mm.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn get_task_mm() -> ! {
@@ -1047,12 +1029,6 @@ pub unsafe extern "sysv64" fn kmsg_dump_desc() -> ! {
     trace_and_stop(c"kmsg_dump_desc")
 }
 
-/// `void kvfree_call_rcu(struct callback_head *, void *)`, declared in `linux/rcupdate.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn kvfree_call_rcu() -> ! {
-    trace_and_stop(c"kvfree_call_rcu")
-}
-
 /// `struct metadata_dst *metadata_dst_alloc(u8, enum metadata_type, gfp_t)`, declared in `net/dst_metadata.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn metadata_dst_alloc() -> ! {
@@ -1154,13 +1130,6 @@ pub unsafe extern "sysv64" fn netlink_unicast() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn nl80211_build_scan_msg() -> ! {
     trace_and_stop(c"nl80211_build_scan_msg")
-}
-
-/// `void nl80211_common_reg_change_event(enum nl80211_commands, struct regulatory_request *)`, declared in `linux/net/wireless/nl80211.h`.
-/// Defined only in the cut `net/wireless/nl80211.c`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn nl80211_common_reg_change_event() -> ! {
-    trace_and_stop(c"nl80211_common_reg_change_event")
 }
 
 /// `void nl80211_michael_mic_failure(struct cfg80211_registered_device *, struct net_device *, const u8 *, enum nl80211_key_type, int, const u8 *, gfp_t)`, declared in `linux/net/wireless/nl80211.h`.
@@ -1381,12 +1350,6 @@ pub unsafe extern "sysv64" fn param_set_ulong() -> ! {
     trace_and_stop(c"param_set_ulong")
 }
 
-/// `bool parse_option_str(const char *, const char *)`, declared in `linux/string.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn parse_option_str() -> ! {
-    trace_and_stop(c"parse_option_str")
-}
-
 /// `void pci_assign_irq(struct pci_dev *)`, declared in `linux/pci.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn pci_assign_irq() -> ! {
@@ -1513,12 +1476,6 @@ pub unsafe extern "sysv64" fn pidfd_prepare() -> ! {
     trace_and_stop(c"pidfd_prepare")
 }
 
-/// `bool poll_state_synchronize_rcu(unsigned long)`, declared in `linux/rcutiny.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn poll_state_synchronize_rcu() -> ! {
-    trace_and_stop(c"poll_state_synchronize_rcu")
-}
-
 /// `void print_cfs_stats(struct seq_file *, int)`, declared in `linux/kernel/sched/sched.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn print_cfs_stats() -> ! {
@@ -1603,12 +1560,6 @@ pub unsafe extern "sysv64" fn raw_spin_rq_unlock() -> ! {
     trace_and_stop(c"raw_spin_rq_unlock")
 }
 
-/// `void rcu_barrier(void)`, declared in `linux/rcutiny.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn rcu_barrier() -> ! {
-    trace_and_stop(c"rcu_barrier")
-}
-
 /// `bool rcuref_get_slowpath(rcuref_t *)`, declared in `linux/rcuref.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn rcuref_get_slowpath() -> ! {
@@ -1637,24 +1588,6 @@ pub unsafe extern "sysv64" fn register_inetaddr_notifier() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn register_irq_proc() -> ! {
     trace_and_stop(c"register_irq_proc")
-}
-
-/// `void release_firmware(const struct firmware *)`, declared in `linux/firmware.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn release_firmware() -> ! {
-    trace_and_stop(c"release_firmware")
-}
-
-/// `int request_firmware(const struct firmware **, const char *, struct device *)`, declared in `linux/firmware.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn request_firmware() -> ! {
-    trace_and_stop(c"request_firmware")
-}
-
-/// `int request_firmware_nowait(struct module *, bool, const char *, struct device *, gfp_t, void *, void (*)(const struct firmware *, void *))`, declared in `linux/firmware.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn request_firmware_nowait() -> ! {
-    trace_and_stop(c"request_firmware_nowait")
 }
 
 /// `int reuseport_detach_prog(struct sock *)`, declared in `net/sock_reuseport.h`.
@@ -1879,12 +1812,6 @@ pub unsafe extern "sysv64" fn srcu_tiny_irq_work() -> ! {
     trace_and_stop(c"srcu_tiny_irq_work")
 }
 
-/// `unsigned long start_poll_synchronize_rcu(void)`, declared in `linux/rcutiny.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn start_poll_synchronize_rcu() -> ! {
-    trace_and_stop(c"start_poll_synchronize_rcu")
-}
-
 /// `int stream_open(struct inode *, struct file *)`, declared in `linux/fs.h`.
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn stream_open() -> ! {
@@ -1901,12 +1828,6 @@ pub unsafe extern "sysv64" fn strnlen_user() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "sysv64" fn switch_mm_irqs_off() -> ! {
     trace_and_stop(c"switch_mm_irqs_off")
-}
-
-/// `void synchronize_rcu(void)`, declared in `linux/rcupdate.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "sysv64" fn synchronize_rcu() -> ! {
-    trace_and_stop(c"synchronize_rcu")
 }
 
 /// `void synchronize_srcu(struct srcu_struct *)`, declared in `linux/srcutiny.h`.

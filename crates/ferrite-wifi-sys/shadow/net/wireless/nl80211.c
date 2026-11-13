@@ -17,3 +17,8 @@ int __init nl80211_init(void)
 void nl80211_exit(void)
 {
 }
+
+/* No netlink socket listens, so a regulatory change has no one to be broadcast to. */
+void nl80211_common_reg_change_event(enum nl80211_commands cmd_id, struct regulatory_request *request)
+{
+}
