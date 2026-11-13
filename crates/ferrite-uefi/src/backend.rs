@@ -6,15 +6,15 @@
 //! when they differ from what the console already has. Together with ratatui's
 //! frame diffing this costs a few calls per styled run rather than per cell.
 //!
-//! This is a 16-colour character grid; a GOP framebuffer backend with an
-//! embedded font is the route to a truecolor UI.
+//! It draws the status screen of machines without GOP, a 16-colour grid; only
+//! the named colours are mapped, since that screen uses no others.
 
 use alloc::vec::Vec;
 
 use ratatui_core::backend::{Backend, ClearType, WindowSize};
 use ratatui_core::buffer;
 use ratatui_core::layout::{Position, Size};
-use ratatui_core::style::{Color, Modifier};
+use ratatui_core::style::Color;
 use snafu::{ResultExt as _, Snafu};
 use uefi::proto::console::text::{Color as UefiColor, Output};
 use uefi::{CStr16, Char16, Status};
@@ -50,21 +50,12 @@ struct Attr {
 
 impl Attr {
     fn of(cell: &buffer::Cell) -> Self {
-        let (fg, bg) = if cell.modifier.contains(Modifier::REVERSED) {
-            (or_default(cell.bg, Color::Black), or_default(cell.fg, Color::White))
-        } else {
-            (cell.fg, cell.bg)
-        };
-        Self { fg: fg_color(fg), bg: bg_color(bg) }
+        Self { fg: fg_color(cell.fg), bg: bg_color(cell.bg) }
     }
 
     fn same(self, other: Self) -> bool {
         self.fg as usize == other.fg as usize && self.bg as usize == other.bg as usize
     }
-}
-
-fn or_default(color: Color, default: Color) -> Color {
-    if color == Color::Reset { default } else { color }
 }
 
 pub struct UefiBackend<'a> {
@@ -181,7 +172,7 @@ fn push_ucs2(text: &mut Vec<u16>, symbol: &str) {
 /// Map a ratatui foreground colour onto the 16 EFI text colours.
 fn fg_color(color: Color) -> UefiColor {
     match color {
-        Color::Reset | Color::White => UefiColor::White,
+        Color::Reset | Color::White | Color::Indexed(_) | Color::Rgb(..) => UefiColor::White,
         Color::Gray => UefiColor::LightGray,
         Color::Black => UefiColor::Black,
         Color::Red => UefiColor::Red,
@@ -196,15 +187,13 @@ fn fg_color(color: Color) -> UefiColor {
         Color::LightBlue => UefiColor::LightBlue,
         Color::LightMagenta => UefiColor::LightMagenta,
         Color::LightCyan => UefiColor::LightCyan,
-        Color::Indexed(i) => index_to_fg(i),
-        Color::Rgb(r, g, b) => rgb_to_fg(r, g, b),
     }
 }
 
 /// Backgrounds are limited to the first 8 EFI colours.
 fn bg_color(color: Color) -> UefiColor {
     match color {
-        Color::Reset | Color::Black => UefiColor::Black,
+        Color::Reset | Color::Black | Color::Indexed(_) | Color::Rgb(..) => UefiColor::Black,
         Color::Blue | Color::LightBlue => UefiColor::Blue,
         Color::Green | Color::LightGreen => UefiColor::Green,
         Color::Cyan | Color::LightCyan => UefiColor::Cyan,
@@ -212,55 +201,7 @@ fn bg_color(color: Color) -> UefiColor {
         Color::Magenta | Color::LightMagenta => UefiColor::Magenta,
         Color::Yellow | Color::LightYellow => UefiColor::Brown,
         Color::White | Color::Gray | Color::DarkGray => UefiColor::LightGray,
-        Color::Indexed(i) => index_to_bg(i),
-        Color::Rgb(r, g, b) => bg_from_luma(r, g, b),
     }
-}
-
-fn index_to_fg(i: u8) -> UefiColor {
-    // The 16 ANSI slots map directly; the colour cube and grey ramp fall back to grey by luma.
-    match i {
-        0 => UefiColor::Black,
-        1 => UefiColor::Red,
-        2 => UefiColor::Green,
-        3 | 11 => UefiColor::Yellow,
-        4 => UefiColor::Blue,
-        5 => UefiColor::Magenta,
-        6 => UefiColor::Cyan,
-        8 | 232..=243 => UefiColor::DarkGray,
-        9 => UefiColor::LightRed,
-        10 => UefiColor::LightGreen,
-        12 => UefiColor::LightBlue,
-        13 => UefiColor::LightMagenta,
-        14 => UefiColor::LightCyan,
-        15 => UefiColor::White,
-        _ => UefiColor::LightGray,
-    }
-}
-
-fn index_to_bg(i: u8) -> UefiColor {
-    match i {
-        0 | 8 | 232..=243 => UefiColor::Black,
-        1 | 9 => UefiColor::Red,
-        2 | 10 => UefiColor::Green,
-        3 | 11 => UefiColor::Brown,
-        4 | 12 => UefiColor::Blue,
-        5 | 13 => UefiColor::Magenta,
-        6 | 14 => UefiColor::Cyan,
-        _ => UefiColor::LightGray,
-    }
-}
-
-fn rgb_to_fg(r: u8, g: u8, b: u8) -> UefiColor {
-    match u16::from(r) + u16::from(g) + u16::from(b) {
-        601.. => UefiColor::White,
-        ..128 => UefiColor::DarkGray,
-        _ => UefiColor::LightGray,
-    }
-}
-
-fn bg_from_luma(r: u8, g: u8, b: u8) -> UefiColor {
-    if u16::from(r) + u16::from(g) + u16::from(b) > 384 { UefiColor::LightGray } else { UefiColor::Black }
 }
 
 impl Backend for UefiBackend<'_> {

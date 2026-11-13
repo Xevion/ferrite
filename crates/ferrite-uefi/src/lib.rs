@@ -1,5 +1,5 @@
-//! A bare-metal memory sweep with a ratatui UI and a status page served over
-//! the machine's own NIC.
+//! A bare-metal memory sweep with a framebuffer dashboard (ratatui on text-only consoles) and a
+//! status page served over the machine's own NIC.
 
 #![no_std]
 
@@ -13,7 +13,10 @@ pub mod backend;
 pub mod control;
 pub mod cores;
 pub mod crew;
+pub mod dash;
 pub mod diag;
+pub mod gfx;
+pub mod gop;
 pub mod mdns;
 pub mod net;
 pub mod report;

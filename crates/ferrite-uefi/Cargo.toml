@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-uefi"
-description = "Bare-metal memory sweep with a ratatui UI and a status page served over the machine's own NIC"
+description = "Bare-metal memory sweep with a framebuffer dashboard (ratatui on text-only consoles) and a status page served over the machine's own NIC"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,6 +14,7 @@ target = "x86_64-unknown-linux-gnu"
 ferrite-efi.workspace = true
 ferrite-hal.workspace = true
 ferrite-mem.workspace = true
+fontdue.workspace = true
 log.workspace = true
 # The status page and its API, over our own smoltcp sockets.
 picoserve.workspace = true
@@ -22,6 +23,7 @@ ratatui-core.workspace = true
 # Answers ping, as a liveness check.
 smoltcp = { workspace = true, features = ["auto-icmp-echo-reply"] }
 snafu.workspace = true
+tiny-skia.workspace = true
 uefi.workspace = true
 
 # The allocator and panic handler would collide with std's on a host build.

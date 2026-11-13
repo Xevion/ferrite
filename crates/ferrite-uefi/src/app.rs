@@ -4,7 +4,9 @@
 //! While a test runs split over every core, the sweep runs the loop's duties
 //! from inside it.
 
+use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::ToString as _;
 use core::time::Duration;
 
 use ferrite_efi::clock::Clock;
@@ -20,10 +22,12 @@ use uefi::proto::console::text::{Input, Key, Output, ScanCode};
 
 use crate::backend::{BackendError, UefiBackend};
 use crate::control::{Command, Commands};
+use crate::dash::{Dashboard, Frame};
 use crate::diag::{self, Diag};
-use crate::net::Net;
+use crate::gop::Display;
+use crate::net::{Net, NetStatus};
 use crate::report::Snapshot;
-use crate::sweep::{CoreChoice, Cores, Flow, Sweep};
+use crate::sweep::{CoreChoice, Cores, Flow, Sweep, SweepStatus};
 use crate::ui::{self, View};
 
 const SWEEP_BYTES: usize = 1 << 30;
@@ -43,6 +47,69 @@ const SHORT_WAIT: Duration = Duration::from_millis(2);
 /// `WATCHDOG_REARM`, so a long sweep never trips it and a hung loop does.
 const WATCHDOG: Duration = Duration::from_secs(60);
 const WATCHDOG_REARM: Duration = Duration::from_secs(5);
+/// How often draw times are summarised at debug.
+const DRAW_LOG_EVERY: Duration = Duration::from_secs(30);
+
+/// Where frames go: the dashboard on the GOP framebuffer, or a short status screen on the text
+/// console of a machine without GOP.
+enum Screen<'a> {
+    Pixels { dash: Box<Dashboard>, display: Display },
+    Text { terminal: Box<Terminal<UefiBackend<'a>>>, last: Option<View> },
+}
+
+impl<'a> Screen<'a> {
+    fn open(output: &'a mut Output, clock: &Clock) -> Result<Self, BackendError> {
+        match Display::open() {
+            Ok(mut display) => {
+                let (width, height) = display.size();
+                match Dashboard::new(width, height) {
+                    Ok(dash) => {
+                        display.calibrate(dash.output().0, clock);
+                        return Ok(Self::Pixels { dash: Box::new(dash), display });
+                    },
+                    Err(e) => log::warn!("ui: no dashboard on the {width}x{height} GOP, using the text console: {e}"),
+                }
+            },
+            Err(e) => log::info!("ui: {e}; using the text console"),
+        }
+        Ok(Self::Text { terminal: Box::new(Terminal::new(UefiBackend::new(output))?), last: None })
+    }
+}
+
+/// Dashboard frames that changed something since the last summary.
+#[derive(Default)]
+struct DrawStats {
+    since: Instant,
+    frames: u32,
+    render: Duration,
+    push: Duration,
+    worst: Duration,
+    bytes: u64,
+}
+
+impl DrawStats {
+    fn record(&mut self, now: Instant, render: Duration, push: Duration, bytes: u64) {
+        self.frames += 1;
+        self.render += render;
+        self.push += push;
+        self.worst = self.worst.max(render + push);
+        self.bytes += bytes;
+        if now - self.since < DRAW_LOG_EVERY {
+            return;
+        }
+        let frames = self.frames.max(1);
+        log::debug!(
+            "ui: {} frames in {:?}, render mean {:?}, push mean {:?}, worst {:?}, {} KiB pushed",
+            self.frames,
+            now - self.since,
+            self.render / frames,
+            self.push / frames,
+            self.worst,
+            self.bytes >> 10
+        );
+        *self = Self { since: now, ..Self::default() };
+    }
+}
 
 /// Sleeps until a timeout or a keypress, for when there is no sweep to run.
 struct Waiter {
@@ -86,14 +153,16 @@ pub struct App<'a> {
 /// Everything the BSP serves besides the sweep: watchdog, network, keys, screen and log.
 struct Desk<'a> {
     input: &'a mut Input,
-    terminal: Terminal<UefiBackend<'a>>,
+    screen: Screen<'a>,
     clock: Clock,
     net: Option<Net>,
     net_err: Option<&'static str>,
     diag: Diag,
     waiter: Option<Waiter>,
-    last_view: Option<View>,
     draw_failures: u32,
+    draw_stats: DrawStats,
+    /// Pause state the `p` key asked for, until the queued commands are applied.
+    pause_wanted: Option<bool>,
     next_frame: Instant,
     /// The loader's link, when this app was started by the loader.
     loader: Option<LoaderLink>,
@@ -110,8 +179,8 @@ impl<'a> App<'a> {
         vector: Option<&'a VectorState>,
         caps: Caps,
     ) -> Result<Self, BackendError> {
-        let terminal = Terminal::new(UefiBackend::new(output))?;
         let clock = Clock::start();
+        let screen = Screen::open(output, &clock)?;
         let (net, net_err) = match Net::setup(clock.now()) {
             Ok(net) => {
                 log::debug!("net: SNP up, {}", net.status());
@@ -128,14 +197,15 @@ impl<'a> App<'a> {
         let cores = Cores::locate(CORES, clock);
         let desk = Desk {
             input,
-            terminal,
+            screen,
             clock,
             net,
             net_err,
             diag: Diag::new(),
             waiter,
-            last_view: None,
             draw_failures: 0,
+            draw_stats: DrawStats { since: clock.now(), ..DrawStats::default() },
+            pause_wanted: None,
             next_frame: Instant::default(),
             loader,
             watchdog,
@@ -193,6 +263,7 @@ impl<'a> App<'a> {
                 Command::Quit => flow = Flow::Stop,
             }
         }
+        self.desk.pause_wanted = None;
         flow
     }
 
@@ -241,13 +312,14 @@ impl Desk<'_> {
         }
         let commands = &mut self.commands;
         let net_wait = self.net.as_mut().map_or(FRAME_INTERVAL, |net| net.poll(now, snapshot, commands));
-        if self.quit_requested() || self.desktop_stop_requested() {
+        self.read_keys(&snapshot.status);
+        if self.desktop_stop_requested() {
             self.commands.push(Command::Quit);
         }
         let sweep = &snapshot.status;
         let net = self.net.as_ref().map(Net::status);
         if now >= self.next_frame {
-            self.draw(View { sweep: *sweep, net, net_err: self.net_err });
+            self.draw(now, snapshot, net);
             self.next_frame = now + FRAME_INTERVAL;
         }
         self.diag.tick(now, net.as_ref(), sweep);
@@ -257,15 +329,26 @@ impl Desk<'_> {
         Some((now + net_wait).min(self.next_frame))
     }
 
-    fn quit_requested(&mut self) -> bool {
-        let mut quit = false;
+    /// Queue what the console's keys ask for: `q` or `Esc` quits, `p` pauses or resumes, `r`
+    /// restarts with the current preset.
+    fn read_keys(&mut self, status: &SweepStatus) {
         while let Ok(Some(key)) = self.input.read_key() {
-            quit |= match key {
-                Key::Printable(c) => matches!(char::from(c), 'q' | 'Q'),
-                Key::Special(code) => code == ScanCode::ESCAPE,
+            let command = match key {
+                Key::Special(ScanCode::ESCAPE) => Command::Quit,
+                Key::Special(_) => continue,
+                Key::Printable(c) => match char::from(c).to_ascii_lowercase() {
+                    'q' => Command::Quit,
+                    'p' => {
+                        let paused = self.pause_wanted.unwrap_or(status.paused);
+                        self.pause_wanted = Some(!paused);
+                        if paused { Command::Resume } else { Command::Pause }
+                    },
+                    'r' => Command::Restart(status.preset),
+                    _ => continue,
+                },
             };
+            self.commands.push(command);
         }
-        quit
     }
 
     /// A `Stop` from the desktop, or a `q` typed there: the same quit key as the console's.
@@ -283,19 +366,39 @@ impl Desk<'_> {
         asked
     }
 
-    fn draw(&mut self, view: View) {
-        if self.last_view == Some(view) {
-            return;
-        }
-        match self.terminal.draw(|frame| ui::render(frame, &view)) {
-            Ok(_) => self.last_view = Some(view),
-            Err(e) => {
-                if self.draw_failures == 0 {
-                    log::warn!("ui: drawing failed: {e}");
+    fn draw(&mut self, now: Instant, snapshot: &Snapshot<'_>, net: Option<NetStatus>) {
+        let failure = match &mut self.screen {
+            Screen::Pixels { dash, display } => {
+                let start = self.clock.now();
+                dash.render(&Frame { snapshot, net, net_err: self.net_err, now });
+                let rendered = self.clock.now();
+                let (canvas, rects) = dash.output();
+                if rects.is_empty() {
+                    return;
                 }
-                self.draw_failures = self.draw_failures.saturating_add(1);
-                self.last_view = None;
+                let bytes = rects.iter().map(|r| r.area() * 4).sum();
+                let pushed = display.present(canvas, rects);
+                self.draw_stats.record(now, rendered - start, self.clock.now() - rendered, bytes);
+                let Err(e) = pushed else { return };
+                dash.invalidate();
+                e.to_string()
             },
+            Screen::Text { terminal, last } => {
+                let view = View { sweep: snapshot.status, net, net_err: self.net_err };
+                if *last == Some(view) {
+                    return;
+                }
+                let Err(e) = terminal.draw(|frame| ui::render(frame, &view)) else {
+                    *last = Some(view);
+                    return;
+                };
+                *last = None;
+                e.to_string()
+            },
+        };
+        if self.draw_failures == 0 {
+            log::warn!("ui: drawing failed: {failure}");
         }
+        self.draw_failures = self.draw_failures.saturating_add(1);
     }
 }

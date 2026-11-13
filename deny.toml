@@ -2,6 +2,9 @@
 yanked = "warn"
 unmaintained = "all"
 unsound = "workspace"
+ignore = [
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained with no successor release; fontdue needs it to rasterize the dashboard's fonts" },
+]
 
 [licenses]
 allow = [
