@@ -1,3 +1,5 @@
+use std::vec::Vec;
+
 use assert2::check;
 use rstest::rstest;
 
@@ -76,15 +78,20 @@ fn a_merge_can_cascade() {
 }
 
 #[test]
-fn too_many_rects_collapse_into_their_bounds() {
+fn too_many_rects_are_merged_least_waste_first() {
     let mut dirty = DirtyRects::new(SCREEN);
-    for i in 0..=MAX_RECTS as u32 {
+    // Sixteen rectangles far apart, then a seventeenth beside the first.
+    for i in 0..MAX_RECTS as u32 {
         dirty.add(Rect::new(i * 100, i * 50, 10, 10));
     }
-    check!(dirty.as_slice() == [Rect::new(0, 0, MAX_RECTS as u32 * 100 + 10, MAX_RECTS as u32 * 50 + 10)]);
+    check!(dirty.as_slice().len() == MAX_RECTS);
+    dirty.add(Rect::new(0, 30, 10, 10));
+    check!(dirty.as_slice().len() == MAX_RECTS);
+    check!(dirty.as_slice().contains(&Rect::new(0, 0, 10, 40)));
 }
 
-/// The rectangles a 64x8 canvas of zeros marks for `rect` once the pixels at `pokes` change.
+/// The rectangles a 64x8 canvas of zeros marks for `rect` once the pixels at `pokes` change, with
+/// the old rows packed and the new ones in the canvas.
 fn diffed(rect: Rect, pokes: &[(u32, u32)], band: u32) -> Vec<Rect> {
     const W: u32 = 64;
     let canvas = std::vec![0u8; (W * 8 * 4) as usize];
@@ -98,8 +105,12 @@ fn diffed(rect: Rect, pokes: &[(u32, u32)], band: u32) -> Vec<Rect> {
     for &(x, y) in pokes {
         after[((y * W + x) * 4 + 1) as usize] = 0xff;
     }
+    let old = Plane { data: &before, stride: rect.w as usize * 4 };
+    let new = Plane { data: &after[((rect.y * W + rect.x) * 4) as usize..], stride: W as usize * 4 };
     let mut dirty = DirtyRects::new(Rect::new(0, 0, W, 8));
-    dirty.add_changes(&before, &after, W, rect, band);
+    for found in changed_bands(old, new, rect, band) {
+        dirty.add(found);
+    }
     let mut rects = dirty.as_slice().to_vec();
     rects.sort_by_key(|r| (r.x, r.y));
     rects

@@ -34,6 +34,16 @@ pub enum Face {
 
 impl Face {
     const COUNT: usize = 5;
+    const ALL: [Self; Self::COUNT] = [Self::Regular, Self::SemiBold, Self::Bold, Self::Mono, Self::MonoBold];
+}
+
+/// How letters are cased when drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Case {
+    #[default]
+    AsWritten,
+    /// ASCII letters uppercased, for the small capitals over cards and columns.
+    Upper,
 }
 
 /// How a run of text looks.
@@ -45,6 +55,7 @@ pub struct Style {
     pub color: Rgb,
     /// Extra pixels after each glyph.
     pub tracking: f32,
+    pub case: Case,
 }
 
 #[derive(Debug, Snafu)]
@@ -68,21 +79,92 @@ pub struct Placement {
     pub top: i32,
 }
 
+/// The pixels a run of text can colour, relative to its rounded origin and baseline; empty for a
+/// run with no ink, such as spaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ink {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl Ink {
+    const NONE: Self = Self { left: i32::MAX, top: i32::MAX, right: i32::MIN, bottom: i32::MIN };
+
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.right <= self.left || self.bottom <= self.top
+    }
+
+    fn include(&mut self, at: Placement, glyph: &Glyph) {
+        let (w, h) = (glyph.metrics.width, glyph.metrics.height);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let (w, h) = (i32::try_from(w).unwrap_or(0), i32::try_from(h).unwrap_or(0));
+        *self = Self {
+            left: self.left.min(at.x),
+            top: self.top.min(at.top),
+            right: self.right.max(at.x + w),
+            bottom: self.bottom.max(at.top + h),
+        };
+    }
+}
+
+/// How far a run advances the pen, and what it draws on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Run {
+    pub advance: f32,
+    pub ink: Ink,
+}
+
+/// Printable ASCII, which almost every glyph drawn is.
+const ASCII: core::ops::RangeInclusive<char> = ' '..='~';
+const ASCII_COUNT: usize = 95;
+
+/// The glyphs of one face at one size. ASCII is a table lookup; the few symbols go in a map.
+struct Strike {
+    face: Face,
+    px: u16,
+    ascii: Vec<Option<Glyph>>,
+    other: BTreeMap<char, Glyph>,
+}
+
+impl Strike {
+    fn new(face: Face, px: u16) -> Self {
+        Self { face, px, ascii: (0..ASCII_COUNT).map(|_| None).collect(), other: BTreeMap::new() }
+    }
+
+    fn glyph(&mut self, font: &Font, c: char) -> &Glyph {
+        let px = f32::from(self.px);
+        let make = || {
+            let (metrics, coverage) = font.rasterize(c, px);
+            Glyph { metrics, coverage }
+        };
+        if ASCII.contains(&c) {
+            self.ascii[c as usize - ' ' as usize].get_or_insert_with(make)
+        } else {
+            self.other.entry(c).or_insert_with(make)
+        }
+    }
+}
+
 pub struct Fonts {
     faces: Vec<Font>,
-    cache: BTreeMap<(Face, u16, char), Glyph>,
+    strikes: Vec<Strike>,
 }
 
 impl Fonts {
     pub fn load() -> Result<Self, FontError> {
-        let faces = [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono, Face::MonoBold]
+        let faces = Face::ALL
             .into_iter()
             .map(|face| {
                 let settings = FontSettings { scale: 32.0, ..FontSettings::default() };
                 Font::from_bytes(FACES[face as usize], settings).map_err(|reason| FontError { face, reason })
             })
             .collect::<Result<_, _>>()?;
-        Ok(Self { faces, cache: BTreeMap::new() })
+        Ok(Self { faces, strikes: Vec::new() })
     }
 
     /// The baseline that centres capitals at `px` in a box from `top` that is `height` tall.
@@ -94,19 +176,27 @@ impl Fonts {
         top + f32::midpoint(height, cap)
     }
 
+    fn strike(&mut self, face: Face, px: u16) -> usize {
+        if let Some(i) = self.strikes.iter().position(|s| s.face == face && s.px == px) {
+            return i;
+        }
+        self.strikes.push(Strike::new(face, px));
+        self.strikes.len() - 1
+    }
+
     pub fn glyph(&mut self, face: Face, px: u16, c: char) -> &Glyph {
-        let font = &self.faces[face as usize];
-        self.cache.entry((face, px, c)).or_insert_with(|| {
-            let (metrics, coverage) = font.rasterize(c, f32::from(px));
-            Glyph { metrics, coverage }
-        })
+        let i = self.strike(face, px);
+        self.strikes[i].glyph(&self.faces[face as usize], c)
     }
 
     /// Call `each` with every glyph of `text` and where it goes; returns the advance of the run.
     pub fn layout(&mut self, text: &str, style: Style, mut each: impl FnMut(Placement, &Glyph)) -> f32 {
+        let i = self.strike(style.face, style.px);
+        let (strike, font) = (&mut self.strikes[i], &self.faces[style.face as usize]);
         let mut pen = 0.0f32;
         for c in text.chars() {
-            let glyph = self.glyph(style.face, style.px, c);
+            let c = if style.case == Case::Upper { c.to_ascii_uppercase() } else { c };
+            let glyph = strike.glyph(font, c);
             let m = glyph.metrics;
             let top = -(m.ymin + i32::try_from(m.height).unwrap_or(0));
             each(Placement { x: round(pen) + m.xmin, top }, glyph);
@@ -120,6 +210,13 @@ impl Fonts {
         self.layout(text, style, |_, _| ())
     }
 
+    /// The advance and the ink of `text` in one pass.
+    pub fn run(&mut self, text: &str, style: Style) -> Run {
+        let mut ink = Ink::NONE;
+        let advance = self.layout(text, style, |at, glyph| ink.include(at, glyph));
+        Run { advance, ink }
+    }
+
     /// The longest prefix of `text` that fits in `max` pixels, and whether it had to be cut. A cut
     /// prefix leaves room for [`ELLIPSIS`] and drops trailing spaces.
     pub fn fit<'t>(&mut self, text: &'t str, style: Style, max: f32) -> (&'t str, bool) {
@@ -130,6 +227,7 @@ impl Fonts {
         let mut width = 0.0;
         let mut end = 0;
         for (i, c) in text.char_indices() {
+            let c = if style.case == Case::Upper { c.to_ascii_uppercase() } else { c };
             let advance = self.glyph(style.face, style.px, c).metrics.advance_width + style.tracking;
             if width + advance + ellipsis > max {
                 break;

@@ -1,6 +1,6 @@
 //! Where every card and widget of the dashboard goes, scaled from a 1360x860 design to the screen.
 
-use crate::gfx::Rect;
+use crate::gfx::{Rect, px, whole_px};
 
 /// The size the dashboard's measures are given for.
 const DESIGN: (f32, f32) = (1360.0, 860.0);
@@ -57,16 +57,6 @@ pub struct Layout {
 pub fn scale(width: u32, height: u32) -> f32 {
     let s = (px(width) / DESIGN.0).min(px(height) / DESIGN.1);
     s.clamp(0.75, 4.0)
-}
-
-#[expect(clippy::cast_precision_loss, reason = "screen sizes are far below 2^24")]
-pub const fn px(v: u32) -> f32 {
-    v as f32
-}
-
-#[expect(clippy::cast_sign_loss, reason = "clamped to zero first")]
-pub fn whole_px(v: f32) -> u32 {
-    v.max(0.0) as u32
 }
 
 fn text_px(v: f32) -> u16 {

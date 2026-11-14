@@ -123,6 +123,23 @@ fn steady_frames_redraw_only_the_widgets_that_changed() {
 }
 
 #[test]
+fn a_clock_tick_allocates_nothing() {
+    let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
+    let (history, faults) = (history(), VecDeque::new());
+    // The first frames size the scratch buffer and rasterize each digit the clocks show.
+    for at in 500..560 {
+        render(&mut dash, status(), &history, &faults, at);
+    }
+    let snapshot = Snapshot { status: status(), history: &history, faults: &faults };
+    let frame = Frame { snapshot: &snapshot, net: Some(net()), net_err: None, now: START + Duration::from_secs(560) };
+    let before = bench::allocations().0;
+    dash.render(&frame);
+    let allocated = bench::allocations().0 - before;
+    check!(!dash.output().1.is_empty());
+    check!(allocated == 0);
+}
+
+#[test]
 fn the_first_fault_redraws_everything() {
     let mut dash = Dashboard::new(1280, 800).expect("dashboard");
     let (history, mut faults) = (history(), VecDeque::new());

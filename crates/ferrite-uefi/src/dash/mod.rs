@@ -2,16 +2,16 @@
 //! pass history, network and processors, drawn into a [`Canvas`].
 //!
 //! Each widget has a key, the few values it shows; a frame redraws only the widgets whose key
-//! changed and reports their rectangles, so the steady state pushes a few small rectangles to the
-//! screen. Cards and the page behind them are drawn only on a full redraw: the first frame, and
-//! when the layout changes (the first fault, a preset with a different number of tests).
+//! changed, and the canvas then draws only the parts of those that differ from what the widget drew
+//! last, so the steady state pushes a few small rectangles to the screen. Cards and the page behind
+//! them are drawn only on a full redraw: the first frame, and when the layout changes (the first
+//! fault, a preset with a different number of tests).
 
 mod format;
 mod layout;
 mod theme;
 mod widgets;
 
-use alloc::vec::Vec;
 use core::time::Duration;
 
 use ferrite_hal::Instant;
@@ -22,7 +22,7 @@ use snafu::{OptionExt as _, ResultExt as _, Snafu};
 use self::layout::Layout;
 use self::widgets::Pen;
 use crate::gfx::text::{FontError, Fonts};
-use crate::gfx::{Canvas, DirtyRects, Rect};
+use crate::gfx::{Canvas, DirtyRects, Recording, Rect};
 use crate::net::NetStatus;
 use crate::report::{FaultRecord, Snapshot};
 use crate::sweep::SweepStatus;
@@ -81,10 +81,21 @@ enum State {
     Paused,
 }
 
+/// What the layout depends on; a frame whose setup differs from the last frame's redraws everything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Setup {
+    width: u32,
+    height: u32,
+    /// Rows of the test table.
+    tests: usize,
+    /// Faults were found, which turns the header red and gives the fault log more room.
+    faulted: bool,
+}
+
 /// What each widget shows; a widget is redrawn when its part differs from the last frame's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Keys {
-    frame: (u32, u32, usize, bool),
+    setup: Setup,
     brand: (Preset, &'static str, usize, usize),
     clock: (State, u64, u64),
     pass: (u64, u16, u64, bool),
@@ -98,11 +109,11 @@ struct Keys {
 }
 
 impl Keys {
-    fn of(f: &Frame<'_>, size: (u32, u32)) -> Self {
+    fn of(f: &Frame<'_>, (width, height): (u32, u32)) -> Self {
         let s = f.status();
         let history = f.snapshot.history;
         Self {
-            frame: (size.0, size.1, test_count(s.preset), s.faults > 0),
+            setup: Setup { width, height, tests: test_count(s.preset), faulted: s.faults > 0 },
             brand: (s.preset, s.tier, s.bytes, history.cpus.len()),
             clock: (f.state(), s.faults, f.elapsed().as_secs()),
             pass: (s.passes, s.percent, f.pass_elapsed().as_secs(), s.paused),
@@ -115,10 +126,22 @@ impl Keys {
             hints: s.paused,
         }
     }
-}
 
-fn differs<T: PartialEq>(last: Option<&Keys>, now: &Keys, part: impl Fn(&Keys) -> T) -> bool {
-    last.is_none_or(|last| part(last) != part(now))
+    /// Whether `widget` shows something other than in the frame with keys `last`.
+    fn changed(&self, last: Option<&Self>, widget: Widget) -> bool {
+        last.is_none_or(|last| match widget {
+            Widget::Brand => last.brand != self.brand,
+            Widget::Clock => last.clock != self.clock,
+            Widget::Pass => last.pass != self.pass,
+            Widget::Test => last.test != self.test,
+            Widget::Tests => last.tests != self.tests,
+            Widget::Faults => last.faults != self.faults,
+            Widget::Net => last.net != self.net,
+            Widget::Passes => last.passes != self.passes,
+            Widget::Cpus => last.cpus != self.cpus,
+            Widget::Hints => last.hints != self.hints,
+        })
+    }
 }
 
 fn test_count(preset: Preset) -> usize {
@@ -128,14 +151,74 @@ fn test_count(preset: Preset) -> usize {
 /// A widget's draw function.
 type Draw = fn(&mut Pen<'_>, Rect, &Frame<'_>);
 
+/// The parts of the screen redrawn on their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Widget {
+    Brand,
+    Clock,
+    Pass,
+    Test,
+    Tests,
+    Faults,
+    Net,
+    Passes,
+    Cpus,
+    Hints,
+}
+
+impl Widget {
+    const ALL: [Self; 10] = [
+        Self::Brand,
+        Self::Clock,
+        Self::Pass,
+        Self::Test,
+        Self::Tests,
+        Self::Faults,
+        Self::Net,
+        Self::Passes,
+        Self::Cpus,
+        Self::Hints,
+    ];
+
+    const fn rect(self, l: &Layout) -> Rect {
+        match self {
+            Self::Brand => l.brand,
+            Self::Clock => l.clock,
+            Self::Pass => l.pass,
+            Self::Test => l.test,
+            Self::Tests => l.tests,
+            Self::Faults => l.faults,
+            Self::Net => l.net,
+            Self::Passes => l.passes,
+            Self::Cpus => l.cpus,
+            Self::Hints => l.footer,
+        }
+    }
+
+    const fn draw(self) -> Draw {
+        match self {
+            Self::Brand => widgets::brand,
+            Self::Clock => widgets::clock,
+            Self::Pass => widgets::pass,
+            Self::Test => widgets::test,
+            Self::Tests => widgets::tests,
+            Self::Faults => widgets::faults,
+            Self::Net => widgets::net,
+            Self::Passes => widgets::passes,
+            Self::Cpus => widgets::cpus,
+            Self::Hints => widgets::hints,
+        }
+    }
+}
+
 pub struct Dashboard {
     canvas: Canvas,
     fonts: Fonts,
     layout: Layout,
     last: Option<Keys>,
     dirty: DirtyRects,
-    /// A widget's pixels from before it is redrawn, to find what the redraw changed.
-    before: Vec<u8>,
+    /// What each widget drew last, by [`Widget`].
+    drawn: [Recording; Widget::ALL.len()],
 }
 
 impl Dashboard {
@@ -152,7 +235,7 @@ impl Dashboard {
             layout: Layout::new(width, height, test_count(Preset::Standard), false),
             last: None,
             dirty: DirtyRects::new(bounds),
-            before: Vec::new(),
+            drawn: core::array::from_fn(|_| Recording::roomy()),
         };
         dash.pen(false).backdrop();
         Ok(dash)
@@ -167,42 +250,25 @@ impl Dashboard {
         self.dirty.clear();
         let bounds = self.canvas.bounds();
         let keys = Keys::of(f, (bounds.w, bounds.h));
-        let faulted = keys.frame.3;
-        let last = self.last.filter(|last| last.frame == keys.frame);
-        if last.is_none() {
-            self.layout = Layout::new(bounds.w, bounds.h, keys.frame.2, faulted);
+        let faulted = keys.setup.faulted;
+        let last = self.last.filter(|last| last.setup == keys.setup);
+        let full = last.is_none();
+        if full {
+            self.layout = Layout::new(bounds.w, bounds.h, keys.setup.tests, faulted);
             self.pen(faulted).backdrop();
             self.dirty.add_all();
         }
         let l = self.layout;
-        let last = last.as_ref();
-        let widgets: [(bool, Rect, Draw); 10] = [
-            (differs(last, &keys, |k| k.brand), l.brand, widgets::brand),
-            (differs(last, &keys, |k| k.clock), l.clock, widgets::clock),
-            (differs(last, &keys, |k| k.pass), l.pass, widgets::pass),
-            (differs(last, &keys, |k| k.test), l.test, widgets::test),
-            (differs(last, &keys, |k| k.tests), l.tests, widgets::tests),
-            (differs(last, &keys, |k| k.faults), l.faults, widgets::faults),
-            (differs(last, &keys, |k| k.net), l.net, widgets::net),
-            (differs(last, &keys, |k| k.passes), l.passes, widgets::passes),
-            (differs(last, &keys, |k| k.cpus), l.cpus, widgets::cpus),
-            (differs(last, &keys, |k| k.hints), l.footer, widgets::hints),
-        ];
-        let full = last.is_none();
         let band = (bounds.w / 24).max(64);
-        for (redraw, rect, draw) in widgets {
-            if !redraw {
+        for widget in Widget::ALL {
+            if !keys.changed(last.as_ref(), widget) {
                 continue;
             }
-            if !full {
-                self.canvas.copy_out(rect, &mut self.before);
-            }
+            let rect = widget.rect(&l);
             let mut pen = Pen { canvas: &mut self.canvas, fonts: &mut self.fonts, l: &l, faulted };
             pen.begin(rect);
-            draw(&mut pen, rect, f);
-            if !full {
-                self.dirty.add_changes(&self.before, self.canvas.bgra(), bounds.w, rect, band);
-            }
+            widget.draw()(&mut pen, rect, f);
+            self.canvas.finish(&mut self.fonts, &mut self.drawn[widget as usize], full, &mut self.dirty, band);
         }
         self.last = Some(keys);
     }
@@ -219,5 +285,7 @@ impl Dashboard {
     }
 }
 
+#[cfg(test)]
+mod bench;
 #[cfg(test)]
 mod tests;

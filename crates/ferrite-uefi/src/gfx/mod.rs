@@ -3,8 +3,8 @@
 
 mod canvas;
 pub mod pixel;
-mod rect;
+pub mod rect;
 pub mod text;
 
-pub use canvas::{Canvas, Fill, Rgb};
-pub use rect::{DirtyRects, Rect};
+pub use canvas::{Canvas, Fill, Recording, Rgb};
+pub use rect::{DirtyRects, Rect, ceil_px, px, whole_px};

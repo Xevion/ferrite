@@ -3,7 +3,8 @@ use rstest::rstest;
 
 use super::*;
 
-const BODY: Style = Style { face: Face::Regular, px: 16, color: Rgb::hex(0x00ff_ffff), tracking: 0.0 };
+const BODY: Style =
+    Style { face: Face::Regular, px: 16, color: Rgb::hex(0x00ff_ffff), tracking: 0.0, case: Case::AsWritten };
 
 fn fonts() -> Fonts {
     Fonts::load().expect("embedded faces parse")

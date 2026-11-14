@@ -21,4 +21,6 @@ pub mod mdns;
 pub mod net;
 pub mod report;
 pub mod sweep;
+#[cfg(test)]
+mod testing;
 pub mod ui;

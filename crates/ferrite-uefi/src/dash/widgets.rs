@@ -6,22 +6,19 @@
     reason = "p, r, f, s and l are the pen, rectangle, frame, status and layout in every widget"
 )]
 
-use alloc::format;
-use alloc::string::String;
-use alloc::vec::Vec;
-
 use ferrite_mem::suite::{Mode, TestKind};
+use heapless::String;
 
-use super::format;
-use super::layout::{Layout, px, tile_grid, window};
+use super::format::{self, fixed, num, plural};
+use super::layout::{Layout, tile_grid, window};
 use super::theme::{
     ACCENT, ACCENT_FROM, BAD, BAD_DEEP, BAD_EDGE, BAD_GROUND, CARD, CARD_EDGE, CHIP, DIM, GOOD, MUTED, PAGE, ROW, TEXT,
     TRACK, WARN,
 };
 use super::{Frame, State};
-use crate::gfx::text::{Face, Fonts, Style};
-use crate::gfx::{Canvas, Fill, Rect, Rgb};
-use crate::report::TestRecord;
+use crate::gfx::text::{Case, Face, Fonts, Style};
+use crate::gfx::{Canvas, Fill, Rect, Rgb, px, whole_px};
+use crate::report::{CpuInfo, TestRecord};
 
 pub struct Pen<'d> {
     pub canvas: &'d mut Canvas,
@@ -36,7 +33,7 @@ impl Pen<'_> {
         if self.faulted { BAD_GROUND } else { CARD }
     }
 
-    /// Clear `r` to what lies behind it and clip drawing to it.
+    /// Start drawing the widget in `r`, which is cleared to what lies behind it and drawn only in.
     pub fn begin(&mut self, r: Rect) {
         let ground = if self.l.header.intersect(r) == r {
             self.header_ground()
@@ -45,15 +42,13 @@ impl Pen<'_> {
         } else {
             CARD
         };
-        self.canvas.set_clip(r);
-        self.canvas.fill(r, ground);
+        self.canvas.begin(r, ground);
     }
 
     /// The page and the cards, with their titles.
     pub fn backdrop(&mut self) {
         let l = *self.l;
         let all = self.canvas.bounds();
-        self.canvas.set_clip(all);
         self.canvas.fill(all, PAGE);
         let (header_edge, fault_edge) = if self.faulted { (BAD_EDGE, BAD_EDGE) } else { (CARD_EDGE, CARD_EDGE) };
         self.card(l.header, self.header_ground(), header_edge);
@@ -80,23 +75,23 @@ impl Pen<'_> {
     }
 
     const fn style(face: Face, px: u16, color: Rgb) -> Style {
-        Style { face, px, color, tracking: 0.0 }
+        Style { face, px, color, tracking: 0.0, case: Case::AsWritten }
     }
 
     fn label_style(&self, color: Rgb) -> Style {
         let px = self.l.text.label;
-        Style { face: Face::SemiBold, px, color, tracking: f32::from(px) * 0.08 }
+        Style { face: Face::SemiBold, px, color, tracking: f32::from(px) * 0.08, case: Case::Upper }
     }
 
-    /// Small capitals: `text` is uppercased here.
+    /// Small capitals.
     fn label(&mut self, x: f32, base: f32, text: &str, color: Rgb) -> f32 {
         let style = self.label_style(color);
-        self.canvas.text(self.fonts, x, base, &text.to_ascii_uppercase(), style)
+        self.canvas.text(self.fonts, x, base, text, style)
     }
 
     fn label_width(&mut self, text: &str) -> f32 {
         let style = self.label_style(MUTED);
-        self.fonts.measure(&text.to_ascii_uppercase(), style)
+        self.fonts.measure(text, style)
     }
 
     /// The baseline that centres capitals at `px_size` in the band `top..top + h`.
@@ -167,14 +162,10 @@ pub fn brand(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     x += l.m(18.0);
     let preset: &str = s.preset.into();
     let cpus = f.snapshot.history.cpus.len().max(1);
-    let chips = [
-        String::from(preset),
-        String::from(s.tier),
-        format::size(s.bytes),
-        format!("{cpus} cpu{}", if cpus == 1 { "" } else { "s" }),
-    ];
+    let (size, cpu_text) = (format::size(s.bytes), fixed::<16>(format_args!("{cpus} cpu{}", plural(cpus))));
+    let chips = [preset, s.tier, &size, &cpu_text];
     let style = Pen::style(Face::Regular, l.text.small, MUTED);
-    for chip in &chips {
+    for chip in chips {
         if x + p.pill_width(chip, style, false) > px(r.right()) {
             break;
         }
@@ -202,7 +193,7 @@ pub fn clock(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     right -= p.pill_width(text, style, true);
     p.pill(right, r, text, style, CHIP, Some(color));
     if s.faults > 0 {
-        let text = format!("{} fault{}", s.faults, if s.faults == 1 { "" } else { "s" });
+        let text = fixed::<32>(format_args!("{} fault{}", s.faults, plural(s.faults)));
         let style = Pen::style(Face::Bold, l.text.small, TEXT);
         right -= p.pill_width(&text, style, true) + l.m(8.0);
         p.pill(right, r, &text, style, BAD_DEEP, Some(TEXT));
@@ -212,7 +203,7 @@ pub fn clock(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
 /// The text band and the bar below it in a progress widget.
 fn split_bar(r: Rect, bar_h: f32, gap: f32) -> (Rect, f32) {
     let text_h = (px(r.h) - bar_h - gap).max(0.0);
-    let band = Rect::new(r.x, r.y, r.w, super::layout::whole_px(text_h));
+    let band = Rect::new(r.x, r.y, r.w, whole_px(text_h));
     (band, px(r.bottom()) - bar_h)
 }
 
@@ -228,25 +219,24 @@ pub fn pass(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let title = Pen::style(Face::SemiBold, l.text.title, TEXT);
     let base = p.mid(title.px, band.y, band.h);
     let mut x = px(r.x);
-    x += p.text(x, base, &format!("Pass {}", s.passes + 1), title) + l.m(10.0);
+    x += p.text(x, base, &fixed::<32>(format_args!("Pass {}", s.passes + 1)), title) + l.m(10.0);
     let done = match s.passes {
-        0 => String::from("first pass"),
-        1 => String::from("1 complete"),
-        n => format!("{n} complete"),
+        0 => fixed::<32>(format_args!("first pass")),
+        n => fixed(format_args!("{n} complete")),
     };
     let small = Pen::style(Face::Regular, l.text.small, MUTED);
     p.text(x, base, &done, small);
 
     let mut right = px(r.right());
     let percent = Pen::style(Face::MonoBold, l.text.title, TEXT);
-    right -= p.right(right, base, &format!("{}%", s.percent.min(100)), percent) + l.m(14.0);
+    right -= p.right(right, base, &fixed::<8>(format_args!("{}%", s.percent.min(100))), percent) + l.m(14.0);
     let took = f.pass_elapsed();
-    let mut times = format::clock(took);
+    let mut times = fixed::<64>(format_args!("{}", format::clock(took)));
     if s.percent >= 2 && s.percent < 100 && !s.paused {
         let left = took * u32::from(100 - s.percent) / u32::from(s.percent);
-        times = format!("{times} elapsed \u{b7} about {} left", format::clock(left));
+        times = fixed(format_args!("{times} elapsed \u{b7} about {} left", format::clock(left)));
     } else if s.position.1 > 0 {
-        times.push_str(" elapsed");
+        times.push_str(" elapsed").ok();
     }
     p.right(right, base, &times, small);
 
@@ -270,12 +260,12 @@ pub fn test(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         p.bar(px(r.x), bar_y, px(r.w), bar_h, 0, Fill::Solid(ACCENT));
         return;
     }
-    x += p.label(x, base, &format!("test {i}/{n}"), MUTED) + l.m(12.0);
+    x += p.label(x, base, &fixed::<32>(format_args!("test {i}/{n}")), MUTED) + l.m(12.0);
     let pct = Pen::style(Face::Mono, l.text.body, TEXT);
-    right -= p.right(right, base, &format!("{}%", s.test_percent.min(100)), pct) + l.m(14.0);
+    right -= p.right(right, base, &fixed::<8>(format_args!("{}%", s.test_percent.min(100))), pct) + l.m(14.0);
     let how = match s.mode {
-        Mode::Split => format!("split over {} cpus", s.cpus),
-        Mode::Single => String::from("single core"),
+        Mode::Split => fixed::<48>(format_args!("split over {} cpus", s.cpus)),
+        Mode::Single => fixed(format_args!("single core")),
     };
     right -= p.right(right, base, &how, small) + l.m(14.0);
     p.fit(x, base, s.test, Pen::style(Face::SemiBold, l.text.body, TEXT), right - x);
@@ -293,8 +283,6 @@ enum Row {
 pub fn tests(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
     let l = *p.l;
-    let kinds: Vec<TestKind> = TestKind::sequence(s.preset).collect();
-    let records: Vec<&TestRecord> = f.snapshot.history.latest_tests().collect();
     let current = s.position.0.checked_sub(1).filter(|_| s.position.1 > 0);
 
     let row_h = l.row_h;
@@ -313,9 +301,9 @@ pub fn tests(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     }
 
     let visible = ((r.h.saturating_sub(row_h)) / row_h.max(1)) as usize;
-    let start = window(kinds.len(), visible, current.unwrap_or(0));
+    let start = window(super::test_count(s.preset), visible, current.unwrap_or(0));
     let mono = Pen::style(Face::Mono, l.text.mono, TEXT);
-    for (slot, (i, kind)) in kinds.iter().enumerate().skip(start).take(visible).enumerate() {
+    for (slot, (i, kind)) in TestKind::sequence(s.preset).enumerate().skip(start).take(visible).enumerate() {
         let top = r.y + row_h + u32::try_from(slot).unwrap_or(0) * row_h;
         let row = match current {
             Some(c) if i < c => Row::Done,
@@ -339,11 +327,11 @@ pub fn tests(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
             Row::Current => (TEXT, ACCENT),
             Row::Pending => (DIM, DIM),
         };
-        p.right(name_x - l.m(10.0), base, &format!("{}", i + 1), Style { color: sub, ..mono });
+        p.right(name_x - l.m(10.0), base, &num(i + 1), Style { color: sub, ..mono });
         let face = if row == Row::Current { Face::SemiBold } else { Face::Regular };
         p.fit(name_x, base, kind.name(), Pen::style(face, l.text.body, ink), name_max);
 
-        let record = records.iter().find(|rec| rec.test == kind.name());
+        let record = f.snapshot.history.tests.iter().rev().find(|rec| rec.test == kind.name());
         let values = Style { color: if row == Row::Pending { DIM } else { TEXT }, ..mono };
         let dash = Style { color: DIM, ..mono };
         if row == Row::Current {
@@ -355,13 +343,13 @@ pub fn tests(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
                 None => p.right(time_r, base, "-", dash),
             };
         }
-        match record.and_then(|rec| rec.rate()) {
+        match record.and_then(TestRecord::rate) {
             Some(rate) if row != Row::Current => p.right(rate_r, base, &format::rate(rate), values),
             _ => p.right(rate_r, base, "-", dash),
         };
         match record {
             Some(rec) if rec.faults > 0 => {
-                p.right(faults_r, base, &format!("{}", rec.faults), Style { face: Face::MonoBold, color: BAD, ..mono })
+                p.right(faults_r, base, &num(rec.faults), Style { face: Face::MonoBold, color: BAD, ..mono })
             },
             Some(_) if row != Row::Current => p.right(faults_r, base, "0", Style { color: DIM, ..mono }),
             _ => p.right(faults_r, base, "-", dash),
@@ -381,10 +369,13 @@ pub fn faults(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         let x = px(r.x) + d + l.m(14.0);
         let title = Pen::style(Face::SemiBold, l.text.title, TEXT);
         p.text(x, cy - l.m(3.0), "No faults found", title);
-        let note = match s.passes {
-            0 => format!("first pass running over {}", format::size(s.bytes)),
-            1 => format!("1 full pass over {}, every word read back as written", format::size(s.bytes)),
-            n => format!("{n} full passes over {}, every word read back as written", format::size(s.bytes)),
+        let size = format::size(s.bytes);
+        let note: String<128> = match s.passes {
+            0 => fixed(format_args!("first pass running over {size}")),
+            n => fixed(format_args!(
+                "{n} full pass{} over {size}, every word read back as written",
+                if n == 1 { "" } else { "es" }
+            )),
         };
         let small = Pen::style(Face::Regular, l.text.small, MUTED);
         p.fit(x, cy + l.m(16.0), &note, small, px(r.right()) - x);
@@ -396,11 +387,12 @@ pub fn faults(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let top = body.take_top(row_h + row_h / 2);
     let base = p.mid(l.text.title, top.y, top.h);
     let mut x = px(r.x);
-    let count = format!("{} faulty word{}", s.faults, if s.faults == 1 { "" } else { "s" });
+    let count = fixed::<48>(format_args!("{} faulty word{}", s.faults, plural(s.faults)));
     x += p.text(x, base, &count, Pen::style(Face::Bold, l.text.title, BAD)) + l.m(12.0);
-    let analysis = format!("{}", s.analysis);
+    let analysis = fixed::<64>(format_args!("{}", s.analysis));
     x += p.text(x, base, &analysis, Pen::style(Face::Regular, l.text.body, TEXT)) + l.m(12.0);
-    let first = s.first_fault.map_or_else(String::new, |f| format!("first in {} on cpu {}", f.test, f.cpu));
+    let first: String<96> =
+        s.first_fault.map_or_else(String::new, |f| fixed(format_args!("first in {} on cpu {}", f.test, f.cpu)));
     p.fit(x, base, &first, Pen::style(Face::Regular, l.text.small, MUTED), px(r.right()) - x);
 
     let mono = Pen::style(Face::Mono, l.text.mono, TEXT);
@@ -434,12 +426,12 @@ pub fn faults(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         let top = body.y + u32::try_from(slot).unwrap_or(0) * row_h;
         let base = p.mid(mono.px, top, row_h);
         let fault = rec.fault;
-        p.text(addr_x, base, &format!("{:012x}", fault.addr.get()), mono);
-        p.text(exp_x, base, &format!("{:016x}", fault.expected), Style { color: MUTED, ..mono });
+        p.text(addr_x, base, &fixed::<16>(format_args!("{:012x}", fault.addr.get())), mono);
+        p.text(exp_x, base, &fixed::<16>(format_args!("{:016x}", fault.expected)), Style { color: MUTED, ..mono });
         hex_diff(p, act_x, base, ch, fault.actual, fault.expected, mono);
         if wide {
             let flipped = fault.actual ^ fault.expected;
-            let text = format!("{flipped:016x}");
+            let text = fixed::<16>(format_args!("{flipped:016x}"));
             for (n, c) in text.chars().enumerate() {
                 let color = if c == '0' { DIM } else { BAD };
                 p.text(
@@ -451,21 +443,21 @@ pub fn faults(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
             }
         }
         p.fit(test_x, base, rec.test, Pen::style(Face::Regular, l.text.small, MUTED), test_max);
-        p.right(cpu_r, base, &format!("{}", rec.cpu), mono);
+        p.right(cpu_r, base, &num(rec.cpu), mono);
     }
     if kept > shown {
         let top = body.y + u32::try_from(shown).unwrap_or(0) * row_h;
         let base = p.mid(l.text.small, top, row_h);
         let more = u64::try_from(kept - shown).unwrap_or(0) + s.faults.saturating_sub(u64::try_from(kept).unwrap_or(0));
-        let text = format!("and {more} more; the boot-volume log has the first of them in full");
+        let text = fixed::<128>(format_args!("and {more} more; the boot-volume log has the first of them in full"));
         p.fit(addr_x, base, &text, Pen::style(Face::Regular, l.text.small, DIM), px(r.w));
     }
 }
 
 /// `value` in hex with the digits that differ from `reference` in red.
 fn hex_diff(p: &mut Pen<'_>, x: f32, base: f32, ch: f32, value: u64, reference: u64, style: Style) {
-    let text = format!("{value:016x}");
-    let expected = format!("{reference:016x}");
+    let text = fixed::<16>(format_args!("{value:016x}"));
+    let expected = fixed::<16>(format_args!("{reference:016x}"));
     for (n, (c, e)) in text.chars().zip(expected.chars()).enumerate() {
         let color = if c == e { TEXT } else { BAD };
         let face = if c == e { Face::Mono } else { Face::MonoBold };
@@ -499,7 +491,7 @@ pub fn net(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let (state, color) = if link.up { ("Link up", GOOD) } else { ("Link down", BAD) };
     p.canvas.circle(px(r.x) + dot_r, base - l.m(4.5), dot_r, color);
     p.text(px(r.x) + l.m(16.0), base, state, body_style);
-    p.right(px(r.right()), base, &format!("{}", link.mac), Style { face: Face::Mono, ..small });
+    p.right(px(r.right()), base, &num(link.mac), Style { face: Face::Mono, ..small });
 
     let big = body.take_top(row_h * 2);
     let url = body.take_top(row_h);
@@ -507,11 +499,11 @@ pub fn net(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     if let Some(cidr) = link.address {
         let ip = Pen::style(Face::MonoBold, l.text.big, TEXT);
         let b = p.mid(ip.px, big.y, big.h);
-        p.text(px(r.x), b, &format!("{}", cidr.address()), ip);
+        p.text(px(r.x), b, &num(cidr.address()), ip);
         let b = p.mid(l.text.body, url.y, url.h);
         let mut x = px(r.x);
         x += p.label(x, b, "open", DIM) + l.m(10.0);
-        let page = format!("http://{}/", cidr.address());
+        let page = fixed::<32>(format_args!("http://{}/", cidr.address()));
         p.fit(x, b, &page, Pen::style(Face::Mono, l.text.body, ACCENT), px(r.right()) - x);
     } else {
         let b = p.mid(l.text.title, big.y, big.h);
@@ -520,12 +512,12 @@ pub fn net(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         p.text(px(r.x), b, "the status page opens once there is an address", small);
     }
     let b = p.mid(l.text.small, rest.y, rest.h);
-    let tail = format!(
+    let tail = fixed::<128>(format_args!(
         "{} \u{b7} gateway {} \u{b7} dns {}",
         crate::mdns::HOST,
         crate::net::OptAddr(link.gateway),
         crate::net::OptAddr(link.dns)
-    );
+    ));
     p.fit(px(r.x), b, &tail, Style { color: DIM, ..small }, px(r.w));
 }
 
@@ -543,16 +535,16 @@ pub fn passes(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
             p.text(x, base, "First pass running", Pen::style(Face::SemiBold, l.text.body, TEXT));
         },
         Some(last) => {
-            let count = format!("{} pass{}", s.passes, if s.passes == 1 { "" } else { "es" });
+            let count = fixed::<32>(format_args!("{} pass{}", s.passes, if s.passes == 1 { "" } else { "es" }));
             x += p.text(x, base, &count, Pen::style(Face::SemiBold, l.text.body, TEXT)) + l.m(10.0);
             let best = history.passes.iter().map(|p| p.took).min().unwrap_or_default();
             let worst = history.passes.iter().map(|p| p.took).max().unwrap_or_default();
-            let summary = format!(
+            let summary = fixed::<128>(format_args!(
                 "last {} \u{b7} best {} \u{b7} worst {}",
                 format::took(last.took),
                 format::took(best),
                 format::took(worst)
-            );
+            ));
             p.fit(x, base, &summary, small, px(r.right()) - x);
         },
     }
@@ -560,36 +552,38 @@ pub fn passes(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     // Finished passes as bars of their duration, then the running pass growing towards the last
     // one's height as its percentage climbs.
     body.take_top(l.pad);
-    let chart = body.take_top(super::layout::whole_px(l.m(150.0)).min(body.h.saturating_sub(l.row_h)));
+    let chart = body.take_top(whole_px(l.m(150.0)).min(body.h.saturating_sub(l.row_h)));
     let labels = body.take_top(l.row_h);
     let gap = l.m(6.0);
-    let max_slots = super::layout::whole_px((px(chart.w) + gap) / (l.m(10.0) + gap)).max(2) as usize;
-    let shown: Vec<_> = history.passes.iter().rev().take(max_slots - 1).rev().collect();
-    let slots = px(u32::try_from(shown.len() + 1).unwrap_or(1));
+    let max_slots = whole_px((px(chart.w) + gap) / (l.m(10.0) + gap)).max(2) as usize;
+    let skipped = history.passes.len().saturating_sub(max_slots - 1);
+    let shown = || history.passes.iter().skip(skipped);
+    let slots = px(u32::try_from(shown().len() + 1).unwrap_or(1));
     let bar_w = ((px(chart.w) + gap) / slots - gap).clamp(l.m(10.0), l.m(36.0));
-    let max = shown.iter().map(|p| p.took.as_secs_f32()).fold(0.0f32, f32::max);
+    let max = shown().map(|p| p.took.as_secs_f32()).fold(0.0f32, f32::max);
     let floor = px(chart.bottom());
     let full_h = px(chart.h);
     p.canvas.fill(Rect::new(chart.x, chart.bottom(), chart.w, 1), CARD_EDGE);
     let slot_x = |n: usize| px(chart.x) + px(u32::try_from(n).unwrap_or(0)) * (bar_w + gap);
-    for (n, pass) in shown.iter().enumerate() {
+    for (n, pass) in shown().enumerate() {
         let h = (full_h * pass.took.as_secs_f32() / max.max(f32::MIN_POSITIVE)).max(l.m(3.0));
         let fill = if pass.faults > 0 { Fill::Solid(BAD) } else { Fill::Down(ACCENT, ACCENT_FROM.over(CARD, 140)) };
         p.canvas.round_rect(slot_x(n), floor - h, bar_w, h, l.m(3.0), fill);
     }
-    let last_h = shown.last().map_or(full_h, |last| full_h * last.took.as_secs_f32() / max.max(f32::MIN_POSITIVE));
-    let now_x = slot_x(shown.len());
+    let last_h =
+        shown().next_back().map_or(full_h, |last| full_h * last.took.as_secs_f32() / max.max(f32::MIN_POSITIVE));
+    let now_x = slot_x(shown().len());
     p.canvas.round_rect(now_x, floor - last_h, bar_w, last_h, l.m(3.0), Fill::Solid(CHIP));
     let grown = (last_h * f32::from(s.percent.min(100)) / 100.0).max(l.m(3.0));
     p.canvas.round_rect(now_x, floor - grown, bar_w, grown, l.m(3.0), Fill::Solid(ACCENT.over(CARD, 90)));
 
     let b = p.mid(l.text.small, labels.y, labels.h);
     let dim = Style { color: DIM, ..small };
-    let now = format!("{}", s.passes + 1);
+    let now = num(s.passes + 1);
     let w = p.measure(&now, dim);
     p.text(now_x + (bar_w - w) / 2.0, b, &now, Style { color: ACCENT, ..small });
-    if let Some(first) = shown.first() {
-        let text = format!("{}", first.pass + 1);
+    if let Some(first) = shown().next() {
+        let text = num(first.pass + 1);
         let w = p.measure(&text, dim);
         p.text(slot_x(0) + (bar_w - w) / 2.0, b, &text, dim);
     }
@@ -607,29 +601,23 @@ pub fn cpus(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         p.fit(px(r.x), base, "No MP Services: every test runs on the boot processor", small, px(r.w));
         return;
     }
-    let mut cores: Vec<(u32, u32)> = list.iter().map(|c| (c.package, c.core)).collect();
-    cores.sort_unstable();
-    cores.dedup();
-    let mut packages: Vec<u32> = list.iter().map(|c| c.package).collect();
-    packages.sort_unstable();
-    packages.dedup();
+    let first_of =
+        |i: usize, same: fn(&CpuInfo, &CpuInfo) -> bool| !list[..i].iter().any(|before| same(before, &list[i]));
+    let cores = (0..list.len()).filter(|&i| first_of(i, |a, b| (a.package, a.core) == (b.package, b.core))).count();
+    let packages = (0..list.len()).filter(|&i| first_of(i, |a, b| a.package == b.package)).count();
     let mut x = px(r.x);
-    x += p.text(x, base, &format!("{} logical", list.len()), Pen::style(Face::SemiBold, l.text.body, TEXT)) + l.m(10.0);
-    let shape = format!(
-        "{} core{} \u{b7} {} package{}",
-        cores.len(),
-        if cores.len() == 1 { "" } else { "s" },
-        packages.len(),
-        if packages.len() == 1 { "" } else { "s" }
-    );
+    let logical = fixed::<32>(format_args!("{} logical", list.len()));
+    x += p.text(x, base, &logical, Pen::style(Face::SemiBold, l.text.body, TEXT)) + l.m(10.0);
+    let shape =
+        fixed::<64>(format_args!("{cores} core{} \u{b7} {packages} package{}", plural(cores), plural(packages)));
     x += p.text(x, base, &shape, small) + l.m(10.0);
     let active = match s.mode {
         Mode::Split => s.cpus.min(list.len()),
         Mode::Single => 1,
     };
     let note = match s.mode {
-        Mode::Split => format!("{active} running this test"),
-        Mode::Single => String::from("this test runs on the boot processor"),
+        Mode::Split => fixed::<48>(format_args!("{active} running this test")),
+        Mode::Single => fixed(format_args!("this test runs on the boot processor")),
     };
     let accent = Pen::style(Face::Regular, l.text.small, if s.mode == Mode::Split { ACCENT } else { MUTED });
     let w = p.measure(&note, accent);
@@ -638,10 +626,10 @@ pub fn cpus(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     }
 
     body.take_top(l.pad / 2);
-    let gap = super::layout::whole_px(l.m(5.0)).max(2);
+    let gap = whole_px(l.m(5.0)).max(2);
     let n = u32::try_from(list.len()).unwrap_or(u32::MAX);
-    let largest = super::layout::whole_px(l.m(30.0));
-    let smallest = super::layout::whole_px(l.m(10.0)).max(6);
+    let largest = whole_px(l.m(30.0));
+    let smallest = whole_px(l.m(10.0)).max(6);
     let (side, cols) = tile_grid(n, body.w, body.h, gap, largest, smallest);
     for (i, cpu) in list.iter().enumerate() {
         let i = u32::try_from(i).unwrap_or(0);
@@ -658,7 +646,7 @@ pub fn cpus(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         }
         let label_px = u16::try_from(side * 2 / 5).unwrap_or(u16::MAX).clamp(6, l.text.mono);
         let style = Pen::style(Face::Mono, label_px, if on { TEXT } else { MUTED });
-        let label = format!("{}", cpu.number);
+        let label = num(cpu.number);
         let w = p.measure(&label, style);
         let b = p.mid(label_px, y, side);
         p.text(px(x) + (px(side) - w) / 2.0, b, &label, style);

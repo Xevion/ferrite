@@ -1,56 +1,81 @@
 //! Durations, rates and sizes as the dashboard prints them.
 
-use alloc::format;
-use alloc::string::String;
+use core::fmt::{self, Write as _};
 use core::time::Duration;
+
+use heapless::String;
+
+/// What the functions below return.
+pub type Text = String<32>;
+
+/// `args` formatted into a fixed-capacity string, cut where it does not fit.
+#[must_use]
+pub fn fixed<const N: usize>(args: fmt::Arguments<'_>) -> String<N> {
+    let mut out = String::new();
+    // Only a full buffer fails, and a cut line is what that means.
+    out.write_fmt(args).ok();
+    out
+}
+
+/// A number as decimal text.
+#[must_use]
+pub fn num(n: impl fmt::Display) -> String<24> {
+    fixed(format_args!("{n}"))
+}
+
+/// `""` for one, else `"s"`.
+#[must_use]
+pub fn plural(n: impl TryInto<u64>) -> &'static str {
+    if matches!(n.try_into(), Ok(1)) { "" } else { "s" }
+}
 
 /// A running clock: `m:ss`, or `h:mm:ss` from an hour on.
 #[must_use]
-pub fn clock(d: Duration) -> String {
+pub fn clock(d: Duration) -> Text {
     let secs = d.as_secs();
     let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+    if h > 0 { fixed(format_args!("{h}:{m:02}:{s:02}")) } else { fixed(format_args!("{m}:{s:02}")) }
 }
 
 /// How long something took: hundredths under ten seconds, tenths under a minute, then a clock.
 #[must_use]
-pub fn took(d: Duration) -> String {
+pub fn took(d: Duration) -> Text {
     let millis = d.as_millis();
     let hundredths = (millis + 5) / 10;
     if hundredths < 1000 {
-        return format!("{}.{:02} s", hundredths / 100, hundredths % 100);
+        return fixed(format_args!("{}.{:02} s", hundredths / 100, hundredths % 100));
     }
     let tenths = (millis + 50) / 100;
     if tenths < 600 {
-        return format!("{}.{} s", tenths / 10, tenths % 10);
+        return fixed(format_args!("{}.{} s", tenths / 10, tenths % 10));
     }
     clock(Duration::from_secs(u64::try_from((millis + 500) / 1000).unwrap_or(u64::MAX)))
 }
 
 /// Bytes per second in decimal units, three significant digits.
 #[must_use]
-pub fn rate(bytes_per_sec: u64) -> String {
+pub fn rate(bytes_per_sec: u64) -> Text {
     let mb = (bytes_per_sec + 500_000) / 1_000_000;
     if mb < 1000 {
-        return format!("{mb} MB/s");
+        return fixed(format_args!("{mb} MB/s"));
     }
     let centi = (mb + 5) / 10;
     if centi < 1000 {
-        return format!("{}.{:02} GB/s", centi / 100, centi % 100);
+        return fixed(format_args!("{}.{:02} GB/s", centi / 100, centi % 100));
     }
     let deci = (mb + 50) / 100;
-    format!("{}.{} GB/s", deci / 10, deci % 10)
+    fixed(format_args!("{}.{} GB/s", deci / 10, deci % 10))
 }
 
 /// A buffer size in the largest binary unit it is a whole number of, else MiB.
 #[must_use]
-pub fn size(bytes: usize) -> String {
+pub fn size(bytes: usize) -> Text {
     const MIB: usize = 1 << 20;
     const GIB: usize = 1 << 30;
     if bytes >= GIB && bytes.is_multiple_of(GIB) {
-        format!("{} GiB", bytes / GIB)
+        fixed(format_args!("{} GiB", bytes / GIB))
     } else {
-        format!("{} MiB", bytes / MIB)
+        fixed(format_args!("{} MiB", bytes / MIB))
     }
 }
 
