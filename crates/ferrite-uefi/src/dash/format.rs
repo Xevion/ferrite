@@ -3,6 +3,7 @@
 use core::fmt::{self, Write as _};
 use core::time::Duration;
 
+use ferrite_mem::eta::{Confidence, Eta};
 use heapless::String;
 
 /// What the functions below return.
@@ -35,6 +36,33 @@ pub fn clock(d: Duration) -> Text {
     let secs = d.as_secs();
     let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
     if h > 0 { fixed(format_args!("{h}:{m:02}:{s:02}")) } else { fixed(format_args!("{m}:{s:02}")) }
+}
+
+/// Time left as the screens print it: to the second when it is measured (`12:34 left`), rounded and
+/// marked when it is a guess (`~34 min left`, `~1 h 25 min left`).
+#[must_use]
+pub fn left(eta: Eta) -> Text {
+    match eta.confidence {
+        Confidence::Measured => fixed(format_args!("{} left", clock(eta.remaining))),
+        Confidence::Estimated => fixed(format_args!("~{} left", approximate(eta.remaining))),
+    }
+}
+
+/// A time to the minute, or to five minutes from an hour and a half on.
+fn approximate(d: Duration) -> Text {
+    let secs = d.as_secs();
+    if secs < 90 {
+        return fixed(format_args!("1 min"));
+    }
+    let minutes = (secs + 30) / 60;
+    if minutes < 90 {
+        return fixed(format_args!("{minutes} min"));
+    }
+    let rounded = (minutes + 2) / 5 * 5;
+    match (rounded / 60, rounded % 60) {
+        (h, 0) => fixed(format_args!("{h} h")),
+        (h, m) => fixed(format_args!("{h} h {m:02} min")),
+    }
 }
 
 /// A clock with every field: `hh:mm:ss`.
@@ -122,6 +150,19 @@ mod tests {
     #[case(3_599_600, "1:00:00")]
     fn took_switches_units_at_the_rounding_edge(#[case] millis: u64, #[case] expected: &str) {
         check!(took(Duration::from_millis(millis)) == expected);
+    }
+
+    #[rstest]
+    #[case::measured_is_exact(754, Confidence::Measured, "12:34 left")]
+    #[case::measured_hours(3_723, Confidence::Measured, "1:02:03 left")]
+    #[case::guess_under_a_minute_and_a_half(89, Confidence::Estimated, "~1 min left")]
+    #[case::guess_to_the_minute(90, Confidence::Estimated, "~2 min left")]
+    #[case::guess_just_under_the_hour_and_a_half(5_369, Confidence::Estimated, "~89 min left")]
+    #[case::guess_to_five_minutes(5_400, Confidence::Estimated, "~1 h 30 min left")]
+    #[case::guess_whole_hours(7_199, Confidence::Estimated, "~2 h left")]
+    #[case::guess_a_long_run(27_000 + 1_000, Confidence::Estimated, "~7 h 45 min left")]
+    fn time_left_is_exact_only_when_measured(#[case] secs: u64, #[case] confidence: Confidence, #[case] want: &str) {
+        check!(left(Eta { remaining: Duration::from_secs(secs), confidence }) == want);
     }
 
     #[rstest]

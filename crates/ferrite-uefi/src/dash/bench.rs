@@ -31,6 +31,7 @@ use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
 use super::*;
 use crate::gfx::rect::{Plane, changed_bands};
+use crate::pace::Outlook;
 use crate::report::{CpuInfo, History, PassRecord, TestRecord};
 use crate::sweep::Coverage;
 use ferrite_net::{Link, MacAddr, Medium, PortStats, PortStatus, ServiceCounters};
@@ -80,6 +81,7 @@ impl Scenario {
             preset: Preset::Standard,
             paused: false,
             coverage: Coverage::NONE,
+            outlook: Outlook::NONE,
         };
         Self { status, history, faults: VecDeque::new(), frame: 0, kinds }
     }

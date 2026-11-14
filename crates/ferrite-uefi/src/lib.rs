@@ -15,10 +15,14 @@ pub mod cores;
 pub mod dash;
 pub mod diag;
 pub mod gfx;
+pub mod goal;
 pub mod gop;
+pub mod machine;
 pub mod net;
+pub mod pace;
 pub mod report;
 pub mod sweep;
 #[cfg(test)]
 mod testing;
+pub mod timings;
 pub mod ui;

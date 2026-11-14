@@ -8,7 +8,7 @@
 | `ferrite-hal` | `no_std` | Platform traits (MMIO, PCI config, DMA, clock, delay) and the address, unit and index types every driver shares |
 | `ferrite-xhci` | `no_std` + `alloc` | xHCI Debug Capability driver, written only against `ferrite-hal` |
 | `ferrite-efi` | `no_std` + `uefi` | UEFI backends for the HAL traits, the boot-volume log and file reads, the `log` sink, unattended exit, the firmware watchdog, firmware RNG and RTC, the link protocol the loader shares with its apps; behind features, the SNP network port (`net`) and the sweep's platform side (`crew`): free-memory claiming (`memory`), processor discovery and choice (`cores`), and running crew jobs on APs |
-| `ferrite-mem` | `no_std` + `alloc` | Memory-test building blocks (fills, verifies, own-address, PRSG and shifting patterns, moving-inversion steps, block copies) at the scalar, `rep` string, SSE2, AVX2 and AVX-512 tiers, over a typed `Region` and sets of them (`Regions`, read as one run of words); the test suite built from them (memtest86+'s tests and ferrite's patterns as steppable state machines) stuck-bit versus coupling analysis, and the crew protocol that runs consecutive split tests on many processors (`crew`) |
+| `ferrite-mem` | `no_std` + `alloc` | Memory-test building blocks (fills, verifies, own-address, PRSG and shifting patterns, moving-inversion steps, block copies) at the scalar, `rep` string, SSE2, AVX2 and AVX-512 tiers, over a typed `Region` and sets of them (`Regions`, read as one run of words); the test suite built from them (memtest86+'s tests and ferrite's patterns as steppable state machines) stuck-bit versus coupling analysis, the crew protocol that runs consecutive split tests on many processors (`crew`), and the time model of a pass (`eta`: each test's shape of work and waits, the ETA estimator, the live rate) |
 | `ferrite-testing` | std | Host-only test doubles: mock HAL, simulated DbC register file |
 | `ferrite-uefi` | `no_std`, UEFI app built as ELF | Memory sweep (the `ferrite-mem` suite) on every core, framebuffer dashboard (ratatui on text-only consoles), SNP + smoltcp networking, mDNS, picoserve status page and API; `membench`, the throughput of every `ferrite-mem` block per tier |
 | `ferrite-recon` | `no_std`, UEFI apps | `pciscan`, `xhciscan`, `dbcping`, `dbcbench` |
@@ -129,7 +129,7 @@ an `#[expect(clippy::disallowed_*)]`; everything else goes through it.
 | `uefi::runtime::reset` | `ferrite_efi::session` |
 | `uefi::boot::set_watchdog_timer` | `ferrite_efi::watchdog` |
 | `uefi::boot::exit_boot_services` | none |
-| `FileSystem::write` (truncating rewrite) | none; files go through `BootLog` |
+| `FileSystem::write` (truncating rewrite) | none; logs go through `BootLog`, small state files through `bootlog::replace_file` |
 | `uefi::println` / `print` | `BootLog`'s console echo and the panic handler |
 | `assert_eq` / `assert_ne` | none; assert2's `check!` / `assert!` |
 | std `Mutex`, `RwLock`, `HashMap`, `HashSet` | none; parking_lot and rustc_hash in the std crates |

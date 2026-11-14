@@ -157,7 +157,7 @@ impl Test {
         }
         let Some(active) = self.active.as_mut() else { return Progress::Done };
         let budget = (budget_bytes / size_of::<u64>()).max(BLOCK_WORDS) / BLOCK_WORDS * BLOCK_WORDS;
-        if active.work > 0
+        if (active.work > 0 || matches!(active.phase.op, Op::Wait(_)))
             && let Some(until) = active.run(memory, kernels, budget, now, faults)
         {
             return Progress::Waiting { until };

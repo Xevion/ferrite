@@ -3,6 +3,7 @@
 use ferrite_mem::analysis::Classification;
 use ferrite_mem::suite::{Mode, Preset};
 
+use crate::pace::Outlook;
 use crate::sweep::SweepStatus;
 pub use crate::testing::count;
 
@@ -24,5 +25,6 @@ pub fn idle_status() -> SweepStatus {
         preset: Preset::Standard,
         paused: false,
         coverage: crate::sweep::Coverage::NONE,
+        outlook: Outlook::NONE,
     }
 }

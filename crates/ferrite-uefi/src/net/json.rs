@@ -12,12 +12,15 @@ use core::time::Duration;
 use ferrite_hal::Instant;
 use ferrite_mem::Fault;
 use ferrite_mem::analysis::Classification;
+use ferrite_mem::eta::{Confidence, Eta, Position};
 
 use ferrite_net::http::JsonEscape;
 use ferrite_net::mdns;
 use ferrite_net::{NetStatus, PortStatus};
 
 use super::wifi::{WifiFacts, WifiView};
+use crate::goal::Goal;
+use crate::pace::Outlook;
 use crate::report::{CpuInfo, FaultRecord, PassRecord, Snapshot, TestRecord};
 use crate::sweep::SweepStatus;
 
@@ -89,6 +92,95 @@ pub struct Millis(pub Duration);
 impl ToJson for Millis {
     fn to_json(&self, out: &mut dyn fmt::Write) {
         u64::try_from(self.0.as_millis()).unwrap_or(u64::MAX).to_json(out);
+    }
+}
+
+/// A duration as whole seconds.
+pub struct Secs(pub Duration);
+
+impl ToJson for Secs {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        self.0.as_secs().to_json(out);
+    }
+}
+
+/// A time left: seconds and what the figure rests on.
+fn eta_fields(o: &mut Object<'_>, eta: Eta) {
+    let confidence = match eta.confidence {
+        Confidence::Measured => "measured",
+        Confidence::Estimated => "estimated",
+    };
+    o.field("left_s", &Secs(eta.remaining)).field("confidence", confidence);
+}
+
+impl ToJson for Goal {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        Object::new(out)
+            .field("passes", &self.passes.map(core::num::NonZeroU64::get))
+            .field("time_s", &self.time.map(Secs))
+            .field("stop_on_fault", &self.stop_on_fault)
+            .field("text", &Text(self))
+            .finish();
+    }
+}
+
+impl ToJson for Position {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        let mut o = Object::new(out);
+        match *self {
+            Self::Work { waits_passed, waits } => {
+                o.field("kind", "work").field("waits_passed", &waits_passed).field("waits", &waits);
+            },
+            Self::Wait { nth, waits, left } => {
+                o.field("kind", "wait").field("nth", &nth).field("waits", &waits).field("left_s", &Secs(left));
+            },
+        }
+        o.finish();
+    }
+}
+
+/// How the run is going as time, with the run measured against its goal as of `elapsed`.
+struct ProgressDoc<'a> {
+    outlook: &'a Outlook,
+    elapsed: Duration,
+    percent: u16,
+}
+
+impl ToJson for ProgressDoc<'_> {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        let o = self.outlook;
+        let overall = o.overall(self.elapsed, self.percent);
+        let eta = |e: Option<Eta>| e.map(|e| Section(move |o: &mut Object<'_>| eta_fields(o, e)));
+        Object::new(out)
+            .field("settled", &o.settled)
+            .field("reserve", &o.reserve)
+            .field("rate", &o.rate)
+            .field("position", &o.position)
+            .field(
+                "test",
+                &Section(|s: &mut Object<'_>| {
+                    s.field("left_s", &o.test_left.map(Secs)).field("permille", &o.test_permille);
+                }),
+            )
+            .field("pass", &eta(o.pass))
+            .field("pass_permille", &o.pass_permille)
+            .field("cycle_s", &o.cycle.map(Secs))
+            .field("cycle_left", &eta(o.cycle_left))
+            .field(
+                "overall",
+                &Section(|s: &mut Object<'_>| {
+                    s.field("elapsed_ms", &Millis(overall.elapsed))
+                        .field("permille", &overall.fill)
+                        .field("left", &eta(overall.left));
+                }),
+            )
+            .field(
+                "timings",
+                &Section(|s: &mut Object<'_>| {
+                    s.field("known", &o.known.0).field("of", &o.known.1);
+                }),
+            )
+            .finish();
     }
 }
 
@@ -345,6 +437,15 @@ impl ToJson for StatusDoc<'_> {
                         .field("percent", &status.test_percent);
                 }),
             )
+            .field("goal", &status.outlook.goal)
+            .field(
+                "progress",
+                &ProgressDoc {
+                    outlook: &status.outlook,
+                    elapsed: history.run_started.map_or(Duration::ZERO, |start| self.now - start),
+                    percent: status.percent,
+                },
+            )
             .field(
                 "faults",
                 &Section(|o: &mut Object<'_>| {
@@ -384,6 +485,7 @@ mod tests {
     use alloc::rc::Rc;
     use alloc::string::String;
     use alloc::vec;
+    use core::num::NonZeroU64;
 
     use assert2::check;
     use ferrite_mem::CpuAddr;
@@ -441,6 +543,20 @@ mod tests {
             preset: Preset::Thorough,
             paused: true,
             coverage: crate::sweep::Coverage::NONE,
+            outlook: Outlook {
+                goal: Goal { passes: NonZeroU64::new(3), time: Some(Duration::from_hours(2)), stop_on_fault: true },
+                settled: 1,
+                rate: Some(8_000_000_000),
+                position: Position::Wait { nth: 2, waits: 4, left: Duration::from_secs(192) },
+                test_left: Some(Duration::from_secs(312)),
+                test_permille: Some(450),
+                pass: Some(Eta { remaining: Duration::from_mins(10), confidence: Confidence::Estimated }),
+                pass_permille: Some(150),
+                cycle: Some(Duration::from_mins(40)),
+                cycle_left: Some(Eta { remaining: Duration::from_mins(25), confidence: Confidence::Estimated }),
+                known: (11, 11),
+                ..Outlook::NONE
+            },
         };
         let snapshot = Snapshot { status, history: &history, faults: &faults };
         let mut net = NetStatus::default();
@@ -468,6 +584,13 @@ mod tests {
                 r#""tier":"avx2","mode":"split","cpus":4,"#,
                 r#""pass":{"number":1,"percent":15,"elapsed_ms":2500},"#,
                 r#""test":{"name":"moving-inversions","index":2,"count":9,"percent":40},"#,
+                r#""goal":{"passes":3,"time_s":7200,"stop_on_fault":true,"text":"3 passes, 2h, first fault"},"#,
+                r#""progress":{"settled":1,"reserve":false,"rate":8000000000,"#,
+                r#""position":{"kind":"wait","nth":2,"waits":4,"left_s":192},"#,
+                r#""test":{"left_s":312,"permille":450},"pass":{"left_s":600,"confidence":"estimated"},"#,
+                r#""pass_permille":150,"cycle_s":2400,"cycle_left":{"left_s":1500,"confidence":"estimated"},"#,
+                r#""overall":{"elapsed_ms":5500,"permille":458,"left":{"left_s":3900,"confidence":"estimated"}},"#,
+                r#""timings":{"known":11,"of":11}},"#,
                 r#""faults":{"total":1,"analysis":{"kind":"stuck-bits","stuck":"0x10","text":"stuck bits 0x10"},"#,
                 r#""first":{"test":"moving-inversions","cpu":2,"addr":"0x40001008","expected":"0xffffffffffffffff","#,
                 r#""actual":"0xffffffffffffffef","flipped":"0x10"},"#,

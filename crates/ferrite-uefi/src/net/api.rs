@@ -2,13 +2,14 @@
 //!
 //! The server around them, with its `Host` and content-type guards, is `ferrite_net`'s.
 
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU64, NonZeroUsize};
 
 use ferrite_mem::suite::Preset;
 use ferrite_net::http::{Rejection, Route};
 use snafu::Snafu;
 
 use crate::control::Command;
+use crate::goal::{Goal, parse_duration};
 use ferrite_efi::cores::CoreChoice;
 
 /// A rejected preset name as far as it is worth echoing back.
@@ -20,6 +21,7 @@ pub enum Control {
     Resume,
     Restart,
     Cores,
+    Goal,
     Quit,
 }
 
@@ -30,6 +32,7 @@ impl From<Control> for &'static str {
             Control::Resume => "resume",
             Control::Restart => "restart",
             Control::Cores => "cores",
+            Control::Goal => "goal",
             Control::Quit => "quit",
         }
     }
@@ -52,6 +55,14 @@ pub enum BodyError {
     UnknownPreset { name: PresetName },
     #[snafu(display("cores must be \"all\", \"physical\" or a count of at least 1"))]
     BadCores,
+    #[snafu(display("unknown field {name:?}"))]
+    UnknownField { name: PresetName },
+    #[snafu(display("passes must be a whole number of at least 1, or null"))]
+    BadPasses,
+    #[snafu(display("time must be a duration such as \"90m\", \"2h\" or \"1h30m\" (1 second to a year), or null"))]
+    BadTime,
+    #[snafu(display("stop_on_fault must be true, false or null"))]
+    BadFlag,
 }
 
 /// The route for `method` on `path` (without the query).
@@ -64,6 +75,7 @@ pub fn resolve(method: &str, path: &str) -> Result<Route<Control>, Rejection> {
         "/api/resume" => (Route::Control(Control::Resume), "POST"),
         "/api/restart" => (Route::Control(Control::Restart), "POST"),
         "/api/cores" => (Route::Control(Control::Cores), "POST"),
+        "/api/goal" => (Route::Control(Control::Goal), "POST"),
         "/api/quit" => (Route::Control(Control::Quit), "POST"),
         _ => return Err(Rejection::NotFound),
     };
@@ -73,7 +85,9 @@ pub fn resolve(method: &str, path: &str) -> Result<Route<Control>, Rejection> {
 /// The command a control request's body asks for.
 ///
 /// Pause, resume and quit take an empty body or any flat object; restart takes
-/// `{"preset": "quick"}`, cores `{"cores": "all"}`, `{"cores": "physical"}` or `{"cores": 4}`.
+/// `{"preset": "quick"}`, cores `{"cores": "all"}`, `{"cores": "physical"}` or `{"cores": 4}`, and goal
+/// `{"passes": 3, "time": "2h", "stop_on_fault": true}` with every field optional (`{}` is no goal)
+/// and no other field allowed.
 pub fn command(control: Control, body: &[u8]) -> Result<Command, BodyError> {
     let body = body.trim_ascii();
     let get = |field: &'static str| -> Result<Scalar<'_>, BodyError> {
@@ -107,7 +121,29 @@ pub fn command(control: Control, body: &[u8]) -> Result<Command, BodyError> {
             };
             Ok(Command::Cores(choice))
         },
+        Control::Goal => goal(body).map(Command::Goal),
     }
+}
+
+/// The goal a body sets: fields that are absent or `null` are not part of it.
+fn goal(body: &[u8]) -> Result<Goal, BodyError> {
+    let mut goal = Goal::UNLIMITED;
+    flat_scan(body, |name, value| {
+        match (name, value) {
+            ("passes", Scalar::Int(n)) => goal.passes = Some(NonZeroU64::new(n).ok_or(BodyError::BadPasses)?),
+            ("passes", Scalar::Null) => goal.passes = None,
+            ("passes", _) => return Err(BodyError::BadPasses),
+            ("time", Scalar::Str(text)) => goal.time = Some(parse_duration(text).ok_or(BodyError::BadTime)?),
+            ("time", Scalar::Null) => goal.time = None,
+            ("time", _) => return Err(BodyError::BadTime),
+            ("stop_on_fault", Scalar::Bool(on)) => goal.stop_on_fault = on,
+            ("stop_on_fault", Scalar::Null) => goal.stop_on_fault = false,
+            ("stop_on_fault", _) => return Err(BodyError::BadFlag),
+            (other, _) => return Err(BodyError::UnknownField { name: truncated(other) }),
+        }
+        Ok(())
+    })?;
+    Ok(goal)
 }
 
 /// The preset whose kebab-case name is `name`.
@@ -135,23 +171,35 @@ fn truncated(name: &str) -> PresetName {
 enum Scalar<'a> {
     Str(&'a str),
     Int(u64),
-    /// `true`, `false` or `null`.
-    Literal,
+    Bool(bool),
+    Null,
 }
 
 /// Parse `body` as a flat JSON object and return the value of `key`, the last one if repeated.
 fn flat_field<'a>(body: &'a [u8], key: &str) -> Result<Option<Scalar<'a>>, BodyError> {
-    let mut c = Cursor { s: body, at: 0 };
     let mut found = None;
+    flat_scan(body, |name, value| {
+        if name == key {
+            found = Some(value);
+        }
+        Ok(())
+    })?;
+    Ok(found)
+}
+
+/// Parse `body` as a flat JSON object and hand `visit` each member in order.
+fn flat_scan<'a>(
+    body: &'a [u8],
+    mut visit: impl FnMut(&'a str, Scalar<'a>) -> Result<(), BodyError>,
+) -> Result<(), BodyError> {
+    let mut c = Cursor { s: body, at: 0 };
     c.expect(b'{')?;
     if !c.eat(b'}') {
         loop {
             let name = c.string()?;
             c.expect(b':')?;
             let value = c.scalar()?;
-            if name == key {
-                found = Some(value);
-            }
+            visit(name, value)?;
             if c.eat(b'}') {
                 break;
             }
@@ -159,7 +207,7 @@ fn flat_field<'a>(body: &'a [u8], key: &str) -> Result<Option<Scalar<'a>>, BodyE
         }
     }
     c.skip_ws();
-    if c.at == body.len() { Ok(found) } else { Err(c.syntax()) }
+    if c.at == body.len() { Ok(()) } else { Err(c.syntax()) }
 }
 
 struct Cursor<'a> {
@@ -225,7 +273,11 @@ impl<'a> Cursor<'a> {
                 let literal = [&b"true"[..], b"false", b"null"].into_iter().find(|l| rest.starts_with(l));
                 let literal = literal.ok_or_else(|| self.syntax())?;
                 self.at += literal.len();
-                Ok(Scalar::Literal)
+                Ok(match literal {
+                    b"true" => Scalar::Bool(true),
+                    b"false" => Scalar::Bool(false),
+                    _ => Scalar::Null,
+                })
             },
         }
     }
@@ -238,6 +290,14 @@ mod tests {
 
     use super::*;
 
+    fn goal(passes: Option<u64>, secs: Option<u64>, stop_on_fault: bool) -> Goal {
+        Goal {
+            passes: passes.and_then(NonZeroU64::new),
+            time: secs.map(core::time::Duration::from_secs),
+            stop_on_fault,
+        }
+    }
+
     #[rstest]
     #[case::page("GET", "/", Ok(Route::Page))]
     #[case::index("GET", "/index.html", Ok(Route::Page))]
@@ -245,6 +305,7 @@ mod tests {
     #[case::events("GET", "/api/events", Ok(Route::Events))]
     #[case::pause("POST", "/api/pause", Ok(Route::Control(Control::Pause)))]
     #[case::quit("POST", "/api/quit", Ok(Route::Control(Control::Quit)))]
+    #[case::goal("POST", "/api/goal", Ok(Route::Control(Control::Goal)))]
     #[case::get_control("GET", "/api/pause", Err(Rejection::MethodNotAllowed { allow: "POST" }))]
     #[case::post_page("POST", "/", Err(Rejection::MethodNotAllowed { allow: "GET" }))]
     #[case::preflight("OPTIONS", "/api/quit", Err(Rejection::MethodNotAllowed { allow: "POST" }))]
@@ -272,6 +333,19 @@ mod tests {
     #[case::cores_all(Control::Cores, r#"{"cores":"all"}"#, Command::Cores(CoreChoice::All))]
     #[case::cores_physical(Control::Cores, r#"{"cores":"physical"}"#, Command::Cores(CoreChoice::Physical))]
     #[case::cores_count(Control::Cores, r#"{"cores":3}"#, Command::Cores(CoreChoice::Count(NonZeroUsize::new(3).unwrap())))]
+    #[case::goal_none(Control::Goal, "{}", Command::Goal(Goal::UNLIMITED))]
+    #[case::goal_passes(Control::Goal, r#"{"passes":3}"#, Command::Goal(goal(Some(3), None, false)))]
+    #[case::goal_all(
+        Control::Goal,
+        r#" { "passes" : 2 , "time" : "1h30m" , "stop_on_fault" : true } "#,
+        Command::Goal(goal(Some(2), Some(5400), true))
+    )]
+    #[case::goal_nulls_clear(
+        Control::Goal,
+        r#"{"passes":null,"time":null,"stop_on_fault":null}"#,
+        Command::Goal(Goal::UNLIMITED)
+    )]
+    #[case::goal_last_wins(Control::Goal, r#"{"passes":2,"passes":5}"#, Command::Goal(goal(Some(5), None, false)))]
     fn commands(#[case] control: Control, #[case] body: &str, #[case] expected: Command) {
         check!(command(control, body.as_bytes()) == Ok(expected));
     }
@@ -281,6 +355,14 @@ mod tests {
     #[case::restart_missing(Control::Restart, "{}", BodyError::Missing { field: "preset" })]
     #[case::restart_number(Control::Restart, r#"{"preset":1}"#, BodyError::WrongType { field: "preset" })]
     #[case::restart_unknown(Control::Restart, r#"{"preset":"fast"}"#, BodyError::UnknownPreset { name: truncated("fast") })]
+    #[case::goal_empty(Control::Goal, "", BodyError::Syntax { at: 0 })]
+    #[case::goal_zero_passes(Control::Goal, r#"{"passes":0}"#, BodyError::BadPasses)]
+    #[case::goal_text_passes(Control::Goal, r#"{"passes":"3"}"#, BodyError::BadPasses)]
+    #[case::goal_bad_time(Control::Goal, r#"{"time":"90"}"#, BodyError::BadTime)]
+    #[case::goal_number_time(Control::Goal, r#"{"time":90}"#, BodyError::BadTime)]
+    #[case::goal_bad_flag(Control::Goal, r#"{"stop_on_fault":"yes"}"#, BodyError::BadFlag)]
+    #[case::goal_unknown_field(Control::Goal, r#"{"pases":3}"#, BodyError::UnknownField { name: truncated("pases") })]
+    #[case::goal_overflow(Control::Goal, r#"{"passes":99999999999999999999}"#, BodyError::Overflow)]
     #[case::cores_zero(Control::Cores, r#"{"cores":0}"#, BodyError::BadCores)]
     #[case::cores_word(Control::Cores, r#"{"cores":"half"}"#, BodyError::BadCores)]
     #[case::cores_overflow(Control::Cores, r#"{"cores":99999999999999999999}"#, BodyError::Overflow)]

@@ -128,6 +128,17 @@ impl Backing {
     }
 }
 
+/// Replace the file at `path` with exactly `bytes`, creating the directories.
+///
+/// `path` is `\`-separated from the volume's root, in `\EFI\ferrite` or below it. This is for small
+/// state kept between runs; a failure part way leaves the old file deleted or short, so readers
+/// must tolerate that.
+pub fn replace_file(path: &str, bytes: &[u8]) -> uefi::Result {
+    let mut backing = Backing::create(path, Echo::Silent)?;
+    backing.file.write(bytes).map_err(|e| e.to_err_without_payload())?;
+    backing.file.flush()
+}
+
 fn ensure_dir(root: &mut Directory, path: &CStr16) -> uefi::Result {
     if root.open(path, FileMode::Read, FileAttribute::empty()).is_ok() {
         return Ok(());

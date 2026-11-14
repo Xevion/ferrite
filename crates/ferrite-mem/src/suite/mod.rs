@@ -15,6 +15,7 @@
 //! aggressor rows next to a victim needs the DRAM address mapping (channel, rank, bank, row), which
 //! nothing here knows yet.
 
+use alloc::vec::Vec;
 use core::fmt;
 use core::time::Duration;
 
@@ -26,12 +27,14 @@ use crate::region::{Layout, Regions};
 
 mod plan;
 mod run;
+mod shape;
 mod share;
 #[cfg(test)]
 mod tests;
 
 pub use plan::Span;
 pub use run::{Progress, Test};
+pub use shape::{Place, Shape, Stage};
 pub use share::{Mode, shares};
 
 /// What a run covers.
@@ -308,16 +311,18 @@ pub struct Schedule {
     /// Work of the tests already done in this pass, and of the whole pass.
     pass_done: u64,
     pass_total: u64,
+    /// The shape of each test of the preset, in order, over the whole layout.
+    shapes: Vec<Shape>,
 }
 
 impl Schedule {
     #[must_use]
     pub fn new(layout: Layout, kernels: Kernels, config: Config, preset: Preset) -> Self {
         let first = TestKind::sequence(preset).next().unwrap_or(TestKind::AddressWalk);
-        let pass_total =
-            TestKind::sequence(preset).map(|k| Test::for_share(k, config, 0, &layout, layout.all()).total()).sum();
+        let shapes: Vec<Shape> = TestKind::sequence(preset).map(|k| Shape::of(k, &config, 0, &layout)).collect();
+        let pass_total = shapes.iter().map(Shape::work).sum();
         let test = Test::for_share(first, config, 0, &layout, layout.all());
-        Self { layout, kernels, config, preset, test, passes: 0, pass_done: 0, pass_total }
+        Self { layout, kernels, config, preset, test, passes: 0, pass_done: 0, pass_total, shapes }
     }
 
     /// A schedule whose first pass is `pass`, so a rebuilt one carries on with the patterns that follow.
@@ -371,6 +376,18 @@ impl Schedule {
     #[must_use]
     pub fn percent(&self) -> u16 {
         percent(self.pass_done + self.test.done(), self.pass_total)
+    }
+
+    /// The shape of each test of the preset, in the order a pass runs them.
+    #[must_use]
+    pub fn shapes(&self) -> &[Shape] {
+        &self.shapes
+    }
+
+    /// The current test's 0-based index among [`Schedule::shapes`].
+    #[must_use]
+    pub fn index(&self) -> usize {
+        self.position().0.saturating_sub(1)
     }
 
     /// Work of the pass's tests before the current one, and of the whole pass, for progress of a

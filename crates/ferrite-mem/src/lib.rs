@@ -23,6 +23,7 @@ pub mod analysis;
 mod block;
 mod caps;
 pub mod crew;
+pub mod eta;
 mod fault;
 mod kernels;
 mod ops;

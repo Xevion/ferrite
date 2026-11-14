@@ -9,6 +9,12 @@ use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
 use super::*;
 use crate::report::{CpuInfo, History, PassRecord, TestRecord};
+use core::num::NonZeroU64;
+
+use ferrite_mem::eta::{Confidence, Eta, Position};
+
+use crate::goal::Goal;
+use crate::pace::Outlook;
 use crate::sweep::Coverage;
 use ferrite_net::{Link, MacAddr, Medium, PortStats, PortStatus, ServiceCounters};
 
@@ -31,6 +37,7 @@ fn status() -> SweepStatus {
         preset: Preset::Standard,
         paused: false,
         coverage: Coverage::NONE,
+        outlook: Outlook::NONE,
     }
 }
 
@@ -93,6 +100,7 @@ fn faulty(status: &mut SweepStatus, faults: &mut VecDeque<FaultRecord>) {
     status.analysis = Classification::Mixed { stuck: 1 << 3 };
 }
 
+#[expect(clippy::large_types_passed_by_value, reason = "every caller builds a fresh status for the call")]
 fn render(
     dash: &mut Dashboard,
     status: SweepStatus,
@@ -147,6 +155,43 @@ fn a_clock_tick_allocates_nothing() {
     check!(allocated == 0);
 }
 
+/// A run with a goal of four passes, one done, waiting in the second of bit fade's four waits.
+fn with_goal() -> SweepStatus {
+    let outlook = Outlook {
+        goal: Goal { passes: NonZeroU64::new(4), time: None, stop_on_fault: false },
+        settled: 1,
+        rate: Some(8_000_000_000),
+        position: Position::Wait { nth: 2, waits: 4, left: Duration::from_secs(192) },
+        test_left: Some(Duration::from_secs(312)),
+        test_permille: Some(450),
+        pass: Some(Eta { remaining: Duration::from_mins(10), confidence: Confidence::Estimated }),
+        pass_permille: Some(720),
+        cycle: Some(Duration::from_mins(40)),
+        cycle_left: Some(Eta { remaining: Duration::from_mins(15), confidence: Confidence::Estimated }),
+        known: (11, 11),
+        ..Outlook::NONE
+    };
+    SweepStatus { test: TestKind::BitFade.name(), position: (11, 11), outlook, ..status() }
+}
+
+#[test]
+fn the_overall_bar_stays_empty_without_a_goal_and_fills_against_one() {
+    let (history, faults) = (history(), VecDeque::new());
+    let filled = |status: SweepStatus| {
+        let mut dash = Dashboard::new(1280, 800).expect("dashboard");
+        render(&mut dash, status, &history, &faults, 500);
+        let l = dash.layout;
+        let wanted = [theme::FILL.b, theme::FILL.g, theme::FILL.r, 255];
+        let width = l.pass.w as usize;
+        (l.pass.y..l.pass.y + l.row_h).any(|y| {
+            let row = (y as usize * 1280 + l.pass.x as usize) * 4;
+            dash.canvas.bgra()[row..row + width * 4].as_chunks::<4>().0.contains(&wanted)
+        })
+    };
+    check!(!filled(status()), "nothing to measure against, so nothing to fill");
+    check!(filled(with_goal()));
+}
+
 #[test]
 fn the_first_fault_shows_in_the_errors_the_tab_and_the_clock() {
     let mut dash = Dashboard::new(1280, 800).expect("dashboard");
@@ -198,10 +243,10 @@ fn png_frames() {
     std::fs::create_dir_all(&dir).expect("create the output directory");
     let no_network = Some(NoNetwork { wired: "no wired NIC driven by the firmware", wifi: "scanning" });
     for (w, h) in [(1920, 1080), (1024, 768)] {
-        for scene in ["running", "fault", "no-network"] {
+        for scene in ["running", "fault", "no-network", "goal"] {
             let mut dash = Dashboard::new(w, h).expect("dashboard");
             let (history, mut faults) = (history(), VecDeque::new());
-            let mut status = status();
+            let mut status = if scene == "goal" { with_goal() } else { status() };
             if scene == "fault" {
                 faulty(&mut status, &mut faults);
             }

@@ -8,7 +8,7 @@
 //! last, so the steady state pushes a few small rectangles to the screen. The page behind the
 //! widgets is drawn only on a full redraw: the first frame, and when the screen size changes.
 
-mod format;
+pub(crate) mod format;
 mod layout;
 mod theme;
 mod widgets;
@@ -17,6 +17,7 @@ use core::time::Duration;
 
 use ferrite_hal::Instant;
 use ferrite_mem::analysis::Classification;
+use ferrite_mem::eta::{Eta, Position};
 use ferrite_mem::suite::{Mode, Preset, TestKind};
 use ferrite_net::NetStatus;
 use snafu::{OptionExt as _, ResultExt as _, Snafu};
@@ -25,7 +26,9 @@ use self::layout::Layout;
 use self::widgets::Pen;
 use crate::gfx::text::{FontError, Fonts};
 use crate::gfx::{Canvas, DirtyRects, Recording, Rect};
+use crate::goal::Goal;
 use crate::net::NoNetwork;
+use crate::pace::Overall;
 use crate::report::{FaultRecord, Snapshot};
 use crate::sweep::{Coverage, SweepStatus};
 
@@ -58,6 +61,12 @@ impl Frame<'_> {
 
     fn elapsed(&self) -> Duration {
         self.snapshot.history.run_started.map_or(Duration::ZERO, |start| self.now - start)
+    }
+
+    /// The run against its goal, by the whole second so what it prints changes once a second.
+    fn overall(&self) -> Overall {
+        let s = self.status();
+        s.outlook.overall(Duration::from_secs(self.elapsed().as_secs()), s.percent)
     }
 
     fn pass_elapsed(&self) -> Duration {
@@ -96,15 +105,15 @@ struct Keys {
     setup: Setup,
     clock: (State, u64, u64),
     tabs: u64,
-    system: (Preset, &'static str, usize, usize, Mode, usize, Coverage),
-    pass: (u64, u16, u64, bool),
-    test: ((usize, usize), u16, bool),
-    detail: (Mode, usize, usize, u64),
+    system: (Preset, &'static str, usize, usize, Mode, usize, Coverage, (usize, usize)),
+    pass: (u64, u16, u64, bool, Option<Eta>, Option<u16>, Overall),
+    test: ((usize, usize), u16, bool, Option<u16>, Position, Option<Duration>),
+    detail: (Mode, usize, usize, u64, Option<u64>, Position),
     tests: (u64, (usize, usize), u64, bool),
     map: ((usize, usize), Option<usize>, usize),
     net: (Option<NetStatus>, Option<NoNetwork>),
     errors: (u64, usize, Option<FaultRecord>, Classification, u64),
-    log: (u64, &'static str, (usize, usize), u64, u64, u64),
+    log: (u64, &'static str, (usize, usize), u64, u64, u64, Goal),
     hints: bool,
 }
 
@@ -116,15 +125,30 @@ impl Keys {
             setup: Setup { width, height },
             clock: (f.state(), s.faults, f.elapsed().as_secs()),
             tabs: s.faults,
-            system: (s.preset, s.tier, s.bytes, history.cpus.len(), s.mode, s.cpus, s.coverage),
-            pass: (s.passes, s.percent, f.pass_elapsed().as_secs(), s.paused),
-            test: (s.position, s.test_percent, s.paused),
-            detail: (s.mode, s.cpus, history.cpus.len(), history.revision),
+            system: (s.preset, s.tier, s.bytes, history.cpus.len(), s.mode, s.cpus, s.coverage, s.outlook.known),
+            pass: (
+                s.passes,
+                s.percent,
+                f.pass_elapsed().as_secs(),
+                s.paused,
+                s.outlook.pass,
+                s.outlook.pass_permille,
+                f.overall(),
+            ),
+            test: (
+                s.position,
+                s.test_percent,
+                s.paused,
+                s.outlook.test_permille,
+                s.outlook.position,
+                s.outlook.test_left,
+            ),
+            detail: (s.mode, s.cpus, history.cpus.len(), history.revision, s.outlook.rate, s.outlook.position),
             tests: (history.revision, s.position, s.passes, s.paused),
             map: (s.position, (s.position.1 > 0).then(|| widgets::active_cell(s.test_percent)), s.bytes),
             net: (f.net, f.net_err),
             errors: (s.faults, f.snapshot.faults.len(), f.snapshot.faults.back().copied(), s.analysis, s.passes),
-            log: (f.elapsed().as_secs(), s.test, s.position, s.passes, s.faults, history.revision),
+            log: (f.elapsed().as_secs(), s.test, s.position, s.passes, s.faults, history.revision, s.outlook.goal),
             hints: s.paused,
         }
     }

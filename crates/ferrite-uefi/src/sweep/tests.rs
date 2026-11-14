@@ -384,6 +384,38 @@ mod rotation {
         check!(sweep.status().passes == 2);
     }
 
+    /// Step and look at `sweep` in 1 ms ticks until `done`.
+    fn watch_until(sweep: &mut Sweep, mut done: impl FnMut(&Sweep) -> bool) {
+        let mut ms = 0;
+        while !done(sweep) {
+            ms += 1;
+            let now = Instant::from_epoch(Duration::from_millis(ms));
+            sweep.tick(now);
+            sweep.step(16 << 10, now, None);
+        }
+    }
+
+    #[rstest]
+    fn a_pass_counts_for_the_goal_only_once_its_reserve_has_been_tested(open_rig: (Sweep, Calls)) {
+        let (mut sweep, _) = open_rig;
+        sweep.set_goal(Goal { passes: core::num::NonZeroU64::new(1), ..Goal::UNLIMITED });
+        // The main pass ends: the next look finds the rotation due but not yet opened.
+        watch_until(&mut sweep, |s| s.run.as_ref().is_some_and(|r| r.suite.passes() == 1));
+        sweep.tick(Instant::from_epoch(Duration::from_secs(1)));
+        let o = sweep.status().outlook;
+        check!(o.settled == 0, "one pass done, its rotation still to come");
+        check!(o.goal.met(o.settled, Duration::ZERO, 0).is_none());
+        watch_until(&mut sweep, |s| s.rotation.is_open());
+        sweep.tick(Instant::from_epoch(Duration::from_secs(2)));
+        let o = sweep.status().outlook;
+        check!(o.settled == 0 && o.reserve, "the reserve is under test");
+        watch_until(&mut sweep, |s| !s.rotation.is_open());
+        sweep.tick(Instant::from_epoch(Duration::from_secs(3)));
+        let o = sweep.status().outlook;
+        check!(o.settled == 1 && !o.reserve);
+        check!(o.goal.met(o.settled, Duration::ZERO, 0).is_some());
+    }
+
     #[rstest]
     #[expect(clippy::used_underscore_binding, reason = "the buffer field only owns memory outside tests")]
     fn a_fault_in_the_reserve_is_reported_with_its_address_and_the_pass_it_followed(open_rig: (Sweep, Calls)) {
@@ -480,4 +512,65 @@ fn only_aps_that_never_began_are_called_off() {
     assert!(let Some(ended) = ended);
     ended.retire();
     check!(never_began(&[0, 1, 2, 3], &seats) == [0, 3]);
+}
+
+/// Step and look at `sweep` as the main loop does, on a clock that jumps to the end of a wait.
+fn drive(sweep: &mut Sweep, now: &mut Instant, until: impl Fn(&Sweep) -> bool) {
+    while !until(sweep) {
+        sweep.tick(*now);
+        if sweep.has_work(*now) {
+            sweep.step(64 << 10, *now, None);
+        } else if let Some(end) = sweep.waiting_until() {
+            *now = end;
+        }
+        *now = *now + Duration::from_millis(5);
+    }
+    sweep.tick(*now);
+}
+
+#[test]
+fn the_outlook_counts_bit_fades_waits_as_time_and_knows_the_next_pass_from_this_one() {
+    use ferrite_mem::eta::{Confidence, Position};
+
+    let fade = Duration::from_secs(5);
+    let mut sweep = Sweep::with_buffer(
+        Some(host_blocks(&[1024])),
+        Kernels::uniform(Kernel::SCALAR),
+        Config { fade, ..CFG },
+        Preset::Thorough,
+        None,
+    );
+    let mut now = Instant::from_epoch(Duration::from_secs(1));
+    drive(&mut sweep, &mut now, |s| s.waiting_until().is_some() && s.status().test == "bit fade");
+    let outlook = sweep.status().outlook;
+    check!(outlook.position == Position::Wait { nth: 1, waits: 4, left: fade });
+    check!(outlook.rate.is_none(), "no rate to report while the memory sits");
+    check!(outlook.pass.is_none(), "the first pass has no priors and nothing agrees yet");
+    // Two seconds into the wait.
+    now = now + Duration::from_secs(2);
+    sweep.tick(now);
+    check!(sweep.status().outlook.position == Position::Wait { nth: 1, waits: 4, left: Duration::from_secs(3) });
+    // The pass carries on through the other three waits, and the next one starts knowing its tests.
+    drive(&mut sweep, &mut now, |s| s.status().passes == 1);
+    let outlook = sweep.status().outlook;
+    let (known, tests) = outlook.known;
+    check!(known == tests && tests == sweep.status().position.1, "every test of the pass has a time now");
+    assert!(let Some(left) = outlook.pass);
+    check!(left.confidence == Confidence::Measured);
+    check!(left.remaining >= fade * 4, "the waits alone are {:?}, and {left:?} is left", fade * 4);
+}
+
+#[test]
+fn a_goal_ends_the_run_by_what_the_status_reports() {
+    let mut sweep = sweep_of_words(2048);
+    let goal = Goal { passes: core::num::NonZeroU64::new(2), time: None, stop_on_fault: false };
+    sweep.set_goal(goal);
+    let mut now = Instant::from_epoch(Duration::from_secs(1));
+    drive(&mut sweep, &mut now, |s| s.status().outlook.settled >= 1);
+    let o = sweep.status().outlook;
+    check!(o.goal == goal && o.settled == 1);
+    check!(o.goal.met(o.settled, Duration::ZERO, 0).is_none());
+    drive(&mut sweep, &mut now, |s| s.status().outlook.settled >= 2);
+    let o = sweep.status().outlook;
+    check!(o.goal.met(o.settled, Duration::ZERO, 0).is_some());
 }

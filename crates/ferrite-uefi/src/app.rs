@@ -29,7 +29,7 @@ use crate::gop::Display;
 use crate::net::Net;
 use crate::net::notify::{self, Watch};
 use crate::report::Snapshot;
-use crate::sweep::{Flow, Sweep, SweepStatus};
+use crate::sweep::{Flow, Sweep, SweepStatus, Tended};
 use crate::ui::{self, View};
 
 /// The processors split tests run on. Every logical processor: verify-heavy kernels scale up to
@@ -176,6 +176,8 @@ struct Desk<'a> {
     watchdog: Option<Keepalive>,
     /// Requests from the console, the loader's link and the status page, not yet applied.
     commands: Commands,
+    /// The goal was met and the run is being ended for it.
+    goal_met: bool,
 }
 
 impl<'a> App<'a> {
@@ -208,6 +210,7 @@ impl<'a> App<'a> {
             loader,
             watchdog,
             commands: Commands::default(),
+            goal_met: false,
         };
         Ok(Self { desk, sweep: Sweep::new(caps, cores), chunk_bytes: START_CHUNK_BYTES, vector })
     }
@@ -222,7 +225,12 @@ impl<'a> App<'a> {
     pub fn run(&mut self) {
         loop {
             let now = self.now();
-            let deadline = self.desk.duties(now, &self.sweep.snapshot());
+            self.sweep.tick(now);
+            let tended = self.desk.duties(now, &self.sweep.snapshot());
+            if let Some(goal) = tended.goal {
+                self.sweep.set_goal(goal);
+            }
+            let deadline = tended.next;
             if self.apply_commands() == Flow::Stop {
                 break;
             }
@@ -246,6 +254,7 @@ impl<'a> App<'a> {
             sweep.analysis
         );
         self.sweep.check_cores();
+        self.sweep.save_timings(self.now());
         self.desk.announce_end(&self.sweep.snapshot());
         self.desk.net.shutdown();
     }
@@ -260,6 +269,7 @@ impl<'a> App<'a> {
                 Command::Resume => self.sweep.resume(),
                 Command::Restart(preset) => self.sweep.restart(preset),
                 Command::Cores(choice) => self.sweep.set_cores(choice),
+                Command::Goal(goal) => self.sweep.set_goal(goal),
                 Command::Quit => flow = Flow::Stop,
             }
         }
@@ -304,9 +314,10 @@ impl<'a> App<'a> {
 
 impl Desk<'_> {
     /// One round of the duties: re-arm the watchdog, poll the network, read keys and the loader's
-    /// stop, draw when a frame is due, log. Returns when they are next due, or `None` when a queued
-    /// command has to cut the sweep short.
-    fn duties(&mut self, now: Instant, snapshot: &Snapshot<'_>) -> Option<Instant> {
+    /// stop, draw when a frame is due, log. Returns when they are next due (`None` when a queued
+    /// command has to cut the sweep short) and any goal set meanwhile, which takes effect at once
+    /// instead of waiting for the split test in progress to end.
+    fn duties(&mut self, now: Instant, snapshot: &Snapshot<'_>) -> Tended {
         if let Some(watchdog) = self.watchdog.as_mut() {
             watchdog.tick(now);
         }
@@ -318,6 +329,7 @@ impl Desk<'_> {
         if self.desktop_stop_requested() {
             self.commands.push(Command::Quit);
         }
+        self.check_goal(now, snapshot);
         let sweep = &snapshot.status;
         let status = self.net.status();
         let net = (!status.is_empty()).then_some(status);
@@ -326,10 +338,24 @@ impl Desk<'_> {
             self.next_frame = now + FRAME_INTERVAL;
         }
         self.diag.tick(now, net.as_ref(), sweep);
-        if self.commands.interrupting() {
-            return None;
+        let goal = self.commands.take_goal();
+        let due = (!self.commands.interrupting()).then(|| (now + net_wait).min(self.next_frame));
+        Tended { next: due, goal }
+    }
+
+    /// End the run the way `q` does once its goal is met.
+    fn check_goal(&mut self, now: Instant, snapshot: &Snapshot<'_>) {
+        let status = &snapshot.status;
+        let outlook = &status.outlook;
+        let elapsed = snapshot.history.run_started.map_or(Duration::ZERO, |start| now - start);
+        if self.goal_met || snapshot.history.run_started.is_none() {
+            return;
         }
-        Some((now + net_wait).min(self.next_frame))
+        if let Some(met) = outlook.goal.met(outlook.settled, elapsed, status.faults) {
+            self.goal_met = true;
+            log::info!("run: goal met ({met}) after {}s, ending the run", elapsed.as_secs());
+            self.commands.push(Command::Quit);
+        }
     }
 
     /// Tell the user the run ended, and give the network a few seconds to deliver that and whatever
@@ -417,7 +443,8 @@ impl Desk<'_> {
                 e.to_string()
             },
             Screen::Text { terminal, last } => {
-                let view = View { sweep: snapshot.status, net, net_err };
+                let elapsed = snapshot.history.run_started.map_or(0, |start| (now - start).as_secs());
+                let view = View { sweep: snapshot.status, net, net_err, elapsed };
                 if *last == Some(view) {
                     return;
                 }

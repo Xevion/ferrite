@@ -6,6 +6,7 @@
     reason = "p, r, f, s and l are the pen, rectangle, frame, status and layout in every widget"
 )]
 
+use ferrite_mem::eta::Position;
 use ferrite_mem::suite::{Mode, TestKind};
 use ferrite_net::{Medium, PortStatus};
 use heapless::String;
@@ -19,7 +20,7 @@ use super::theme::{
 use super::{Frame, State};
 use crate::gfx::text::{Case, Face, Fonts, Style};
 use crate::gfx::{Canvas, Rect, Rgb, px, whole_px};
-use crate::report::{CpuInfo, FaultRecord, TestRecord};
+use crate::report::{CpuInfo, FaultRecord};
 
 /// The placeholder for what this build cannot read from the machine.
 const NONE: &str = "\u{2014}";
@@ -301,6 +302,11 @@ pub fn system(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         fixed(format_args!("{} under test", format::size(s.bytes)))
     };
     let preset: &str = s.preset.into();
+    let timings: String<32> = match s.outlook.known {
+        (_, 0) => fixed(format_args!("{NONE}")),
+        (0, n) => fixed(format_args!("learning, 0 of {n}")),
+        (known, n) => fixed(format_args!("{known} of {n} known")),
+    };
     p.pairs(
         r,
         &[
@@ -309,7 +315,7 @@ pub fn system(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
             ("Preset", preset),
             ("Tier", s.tier),
             ("Modules", NONE),
-            ("Timings", NONE),
+            ("Timings", &timings),
         ],
     );
 }
@@ -324,26 +330,52 @@ fn fill_of(paused: bool) -> Rgb {
 
 pub fn pass(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
+    let o = &s.outlook;
     let l = *p.l;
     let gap = l.m(8.0);
-    let overall = Rect::new(r.x, r.y, r.w, l.row_h);
-    p.bar_row(overall, "Overall", NONE, 0, fill_of(s.paused));
+    let overall = f.overall();
+    let rect = Rect::new(r.x, r.y, r.w, l.row_h);
+    let figure: String<40> = match (overall.fill, overall.left) {
+        (Some(fill), Some(left)) => fixed(format_args!("{}% {SEPARATOR} {}", fill / 10, format::left(left))),
+        (Some(fill), None) => fixed(format_args!("{}% {SEPARATOR} {}", fill / 10, format::clock(overall.elapsed))),
+        (None, _)
+            if s.outlook.goal.stop_on_fault && s.outlook.goal.passes.is_none() && s.outlook.goal.time.is_none() =>
+        {
+            fixed(format_args!("first fault {SEPARATOR} {}", format::clock(overall.elapsed)))
+        },
+        (None, _) => fixed(format_args!("no goal {SEPARATOR} {}", format::clock(overall.elapsed))),
+    };
+    p.bar_row(rect, "Overall", &figure, u32::from(overall.fill.unwrap_or(0)), fill_of(s.paused));
     let pass = Rect::new(r.x, r.y + l.row_h + whole_px(gap), r.w, l.row_h);
-    let figure = fixed::<32>(format_args!("{}% {SEPARATOR} {}", s.percent.min(100), format::clock(f.pass_elapsed())));
+    let permille = o.pass_permille.map_or_else(|| permille(s.percent), u32::from);
+    let figure: String<40> = o.pass.map_or_else(
+        || fixed(format_args!("{}% {SEPARATOR} {}", permille / 10, format::clock(f.pass_elapsed()))),
+        |eta| fixed(format_args!("{}% {SEPARATOR} {}", permille / 10, format::left(eta))),
+    );
     let label = fixed::<24>(format_args!("Pass {}", s.passes + 1));
-    p.bar_row(pass, &label, &figure, permille(s.percent), fill_of(s.paused));
+    p.bar_row(pass, &label, &figure, permille, fill_of(s.paused));
 }
 
 pub fn test(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
+    let o = &s.outlook;
     let (i, n) = s.position;
     if n == 0 {
         p.bar_row(r, "Test", NONE, 0, fill_of(s.paused));
         return;
     }
     let label = fixed::<24>(format_args!("Test {i}/{n}"));
-    let figure = fixed::<8>(format_args!("{}%", s.test_percent.min(100)));
-    p.bar_row(r, &label, &figure, permille(s.test_percent), fill_of(s.paused));
+    let permille = o.test_permille.map_or_else(|| permille(s.test_percent), u32::from);
+    let figure: String<40> = match (o.position, o.test_left) {
+        (Position::Wait { nth, waits, left }, _) => {
+            fixed(format_args!("wait {nth}/{waits} {SEPARATOR} {}", format::clock(left)))
+        },
+        (Position::Work { .. }, Some(left)) => {
+            fixed(format_args!("{}% {SEPARATOR} {}", permille / 10, format::clock(left)))
+        },
+        (Position::Work { .. }, None) => fixed(format_args!("{}%", permille / 10)),
+    };
+    p.bar_row(r, &label, &figure, permille, fill_of(s.paused));
 }
 
 pub fn detail(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
@@ -353,14 +385,14 @@ pub fn detail(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         Mode::Split => fixed(format_args!("{} / {total} parallel", s.cpus.min(total))),
         Mode::Single => fixed(format_args!("1 / {total} {SEPARATOR} single core")),
     };
-    let rate = f
-        .snapshot
-        .history
-        .tests
-        .back()
-        .and_then(TestRecord::rate)
-        .map_or_else(|| fixed(format_args!("{NONE}")), format::rate);
-    p.pairs(r, &[("Range", NONE), ("Threads", &threads), ("Pattern", NONE), ("Last rate", &rate)]);
+    let rate: String<48> = match (s.outlook.position, s.outlook.rate) {
+        (Position::Wait { nth, waits, left }, _) => {
+            fixed(format_args!("idle, wait {nth}/{waits} {SEPARATOR} {}", format::clock(left)))
+        },
+        (Position::Work { .. }, Some(rate)) if !s.paused => format::rate(rate).as_str().try_into().unwrap_or_default(),
+        (Position::Work { .. }, _) => fixed(format_args!("{NONE}")),
+    };
+    p.pairs(r, &[("Range", NONE), ("Threads", &threads), ("Pattern", NONE), ("Rate", &rate)]);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -698,11 +730,16 @@ pub fn log(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         x += p.fit(x, base, &text, style, px(r.right()) / 2.0 - x) + l.m(14.0);
     }
     let (i, n) = s.position;
-    let line: String<128> = if n == 0 {
+    let goal: String<64> = if s.outlook.goal.is_unlimited() {
+        String::new()
+    } else {
+        fixed(format_args!(" {SEPARATOR} goal: {}", s.outlook.goal))
+    };
+    let line: String<192> = if n == 0 {
         fixed(format_args!("[{}] preparing the buffer", hms(f.elapsed())))
     } else {
         fixed(format_args!(
-            "[{}] pass {} {SEPARATOR} test {i}/{n} {SEPARATOR} {}",
+            "[{}] pass {} {SEPARATOR} test {i}/{n} {SEPARATOR} {}{goal}",
             hms(f.elapsed()),
             s.passes + 1,
             s.test

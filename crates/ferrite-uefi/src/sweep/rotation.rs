@@ -147,6 +147,7 @@ impl Sweep {
         if lend > 0 {
             self.rotation.pages = Box::new(pages);
             self.rotation.lend = lend;
+            self.pace.set_rotation_scale(lend, self.rotation.main_bytes);
         }
         self
     }
@@ -170,17 +171,31 @@ impl Sweep {
 
     /// A pass has ended, nothing of the next has run and its window has not been had.
     fn rotation_due(&self) -> bool {
+        !self.paused && self.rotation_pending()
+    }
+
+    /// [`Sweep::rotation_due`] but for a pause, which only delays it.
+    fn rotation_pending(&self) -> bool {
         let Some(run) = &self.run else { return false };
         let passes = run.suite.passes();
         let test = run.suite.test();
         self.rotation.lend > 0
             && !self.rotation.is_open()
-            && !self.paused
             && passes > 0
             && self.rotation.rotated_at != Some(passes)
             && run.suite.position().0 == 1
             && test.phase() == 0
             && test.done() == 0
+    }
+
+    /// Passes done together with their reserve rotation: the ones a goal of so many passes counts.
+    pub(super) fn settled_passes(&self) -> u64 {
+        let Some(run) = &self.run else { return 0 };
+        match &self.rotation.window {
+            Some(window) => window.pass,
+            None if self.rotation_pending() => run.suite.passes().saturating_sub(1),
+            None => run.suite.passes(),
+        }
     }
 
     fn open_window(&mut self, now: Instant) {

@@ -67,23 +67,24 @@ build profile="dev": vendor
     cargo efi-build --profile {{ profile }}
     cargo efi-app-build --profile {{ profile }}
 
-# build one UEFI app and stage it as the ESP bootloader under ./esp; wifitrace and ferrite-uefi also get the firmware of every supported Wi-Fi chip (`ferrite-dev firmware`, chips in ferrite-wifi-sys/firmware-chips.txt), wifi.env from the WPA_ lines of .env and notify.env from its NOTIFY_ lines
+# build one UEFI app and stage it as the ESP bootloader under ./esp; wifitrace and ferrite-uefi also get the firmware of every supported Wi-Fi chip (`ferrite-dev firmware`, chips in ferrite-wifi-sys/firmware-chips.txt), wifi.env from the WPA_ lines of .env, notify.env from its NOTIFY_ lines and run.env from its RUN_ lines
 stage app="ferrite-uefi": vendor
     mkdir -p esp/efi/boot
     cargo run -q -p ferrite-dev -- build {{ app }} --out esp/efi/boot/bootx64.efi
     {{ if app =~ "^(wifitrace|ferrite-uefi)$" { "cargo run -q -p ferrite-dev -- firmware && just _stage-env" } else { "true" } }}
     test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
 
-# write wifi.env (efi/ferrite/firmware) and notify.env (efi/ferrite) from the .env lines, removing stale ones; values are never printed
+# write wifi.env (efi/ferrite/firmware), notify.env and run.env (efi/ferrite) from the .env lines, removing stale ones; values are never printed
 _stage-env:
     #!/usr/bin/env bash
     set -euo pipefail
     dir=esp/efi/ferrite
     mkdir -p "$dir/firmware"
-    rm -f "$dir/firmware/wifi.env" "$dir/notify.env"
+    rm -f "$dir/firmware/wifi.env" "$dir/notify.env" "$dir/run.env"
     if test -f .env; then
         grep -E '^WPA_[A-Z_0-9]+=' .env > "$dir/firmware/wifi.env" || true
         grep -E '^NOTIFY_[A-Z_0-9]+=' .env > "$dir/notify.env" || true
+        grep -E '^RUN_[A-Z_0-9]+=' .env > "$dir/run.env" || true
     fi
     find "$dir" -maxdepth 2 -name '*.env' -empty -delete
 
@@ -108,13 +109,14 @@ qemu app="ferrite-uefi" mode="gui" net="user" cpu="" smp="": (stage app)
 qemu-log app="ferrite-uefi":
     mtype -i {{ qemu_esp }} ::/efi/ferrite/{{ app }}.txt
 
-# copy the staged ESP onto a mounted FAT32 USB stick, the app and the config under efi/ferrite (firmware/, with wifi.env, and notify.env), not the app logs: `just stage-usb /run/media/$USER/FERRITE`
+# copy the staged ESP onto a mounted FAT32 USB stick, the app and the config under efi/ferrite (firmware/, with wifi.env, notify.env and run.env), not the app logs: `just stage-usb /run/media/$USER/FERRITE`
 stage-usb mount app="ferrite-uefi": (stage app)
     mkdir -p "{{ mount }}/efi/boot" "{{ mount }}/efi/ferrite"
     cp -f esp/efi/boot/bootx64.efi "{{ mount }}/efi/boot/bootx64.efi"
-    rm -f "{{ mount }}/efi/ferrite/firmware/wifi.env" "{{ mount }}/efi/ferrite/notify.env"
+    rm -f "{{ mount }}/efi/ferrite/firmware/wifi.env" "{{ mount }}/efi/ferrite/notify.env" "{{ mount }}/efi/ferrite/run.env"
     if test -d esp/efi/ferrite/firmware; then cp -rf esp/efi/ferrite/firmware "{{ mount }}/efi/ferrite/"; fi
     if test -f esp/efi/ferrite/notify.env; then cp -f esp/efi/ferrite/notify.env "{{ mount }}/efi/ferrite/"; fi
+    if test -f esp/efi/ferrite/run.env; then cp -f esp/efi/ferrite/run.env "{{ mount }}/efi/ferrite/"; fi
     @echo "staged {{ app }} and efi/ferrite -> {{ mount }}"
 
 # Security audit

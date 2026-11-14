@@ -605,3 +605,28 @@ fn the_memtest86_plus_preset_runs_memtest86_plus_tests_with_its_counts() {
     check!(Preset::Thorough.config() == Config::DEFAULT);
     check!(TestKind::sequence(Preset::Thorough).count() == TestKind::ALL.len());
 }
+
+#[test]
+fn a_shape_agrees_with_the_test_it_describes_and_bit_fade_keeps_its_waits_apart() {
+    let layout = Layout::new(RAGGED.iter().copied());
+    for &kind in TestKind::ALL {
+        let shape = Shape::of(kind, &CFG, 0, &layout);
+        let test = Test::for_share(kind, CFG, 0, &layout, layout.all());
+        check!(shape.work() == test.total(), "{kind}");
+        check!(shape.waits() == test.waits(), "{kind}");
+    }
+    let fade = Shape::of(TestKind::BitFade, &CFG, 0, &layout);
+    let (w, d) = (fade.stages()[0], CFG.fade);
+    assert!(let Stage::Work(fill) = w);
+    check!(fade.wait_count() == 4);
+    check!(fade.stages().len() == 9, "work and wait alternate, work at both ends");
+    check!(fade.stages()[1] == Stage::Wait(d));
+    assert!(let Stage::Work(middle) = fade.stages()[2]);
+    check!(middle == 2 * fill, "a round's check and the next round's fill are one stage");
+    // Words say nothing in a wait: the end of the work before it is the wait itself.
+    check!(fade.locate(fill) == Place::Wait { stage: 1, nth: 1, waits: 4 });
+    check!(fade.locate(fill + 1) == Place::Work { stage: 2, done: 1, of: middle });
+    check!(fade.locate(fade.work()) == Place::Finished);
+    let plain = Shape::of(TestKind::SolidBits, &CFG, 0, &layout);
+    check!(plain.stages().len() == 1 && plain.wait_count() == 0);
+}

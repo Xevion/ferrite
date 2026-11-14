@@ -154,12 +154,12 @@ pub struct Phase {
 
 impl Phase {
     /// Words of work inside `share`, the unit of step budgets and of progress. A move window is
-    /// worked whole or not at all, so shares are cut on window boundaries.
+    /// worked whole or not at all, so shares are cut on window boundaries. A wait touches no word.
     pub fn work_in(&self, share: Span) -> usize {
         match self.op {
             Op::AddressWalk { .. } => BLOCK_WORDS,
             Op::Move { iterations } if share.contains(self.span) => iterations as usize * 2 * move_half(self.span),
-            Op::Move { .. } => 0,
+            Op::Move { .. } | Op::Wait(_) => 0,
             Op::Bus(bus) => bus.fill.span.clip(share).words + bus.check.map_or(0, |c| c.span.clip(share).words),
             _ => self.span.clip(share).words,
         }

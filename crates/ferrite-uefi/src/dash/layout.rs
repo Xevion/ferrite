@@ -127,7 +127,10 @@ impl Layout {
         };
 
         let system = section(left_x, main.y, left_w, SYSTEM_ROWS * pitch - m(2.0));
-        let (lab, pw) = if compact { (m(84.0), m(104.0)) } else { (m(92.0), m(120.0)) };
+        // The figure column holds `100% · ~1 h 35 min left`: 23 characters of the body face, whose
+        // advance is 0.6 em at 13 units.
+        let lab = if compact { m(84.0) } else { m(92.0) };
+        let pw = m(184.0);
 
         let progress_y = system.body.bottom() + section_gap;
         let bars_y = progress_y + label_to_body;

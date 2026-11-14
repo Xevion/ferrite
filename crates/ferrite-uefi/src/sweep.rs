@@ -29,7 +29,11 @@ use ferrite_mem::crew::{AP_PATIENCE, Crew, Job, Seat, SeatState, Turn, WideGuard
 use ferrite_mem::suite::{self, Config, Kernels, Mode, Preset, Progress, Schedule, Span, Suite, Test, TestKind};
 use ferrite_mem::{Caps, Fault, Faults, Region, Regions, WIDE_CHUNK_BYTES};
 
+use crate::goal::Goal;
+use crate::machine::Machine;
+use crate::pace::{Look, Outlook, Pace};
 use crate::report::{self, CpuInfo, FAULT_LOG, FaultRecord, History, Snapshot, TestRecord};
+use crate::timings::{self, BootVolume, Store};
 
 mod rotation;
 
@@ -112,6 +116,8 @@ pub struct SweepStatus {
     pub paused: bool,
     /// The share of the free memory tested; what the firmware holds stays out of it.
     pub coverage: Coverage,
+    /// How the run is going as time: ETAs, rate, the goal.
+    pub outlook: Outlook,
 }
 
 impl fmt::Display for SweepStatus {
@@ -143,6 +149,7 @@ impl SweepStatus {
         preset: Preset::Standard,
         paused: false,
         coverage: Coverage::NONE,
+        outlook: Outlook::NONE,
     };
 }
 
@@ -173,9 +180,9 @@ struct Run {
     scope: Scope,
 }
 
-/// Which memory a run covers, for the log.
+/// Which memory a run covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Scope {
+pub enum Scope {
     /// The sweep's own memory.
     Main,
     /// The firmware's reserve, tested after the pass of that number.
@@ -270,7 +277,16 @@ pub enum Flow {
 
 /// The BSP's duties during a split test: given the time and the sweep's status, it returns when
 /// it is next due, or `None` to stop the sweep.
-pub type Duties<'d> = dyn FnMut(Instant, &Snapshot<'_>) -> Option<Instant> + 'd;
+pub type Duties<'d> = dyn FnMut(Instant, &Snapshot<'_>) -> Tended + 'd;
+
+/// What a round of duties asks of the sweep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tended {
+    /// When the duties are next due; `None` when a queued command has to cut a split test short.
+    pub next: Option<Instant>,
+    /// A goal set meanwhile, to take effect at once rather than after the test.
+    pub goal: Option<Goal>,
+}
 
 pub struct Sweep {
     run: Option<Run>,
@@ -282,6 +298,7 @@ pub struct Sweep {
     history: History,
     paused: bool,
     rotation: Rotation,
+    pace: Pace,
 }
 
 impl Sweep {
@@ -295,7 +312,13 @@ impl Sweep {
         let lend = claimed.as_ref().map_or(0, Claim::reserve);
         let buffer = claimed.or_else(|| alloc_largest(FALLBACK_BYTES, MIN_SWEEP_BYTES, Claim::any_pages));
         let preset = Preset::Standard;
-        let sweep = Self::with_buffer(buffer, Kernels::for_caps(caps), preset.config(), preset, cores);
+        let mut sweep = Self::with_buffer(buffer, Kernels::for_caps(caps), preset.config(), preset, cores);
+        sweep.pace = Pace::new(
+            crate::goal::load(),
+            Machine::detect(),
+            Store::new(timings::load()),
+            Some(alloc::boxed::Box::new(BootVolume)),
+        );
         sweep.with_pages(FirmwarePages, lend)
     }
 
@@ -310,7 +333,17 @@ impl Sweep {
         let run = buffer.and_then(|buffer| Run::new(buffer, kernels, config, preset, 0));
         let mut history = History::default();
         history.set_cpus(cores.as_ref().map_or_default(cpu_infos));
-        Self { run, tally: Tally::default(), waiting: None, current: None, cores, history, paused: false, rotation }
+        Self {
+            run,
+            tally: Tally::default(),
+            waiting: None,
+            current: None,
+            cores,
+            history,
+            paused: false,
+            rotation,
+            pace: Pace::detached(),
+        }
     }
 
     /// Whether a step now would do work.
@@ -351,6 +384,39 @@ impl Sweep {
         self.waiting = None;
         self.current = None;
         self.history.reset();
+        self.pace.restart();
+    }
+
+    /// Replace the run's goal; the run's own progress is untouched.
+    pub fn set_goal(&mut self, goal: Goal) {
+        apply_goal(&mut self.pace, goal);
+    }
+
+    /// Look at the sweep as it stands at `now`, for the time model: call it whenever convenient,
+    /// at least every frame. A split test in progress is looked at by its own dispatch instead.
+    pub fn tick(&mut self, now: Instant) {
+        let settled = self.settled_passes();
+        self.pace.set_settled(settled);
+        let Some(run) = self.run.as_ref() else { return };
+        let schedule = run.suite.schedule();
+        let cpus = self.cores.as_ref().map_or(1, |c| c.cpus().len().max(1));
+        self.pace.prepare(run.scope, schedule, cpus, tier_of(schedule.kernels()));
+        let look = Look {
+            scope: run.scope,
+            now,
+            pass: schedule.passes(),
+            index: schedule.index(),
+            done: schedule.test().done(),
+            wait_until: self.waiting,
+            paused: self.paused,
+            elapsed: self.history.run_started.map_or(Duration::ZERO, |start| now - start),
+        };
+        self.pace.observe(&look);
+    }
+
+    /// Write out the timings learned since they were last saved.
+    pub fn save_timings(&mut self, now: Instant) {
+        self.pace.save(now, true);
     }
 
     /// Run split tests on the processors `choice` picks from the next test on.
@@ -430,7 +496,7 @@ impl Sweep {
             let now = cores.clock().now();
             self.rotate(now);
         }
-        let Self { run: Some(run), tally, current, cores: Some(cores), history, rotation, .. } = self else {
+        let Self { run: Some(run), tally, current, cores: Some(cores), history, rotation, pace, .. } = self else {
             return Flow::Continue;
         };
         let history = history_of(rotation, history);
@@ -439,7 +505,7 @@ impl Sweep {
         note(current, history, tally.faults, run.scope, run.suite.schedule(), started);
         *current = None;
         loop {
-            match dispatch(run, tally, cores, history, vector, duties) {
+            match dispatch(run, tally, cores, history, pace, vector, duties) {
                 Dispatch::Finished => return Flow::Continue,
                 Dispatch::Stopped => return Flow::Stop,
                 Dispatch::Lost(lost) => {
@@ -478,6 +544,7 @@ impl Sweep {
             paused: self.paused,
             passes: self.rotation.passes_done().unwrap_or(status.passes),
             coverage: self.rotation.coverage(),
+            outlook: self.pace.outlook(),
             ..status
         }
     }
@@ -491,9 +558,6 @@ impl Sweep {
 
 /// The status of `schedule`'s current test as `schedule` and `tally` have it.
 fn status_of(schedule: &Schedule, tally: &Tally, mode: Mode, cpus: usize) -> SweepStatus {
-    let k = schedule.kernels();
-    let widest =
-        [k.fill, k.verify, k.rmw].into_iter().map(ferrite_mem::Kernel::tier).max().unwrap_or(ferrite_mem::Tier::Scalar);
     SweepStatus {
         bytes: schedule.layout().bytes(),
         test: schedule.test().kind().name(),
@@ -501,7 +565,7 @@ fn status_of(schedule: &Schedule, tally: &Tally, mode: Mode, cpus: usize) -> Swe
         test_percent: schedule.test().percent(),
         percent: schedule.percent(),
         passes: schedule.passes(),
-        tier: widest.into(),
+        tier: tier_of(schedule.kernels()),
         mode,
         cpus,
         faults: tally.faults,
@@ -510,7 +574,15 @@ fn status_of(schedule: &Schedule, tally: &Tally, mode: Mode, cpus: usize) -> Swe
         preset: schedule.preset(),
         paused: false,
         coverage: Coverage::NONE,
+        outlook: Outlook::NONE,
     }
+}
+
+/// The widest kernel tier in use, for display and as part of what a timing is valid for.
+fn tier_of(k: Kernels) -> &'static str {
+    let widest =
+        [k.fill, k.verify, k.rmw].into_iter().map(ferrite_mem::Kernel::tier).max().unwrap_or(ferrite_mem::Tier::Scalar);
+    widest.into()
 }
 
 /// The history the running tests record into: the sweep's own, or a scratch copy while the reserve
@@ -579,6 +651,14 @@ fn ap_timeout(test: &Test) -> Duration {
     Duration::from_secs(bytes / AP_FLOOR_RATE + 1) + test.waits() + AP_PATIENCE + GATHER_PATIENCE + AP_SLACK
 }
 
+/// Make `goal` the run's goal, logging the change.
+fn apply_goal(pace: &mut Pace, goal: Goal) {
+    if pace.goal() != goal {
+        log::info!("run: goal now {goal}, was {}", pace.goal());
+        pace.set_goal(goal);
+    }
+}
+
 /// The started APs whose seats show they never began their job, so nothing of theirs is running.
 fn never_began(started: &[usize], seats: &[Seat]) -> Vec<usize> {
     started.iter().copied().filter(|&i| seats[i].state() == SeatState::Idle).collect()
@@ -612,6 +692,8 @@ fn live(base: &SweepStatus, seats: &[Seat], tally: &Tally, faults_before: u64, w
 struct Round {
     name: &'static str,
     pass: u64,
+    /// The test's place in the pass.
+    index: usize,
     base: SweepStatus,
     faults_before: u64,
     /// Work of the pass before the test, of the whole pass, and of the test.
@@ -625,6 +707,7 @@ impl Round {
         Self {
             name: schedule.test().kind().name(),
             pass: schedule.passes(),
+            index: schedule.index(),
             base: status_of(schedule, tally, Mode::Split, cpus),
             faults_before: tally.faults,
             work: (pass_done, pass_total, test_total),
@@ -642,6 +725,7 @@ fn dispatch(
     tally: &mut Tally,
     cores: &mut Cores,
     history: &mut History,
+    pace: &mut Pace,
     vector: Option<&VectorState>,
     duties: &mut Duties<'_>,
 ) -> Dispatch {
@@ -676,6 +760,7 @@ fn dispatch(
         })
         .collect();
     let timeout = DISPATCH_BUDGET + longest;
+    pace.prepare(covers, schedule, cpus.len().max(1), tier_of(kernels));
     let dispatched = clock.now();
     let mut round = Round::of(schedule, tally, cpus.len(), totals[0], dispatched);
     let mut absorbed = vec![0; seats.len()];
@@ -685,11 +770,28 @@ fn dispatch(
     let mut completed = 0;
     let panics = mp::ap_panics();
     let wide = vector.map(|v| v as &dyn WideGuard);
-    let mut tend = |now: Instant, tally: &mut Tally, history: &History, round: &Round, absorbed: &mut [usize]| {
-        absorb(tally, &seats, absorbed, &cpu_ids, round.name, round.pass);
-        let status = live(&round.base, &seats, tally, round.faults_before, round.work);
-        duties(now, &Snapshot { status, history, faults: &tally.recent })
-    };
+    let mut tend =
+        |now: Instant, tally: &mut Tally, history: &History, pace: &mut Pace, round: &Round, absorbed: &mut [usize]| {
+            absorb(tally, &seats, absorbed, &cpu_ids, round.name, round.pass);
+            let done: u64 = seats.iter().map(Seat::done).sum();
+            let look = Look {
+                scope: covers,
+                now,
+                pass: round.pass,
+                index: round.index,
+                done: done.min(round.work.2),
+                wait_until: None,
+                paused: false,
+                elapsed: history.run_started.map_or(Duration::ZERO, |start| now - start),
+            };
+            let outlook = pace.observe(&look);
+            let status = SweepStatus { outlook, ..live(&round.base, &seats, tally, round.faults_before, round.work) };
+            let tended = duties(now, &Snapshot { status, history, faults: &tally.recent });
+            if let Some(goal) = tended.goal {
+                apply_goal(pace, goal);
+            }
+            tended.next
+        };
     let (live_seats, closed, timing) = cores.mp().scope(|scope| {
         let mut started = Vec::new();
         for (i, (job, &cpu)) in jobs.iter().zip(&cpus).enumerate().skip(1) {
@@ -724,7 +826,7 @@ fn dispatch(
                 break false;
             }
             if now >= next_duty {
-                let Some(next) = tend(now, tally, history, &round, &mut absorbed) else {
+                let Some(next) = tend(now, tally, history, pace, &round, &mut absorbed) else {
                     stop_asked = true;
                     break false;
                 };
@@ -756,7 +858,7 @@ fn dispatch(
             }
             let now = clock.now();
             if now >= next_duty {
-                if let Some(next) = tend(now, tally, history, &round, &mut absorbed) {
+                if let Some(next) = tend(now, tally, history, pace, &round, &mut absorbed) {
                     next_duty = next;
                 } else {
                     stop_asked = true;
@@ -777,6 +879,7 @@ fn dispatch(
                     layout.bytes()
                 );
                 let work_bytes = schedule.test().total().saturating_mul(WORD as u64);
+                pace.finished(covers, round.pass, round.index, ended, took);
                 schedule.finish_test();
                 let faults = tally.faults - round.faults_before;
                 let record = TestRecord { pass: round.pass, test: round.name, cpus: n, took, work_bytes, faults };

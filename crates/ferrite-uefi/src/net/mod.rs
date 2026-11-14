@@ -9,7 +9,7 @@ mod api;
 mod json;
 pub mod notify;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 mod wifi;
 
 use alloc::boxed::Box;
