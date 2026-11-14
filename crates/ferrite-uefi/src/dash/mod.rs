@@ -22,6 +22,8 @@ use ferrite_mem::suite::{Mode, Preset, TestKind};
 use ferrite_net::NetStatus;
 use snafu::{OptionExt as _, ResultExt as _, Snafu};
 
+pub use self::widgets::CELLS;
+
 use self::layout::Layout;
 use self::widgets::Pen;
 use crate::gfx::text::{FontError, Fonts};
@@ -30,7 +32,7 @@ use crate::goal::Goal;
 use crate::net::NoNetwork;
 use crate::pace::{Delta, Overall};
 use crate::report::{FaultRecord, Snapshot};
-use crate::sweep::{Coverage, SweepStatus};
+use crate::sweep::{Coverage, MapView, SweepStatus};
 use crate::wall::{Ends, TimeLine, TimeOfDay};
 
 /// Below this the layout has no room for its tables: three quarters of the 1024x768 design.
@@ -122,7 +124,7 @@ struct Keys {
     test: ((usize, usize), u16, bool, BasisPoints, Position, Option<Duration>),
     detail: DetailKey,
     tests: TestsKey,
-    map: ((usize, usize), Option<usize>, usize),
+    map: MapView,
     net: (Option<NetStatus>, Option<NoNetwork>),
     errors: (u64, usize, Option<FaultRecord>, Classification, u64),
     log: (u64, &'static str, (usize, usize), u64, u64, u64, Goal),
@@ -176,7 +178,7 @@ impl Keys {
                 s.outlook.pace_percent,
             ),
             tests: (history.revision, s.position, s.passes, s.paused, f.snapshot.stats.revision, live),
-            map: (s.position, (s.position.1 > 0).then(|| widgets::active_cell(s.test_percent)), s.bytes),
+            map: s.map,
             net: (f.net, f.net_err),
             errors: (s.faults, f.snapshot.faults.len(), f.snapshot.faults.back().copied(), s.analysis, s.passes),
             log: (f.elapsed().as_secs(), s.test, s.position, s.passes, s.faults, history.revision, s.outlook.goal),

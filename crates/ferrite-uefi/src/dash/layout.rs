@@ -39,6 +39,8 @@ pub const DETAIL_ROWS: u32 = 3;
 /// Columns of the memory map, and its rows.
 pub const MAP_COLS: u32 = 16;
 pub const MAP_ROWS: u32 = 8;
+/// Rows the memory map's legend wraps to at most.
+pub const LEGEND_ROWS: u32 = 2;
 
 /// Every rectangle of one screen size. The bars and sections are static, drawn on a full redraw;
 /// the other rectangles are widgets, each redrawn on its own when what it shows changes.
@@ -49,6 +51,8 @@ pub struct Layout {
     /// The height of a line of text, and of a table row with its padding.
     pub row_h: u32,
     pub pitch: u32,
+    /// The distance between the rows of the memory map's legend.
+    pub legend_pitch: u32,
     /// Width of a label column, and of the right-aligned figure after a progress bar.
     pub lab: u32,
     pub pw: u32,
@@ -163,7 +167,8 @@ impl Layout {
         let cell_h = m(20.0);
         let map_head = row_h + m(6.0);
         let grid_h = MAP_ROWS * cell_h + (MAP_ROWS - 1) * m(3.0);
-        let map = section(right_x, main.y, right_w, map_head + grid_h + m(10.0) + m(16.0));
+        let map =
+            section(right_x, main.y, right_w, map_head + grid_h + m(10.0) + m(16.0) + (LEGEND_ROWS - 1) * m(18.0));
         let net_y = map.body.bottom() + section_gap;
         let net = section(right_x, net_y, right_w, NET_ROWS * pitch - m(2.0));
         let errors_y = net.body.bottom() + section_gap;
@@ -184,6 +189,7 @@ impl Layout {
             text: sizes,
             row_h,
             pitch,
+            legend_pitch: m(18.0),
             lab,
             pw,
             cols,

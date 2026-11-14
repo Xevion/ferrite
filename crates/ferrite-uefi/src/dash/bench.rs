@@ -83,6 +83,7 @@ impl Scenario {
             paused: false,
             coverage: Coverage::NONE,
             outlook: Outlook::NONE,
+            map: crate::testing::sample_map(0),
         };
         Self { status, history, faults: VecDeque::new(), frame: 0, kinds }
     }
@@ -143,6 +144,7 @@ impl Scenario {
         self.status.test = self.kinds[index as usize].name();
         self.status.position = (index as usize + 1, self.kinds.len());
         self.status.test_percent = (in_test * 100 / TEST_FRAMES) as u16;
+        self.status.map = crate::testing::sample_map((in_test * 90 / TEST_FRAMES) as usize);
         self.status.percent = ((self.frame % pass_frames) * 100 / pass_frames) as u16;
     }
 }

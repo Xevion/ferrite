@@ -17,6 +17,7 @@ use ferrite_mem::histogram::Histogram;
 use ferrite_config::ClockFormat;
 
 use crate::goal::Goal;
+use crate::memmap::CellState;
 use crate::pace::{Delta, Outlook, Steadiness, TestStat, TestStats};
 use crate::sweep::Coverage;
 use crate::wall::{Day, Ends, TimeLine, TimeOfDay};
@@ -63,6 +64,7 @@ fn status() -> SweepStatus {
         paused: false,
         coverage: Coverage::NONE,
         outlook: running(),
+        map: crate::testing::sample_map(40),
     }
 }
 
@@ -150,6 +152,7 @@ fn faulty(status: &mut SweepStatus, faults: &mut VecDeque<FaultRecord>) {
         let fault = Fault { addr: CpuAddr::of(n as *const u64), expected, actual: expected ^ (1 << bit) };
         faults.push_back(FaultRecord { fault, test: TestKind::MovingInversions.name(), cpu: 2, pass: 2 });
     }
+    status.map.cells[50] = CellState::Fault;
     status.faults = 3;
     status.first_fault = Some(faults[0]);
     status.analysis = Classification::Mixed { stuck: 1 << 3 };
@@ -189,15 +192,28 @@ fn steady_frames_redraw_only_the_widgets_that_changed() {
         !rects.is_empty() && rects.iter().all(|r| widgets.iter().any(|w| w.intersect(*r) == *r))
     };
     let area = |rects: &[Rect]| rects.iter().map(|r| r.area()).sum::<u64>();
-    // One percent more moves the bar's end and the figure, and the map's active cell.
-    let moved = SweepStatus { test_percent: 38, ..status() };
+    // One percent more moves the bar's end and the figure.
+    let outlook = Outlook { test_progress: bp(3812), ..running() };
+    let moved = SweepStatus { test_percent: 38, outlook, ..status() };
     let rects = render(&mut dash, moved, &history, &faults, 500);
-    check!(inside(&rects, &[l.test, l.map.body]));
+    check!(inside(&rects, &[l.test]));
     check!(area(&rects) * 5 < l.test.area());
     // A second later the run clock, the pass's time and the log line tick; nothing else does.
     let rects = render(&mut dash, moved, &history, &faults, 501);
     check!(inside(&rects, &[l.clock, l.pass, l.log]));
     check!(rects.iter().any(|r| l.clock.intersect(*r) == *r));
+}
+
+#[test]
+fn a_core_moving_on_to_the_next_cell_redraws_the_memory_map_alone() {
+    let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
+    let (history, faults) = (history(), VecDeque::new());
+    render(&mut dash, status(), &history, &faults, 500);
+    let l = dash.layout;
+    let moved = SweepStatus { map: crate::testing::sample_map(41), ..status() };
+    let rects = render(&mut dash, moved, &history, &faults, 500);
+    check!(!rects.is_empty() && rects.iter().all(|r| l.map.body.intersect(*r) == *r), "{rects:?}");
+    check!(rects.iter().map(|r| r.area()).sum::<u64>() * 8 < l.map.body.area(), "only the two cells that changed");
 }
 
 #[test]
@@ -278,7 +294,12 @@ fn with_goal() -> SweepStatus {
         known: (11, 11),
         ..running()
     };
-    SweepStatus { test: TestKind::BitFade.name(), position: (11, 11), outlook, ..status() }
+    let mut map = crate::testing::sample_map(0);
+    map.cells
+        .iter_mut()
+        .filter(|c| matches!(c, CellState::Pending | CellState::Active))
+        .for_each(|c| *c = CellState::Holding);
+    SweepStatus { test: TestKind::BitFade.name(), position: (11, 11), outlook, map, ..status() }
 }
 
 #[test]
@@ -308,7 +329,7 @@ fn the_first_fault_shows_in_the_errors_the_tab_and_the_clock() {
     faulty(&mut status, &mut faults);
     let rects = render(&mut dash, status, &history, &faults, 500);
     let l = dash.layout;
-    let places = [l.errors.body, l.tabs, l.clock, l.log];
+    let places = [l.errors.body, l.tabs, l.clock, l.log, l.map.body];
     check!(!rects.is_empty() && rects.iter().all(|r| places.iter().any(|w| w.intersect(*r) == *r)), "{rects:?}");
     // The count is drawn in the error colour: some pixel of the errors section is exactly it.
     let wanted = [theme::ERR.b, theme::ERR.g, theme::ERR.r, 255];

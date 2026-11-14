@@ -12,14 +12,15 @@ use ferrite_net::{Medium, PortStatus};
 use heapless::String;
 
 use super::format::{self, Text, addr, fixed, hms, num, plural};
-use super::layout::{Layout, MAP_COLS, MAP_ROWS, Section, window};
+use super::layout::{LEGEND_ROWS, Layout, MAP_COLS, MAP_ROWS, Section, window};
 use super::theme::{
-    ACTIVE, ACTIVE_RING, BAR, BAR_DIM, BAR_RULE, BAR_TEXT, BG, DIM, ERR, FILL, HELD, KEY, KEY_INK, LABEL, LINE, PASS,
-    PENDING, SEL, SEL_INK, STRONG, TAB_ON, TAB_ON_INK, TAB_TEXT, TESTED, TEXT, TRACK, WARN,
+    ACTIVE, ACTIVE_RING, BAR, BAR_DIM, BAR_RULE, BAR_TEXT, BG, DIM, ERR, FAULT, FILL, FIRMWARE, HELD, HOLDING, KEY,
+    KEY_INK, LABEL, LINE, PASS, PENDING, SEL, SEL_INK, STRONG, TAB_ON, TAB_ON_INK, TAB_TEXT, TESTED, TEXT, TRACK, WARN,
 };
 use super::{Frame, State};
 use crate::gfx::text::{Case, Face, Fonts, Style};
 use crate::gfx::{Canvas, Rect, Rgb, px, whole_px};
+use crate::memmap::CellState;
 use crate::pace::Steadiness;
 use crate::report::{CpuInfo, FaultRecord};
 
@@ -29,12 +30,6 @@ const SEPARATOR: &str = "\u{b7}";
 
 /// Cells of the memory map.
 pub const CELLS: usize = (MAP_COLS * MAP_ROWS) as usize;
-
-/// The memory map cell a test at `percent` is working in.
-#[must_use]
-pub fn active_cell(percent: u16) -> usize {
-    (usize::from(percent.min(100)) * CELLS / 100).min(CELLS - 1)
-}
 
 /// The text after a progress bar: `head` in the plain ink, then `tail` in `ink`.
 #[derive(Clone, Copy)]
@@ -609,50 +604,123 @@ fn cell(p: &mut Pen<'_>, r: Rect, color: Rgb, ring: Option<(Rgb, u32)>) {
     }
 }
 
+/// What a cell in `state` looks like: its colour and its outline, a ring in the outline's colour
+/// and its width.
+fn look(state: CellState, ring: u32) -> (Rgb, Option<(Rgb, u32)>) {
+    match state {
+        CellState::NoRam => (BG, Some((LINE, 1))),
+        CellState::Firmware => (FIRMWARE, None),
+        CellState::Pending => (PENDING, None),
+        CellState::Done => (TESTED, None),
+        CellState::Holding => (HOLDING, None),
+        CellState::Active => (ACTIVE, Some((ACTIVE_RING, ring))),
+        CellState::Fault => (FAULT, None),
+    }
+}
+
+/// The name of a state in the memory map's legend.
+const fn legend_name(state: CellState) -> &'static str {
+    match state {
+        CellState::NoRam => "No RAM",
+        CellState::Firmware => "Firmware",
+        CellState::Pending => "Pending",
+        CellState::Done => "Tested",
+        CellState::Holding => "Holding",
+        CellState::Active => "Active",
+        CellState::Fault => "Fault",
+    }
+}
+
+/// The states in the order the legend lists them.
+const LEGEND: [CellState; 7] = [
+    CellState::Done,
+    CellState::Active,
+    CellState::Pending,
+    CellState::Holding,
+    CellState::Fault,
+    CellState::Firmware,
+    CellState::NoRam,
+];
+
 pub fn map(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
-    let s = f.status();
+    let map = &f.status().map;
     let l = *p.l;
     let small = Pen::style(Face::Regular, l.text.small, DIM);
     let base = p.mid(l.text.small, r.y, l.row_h);
     p.text(px(r.x), base, "0", small);
-    p.right(px(r.right()), base, &format::size(s.bytes), small);
-    let each = fixed::<32>(format_args!("1 cell = {}", format::size(s.bytes / CELLS)));
-    let w = p.measure(&each, small);
-    p.text(px(r.x) + (px(r.w) - w) / 2.0, base, &each, small);
+    if map.top > 0 {
+        let top = usize::try_from(map.top).unwrap_or(usize::MAX);
+        p.right(px(r.right()), base, &format::size(top), small);
+        let each = fixed::<32>(format_args!(
+            "1 cell = {}",
+            format::size(usize::try_from(map.cell_bytes()).unwrap_or(usize::MAX))
+        ));
+        let w = p.measure(&each, small);
+        p.text(px(r.x) + (px(r.w) - w) / 2.0, base, &each, small);
+    } else {
+        p.right(px(r.right()), base, NONE, small);
+    }
 
     let (gap, cell_h) = (whole_px(l.m(3.0)), whole_px(l.m(20.0)));
     let top = r.y + l.row_h + whole_px(l.m(6.0));
-    let active = (s.position.1 > 0).then(|| active_cell(s.test_percent));
     let ring = whole_px(l.m(2.0)).max(1);
-    for i in 0..CELLS {
+    for (i, &state) in map.cells.iter().enumerate() {
         let (col, row) =
             (u32::try_from(i % MAP_COLS as usize).unwrap_or(0), u32::try_from(i / MAP_COLS as usize).unwrap_or(0));
         let x0 = r.x + col * (r.w + gap) / MAP_COLS;
         let x1 = r.x + (col + 1) * (r.w + gap) / MAP_COLS - gap;
         let rect = Rect::new(x0, top + row * (cell_h + gap), x1 - x0, cell_h);
-        match active {
-            Some(a) if i == a => cell(p, rect, ACTIVE, Some((ACTIVE_RING, ring))),
-            Some(a) if i < a => cell(p, rect, TESTED, None),
-            _ => cell(p, rect, PENDING, None),
-        }
+        let (color, edge) = look(state, ring);
+        cell(p, rect, color, edge);
+    }
+    if map.top == 0 {
+        return;
     }
 
-    let legend = Rect::new(r.x, top + MAP_ROWS * (cell_h + gap) - gap + whole_px(l.m(10.0)), r.w, whole_px(l.m(16.0)));
-    let key = Pen::style(Face::Regular, l.text.label, TEXT);
-    let side = whole_px(l.m(12.0));
-    let mut x = px(r.x);
-    let swatches = [
-        ("Tested", TESTED, None),
-        ("Active", ACTIVE, Some((ACTIVE_RING, ring))),
-        ("Pending", PENDING, Some((LINE, 1))),
-    ];
-    for (label, color, edge) in swatches {
-        let box_ = Rect::new(whole_px(x), legend.y + (legend.h - side) / 2, side, side);
-        cell(p, box_, color, edge);
-        let base = p.mid(l.text.label, legend.y, legend.h);
-        x += px(side) + l.m(6.0);
-        x += p.text(x, base, label, key) + l.m(14.0);
+    let legend_y = top + MAP_ROWS * (cell_h + gap) - gap + whole_px(l.m(10.0));
+    let (line_h, side) = (whole_px(l.m(16.0)), whole_px(l.m(12.0)));
+    let key = legend_style(&l);
+    let states = LEGEND.into_iter().filter(|&s| map.has(s));
+    for (state, row, at) in legend_places(&l, p.fonts, px(r.w), states) {
+        if row >= LEGEND_ROWS {
+            break;
+        }
+        let y = legend_y + row * l.legend_pitch;
+        let (color, edge) = look(state, ring);
+        let edge = if state == CellState::Pending { Some((LINE, 1)) } else { edge };
+        let x = px(r.x) + at;
+        cell(p, Rect::new(whole_px(x), y + (line_h - side) / 2, side, side), color, edge);
+        let base = p.mid(l.text.label, y, line_h);
+        p.text(x + px(side) + l.m(6.0), base, legend_name(state), key);
     }
+}
+
+fn legend_style(l: &Layout) -> Style {
+    Pen::style(Face::Regular, l.text.label, TEXT)
+}
+
+/// Each state's row of the legend and its left edge in pixels from the widget's, the states
+/// flowing left to right and wrapping at `width`. A state that does not fit in `LEGEND_ROWS` rows
+/// gets a row past them.
+fn legend_places(
+    l: &Layout,
+    fonts: &mut Fonts,
+    width: f32,
+    states: impl Iterator<Item = CellState>,
+) -> heapless::Vec<(CellState, u32, f32), { LEGEND.len() }> {
+    let key = legend_style(l);
+    let (mut x, mut row) = (0.0, 0);
+    let mut places = heapless::Vec::new();
+    for state in states {
+        let entry = px(whole_px(l.m(12.0))) + l.m(6.0) + fonts.measure(legend_name(state), key);
+        if x > 0.0 && x + entry > width {
+            (x, row) = (0.0, row + 1);
+        }
+        // At most `LEGEND.len()` states are listed, which is its capacity.
+        let _ = places.push((state, row, x));
+        x += entry + l.m(14.0);
+    }
+    places
 }
 
 /// A fault's 64-bit pattern in hex, the digits that differ from `reference` inverted.
@@ -961,5 +1029,20 @@ mod tests {
         let used: f32 =
             longest.iter().map(|(text, style)| fonts.measure(text, *style)).sum::<f32>() + 2.0 * l.m(CLOCK_GAP);
         check!(used <= px(l.clock.w), "{used} of {} px at {w}x{h}", l.clock.w);
+    }
+
+    #[rstest]
+    #[case::smallest(768, 576)]
+    #[case::compact(1024, 768)]
+    #[case::ovmf_default(1280, 800)]
+    #[case::laptop(1366, 768)]
+    #[case::full_hd(1920, 1080)]
+    #[case::uhd(3840, 2160)]
+    fn every_state_of_the_memory_maps_legend_fits_in_its_rows(#[case] w: u32, #[case] h: u32) {
+        let l = Layout::new(w, h);
+        let mut fonts = Fonts::load().expect("fonts");
+        let places = legend_places(&l, &mut fonts, px(l.map.body.w), LEGEND.into_iter());
+        let rows = places.iter().map(|&(_, row, _)| row).max().unwrap_or(0) + 1;
+        check!(rows <= LEGEND_ROWS, "{rows} rows at {w}x{h}");
     }
 }

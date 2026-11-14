@@ -21,21 +21,27 @@ use self::rotation::{FirmwarePages, Rotation};
 use ferrite_efi::clock::Clock;
 use ferrite_efi::cores::{CoreChoice, Cores};
 use ferrite_efi::cpu::VectorState;
-use ferrite_efi::memory::{self, Claim};
+use ferrite_efi::memory::ranges::Range;
+use ferrite_efi::memory::{self, Block, Claim};
 use ferrite_efi::mp::{self, ProcessorNumber, STACK_PROBE};
-use ferrite_hal::{Clock as _, Instant};
+use ferrite_hal::{Clock as _, Instant, PhysAddr};
 use ferrite_mem::analysis::{Classification, FaultStats};
 use ferrite_mem::crew::{AP_PATIENCE, Crew, Job, Seat, SeatState, Turn, WideGuard};
 use ferrite_mem::suite::{self, Config, Kernels, Mode, Preset, Progress, Schedule, Span, Suite, Test, TestKind};
 use ferrite_mem::{Caps, Fault, Faults, Region, Regions, WIDE_CHUNK_BYTES};
 
+use crate::dash::CELLS;
 use crate::goal::Goal;
 use crate::machine::Machine;
+use crate::memmap::{CoreFront, Extent, FaultCells, MemMap, Scene, Segment, View};
 use crate::pace::{Look, Outlook, Pace};
 use crate::report::{self, CpuInfo, FAULT_LOG, FaultRecord, History, Snapshot, TestRecord};
 use crate::timings::{self, BootVolume, Store};
 
 mod rotation;
+
+/// The memory map as the dashboard and the status page draw it.
+pub type MapView = View<{ CELLS }>;
 
 const WORD: usize = size_of::<u64>();
 /// Faults handed to the statistics per step; every one is still counted.
@@ -148,6 +154,8 @@ pub struct SweepStatus {
     pub coverage: Coverage,
     /// How the run is going as time: ETAs, rate, the goal.
     pub outlook: Outlook,
+    /// What each cell of the physical address space is, and where the cores are working in it.
+    pub map: MapView,
 }
 
 impl fmt::Display for SweepStatus {
@@ -180,6 +188,7 @@ impl SweepStatus {
         paused: false,
         coverage: Coverage::NONE,
         outlook: Outlook::NONE,
+        map: MapView::NONE,
     };
 }
 
@@ -272,6 +281,8 @@ impl Run {
 #[derive(Default)]
 struct Tally {
     faults: u64,
+    /// The cells of the memory map a fault has been seen in.
+    cells: FaultCells<{ CELLS }>,
     first: Option<FaultRecord>,
     /// The latest faults kept in full, newest last.
     recent: VecDeque<FaultRecord>,
@@ -282,6 +293,7 @@ impl Tally {
     /// Feed a fault kept in full into the statistics and the log, remembering the first one.
     fn record(&mut self, fault: Fault, test: &'static str, cpu: usize, pass: u64) {
         self.stats.record(&fault);
+        self.cells.note(fault.addr);
         let found = FaultRecord { fault, test, cpu, pass };
         self.first.get_or_insert(found);
         report::push_bounded(&mut self.recent, found, FAULT_LOG);
@@ -329,6 +341,8 @@ pub struct Sweep {
     paused: bool,
     rotation: Rotation,
     pace: Pace,
+    /// Which cells of the memory map have RAM.
+    map: MemMap<{ CELLS }>,
 }
 
 impl Sweep {
@@ -345,7 +359,18 @@ impl Sweep {
         let mut sweep = Self::with_buffer(buffer, Kernels::for_caps(caps), preset.config(), preset, cores);
         sweep.pace =
             Pace::new(goal, Machine::detect(), Store::new(timings::load()), Some(alloc::boxed::Box::new(BootVolume)));
-        sweep.with_pages(FirmwarePages, lend)
+        let ram = memory::ram_ranges().unwrap_or_default();
+        sweep.with_ram(&ram).with_pages(FirmwarePages, lend)
+    }
+
+    /// The memory map's axis over the RAM in `ram` and the sweep's own memory, from address 0 to the
+    /// top of the highest; with no RAM given, over the sweep's memory alone.
+    fn with_ram(mut self, ram: &[Range]) -> Self {
+        let own = self.run.as_ref().map_or_default(blocks_of);
+        let all: Vec<Extent> = ram.iter().copied().map(Extent::from).chain(own).collect();
+        self.map = MemMap::new(&all);
+        self.tally.cells = self.map.faults();
+        self
     }
 
     fn with_buffer(
@@ -356,12 +381,14 @@ impl Sweep {
         cores: Option<Cores>,
     ) -> Self {
         let rotation = Rotation::new(buffer.as_ref());
+        let map =
+            MemMap::new(&buffer.as_ref().map_or_default(|b| b.blocks().iter().map(extent_of).collect::<Vec<_>>()));
         let run = buffer.and_then(|buffer| Run::new(buffer, kernels, config, preset, 0));
         let mut history = History::default();
         history.set_cpus(cores.as_ref().map_or_default(cpu_infos));
         Self {
             run,
-            tally: Tally::default(),
+            tally: Tally { cells: map.faults(), ..Tally::default() },
             waiting: None,
             current: None,
             cores,
@@ -369,6 +396,7 @@ impl Sweep {
             paused: false,
             rotation,
             pace: Pace::detached(),
+            map,
         }
     }
 
@@ -413,7 +441,7 @@ impl Sweep {
             let kernels = suite.kernels();
             self.run = Run::new(buffer, kernels, preset.config(), preset, 0);
         }
-        self.tally = Tally::default();
+        self.tally = Tally { cells: self.tally.cells.cleared(), ..Tally::default() };
         self.waiting = None;
         self.current = None;
         self.history.reset();
@@ -572,16 +600,17 @@ impl Sweep {
             let now = cores.clock().now();
             self.rotate(now);
         }
-        let Self { run: Some(run), tally, current, cores: Some(cores), history, rotation, pace, .. } = self else {
+        let Self { run: Some(run), tally, current, cores: Some(cores), history, rotation, pace, map, .. } = self else {
             return Flow::Continue;
         };
+        let surface = Surface { map, aside: rotation.aside() };
         let history = history_of(rotation, history);
         let started = cores.clock().now();
         history.start(started, tally.faults);
         note(current, history, tally.faults, run.scope, run.suite.schedule(), started);
         *current = None;
         loop {
-            match dispatch(run, tally, cores, history, pace, vector, duties) {
+            match dispatch(run, tally, cores, history, pace, &surface, vector, duties) {
                 Dispatch::Finished => return Flow::Continue,
                 Dispatch::Stopped => return Flow::Stop,
                 Dispatch::Lost(lost) => {
@@ -617,12 +646,22 @@ impl Sweep {
         let mode = if cpus > 1 { Mode::Split } else { Mode::Single };
         let status = status_of(run.suite.schedule(), &self.tally, mode, cpus);
         SweepStatus {
+            map: self.map_view(run),
             paused: self.paused,
             passes: self.rotation.passes_done().unwrap_or(status.passes),
             coverage: self.rotation.coverage(),
             outlook: self.pace.outlook(),
             ..status
         }
+    }
+
+    /// The memory map with the one core this test runs on, the BSP, wherever the suite's own test is.
+    fn map_view(&self, run: &Run) -> MapView {
+        let test = run.suite.test();
+        let core =
+            CoreFront { share: run.suite.schedule().layout().all(), front: test.front(), began: test.done() > 0 };
+        let scene = Scene { segments: &segments_of(run), cores: &[core], aside: &self.rotation.aside() };
+        self.map.view(&scene, &self.tally.cells)
     }
 
     /// The status with the history and the latest faults, for the screen and the status page.
@@ -651,7 +690,25 @@ fn status_of(schedule: &Schedule, tally: &Tally, mode: Mode, cpus: usize) -> Swe
         paused: false,
         coverage: Coverage::NONE,
         outlook: Outlook::NONE,
+        map: MapView::NONE,
     }
+}
+
+/// The memory of `block`.
+fn extent_of(block: &Block) -> Extent {
+    Extent::new(PhysAddr::new(block.base().addr().get() as u64), block.bytes() as u64)
+}
+
+/// The memory `run` holds, block by block.
+#[expect(clippy::used_underscore_binding, reason = "the buffer field only owns memory outside this")]
+fn blocks_of(run: &Run) -> Vec<Extent> {
+    run._buffer.blocks().iter().map(extent_of).collect()
+}
+
+/// Where the words of `run`'s layout lie in memory: its regions are its blocks, in order.
+fn segments_of(run: &Run) -> Vec<Segment> {
+    let spans = run.suite.schedule().layout().spans();
+    spans.iter().zip(blocks_of(run)).map(|(&span, extent)| Segment::new(span, extent.start())).collect()
 }
 
 /// The widest kernel tier in use, for display and as part of what a timing is valid for.
@@ -812,6 +869,13 @@ fn live(base: &SweepStatus, seats: &[Seat], tally: &Tally, faults_before: u64, w
     }
 }
 
+/// What the memory map is drawn from during a dispatch, besides the cores' own seats.
+struct Surface<'a> {
+    map: &'a MemMap<{ CELLS }>,
+    /// The sweep's memory outside the run, while the reserve is under test.
+    aside: Vec<Extent>,
+}
+
 /// The test the cores are on, as the status and the log describe it.
 struct Round {
     name: &'static str,
@@ -844,17 +908,20 @@ impl Round {
 /// jobs and AP dispatches, then the BSP's own share between its duties. The cores go from test to
 /// test at a gate ([`Crew::begin_round`]) until the run is done or [`DISPATCH_BUDGET`] has passed.
 #[expect(clippy::too_many_lines, reason = "one start, one loop and the reckoning, each needing the others' locals")]
+#[expect(clippy::too_many_arguments, reason = "the run, what it counts into, what it reports to and what it draws")]
 fn dispatch(
     run: &mut Run,
     tally: &mut Tally,
     cores: &mut Cores,
     history: &mut History,
     pace: &mut Pace,
+    surface: &Surface<'_>,
     vector: Option<&VectorState>,
     duties: &mut Duties<'_>,
 ) -> Dispatch {
     let Some(parts) = NonZeroUsize::new(cores.cpus().len()) else { return Dispatch::Lost(Vec::new()) };
     let covers = run.scope;
+    let segments = segments_of(run);
     let (regions, schedule) = run.suite.split();
     let (first, pass, config, kernels) =
         (schedule.test().kind(), schedule.passes(), schedule.config(), schedule.kernels());
@@ -866,6 +933,7 @@ fn dispatch(
     let clock = cores.clock();
     let crew = Crew::default();
     let shares: Vec<(Span, Regions<'_>)> = suite::shares(regions, first, &config, parts).collect();
+    let share_spans: Vec<Span> = shares.iter().map(|(span, _)| *span).collect();
     let cpus: Vec<ProcessorNumber> = cores.cpus()[..shares.len()].to_vec();
     let cpu_ids: Vec<usize> = cpus.iter().map(|c| c.get()).collect();
     let seats: Vec<Seat> = shares.iter().map(|_| Seat::default()).collect();
@@ -894,6 +962,7 @@ fn dispatch(
     let mut completed = 0;
     let panics = mp::ap_panics();
     let wide = vector.map(|v| v as &dyn WideGuard);
+    let mut fronts: Vec<CoreFront> = Vec::with_capacity(seats.len());
     let mut tend =
         |now: Instant, tally: &mut Tally, history: &History, pace: &mut Pace, round: &Round, absorbed: &mut [usize]| {
             absorb(tally, &seats, absorbed, &cpu_ids, round.name, round.pass);
@@ -909,7 +978,16 @@ fn dispatch(
                 elapsed: history.run_started.map_or(Duration::ZERO, |start| now - start),
             };
             let outlook = pace.observe(&look);
-            let status = SweepStatus { outlook, ..live(&round.base, &seats, tally, round.faults_before, round.work) };
+            fronts.clear();
+            fronts.extend(seats.iter().zip(&share_spans).map(|(seat, &share)| CoreFront {
+                share,
+                front: seat.front(),
+                began: seat.done() > 0,
+            }));
+            let scene = Scene { segments: &segments, cores: &fronts, aside: &surface.aside };
+            let map = surface.map.view(&scene, &tally.cells);
+            let status =
+                SweepStatus { outlook, map, ..live(&round.base, &seats, tally, round.faults_before, round.work) };
             let measured = pace.stats();
             let tended = duties(now, &Snapshot { status, history, faults: &tally.recent, stats: measured });
             if let Some(goal) = tended.goal {

@@ -33,6 +33,9 @@ pub const WARN: Rgb = Rgb::hex(0x7a4700);
 pub const TESTED: Rgb = Rgb::hex(0x3f8f62);
 pub const PENDING: Rgb = Rgb::hex(0xa7aebd);
 pub const HELD: Rgb = Rgb::hex(0x6e7585);
+pub const HOLDING: Rgb = Rgb::hex(0xd49a1f);
+pub const FIRMWARE: Rgb = HELD;
+pub const FAULT: Rgb = ERR;
 pub const ACTIVE: Rgb = LABEL;
 pub const ACTIVE_RING: Rgb = STRONG;
 

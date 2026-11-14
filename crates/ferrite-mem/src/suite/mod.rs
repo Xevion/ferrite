@@ -25,6 +25,7 @@ use crate::caps::{Caps, Kernel, Stores};
 use crate::fault::Faults;
 use crate::region::{Layout, Regions};
 
+mod front;
 mod plan;
 mod run;
 mod shape;
@@ -32,6 +33,7 @@ mod share;
 #[cfg(test)]
 mod tests;
 
+pub use front::{Activity, Front};
 pub use plan::Span;
 pub use run::{Progress, Test};
 pub use shape::{Place, Shape, Stage};

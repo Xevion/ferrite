@@ -23,7 +23,8 @@ use ferrite_hal::Instant;
 use ferrite_mem::suite::{Config, Kernels, Preset};
 use uefi::mem::memory_map::MemoryType;
 
-use super::{Coverage, Run, Sweep, note};
+use super::{Coverage, Run, Sweep, extent_of, note};
+use crate::memmap::Extent;
 use crate::report::History;
 
 /// Bytes of the lent block the firmware may keep before the log warns.
@@ -138,6 +139,12 @@ impl Rotation {
 
     pub(super) const fn is_open(&self) -> bool {
         self.window.is_some()
+    }
+
+    /// While the reserve is under test, the sweep's own memory left out of the run: what the pass
+    /// that just ended tested, less the block lent to the firmware.
+    pub(super) fn aside(&self) -> Vec<Extent> {
+        self.window.as_ref().map_or_default(|w| w.main.blocks().iter().map(extent_of).collect())
     }
 }
 

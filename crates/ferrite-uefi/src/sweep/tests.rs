@@ -9,6 +9,7 @@ use ferrite_mem::{Kernel, Regions};
 use rstest::{fixture, rstest};
 
 use super::*;
+use crate::memmap::CellState;
 
 /// Small counts and windows, so a pass over a small buffer is quick.
 const CFG: Config = Config {
@@ -91,6 +92,62 @@ fn a_corrupted_word_is_counted_and_reported_with_its_test() {
     check!(first.fault.actual == expected ^ 1 << 7);
     check!(first.test == "solid bits");
     check!(status.analysis == Classification::StuckBits { mask: 1 << 7 });
+}
+
+#[test]
+fn the_map_shows_pending_before_the_first_step_and_a_core_working_and_what_it_finished() {
+    let mut sweep = sweep_of_words(2048);
+    let cells = |sweep: &Sweep| sweep.status().map.cells;
+    let ours = |states: &[CellState]| states.iter().filter(|&&c| c != CellState::NoRam).count();
+    let start = cells(&sweep);
+    check!(start.iter().filter(|&&c| c == CellState::Pending).count() == ours(&start), "all of it ahead");
+    check!(start.iter().all(|&c| matches!(c, CellState::Pending | CellState::NoRam)));
+
+    // Chunks of a KiB, so the front is somewhere in the memory between steps.
+    let mut seen = Vec::new();
+    while sweep.status().passes == 0 {
+        sweep.step(1 << 10, Instant::default(), None);
+        seen.extend(cells(&sweep));
+    }
+    check!(seen.contains(&CellState::Active) && seen.contains(&CellState::Done));
+    check!(!seen.contains(&CellState::Fault) && !seen.contains(&CellState::Firmware));
+    check!(sweep.status().map.top > 0);
+}
+
+#[test]
+fn a_bit_fade_wait_shows_the_memory_holding() {
+    let mut sweep = Sweep::with_buffer(
+        Some(host_blocks(&[1024])),
+        Kernels::uniform(Kernel::SCALAR),
+        Config { fade: Duration::from_secs(5), ..CFG },
+        Preset::Thorough,
+        None,
+    );
+    while sweep.waiting_until().is_none() {
+        sweep.step(64 << 10, Instant::default(), None);
+    }
+    let map = sweep.status().map;
+    check!(map.has(CellState::Holding) && !map.has(CellState::Active) && !map.has(CellState::Pending));
+}
+
+#[test]
+#[expect(clippy::used_underscore_binding, reason = "the buffer field only owns memory outside tests")]
+fn a_fault_marks_its_cell_until_the_run_restarts() {
+    let mut sweep = sweep_of_words(2048);
+    let block = sweep.run.as_ref().map(|r| r._buffer.blocks()[0].base().as_ptr()).unwrap();
+    while sweep.status().test != "solid bits" {
+        sweep.step(64, Instant::default(), None);
+    }
+    sweep.step(64 << 10, Instant::default(), None);
+    // SAFETY: inside the host block; no step runs while it is written.
+    unsafe { block.add(100).write(block.add(100).read() ^ 1) };
+    while sweep.status().faults == 0 {
+        sweep.step(64 << 10, Instant::default(), None);
+    }
+    let marked = |sweep: &Sweep| sweep.status().map.cells.iter().filter(|&&c| c == CellState::Fault).count();
+    check!(marked(&sweep) == 1);
+    sweep.restart(Preset::Standard);
+    check!(marked(&sweep) == 0);
 }
 
 #[test]
@@ -416,6 +473,18 @@ mod rotation {
         step_until(&mut sweep, |s| s.rotation.is_open());
         check!(calls.list() == ["open", "close", "open"]);
         check!(sweep.status().passes == 2);
+    }
+
+    #[rstest]
+    fn the_main_memory_is_set_aside_on_the_map_while_the_reserve_is_under_test(open_rig: (Sweep, Calls)) {
+        let (mut sweep, _) = open_rig;
+        let main = sweep.run.as_ref().map(blocks_of).unwrap();
+        check!(sweep.rotation.aside().is_empty());
+        step_until(&mut sweep, |s| s.rotation.is_open());
+        check!(sweep.rotation.aside() == main);
+        check!(sweep.status().bytes == RESERVE_WORDS * WORD);
+        step_until(&mut sweep, |s| !s.rotation.is_open());
+        check!(sweep.rotation.aside().is_empty());
     }
 
     /// Step and look at `sweep` in 1 ms ticks until `done`.

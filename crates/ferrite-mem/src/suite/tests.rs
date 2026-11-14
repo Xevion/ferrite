@@ -630,3 +630,123 @@ fn a_shape_agrees_with_the_test_it_describes_and_bit_fade_keeps_its_waits_apart(
     let plain = Shape::of(TestKind::SolidBits, &CFG, 0, &layout);
     check!(plain.stages().len() == 1 && plain.wait_count() == 0);
 }
+
+/// The test's front after every step that leaves a phase under way, with that phase's index, over
+/// the words `share` of memory laid out as `words`.
+fn fronts(kind: TestKind, words: &[usize], share: Span) -> Vec<(usize, Front)> {
+    let mut mem = Mem::new(words);
+    let mut whole = mem.regions();
+    let layout = whole.layout();
+    let mut views = whole.split(&[share]);
+    let mut region = views.remove(0);
+    let kernels = Kernels::uniform(Kernel::SCALAR);
+    let mut test = Test::for_share(kind, CFG, 0, &layout, share);
+    let mut sink = |_: Fault| {};
+    let mut faults = Faults::new(64, &mut sink);
+    let (mut seen, mut now) = (Vec::new(), Instant::default());
+    loop {
+        let phase = test.phase();
+        let progress = test.step(&mut region, &kernels, CHUNK_BYTES, now, &mut faults);
+        seen.extend(test.front().map(|front| (phase, front)));
+        match progress {
+            Progress::Running => {},
+            Progress::Waiting { until } => now = until,
+            Progress::Done => return seen,
+        }
+    }
+}
+
+const ALL: Span = Span { start: 0, words: WORDS };
+
+#[test]
+fn an_ascending_sweep_has_its_head_at_the_end_of_what_it_has_done() {
+    let seen = fronts(TestKind::SolidBits, &[WORDS], ALL);
+    let fill: Vec<Front> = seen.iter().filter(|(phase, _)| *phase == 0).map(|&(_, front)| front).collect();
+    check!(fill.len() > 10, "a chunk at a time");
+    let words = CHUNK_BYTES / 8;
+    for (i, front) in fill.iter().enumerate() {
+        let done = (i + 1) * words;
+        check!(front.span == ALL);
+        check!(front.activity == Activity::Sweep { order: Order::Ascending, done });
+        check!(front.done() == Span { start: 0, words: done });
+        check!(front.head() == Some(done));
+    }
+}
+
+#[test]
+fn a_descending_sweep_works_down_from_the_end_of_its_span() {
+    let seen = fronts(TestKind::MarchCMinus, &[WORDS], ALL);
+    // March C-: the fill, two ascending passes, then the two descending ones.
+    let down: Vec<Front> = seen.iter().filter(|(phase, _)| *phase == 3).map(|&(_, front)| front).collect();
+    let words = CHUNK_BYTES / 8;
+    for (i, front) in down.iter().enumerate() {
+        let done = (i + 1) * words;
+        check!(front.activity == Activity::Sweep { order: Order::Descending, done });
+        check!(front.done() == Span { start: WORDS - done, words: done });
+        check!(front.head() == Some(WORDS - done - 1));
+    }
+    check!(down.len() > 10);
+}
+
+#[test]
+fn a_bit_fade_wait_holds_the_whole_span_and_touches_nothing() {
+    let seen = fronts(TestKind::BitFade, &[WORDS], ALL);
+    let held: Vec<Front> = seen.iter().filter(|(phase, _)| *phase == 1).map(|&(_, front)| front).collect();
+    check!(held == [Front { span: ALL, activity: Activity::Hold }]);
+    check!(held[0].head().is_none() && held[0].done().words == 0);
+}
+
+#[test]
+fn a_block_move_works_one_window_at_a_time() {
+    // 4 KiB windows: four of them over the 2048 words.
+    let windows: Vec<Span> = fronts(TestKind::BlockMove, &[WORDS], ALL)
+        .into_iter()
+        .filter(|(_, front)| front.activity == Activity::Window)
+        .map(|(_, front)| front.span)
+        .fold(Vec::new(), |mut all, span| {
+            if all.last() != Some(&span) {
+                all.push(span);
+            }
+            all
+        });
+    check!(windows == (0..4).map(|w| Span { start: w * 512, words: 512 }).collect::<Vec<_>>());
+
+    // A share lacking a window passes over it within one step, so no front shows it.
+    let low = Span { start: 0, words: 1024 };
+    let seen = fronts(TestKind::BlockMove, &[WORDS], low);
+    check!(
+        seen.iter().filter(|(_, front)| front.activity == Activity::Window).all(|(_, front)| front.span.end() <= 1024)
+    );
+}
+
+#[test]
+fn bus_stress_has_a_fill_stream_and_a_verify_stream_that_advance_together() {
+    let seen = fronts(TestKind::BusStress, &[WORDS], ALL);
+    let (low, high) = (Span { start: 0, words: WORDS / 2 }, Span { start: WORDS / 2, words: WORDS / 2 });
+    let first: Vec<&Front> = seen.iter().filter(|(phase, _)| *phase == 0).map(|(_, front)| front).collect();
+    check!(first.iter().all(|f| f.span == low && f.check_stream().is_none()), "nothing to verify yet");
+    let both: Vec<&Front> = seen.iter().filter(|(phase, _)| *phase == 1).map(|(_, front)| front).collect();
+    check!(both.len() > 2);
+    for front in both {
+        assert!(let Activity::Bus { done, check, checked } = front.activity);
+        check!(front.span == high && check == low);
+        check!(front.head() == Some(high.start + done));
+        let stream = front.check_stream().expect("a verify stream");
+        check!(stream.span == low);
+        check!(stream.head() == Some(checked));
+        check!(stream.done() == Span { start: 0, words: checked });
+        check!(done > 0 && checked > 0 && done.abs_diff(checked) <= 32, "the bursts alternate: {done} and {checked}");
+    }
+}
+
+#[test]
+fn a_share_reports_in_the_words_of_the_whole_layout() {
+    let share = Span { start: 1024, words: 1024 };
+    let seen = fronts(TestKind::SolidBits, &[512, 1024, 512], share);
+    let fill: Vec<Front> = seen.iter().filter(|(phase, _)| *phase == 0).map(|&(_, front)| front).collect();
+    let words = CHUNK_BYTES / 8;
+    check!(fill[0].span == share);
+    check!(fill[0].done() == Span { start: 1024, words });
+    check!(fill[0].head() == Some(1024 + words));
+    check!(fill.last().and_then(Front::head).is_some_and(|head| head < 2048));
+}

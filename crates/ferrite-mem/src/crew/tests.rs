@@ -396,3 +396,35 @@ fn an_ap_never_enters_a_job_another_core_took() {
     check!(enter_ap(&core, &seat, &taken, &[Kernel::SCALAR], &released, &clock).is_none());
     check!(seat.state() == SeatState::Failed(Failure::Taken));
 }
+
+#[test]
+fn a_seat_shows_where_its_core_is_working_between_chunks_and_nothing_between_phases() {
+    let (mut backing, offset) = buffer();
+    // SAFETY: the buffer is ours, and nothing else touches it while the region lives.
+    let region = unsafe { Region::from_raw(backing.as_mut_ptr().add(offset), WORDS) }.unwrap();
+    let crew = Crew::default();
+    let seat = Seat::default();
+    let regions = Regions::from(region);
+    let all = Span { start: 0, words: WORDS };
+    let test = Test::for_share(TestKind::SolidBits, CFG, 0, &regions.layout(), all);
+    let job = Job::new(vec![test], regions, Kernels::uniform(Kernel::SCALAR), 1 << 10, Fixed, &crew, &seat);
+    let mut worker = job.claim().unwrap();
+    crew.begin_round();
+    worker.begin(crew.round());
+    check!(seat.front().is_none(), "before the first turn");
+
+    let mut seen = Vec::new();
+    loop {
+        crew.coordinate([&seat]);
+        match worker.turn(None) {
+            Turn::Worked | Turn::Gate => seen.push(seat.front()),
+            Turn::Done => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    let heads: Vec<usize> = seen.iter().take(4).map(|front| front.and_then(|f| f.head()).unwrap()).collect();
+    check!(heads == [128, 256, 384, 512], "a 1 KiB chunk is 128 words");
+    check!(seen.iter().flatten().all(|front| front.span == all));
+    check!(seen.contains(&None), "no phase is under way where one ends and the next has not begun");
+    check!(seat.front().is_none(), "the finished test has no front");
+}

@@ -22,7 +22,7 @@ use super::wifi::{WifiFacts, WifiView};
 use crate::goal::Goal;
 use crate::pace::{Delta, Outlook, Steadiness, TestStat};
 use crate::report::{CpuInfo, FaultRecord, PassRecord, Snapshot, TestRecord};
-use crate::sweep::SweepStatus;
+use crate::sweep::{MapView, SweepStatus};
 use crate::wall::Wall;
 
 pub trait ToJson {
@@ -218,6 +218,20 @@ impl ToJson for ProgressDoc<'_> {
             .field("pace_percent", &o.pace_percent)
             .field("pass_median_ms", &o.pass_median.map(Millis))
             .finish();
+    }
+}
+
+/// The memory map: `top`, the bytes from address 0 that the axis covers, 0 when there is no map;
+/// `cell_bytes`, the bytes in one cell, rounded down; and `cells`, a string of one character for each
+/// cell from address 0 up, as [`CellState::code`](crate::memmap::CellState::code) says: `n` no RAM,
+/// `f` RAM the sweep does not hold (firmware), `p` the sweep's, pending, `t` the sweep's, tested,
+/// `h` holding for a bit-fade wait, `a` a core working in it, `x` a fault seen in it.
+impl ToJson for MapView {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        push(out, '{');
+        let _ = write!(out, r#""top":{},"cell_bytes":{},"cells":""#, self.top, self.cell_bytes());
+        self.codes().for_each(|code| push(out, code));
+        push_str(out, "\"}");
     }
 }
 
@@ -469,6 +483,7 @@ impl ToJson for StatusDoc<'_> {
                     o.field("tested", &status.coverage.tested).field("free", &status.coverage.free);
                 }),
             )
+            .field("map", &status.map)
             .field("tier", status.tier)
             .field("bandwidth", &status.outlook.bandwidth)
             .field("mode", mode)
@@ -558,6 +573,7 @@ mod tests {
     use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
     use super::*;
+    use crate::memmap::CellState;
     use crate::pace::TestStats;
     use crate::report::History;
 
@@ -622,6 +638,22 @@ mod tests {
         }
     }
 
+    /// The first eight cells are tested, tested, active, pending, a fault, the firmware's, no RAM and
+    /// holding; the rest are pending.
+    fn sample_map() -> MapView {
+        let mut map = MapView { top: 18 << 30, cells: [CellState::Pending; crate::dash::CELLS] };
+        map.cells[..3].fill(CellState::Done);
+        map.cells[2..8].copy_from_slice(&[
+            CellState::Active,
+            CellState::Pending,
+            CellState::Fault,
+            CellState::Firmware,
+            CellState::NoRam,
+            CellState::Holding,
+        ]);
+        map
+    }
+
     #[test]
     fn status_document_shape() {
         let mut history = History::default();
@@ -655,6 +687,7 @@ mod tests {
             paused: true,
             coverage: crate::sweep::Coverage::NONE,
             outlook: live_outlook(),
+            map: sample_map(),
         };
         let (finished, steadiness) = finished_own_address();
         let snapshot = Snapshot { status, history: &history, faults: &faults, stats: &finished };
@@ -683,6 +716,9 @@ mod tests {
             env!("CARGO_PKG_VERSION"),
             r#"","uptime_ms":6500,"clock":{"unix_ms":1794646676500,"synced":false},"preset":"thorough","paused":true,"elapsed_ms":5500,"bytes":1073741824,"#,
             r#""coverage":{"tested":0,"free":0},"#,
+            r#""map":{"top":19327352832,"cell_bytes":150994944,"cells":"ttapxfnh"#,
+            "@PENDING@",
+            r#""},"#,
             r#""tier":"avx2","bandwidth":18400000000,"mode":"split","cpus":4,"#,
             r#""pass":{"number":1,"percent":15,"elapsed_ms":2500},"#,
             r#""test":{"name":"moving-inversions","index":2,"count":9,"percent":40},"#,
@@ -712,7 +748,8 @@ mod tests {
             r#""rx_frames":5,"rx_dropped":0,"tx_frames":0,"tx_dropped":0,"tx_errors":0,"tx_reclaimed":0}}],"#,
             r#""wifi":{"state":"not in this build","ssid":null,"retry_in_s":null,"final":true}}}"#
         )
-        .replace("@MEDIAN@", &std::format!("{}", steadiness.median));
+        .replace("@MEDIAN@", &std::format!("{}", steadiness.median))
+        .replace("@PENDING@", &"p".repeat(crate::dash::CELLS - 8));
         check!(out == expected);
     }
 

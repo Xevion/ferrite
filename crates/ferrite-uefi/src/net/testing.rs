@@ -26,5 +26,6 @@ pub fn idle_status() -> SweepStatus {
         paused: false,
         coverage: crate::sweep::Coverage::NONE,
         outlook: Outlook::NONE,
+        map: crate::sweep::MapView::NONE,
     }
 }

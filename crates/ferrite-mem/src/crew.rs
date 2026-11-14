@@ -17,12 +17,13 @@
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 use core::time::Duration;
 
 use ferrite_hal::{Clock, Instant};
 
-use crate::suite::{Kernels, Progress, Test};
+use crate::ops::Order;
+use crate::suite::{Activity, Front, Kernels, Progress, Span, Test};
 use crate::{CpuAddr, Fault, Faults, Kernel, Regions, Tier};
 
 /// The first faults each core keeps per test with their addresses; the rest are only counted.
@@ -152,6 +153,81 @@ struct FaultCell {
     actual: AtomicU64,
 }
 
+/// How often a read of a [`Front`] tries again when the core is writing it.
+const FRONT_TRIES: usize = 4;
+
+/// A core's [`Front`] as words behind a sequence counter: odd while the core writes, so a reader
+/// takes the words only when the counter held still, and never sees half of one front and half of
+/// another. One cache line, written once per chunk.
+#[derive(Default)]
+#[repr(align(64))]
+struct FrontCell {
+    seq: AtomicUsize,
+    words: [AtomicUsize; 7],
+}
+
+impl FrontCell {
+    const NONE: usize = 0;
+    const ASCENDING: usize = 1;
+    const DESCENDING: usize = 2;
+    const HOLD: usize = 3;
+    const WINDOW: usize = 4;
+    const BUS: usize = 5;
+
+    /// Only the one core that runs the job writes.
+    fn publish(&self, front: Option<Front>) {
+        let words = match front {
+            None => [Self::NONE; 7],
+            Some(Front { span: Span { start, words }, activity }) => match activity {
+                Activity::Sweep { order: Order::Ascending, done } => [Self::ASCENDING, start, words, done, 0, 0, 0],
+                Activity::Sweep { order: Order::Descending, done } => [Self::DESCENDING, start, words, done, 0, 0, 0],
+                Activity::Hold => [Self::HOLD, start, words, 0, 0, 0, 0],
+                Activity::Window => [Self::WINDOW, start, words, 0, 0, 0, 0],
+                Activity::Bus { done, check, checked } => {
+                    [Self::BUS, start, words, done, check.start, check.words, checked]
+                },
+            },
+        };
+        let seq = self.seq.load(Ordering::Relaxed);
+        self.seq.store(seq.wrapping_add(1), Ordering::Relaxed);
+        fence(Ordering::Release);
+        for (cell, word) in self.words.iter().zip(words) {
+            cell.store(word, Ordering::Relaxed);
+        }
+        self.seq.store(seq.wrapping_add(2), Ordering::Release);
+    }
+
+    /// The published front; `None` when there is none, or the core kept writing through every try.
+    fn read(&self) -> Option<Front> {
+        for _ in 0..FRONT_TRIES {
+            let before = self.seq.load(Ordering::Acquire);
+            if before % 2 == 1 {
+                core::hint::spin_loop();
+                continue;
+            }
+            let words: [usize; 7] = core::array::from_fn(|i| self.words[i].load(Ordering::Relaxed));
+            fence(Ordering::Acquire);
+            if self.seq.load(Ordering::Relaxed) == before {
+                return Self::decode(words);
+            }
+        }
+        None
+    }
+
+    fn decode([tag, start, len, a, b, c, d]: [usize; 7]) -> Option<Front> {
+        let span = Span { start, words: len };
+        let activity = match tag {
+            Self::ASCENDING => Activity::Sweep { order: Order::Ascending, done: a },
+            Self::DESCENDING => Activity::Sweep { order: Order::Descending, done: a },
+            Self::HOLD => Activity::Hold,
+            Self::WINDOW => Activity::Window,
+            Self::BUS => Activity::Bus { done: a, check: Span { start: b, words: c }, checked: d },
+            _ => return None,
+        };
+        Some(Front { span, activity })
+    }
+}
+
 /// One core's progress and results for one test, written only by that core. A cache line of its
 /// own, so no two cores share one.
 #[derive(Default)]
@@ -165,6 +241,8 @@ pub struct Seat {
     finished: AtomicUsize,
     /// Work done in the current test, in its units.
     done: AtomicU64,
+    /// Where the core is working in its test.
+    front: FrontCell,
     faults: AtomicU64,
     /// Cells of `first` filled; a filled cell is never written again.
     kept: AtomicUsize,
@@ -211,11 +289,19 @@ impl Seat {
         })
     }
 
+    /// Where the core is working in the current test: the phase's span inside its share and how
+    /// far along it is, in words of the whole layout. `None` between phases and when idle.
+    #[must_use]
+    pub fn front(&self) -> Option<Front> {
+        self.front.read()
+    }
+
     /// Forget the last test's progress and faults, once every core has finished it and before the
     /// next round begins.
     pub fn reset(&self) {
         self.gate.store(0, Ordering::Release);
         self.done.store(0, Ordering::Release);
+        self.front.publish(None);
         self.faults.store(0, Ordering::Release);
         self.kept.store(0, Ordering::Release);
     }
@@ -651,6 +737,7 @@ impl<C: Clock> Worker<'_, '_, C> {
             seat.faults.fetch_add(seen, Ordering::AcqRel);
         }
         seat.done.store(test.done(), Ordering::Release);
+        seat.front.publish(test.front());
         match progress {
             Progress::Done => {
                 seat.finished.store(self.round, Ordering::Release);

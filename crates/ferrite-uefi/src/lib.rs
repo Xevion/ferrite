@@ -18,6 +18,7 @@ pub mod gfx;
 pub mod goal;
 pub mod gop;
 pub mod machine;
+pub mod memmap;
 pub mod net;
 pub mod pace;
 pub mod report;

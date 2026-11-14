@@ -261,6 +261,33 @@ pub fn free_map(below: u64) -> Option<FreeMap> {
     Some(FreeMap { ranges: free.ranges, all: free.all, conventional: free.conventional, held })
 }
 
+/// Whether memory of type `ty` is RAM, whoever holds it. Reserved and MMIO ranges are not: they
+/// are address space the firmware or a device owns, and persistent memory is not DRAM.
+const fn is_ram(ty: MemoryType) -> bool {
+    matches!(
+        ty,
+        MemoryType::CONVENTIONAL
+            | MemoryType::LOADER_CODE
+            | MemoryType::LOADER_DATA
+            | MemoryType::BOOT_SERVICES_CODE
+            | MemoryType::BOOT_SERVICES_DATA
+            | MemoryType::RUNTIME_SERVICES_CODE
+            | MemoryType::RUNTIME_SERVICES_DATA
+            | MemoryType::ACPI_RECLAIM
+            | MemoryType::ACPI_NON_VOLATILE
+            | MemoryType::UNUSABLE
+    )
+}
+
+/// Every range of the memory map that is RAM, free or held, in map order; `None` when the firmware
+/// will not give the map.
+#[must_use]
+pub fn ram_ranges() -> Option<Vec<Range>> {
+    let map =
+        boot::memory_map(MemoryType::LOADER_DATA).inspect_err(|e| log::warn!("sweep: no memory map: {e}")).ok()?;
+    Some(map.entries().filter(|d| is_ram(d.ty)).map(|d| Range::new(d.phys_start, d.page_count as usize)).collect())
+}
+
 /// Take whatever of `wanted` the firmware will still give, each range at its own address.
 #[must_use]
 pub fn claim_ranges(wanted: &[Range]) -> Claim {

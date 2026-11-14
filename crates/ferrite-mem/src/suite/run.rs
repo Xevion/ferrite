@@ -4,6 +4,7 @@ use core::time::Duration;
 
 use ferrite_hal::Instant;
 
+use super::front::{Activity, Front};
 use super::plan::{self, Bus, MODULO, Op, Phase, Seq, Span, move_half};
 use super::{Config, Kernels, TestKind, percent};
 use crate::fault::Faults;
@@ -129,6 +130,13 @@ impl Test {
     #[must_use]
     pub fn percent(&self) -> u16 {
         percent(self.done(), self.total)
+    }
+
+    /// Where the phase being worked is, in words of the whole layout; `None` before the first
+    /// step of a phase and after its last, when no phase is under way.
+    #[must_use]
+    pub fn front(&self) -> Option<Front> {
+        self.active.as_ref().map(Active::front)
     }
 
     /// Do up to `budget_bytes` (at least one block) of the current phase. A step ends at the end of
@@ -280,6 +288,18 @@ impl Active {
             since_gap: 0,
             until: None,
         }
+    }
+
+    fn front(&self) -> Front {
+        let activity = match self.phase.op {
+            Op::Wait(_) => Activity::Hold,
+            Op::Move { .. } => Activity::Window,
+            // The walk is one shot, so it is never part way.
+            Op::AddressWalk { .. } => Activity::Sweep { order: Order::Ascending, done: 0 },
+            Op::Bus(_) => Activity::Bus { done: self.bus[0], check: self.check_span, checked: self.bus[1] },
+            _ => Activity::Sweep { order: self.phase.order(), done: self.cursor },
+        };
+        Front { span: self.span, activity }
     }
 
     /// Run one chunk of at most `budget` words, or return the time to wait until.

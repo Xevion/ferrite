@@ -6,8 +6,8 @@
 <meta name="color-scheme" content="light dark">
 <title>ferrite</title>
 <style>
-:root{--bg:#c8ccd4;--line:#7a8396;--text:#1b2a5c;--strong:#0a1238;--dim:#3e4a6b;--label:#1e40af;--bar:#1e3a8a;--bar-text:#fff;--bar-dim:#c7d2fe;--bar-rule:#3b5bb5;--tab-text:#dce3f7;--tab-on:#c8ccd4;--tab-on-ink:#0a1238;--fill:#1e40af;--track:#e6e9ef;--sel:#1e3a8a;--sel-ink:#fff;--pass:#14532d;--err:#991b1b;--warn:#7a4700;--err-band:#991b1b;--err-text:#fff;--tested:#3f8f62;--pending:#a7aebd;--reserved:#6e7585;--active:#1e40af;--active-ring:#0a1238;--code:#e6e9ef;--key:#fff;--key-ink:#1e3a8a;--font:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono','Liberation Mono',monospace}
-@media(prefers-color-scheme:dark){:root{--bg:#101826;--line:#33415e;--text:#c9d3e6;--strong:#f1f5fb;--dim:#8c9ab8;--label:#7fa6ff;--tab-on:#101826;--tab-on-ink:#f1f5fb;--fill:#3b6beb;--track:#1a2436;--pass:#6fd38f;--err:#ff6b6b;--warn:#f2c94c;--err-band:#7f1d1d;--err-text:#ffe4e4;--tested:#2e7a50;--pending:#1e2a40;--reserved:#3a4458;--active:#7fa6ff;--active-ring:#f1f5fb;--code:#1a2436}}
+:root{--bg:#c8ccd4;--line:#7a8396;--text:#1b2a5c;--strong:#0a1238;--dim:#3e4a6b;--label:#1e40af;--bar:#1e3a8a;--bar-text:#fff;--bar-dim:#c7d2fe;--bar-rule:#3b5bb5;--tab-text:#dce3f7;--tab-on:#c8ccd4;--tab-on-ink:#0a1238;--fill:#1e40af;--track:#e6e9ef;--sel:#1e3a8a;--sel-ink:#fff;--pass:#14532d;--err:#991b1b;--warn:#7a4700;--err-band:#991b1b;--err-text:#fff;--tested:#3f8f62;--pending:#a7aebd;--reserved:#6e7585;--hold:#d49a1f;--active:#1e40af;--active-ring:#0a1238;--code:#e6e9ef;--key:#fff;--key-ink:#1e3a8a;--font:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono','Liberation Mono',monospace}
+@media(prefers-color-scheme:dark){:root{--bg:#101826;--line:#33415e;--text:#c9d3e6;--strong:#f1f5fb;--dim:#8c9ab8;--label:#7fa6ff;--tab-on:#101826;--tab-on-ink:#f1f5fb;--fill:#3b6beb;--track:#1a2436;--pass:#6fd38f;--err:#ff6b6b;--warn:#f2c94c;--err-band:#7f1d1d;--err-text:#ffe4e4;--tested:#2e7a50;--pending:#1e2a40;--reserved:#3a4458;--hold:#c28b1e;--active:#7fa6ff;--active-ring:#f1f5fb;--code:#1a2436}}
 *{box-sizing:border-box}
 html{background:var(--bg)}
 body{margin:0;min-height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font:13px/1.45 var(--font)}
@@ -78,13 +78,16 @@ tr.cur td:first-child{color:var(--sel-ink)}
 .mapaxis{display:flex;justify-content:space-between;font-size:.85em;color:var(--dim);margin-bottom:6px}
 #map{display:grid;grid-template-columns:repeat(16,minmax(0,1fr));gap:3px}
 #map i{height:20px;background:var(--pending)}
-#map i.t{background:var(--tested)}
-#map i.a{background:var(--active);outline:2px solid var(--active-ring);outline-offset:-2px}
+#map i.t,.legend i.t{background:var(--tested)}
+#map i.a,.legend i.a{background:var(--active);outline:2px solid var(--active-ring);outline-offset:-2px}
+#map i.h,.legend i.h{background:var(--hold)}
+#map i.x,.legend i.x{background:var(--err)}
+#map i.f,.legend i.f{background:var(--reserved)}
+#map i.n,.legend i.n{background:none;outline:1px solid var(--line);outline-offset:-1px}
 .legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:10px;font-size:.92em}
 .legend span{display:flex;align-items:center;gap:6px}
 .legend i{width:12px;height:12px;display:block;background:var(--pending);outline:1px solid var(--line)}
-.legend i.t{background:var(--tested);outline:0}
-.legend i.a{background:var(--active);outline:2px solid var(--active-ring);outline-offset:-2px}
+.legend i.t,.legend i.h,.legend i.x,.legend i.f{outline:0}
 .count{display:flex;align-items:baseline;gap:14px}
 .count b{font-size:4.3em;line-height:1}
 .count span{font-weight:600;letter-spacing:2px}
@@ -165,7 +168,7 @@ label.d{display:inline-flex;align-items:center;gap:4px}
 <h2>Memory map</h2>
 <div class="mapaxis"><span>0</span><span id="cell">-</span><span id="msize">-</span></div>
 <div id="map"></div>
-<div class="legend"><span><i class="t"></i>Tested</span><span><i class="a"></i>Active</span><span><i></i>Pending</span></div>
+<div class="legend" id="legend"><span data-s="t"><i class="t"></i>Tested</span><span data-s="a"><i class="a"></i>Active</span><span data-s="p"><i></i>Pending</span><span data-s="h"><i class="h"></i>Holding</span><span data-s="x"><i class="x"></i>Fault</span><span data-s="f"><i class="f"></i>Firmware</span><span data-s="n"><i class="n"></i>No RAM</span></div>
 </section>
 <section>
 <h2>Network</h2>
@@ -203,7 +206,7 @@ label.d{display:inline-flex;align-items:center;gap:4px}
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]);
 const p2=n=>String(n).padStart(2,"0");
-const DASH="\u2014",DOT=" \u00b7 ",CELLS=128;
+const DASH="\u2014",DOT=" \u00b7 ";
 // Times of day are the browser's to format, in its own zone and style.
 const tf=(o)=>new Intl.DateTimeFormat(undefined,o),HM={hour:"2-digit",minute:"2-digit"};
 const secF=tf({...HM,second:"2-digit"}),minF=tf(HM),dayF=tf({weekday:"short",...HM}),dateF=tf({month:"short",day:"numeric",...HM});
@@ -227,8 +230,7 @@ function diff(a,e){const A=h16(a),E=h16(e);let o="";for(let i=0;i<A.length;i++)o
 function text(id,v){$(id).textContent=v}
 function rows(id,items,f,empty){$(id).innerHTML=items.map(f).join("");if(empty)$(empty).style.display=items.length?"none":"block"}
 const cells=[];
-for(let i=0;i<CELLS;i++){const c=document.createElement("i");$("map").appendChild(c);cells.push(c)}
-let last=null,first=true,paused=false,base=null,mapAt=-2;
+let last=null,first=true,paused=false,base=null,mapKey=null;
 function clock(){
   if(!base)return;
   const dt=performance.now()-base.at,el=base.el==null?null:base.el+dt;
@@ -259,11 +261,17 @@ function clock(){
   text("logline","["+hms(el)+"] "+base.log);
   const u=$("up");if(u)u.textContent=clk(base.up+dt);
 }
+// One character a cell: n no RAM, f firmware, p pending, t tested, h holding, a active, x fault; the character is the class.
 function renderMap(d){
-  const t=d.test,a=t.count>0?Math.min(CELLS-1,Math.floor(Math.min(t.percent,100)*CELLS/100)):-1;
-  if(a!==mapAt){mapAt=a;cells.forEach((c,i)=>{c.className=a<0?"":i<a?"t":i==a?"a":""})}
-  text("msize",size(d.bytes));
-  text("cell","1 cell = "+size(Math.floor(d.bytes/CELLS)));
+  const m=d.map;
+  if(m.cells!==mapKey){
+    mapKey=m.cells;
+    while(cells.length<m.cells.length){const c=document.createElement("i");$("map").appendChild(c);cells.push(c)}
+    cells.forEach((c,i)=>{const s=m.cells[i];c.className=s=="p"?"":s});
+    document.querySelectorAll("#legend span").forEach(e=>{e.style.display=m.top&&m.cells.includes(e.dataset.s)?"":"none"});
+  }
+  text("msize",m.top?size(m.top):DASH);
+  text("cell",m.top?"1 cell = "+size(m.cell_bytes):"");
 }
 function renderTests(d){
   const cur=d.pass.number,name=d.test.name,t=d.test,seen=new Set(),pr=d.progress;
