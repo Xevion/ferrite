@@ -6,6 +6,7 @@
  * is arithmetic, nothing bounces, and x86 coherence makes syncs no-ops.
  */
 
+#include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/gfp.h>
 #include <linux/mm.h>
@@ -69,6 +70,39 @@ void dma_free_attrs(struct device *dev, size_t size, void *cpu_addr, dma_addr_t 
 		__free_pages(virt_to_page(cpu_addr), get_order(size));
 }
 EXPORT_SYMBOL(dma_free_attrs);
+
+struct lx_dmam {
+	size_t size;
+	void *cpu_addr;
+	dma_addr_t dma_handle;
+	unsigned long attrs;
+};
+
+static void lx_dmam_release(struct device *dev, void *res)
+{
+	struct lx_dmam *dmam = res;
+
+	dma_free_attrs(dev, dmam->size, dmam->cpu_addr, dmam->dma_handle, dmam->attrs);
+}
+
+/* Coherent memory the device owns until it is unbound, as Linux's managed variant. */
+void *dmam_alloc_attrs(struct device *dev, size_t size, dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
+{
+	struct lx_dmam *dmam = devres_alloc(lx_dmam_release, sizeof(*dmam), gfp);
+	void *cpu_addr;
+
+	if (!dmam)
+		return NULL;
+	cpu_addr = dma_alloc_attrs(dev, size, dma_handle, gfp, attrs);
+	if (!cpu_addr) {
+		devres_free(dmam);
+		return NULL;
+	}
+	*dmam = (struct lx_dmam){ size, cpu_addr, *dma_handle, attrs };
+	devres_add(dev, dmam);
+	return cpu_addr;
+}
+EXPORT_SYMBOL(dmam_alloc_attrs);
 
 dma_addr_t dma_map_page_attrs(struct device *dev, struct page *page, size_t offset, size_t size,
 			      enum dma_data_direction dir, unsigned long attrs)

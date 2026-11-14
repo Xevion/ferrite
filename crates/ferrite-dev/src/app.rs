@@ -11,12 +11,16 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 
 use snafu::ResultExt;
 
-use crate::cli::{BenchArgs, BuildArgs, Cli, Command, LoaderArgs, LogArgs, PushArgs, RunArgs, StubsArgs, VendorArgs};
+use crate::cli::{
+    BenchArgs, BuildArgs, Cli, Command, FirmwareArgs, LoaderArgs, LogArgs, PushArgs, RunArgs, StubsArgs, VendorArgs,
+};
 use crate::config::{self, Config, ConfigError};
 use crate::emit::Emitter;
 use crate::error::{
-    BenchSnafu, BuildSnafu, Error, LoaderSnafu, LogSnafu, OutputSnafu, PushSnafu, RunSnafu, StubsSnafu, VendorSnafu,
+    BenchSnafu, BuildSnafu, Error, FirmwareSnafu, LoaderSnafu, LogSnafu, OutputSnafu, PushSnafu, RunSnafu, StubsSnafu,
+    VendorSnafu,
 };
+use crate::firmware::{self, FirmwareOptions};
 use crate::live::Live;
 use crate::loader::{self, LoaderOptions};
 use crate::push::{self, PushOptions};
@@ -44,6 +48,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Error> {
         Command::Loader(args) => loader_command(&config, &args),
         Command::Vendor(args) => vendor_command(&args),
         Command::Stubs(args) => stubs_command(&args),
+        Command::Firmware(args) => firmware_command(&args),
     }
 }
 
@@ -142,6 +147,18 @@ fn stubs_command(args: &StubsArgs) -> Result<(), Error> {
         StubsOptions::from_env(args.wifi_dir.clone(), args.lkpi_dir.clone(), args.check).context(StubsSnafu)?;
     println!("{}", stubs::run(&options).context(StubsSnafu)?);
     Ok(())
+}
+
+fn firmware_command(args: &FirmwareArgs) -> Result<(), Error> {
+    let options = FirmwareOptions {
+        root: args.root.clone(),
+        source: args.source.clone(),
+        dest: args.dest.clone(),
+        chips: args.chips.clone(),
+        all: args.all,
+        list: args.list,
+    };
+    firmware::run(&options).context(FirmwareSnafu)
 }
 
 fn run_command(config: &Config, args: &RunArgs) -> Result<(), Error> {

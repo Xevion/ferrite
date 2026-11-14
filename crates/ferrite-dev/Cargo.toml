@@ -13,7 +13,7 @@ ferrite-wire.workspace = true
 humantime.workspace = true
 jiff.workspace = true
 nusb.workspace = true
-object.workspace = true
+object = { workspace = true, features = ["archive"] }
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

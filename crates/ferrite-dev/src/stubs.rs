@@ -6,7 +6,7 @@
 //! stubs in `ferrite-lkpi`; variables become zeroed C definitions and variadic functions C stubs, both in
 //! the archive's `glue/` directory. Output is a pure function of the imports, so a rerun is a no-op.
 
-mod artifacts;
+pub(crate) mod artifacts;
 mod ast;
 mod classify;
 mod include;

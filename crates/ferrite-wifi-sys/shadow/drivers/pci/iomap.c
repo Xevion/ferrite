@@ -6,6 +6,7 @@
  * I/O port BARs are not mapped. The lab reports no devices.
  */
 
+#include <linux/device.h>
 #include <linux/io.h>
 #include <linux/pci.h>
 
@@ -30,11 +31,53 @@ void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long maxlen)
 }
 EXPORT_SYMBOL(pci_iomap);
 
+static void lx_pcim_table_release(struct device *dev, void *res)
+{
+}
+
+/* The per-device table of mapped BARs, kept as a managed resource like Linux's. */
+static void __iomem **lx_pcim_table(struct pci_dev *pdev)
+{
+	void __iomem **table = devres_find(&pdev->dev, lx_pcim_table_release, NULL, NULL);
+
+	if (table)
+		return table;
+	table = devres_alloc(lx_pcim_table_release, PCI_STD_NUM_BARS * sizeof(*table), GFP_KERNEL);
+	if (table)
+		devres_add(&pdev->dev, table);
+	return table;
+}
+
 void __iomem *pcim_iomap(struct pci_dev *pdev, int bar, unsigned long maxlen)
 {
-	return pci_iomap(pdev, bar, maxlen);
+	void __iomem **table = lx_pcim_table(pdev);
+	void __iomem *addr;
+
+	if (!table || bar < 0 || bar >= PCI_STD_NUM_BARS || table[bar])
+		return NULL;
+	addr = pci_iomap(pdev, bar, maxlen);
+	table[bar] = addr;
+	return addr;
 }
 EXPORT_SYMBOL(pcim_iomap);
+
+void __iomem *const *pcim_iomap_table(struct pci_dev *pdev)
+{
+	return lx_pcim_table(pdev);
+}
+EXPORT_SYMBOL(pcim_iomap_table);
+
+int pcim_iomap_regions(struct pci_dev *pdev, int mask, const char *name)
+{
+	int bar;
+
+	for (bar = 0; bar < PCI_STD_NUM_BARS; bar++) {
+		if ((mask & BIT(bar)) && !pcim_iomap(pdev, bar, 0))
+			return -ENOMEM;
+	}
+	return 0;
+}
+EXPORT_SYMBOL(pcim_iomap_regions);
 
 void iounmap(volatile void __iomem *addr)
 {

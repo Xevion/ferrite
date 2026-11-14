@@ -27,6 +27,25 @@ int pci_enable_device(struct pci_dev *dev)
 }
 EXPORT_SYMBOL(pci_enable_device);
 
+/* Memory-only enabling is the same decode switch here. */
+int pci_enable_device_mem(struct pci_dev *dev)
+{
+	return pci_enable_device(dev);
+}
+EXPORT_SYMBOL(pci_enable_device_mem);
+
+/* No power state is ever entered, so there is no config space to save or restore. */
+int pci_save_state(struct pci_dev *dev)
+{
+	return 0;
+}
+EXPORT_SYMBOL(pci_save_state);
+
+void pci_restore_state(struct pci_dev *dev)
+{
+}
+EXPORT_SYMBOL(pci_restore_state);
+
 static void lx_set_master(struct pci_dev *dev, bool on)
 {
 	if (!lx_pci_set_master(lx_pci_index(dev), on))

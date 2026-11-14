@@ -7,6 +7,7 @@ use snafu::Snafu;
 
 use crate::bench::BenchError;
 use crate::config::ConfigError;
+use crate::firmware::FirmwareError;
 use crate::loader::LoaderError;
 use crate::log::LogError;
 use crate::push::PushError;
@@ -43,6 +44,9 @@ pub enum Error {
 
     #[snafu(display("stubs failed"))]
     Stubs { source: StubsError },
+
+    #[snafu(display("firmware staging failed"))]
+    Firmware { source: FirmwareError },
 
     #[snafu(display("cannot create {}", path.display()))]
     Output { path: PathBuf, source: io::Error },

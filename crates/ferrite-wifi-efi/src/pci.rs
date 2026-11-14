@@ -20,13 +20,52 @@ pub struct Wanted {
     pub vendor: u16,
     pub device: u16,
     pub name: &'static str,
-    /// The firmware file its driver loads at probe, under its Linux name.
-    pub firmware: &'static str,
+    /// The firmware files its driver loads at probe, under their Linux names, when the ID fixes them. A
+    /// family whose files depend on the silicon revision lists none, and a missing file then shows as the
+    /// driver's own probe failure.
+    pub firmware: &'static [&'static str],
 }
 
-/// The devices handed to the drivers.
-pub const WANTED: [Wanted; 1] =
-    [Wanted { vendor: 0x8086, device: 0x24fd, name: "Intel Wireless 8265", firmware: "iwlwifi-8265-36.ucode" }];
+const INTEL: u16 = 0x8086;
+const MEDIATEK: u16 = 0x14c3;
+
+const fn intel(device: u16, name: &'static str, firmware: &'static [&'static str]) -> Wanted {
+    Wanted { vendor: INTEL, device, name, firmware }
+}
+
+const fn mediatek(device: u16, name: &'static str, firmware: &'static [&'static str]) -> Wanted {
+    Wanted { vendor: MEDIATEK, device, name, firmware }
+}
+
+const MT7921: &[&str] = &["mediatek/WIFI_RAM_CODE_MT7961_1.bin", "mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin"];
+const MT7922: &[&str] = &["mediatek/WIFI_RAM_CODE_MT7922_1.bin", "mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin"];
+const MT7920: &[&str] = &["mediatek/WIFI_RAM_CODE_MT7961_1a.bin", "mediatek/WIFI_MT7961_patch_mcu_1a_2_hdr.bin"];
+
+/// The devices handed to the drivers: the PCI IDs of iwlwifi's 8265, AX200, AX201, AX210 and AX211
+/// (`pcie/drv.c`) and mt76's mt7921e family (`mt7921/pci.c`).
+pub const WANTED: [Wanted; 21] = [
+    intel(0x24fd, "Intel Wireless 8265", &["iwlwifi-8265-36.ucode"]),
+    intel(0x2723, "Intel Wi-Fi 6 AX200", &["iwlwifi-cc-a0-77.ucode"]),
+    intel(0x2725, "Intel Wi-Fi 6E AX210", &["iwlwifi-ty-a0-gf-a0-89.ucode", "iwlwifi-ty-a0-gf-a0.pnvm"]),
+    intel(0x02f0, "Intel Wi-Fi 6 CNVi (AX201)", &[]),
+    intel(0x06f0, "Intel Wi-Fi 6 CNVi (AX201)", &[]),
+    intel(0x34f0, "Intel Wi-Fi 6 CNVi (AX201)", &[]),
+    intel(0x3df0, "Intel Wi-Fi 6 CNVi (AX201)", &[]),
+    intel(0x4df0, "Intel Wi-Fi 6 CNVi (AX201)", &[]),
+    intel(0x43f0, "Intel Wi-Fi 6 CNVi (AX201)", &[]),
+    intel(0xa0f0, "Intel Wi-Fi 6 CNVi (AX201)", &[]),
+    intel(0x7a70, "Intel Wi-Fi 6E CNVi (AX211)", &[]),
+    intel(0x7af0, "Intel Wi-Fi 6E CNVi (AX211)", &[]),
+    intel(0x51f0, "Intel Wi-Fi 6E CNVi (AX211)", &[]),
+    intel(0x51f1, "Intel Wi-Fi 6E CNVi (AX211)", &[]),
+    intel(0x54f0, "Intel Wi-Fi 6E CNVi (AX211)", &[]),
+    intel(0x7f70, "Intel Wi-Fi 6E CNVi (AX211)", &[]),
+    mediatek(0x7961, "MediaTek MT7921", MT7921),
+    mediatek(0x0608, "MediaTek MT7921", MT7921),
+    mediatek(0x7922, "MediaTek MT7922", MT7922),
+    mediatek(0x0616, "MediaTek MT7922", MT7922),
+    mediatek(0x7920, "MediaTek MT7920", MT7920),
+];
 
 /// `EFI_PCI_IO_PROTOCOL_WIDTH`.
 const WIDTH_U8: u32 = 0;
@@ -238,7 +277,11 @@ impl UefiPci {
         if found.is_empty() {
             let wanted: Vec<String> =
                 WANTED.iter().map(|w| format!("{} {:04x}:{:04x}", w.name, w.vendor, w.device)).collect();
-            log::info!("no 8265 present: none of {} among {} PCI I/O handles", wanted.join(", "), handles.len());
+            log::info!(
+                "no supported Wi-Fi card present: none of {} among {} PCI I/O handles",
+                wanted.join(", "),
+                handles.len()
+            );
         }
         let devices = found.iter().map(|f| f.device.clone()).collect();
         Self { found, devices, withheld: Cell::new(false) }
@@ -253,7 +296,7 @@ impl UefiPci {
     /// The firmware files the cards found need, for a check before any driver runs.
     pub fn firmware(&self) -> Vec<&'static str> {
         let wanted = |d: &PciDevice| WANTED.iter().find(|w| w.vendor == d.vendor && w.device == d.device);
-        self.found.iter().filter_map(|f| wanted(&f.device)).map(|w| w.firmware).collect()
+        self.found.iter().filter_map(|f| wanted(&f.device)).flat_map(|w| w.firmware.iter().copied()).collect()
     }
 
     /// The PCI I/O protocol of device `index`, for mapping DMA memory through it.

@@ -10,7 +10,7 @@ sha256 = "81764a545072d160748beff4d9de2e7d95aa9f16e8261110288f067a2cc61d71"
 # Applied to a tinyconfig, then resolved with olddefconfig.
 enable = [
     "64BIT", "PCI", "NET", "NETDEVICES", "WIRELESS", "CFG80211", "MAC80211", "WLAN",
-    "WLAN_VENDOR_REALTEK", "RTW89", "RTW89_8852CE", "WLAN_VENDOR_INTEL", "IWLWIFI", "IWLMVM", "MAC80211_HWSIM", "EXPERT", "CFG80211_CERTIFICATION_ONUS",
+    "WLAN_VENDOR_REALTEK", "RTW89", "RTW89_8852CE", "WLAN_VENDOR_INTEL", "IWLWIFI", "IWLMVM", "WLAN_VENDOR_MEDIATEK", "MT7921E", "MAC80211_HWSIM", "EXPERT", "CFG80211_CERTIFICATION_ONUS",
     "UNWINDER_GUESS", "PRINTK", "BUG",
     "NO_HZ_IDLE", "HIGH_RES_TIMERS", "DEBUG_KERNEL", "DEBUG_ATOMIC_SLEEP",
     "SYSFS", "PROC_FS", "NLS", "RFKILL", "NET_SCHED", "INET",
@@ -28,6 +28,7 @@ disable = [
 expect_set = [
     "CONFIG_CC_IS_CLANG=y", "CONFIG_64BIT=y", "CONFIG_PCI=y", "CONFIG_NETDEVICES=y", "CONFIG_WLAN=y",
     "CONFIG_CFG80211=y", "CONFIG_MAC80211=y", "CONFIG_RTW89=y", "CONFIG_RTW89_8852CE=y", "CONFIG_IWLWIFI=y", "CONFIG_IWLMVM=y",
+    "CONFIG_MT76_CORE=y", "CONFIG_MT7921E=y",
     "CONFIG_MAC80211_HWSIM=y",
     "CONFIG_PRINTK=y", "CONFIG_BUG=y", "CONFIG_TINY_RCU=y", "CONFIG_PREEMPT_NONE=y", "CONFIG_SLUB_TINY=y",
     "CONFIG_UNWINDER_GUESS=y", "CONFIG_PREEMPT_COUNT=y", "CONFIG_NO_HZ_IDLE=y", "CONFIG_HIGH_RES_TIMERS=y",
@@ -46,6 +47,6 @@ expect_unset = [
 
 [kbuild]
 # Directories whose Kbuild Makefiles decide which C files exist. `source.list` must agree with them.
-dirs = ["net/mac80211", "net/wireless", "drivers/net/wireless/realtek/rtw89", "drivers/net/wireless/intel/iwlwifi"]
+dirs = ["net/mac80211", "net/wireless", "drivers/net/wireless/realtek/rtw89", "drivers/net/wireless/intel/iwlwifi", "drivers/net/wireless/mediatek/mt76"]
 # Files Kbuild builds that we leave out on purpose.
 cut = []

@@ -11,6 +11,7 @@ pub mod efi_image;
 pub mod efi_status;
 pub mod emit;
 pub mod error;
+pub mod firmware;
 pub mod link;
 pub mod live;
 pub mod loader;

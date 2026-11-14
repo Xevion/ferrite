@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-wifi-sys"
-description = "Pinned Linux mac80211, cfg80211, rtw89 and iwlwifi C, compiled by build.rs"
+description = "Pinned Linux mac80211, cfg80211, rtw89, iwlwifi and mt76 C, compiled by build.rs"
 version.workspace = true
 edition.workspace = true
 license = "GPL-2.0-only"

@@ -1,0 +1,31 @@
+# The chips the stick carries firmware for. `ferrite-dev firmware` reads the names the compiled drivers
+# request (their MODULE_FIRMWARE lines) and stages those matching a pattern here; `*` matches any run of
+# characters. A chip whose files are absent from the host's /lib/firmware is skipped with a warning.
+
+# cfg80211's regulatory database
+regulatory.db
+
+# Intel 8265
+iwlwifi-8265-*
+
+# Intel AX200
+iwlwifi-cc-a0-*
+
+# Intel AX201 and AX101 (CNVi, with the HR radio)
+iwlwifi-Qu-b0-hr-b0-*
+iwlwifi-Qu-c0-hr-b0-*
+iwlwifi-QuZ-a0-hr-b0-*
+iwlwifi-so-a0-hr-b0-*
+iwlwifi-ma-*-hr-b0-*
+
+# Intel AX210 and AX211 (the GF radio; the .pnvm is the platform's calibration file)
+iwlwifi-ty-a0-gf-a0*
+iwlwifi-so-a0-gf-a0*
+iwlwifi-ma-*-gf-a0*
+
+# Realtek RTL8852CE
+rtw89/rtw8852c_fw-*
+
+# MediaTek MT7921, MT7922 and MT7920
+mediatek/WIFI_*MT7961*
+mediatek/WIFI_*MT7922*

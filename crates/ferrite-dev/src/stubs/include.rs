@@ -50,8 +50,13 @@ pub fn include_roots(flags: &[String]) -> Vec<String> {
 /// Private headers that only parse after the `.c` that includes them has defined what they call.
 const NOT_SELF_CONTAINED: [&str; 1] = ["kernel/locking/ww_mutex.h"];
 
+/// Directories of driver-private headers that cannot share a translation unit with mac80211's private ones
+/// (mt76 and mac80211 both declare `ewma_signal`). They declare no kernel data, so the union leaves them out.
+const DRIVER_PRIVATE: [&str; 1] = ["drivers/net/wireless/mediatek/"];
+
 /// The headers a source includes itself, from `clang -E -H` output, in the order it includes them. A `.c`
-/// file included by a unity-build source is code, not a header, and is left out with `NOT_SELF_CONTAINED`.
+/// file included by a unity-build source is code, not a header, and is left out with `NOT_SELF_CONTAINED`,
+/// and `DRIVER_PRIVATE` headers are left out too.
 pub fn direct_includes(stderr: &str) -> Vec<&str> {
     stderr
         .lines()
@@ -59,6 +64,7 @@ pub fn direct_includes(stderr: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|path| !Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("c")))
         .filter(|path| !NOT_SELF_CONTAINED.iter().any(|private| path.ends_with(private)))
+        .filter(|path| !DRIVER_PRIVATE.iter().any(|dir| path.contains(dir)))
         .collect()
 }
 
@@ -112,6 +118,12 @@ mod tests {
     fn only_depth_one_lines_of_the_include_tree_are_direct() {
         let stderr = ". linux/include/a.h\n.. linux/include/nested.h\n. linux/include/b.h\nwarning: x\n";
         check!(direct_includes(stderr) == ["linux/include/a.h", "linux/include/b.h"]);
+    }
+
+    #[test]
+    fn headers_of_a_driver_that_clashes_with_mac80211_are_left_out() {
+        let stderr = ". linux/include/a.h\n. ./linux/drivers/net/wireless/mediatek/mt76/mt76.h\n. linux/net/mac80211/sta_info.h\n";
+        check!(direct_includes(stderr) == ["linux/include/a.h", "linux/net/mac80211/sta_info.h"]);
     }
 
     #[test]

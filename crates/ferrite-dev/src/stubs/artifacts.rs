@@ -35,6 +35,17 @@ struct Target {
     crate_types: Vec<String>,
 }
 
+/// The Linux archive's path in the output of a cargo build that ran the build script of `wifi_sys`.
+pub fn archive_path(stdout: &str, wifi_sys: &str) -> Option<PathBuf> {
+    stdout
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .filter_map(|line| serde_json::from_str::<Message>(line).ok())
+        .filter(|message| message.reason == "build-script-executed" && message.package_id.contains(wifi_sys))
+        .find_map(|message| message.env?.into_iter().find(|(name, _)| name == ARCHIVE_VAR))
+        .map(|(_, path)| PathBuf::from(path))
+}
+
 /// The artifacts in the output of `cargo build --message-format=json` for `shim` and `wifi_sys`.
 pub fn parse(stdout: &str, shim: &str, wifi_sys: &str) -> Result<Artifacts, StubsError> {
     let (mut archive, mut rlib) = (None, None);
@@ -84,6 +95,12 @@ mod tests {
         assert!(let Ok(found) = parse(OUTPUT, "ferrite-lkpi", "ferrite-wifi-sys"));
         check!(found.archive == PathBuf::from("/t/libferrite_wifi_c.a"));
         check!(found.rlib == PathBuf::from("/t/libferrite_lkpi.rlib"));
+    }
+
+    #[test]
+    fn the_archive_alone_is_read_from_cargo_messages() {
+        check!(archive_path(OUTPUT, "ferrite-wifi-sys") == Some(PathBuf::from("/t/libferrite_wifi_c.a")));
+        check!(archive_path(OUTPUT, "ferrite-other").is_none());
     }
 
     #[test]

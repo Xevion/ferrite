@@ -229,6 +229,7 @@
 #include <linux/random.h>
 #include <linux/idr.h>
 #include <linux/pci.h>
+#include <linux/io.h>
 #include <linux/bvec.h>
 #include <linux/uio.h>
 #include <linux/pagemap.h>
@@ -299,7 +300,6 @@
 #include <linux/suspend.h>
 #include <linux/socket.h>
 #include <linux/in.h>
-#include <linux/io.h>
 #include <linux/inet.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
@@ -402,6 +402,13 @@
 #include <net/xdp.h>
 #include <net/xdp_priv.h>
 #include <net/xdp_sock_drv.h>
+#include <linux/error-injection.h>
+#include <trace/events/page_pool.h>
+#include "linux/net/core/mp_dmabuf_devmem.h"
+#include "linux/net/core/page_pool_priv.h"
+#include "linux/net/core/netdev-genl-gen.h"
+#include <net/xdp_sock.h>
+#include <net/genetlink.h>
 #include <linux/nvmem-consumer.h>
 #include <linux/property.h>
 #include <net/dst.h>
@@ -421,7 +428,6 @@
 #include <trace/events/netlink.h>
 #include "linux/net/netlink/af_netlink.h"
 #include "linux/net/netlink/genetlink.h"
-#include <net/genetlink.h>
 #include <net/mac80211.h>
 #include "linux/net/mac80211/ieee80211_i.h"
 #include "linux/net/mac80211/driver-ops.h"
@@ -555,6 +561,11 @@
 #include "linux/drivers/net/wireless/intel/iwlwifi/mvm/sta.h"
 #include "linux/drivers/net/wireless/intel/iwlwifi/mvm/debugfs.h"
 #include "linux/drivers/net/wireless/intel/iwlwifi/fw/api/coex.h"
+#include <linux/mtd/mtd.h>
+#include <linux/mtd/partitions.h>
+#include <linux/hwmon.h>
+#include <linux/hwmon-sysfs.h>
+#include <linux/thermal.h>
 #include <linux/virtio.h>
 #include <linux/virtio_ids.h>
 #include <linux/virtio_config.h>

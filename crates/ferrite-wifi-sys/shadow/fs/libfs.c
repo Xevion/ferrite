@@ -42,3 +42,17 @@ struct inode *alloc_anon_inode(struct super_block *sb)
 
 	return inode ? inode : ERR_PTR(-ENOMEM);
 }
+
+/* Debugfs attribute files are never created (there is no debugfs), so nothing opens one. */
+int simple_attr_open(struct inode *inode, struct file *file, int (*get)(void *, u64 *), int (*set)(void *, u64),
+		     const char *fmt)
+{
+	return -ENODEV;
+}
+EXPORT_SYMBOL_GPL(simple_attr_open);
+
+int simple_attr_release(struct inode *inode, struct file *file)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(simple_attr_release);

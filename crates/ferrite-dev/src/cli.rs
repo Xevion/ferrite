@@ -43,6 +43,8 @@ pub enum Command {
     Vendor(VendorArgs),
     /// Regenerate the stubs for the kernel symbols the Linux C imports and nothing defines
     Stubs(StubsArgs),
+    /// Copy the firmware files the compiled Wi-Fi drivers can request from the host into the stick's firmware directory
+    Firmware(FirmwareArgs),
     /// Print the effective configuration
     Config,
 }
@@ -227,6 +229,33 @@ pub struct StubsArgs {
     pub lkpi_dir: PathBuf,
 }
 
+#[derive(Debug, Args)]
+pub struct FirmwareArgs {
+    /// The host's firmware directory
+    #[arg(long, value_name = "DIR", default_value = "/lib/firmware")]
+    pub source: PathBuf,
+
+    /// Where the files go, as `\\EFI\\ferrite\\firmware\\` on the stick
+    #[arg(long, value_name = "DIR", default_value = "esp/efi/ferrite/firmware")]
+    pub dest: PathBuf,
+
+    /// The chips to stage firmware for: name patterns, one per line
+    #[arg(long, value_name = "FILE", default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../ferrite-wifi-sys/firmware-chips.txt"))]
+    pub chips: PathBuf,
+
+    /// The workspace root, where the Linux archive is built
+    #[arg(long, value_name = "DIR", default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))]
+    pub root: PathBuf,
+
+    /// Stage every file the drivers can request, not only the listed chips'
+    #[arg(long)]
+    pub all: bool,
+
+    /// Report what would be staged and copy nothing
+    #[arg(long)]
+    pub list: bool,
+}
+
 /// A transfer count between 1 and 1024.
 pub fn parse_count(text: &str) -> Result<usize, String> {
     let count: usize = text.parse().map_err(|e| format!("{e}"))?;
@@ -379,6 +408,18 @@ mod tests {
         assert!(let Command::Stubs(args) = cli.command);
         check!(args.check);
         check!(args.wifi_dir.ends_with("ferrite-wifi-sys") && args.lkpi_dir.ends_with("ferrite-lkpi"));
+    }
+
+    #[test]
+    fn firmware_defaults_to_the_host_directory_and_the_esp() {
+        assert!(let Ok(cli) = Cli::try_parse_from(["ferrite-dev", "firmware", "--list"]));
+        assert!(let Command::Firmware(args) = cli.command);
+        check!(
+            (args.source.as_path(), args.dest.as_path())
+                == (std::path::Path::new("/lib/firmware"), std::path::Path::new("esp/efi/ferrite/firmware"))
+        );
+        check!(args.list && !args.all);
+        check!(args.chips.ends_with("ferrite-wifi-sys/firmware-chips.txt"));
     }
 
     #[test]

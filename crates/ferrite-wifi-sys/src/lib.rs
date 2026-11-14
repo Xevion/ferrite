@@ -1,4 +1,4 @@
-//! The Linux Wi-Fi C (mac80211, cfg80211, rtw89), compiled by `build.rs` from the snapshot that
+//! The Linux Wi-Fi C (mac80211, cfg80211, rtw89, iwlwifi, mt76), compiled by `build.rs` from the snapshot that
 //! `ferrite-dev vendor` makes, the tables of its initcalls and exitcalls, and the region holding the kernel
 //! data the shim has not implemented yet.
 //!
