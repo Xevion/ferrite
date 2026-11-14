@@ -404,11 +404,11 @@ mod tests {
         check!(!shown.contains("hunter2"));
     }
 
-    #[test]
-    fn the_host_header_omits_the_default_port() {
-        let config = Config::from_env(b"NOTIFY_URL=http://ntfy.local:8080/t").unwrap();
-        check!(config.endpoint.host_header() == "ntfy.local:8080");
-        let config = Config::from_env(b"NOTIFY_URL=http://ntfy.local/t").unwrap();
-        check!(config.endpoint.host_header() == "ntfy.local");
+    #[rstest]
+    #[case::explicit_port("NOTIFY_URL=http://ntfy.local:8080/t", "ntfy.local:8080")]
+    #[case::default_port("NOTIFY_URL=http://ntfy.local/t", "ntfy.local")]
+    fn the_host_header_omits_the_default_port(#[case] line: &str, #[case] header: &str) {
+        let config = Config::from_env(line.as_bytes()).unwrap();
+        check!(config.endpoint.host_header() == header);
     }
 }

@@ -6,6 +6,7 @@ use core::time::Duration;
 use assert2::{assert, check};
 use ferrite_efi::memory::Block;
 use ferrite_mem::{Kernel, Regions};
+use rstest::{fixture, rstest};
 
 use super::*;
 
@@ -31,9 +32,13 @@ fn sweep_of_words(words: usize) -> Sweep {
     Sweep::with_buffer(Some(host_blocks(&[words])), Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard, None)
 }
 
-#[test]
-fn tests_and_percent_advance_through_passes() {
-    let mut sweep = sweep_of_words(2048);
+#[fixture]
+fn sweep() -> Sweep {
+    sweep_of_words(2048)
+}
+
+#[rstest]
+fn tests_and_percent_advance_through_passes(mut sweep: Sweep) {
     let mut seen: Vec<SweepStatus> = vec![sweep.status()];
     while sweep.status().passes < 2 {
         sweep.step(16 << 10, Instant::default(), None);
@@ -121,34 +126,31 @@ fn no_buffer_means_no_work() {
     check!(status.passes == 0);
 }
 
-#[test]
-fn the_reserve_is_a_floor_and_a_share_but_at_most_half() {
-    const MIB: u64 = 1 << 20;
-    check!(reserve_for(16 << 30) == RESERVE_FLOOR + (512 << 20));
-    check!(reserve_for(100 * MIB) == 50 * MIB);
-    check!(reserve_for(0) == 0);
+#[rstest]
+#[case::a_floor_and_a_share(16 << 30, RESERVE_FLOOR + (512 << 20))]
+#[case::at_most_half(100 << 20, 50 << 20)]
+#[case::nothing_to_reserve(0, 0)]
+fn the_reserve_is_a_floor_and_a_share_but_at_most_half(#[case] total: u64, #[case] reserve: u64) {
+    check!(reserve_for(total) == reserve);
 }
 
-#[test]
-fn allocation_halves_until_it_fits() {
+#[rstest]
+#[case::halves_until_it_fits(64 << 10, 4 << 10, 10 << 10, &[64 << 10, 32 << 10, 16 << 10, 8 << 10], Some(8 << 10))]
+#[case::gives_up_below_the_minimum(24 << 10, 8 << 10, 0, &[24 << 10, 12 << 10, 8 << 10], None)]
+fn allocation_halves_until_it_fits_or_gives_up(
+    #[case] start: usize,
+    #[case] minimum: usize,
+    #[case] fits: usize,
+    #[case] expected_tries: &[usize],
+    #[case] expected: Option<usize>,
+) {
     let mut tried = Vec::new();
-    let buf = alloc_largest(64 << 10, 4 << 10, |bytes| {
+    let buf = alloc_largest(start, minimum, |bytes| {
         tried.push(bytes);
-        (bytes <= 10 << 10).then_some(bytes)
+        (bytes <= fits).then_some(bytes)
     });
-    check!(tried == [64 << 10, 32 << 10, 16 << 10, 8 << 10]);
-    check!(buf == Some(8 << 10));
-}
-
-#[test]
-fn allocation_gives_up_below_the_minimum() {
-    let mut tried = Vec::new();
-    let buf = alloc_largest(24 << 10, 8 << 10, |bytes| {
-        tried.push(bytes);
-        None::<usize>
-    });
-    check!(tried == [24 << 10, 12 << 10, 8 << 10]);
-    check!(buf.is_none());
+    check!(tried == expected_tries);
+    check!(buf == expected);
 }
 
 /// A clock that stays at one instant.
@@ -234,9 +236,8 @@ fn faults_merged_from_several_cores_keep_their_finder_and_classify_together() {
     check!(tally.stats.faults() == 3, "a fault is absorbed once");
 }
 
-#[test]
-fn history_records_every_test_and_each_finished_pass() {
-    let mut sweep = sweep_of_words(2048);
+#[rstest]
+fn history_records_every_test_and_each_finished_pass(mut sweep: Sweep) {
     let tests_per_pass = sweep.status().position.1;
     let mut ms = 0;
     while sweep.status().passes < 2 {
@@ -252,9 +253,8 @@ fn history_records_every_test_and_each_finished_pass() {
     check!(history.latest_tests().all(|r| r.pass == 1));
 }
 
-#[test]
-fn restart_clears_results_and_switches_the_preset() {
-    let mut sweep = sweep_of_words(2048);
+#[rstest]
+fn restart_clears_results_and_switches_the_preset(mut sweep: Sweep) {
     while sweep.status().passes < 1 {
         sweep.step(16 << 10, Instant::default(), None);
     }
@@ -266,9 +266,8 @@ fn restart_clears_results_and_switches_the_preset() {
     check!(sweep.history.tests.is_empty());
 }
 
-#[test]
-fn a_paused_sweep_does_no_work_until_resumed() {
-    let mut sweep = sweep_of_words(2048);
+#[rstest]
+fn a_paused_sweep_does_no_work_until_resumed(mut sweep: Sweep) {
     sweep.pause();
     let before = sweep.status();
     sweep.step(64 << 10, Instant::default(), None);
@@ -279,9 +278,8 @@ fn a_paused_sweep_does_no_work_until_resumed() {
     check!(sweep.status() != before);
 }
 
-#[test]
-fn restarting_with_the_memtest86_plus_preset_swaps_the_tests_and_counts() {
-    let mut sweep = sweep_of_words(2048);
+#[rstest]
+fn restarting_with_the_memtest86_plus_preset_swaps_the_tests_and_counts(mut sweep: Sweep) {
     sweep.restart(Preset::Memtest86Plus);
     let status = sweep.status();
     check!(status.preset == Preset::Memtest86Plus);
@@ -346,6 +344,11 @@ mod rotation {
         }
     }
 
+    #[fixture]
+    fn open_rig() -> (Sweep, Calls) {
+        rotating(false, 0)
+    }
+
     fn rotating(refuse: bool, kept: u64) -> (Sweep, Calls) {
         let calls = Calls::default();
         let pages = Fake { calls: calls.clone(), refuse, kept };
@@ -361,9 +364,9 @@ mod rotation {
         }
     }
 
-    #[test]
-    fn each_pass_is_followed_by_a_pass_over_the_reserve() {
-        let (mut sweep, calls) = rotating(false, 0);
+    #[rstest]
+    fn each_pass_is_followed_by_a_pass_over_the_reserve(open_rig: (Sweep, Calls)) {
+        let (mut sweep, calls) = open_rig;
         let tests = sweep.status().position.1;
         step_until(&mut sweep, |s| s.rotation.is_open());
         check!(calls.list() == ["open"], "nothing rotates before the first pass has ended");
@@ -381,10 +384,10 @@ mod rotation {
         check!(sweep.status().passes == 2);
     }
 
-    #[test]
+    #[rstest]
     #[expect(clippy::used_underscore_binding, reason = "the buffer field only owns memory outside tests")]
-    fn a_fault_in_the_reserve_is_reported_with_its_address_and_the_pass_it_followed() {
-        let (mut sweep, _) = rotating(false, 0);
+    fn a_fault_in_the_reserve_is_reported_with_its_address_and_the_pass_it_followed(open_rig: (Sweep, Calls)) {
+        let (mut sweep, _) = open_rig;
         step_until(&mut sweep, |s| s.rotation.is_open());
         let block = sweep.run.as_ref().map(|r| r._buffer.blocks()[0].base().as_ptr()).unwrap();
         while sweep.status().test != "solid bits" {
@@ -413,9 +416,9 @@ mod rotation {
         check!(!sweep.rotation.is_open());
     }
 
-    #[test]
-    fn restarting_inside_a_window_ends_it_and_starts_over() {
-        let (mut sweep, calls) = rotating(false, 0);
+    #[rstest]
+    fn restarting_inside_a_window_ends_it_and_starts_over(open_rig: (Sweep, Calls)) {
+        let (mut sweep, calls) = open_rig;
         step_until(&mut sweep, |s| s.rotation.is_open());
         sweep.restart(Preset::Quick);
         check!(calls.list() == ["open", "close"]);
@@ -425,9 +428,9 @@ mod rotation {
         check!(calls.list() == ["open", "close", "open"], "the first pass after a restart is rotated too");
     }
 
-    #[test]
-    fn coverage_counts_the_reserve_once_it_has_been_tested() {
-        let (mut sweep, _) = rotating(false, 0);
+    #[rstest]
+    fn coverage_counts_the_reserve_once_it_has_been_tested(open_rig: (Sweep, Calls)) {
+        let (mut sweep, _) = open_rig;
         sweep.rotation.reported_free = 64 << 10;
         let main = (MAIN_WORDS * WORD) as u64;
         check!(sweep.status().coverage == Coverage { tested: main, free: 64 << 10 });
@@ -439,9 +442,9 @@ mod rotation {
         check!(coverage.percent() == 37);
     }
 
-    #[test]
-    fn a_window_cut_short_does_not_count_the_reserve() {
-        let (mut sweep, _) = rotating(false, 0);
+    #[rstest]
+    fn a_window_cut_short_does_not_count_the_reserve(open_rig: (Sweep, Calls)) {
+        let (mut sweep, _) = open_rig;
         step_until(&mut sweep, |s| s.rotation.is_open());
         sweep.restart(Preset::Standard);
         check!(sweep.status().coverage.tested == (MAIN_WORDS * WORD) as u64);

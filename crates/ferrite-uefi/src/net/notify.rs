@@ -173,7 +173,7 @@ mod tests {
 
     use assert2::{assert, check};
     use ferrite_mem::{CpuAddr, Fault};
-    use rstest::rstest;
+    use rstest::{fixture, rstest};
 
     use super::*;
     use crate::net::testing::idle_status;
@@ -245,9 +245,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_finished_pass_is_told_once_with_the_run_so_far() {
-        let mut rig = Rig::new();
+    #[fixture]
+    fn rig() -> Rig {
+        Rig::new()
+    }
+
+    #[rstest]
+    fn a_finished_pass_is_told_once_with_the_run_so_far(mut rig: Rig) {
         check!(rig.observe(10).is_empty());
 
         rig.history.passes.push_back(pass(2));
@@ -260,9 +264,8 @@ mod tests {
         check!(rig.observe(41 * 60 + 13).is_empty());
     }
 
-    #[test]
-    fn passes_missed_between_calls_are_each_told_in_order() {
-        let mut rig = Rig::new();
+    #[rstest]
+    fn passes_missed_between_calls_are_each_told_in_order(mut rig: Rig) {
         rig.history.passes.extend([pass(0), pass(1)]);
         let sent = rig.observe(5);
         check!(
@@ -273,9 +276,8 @@ mod tests {
         check!(rig.observe(6).len() == 1);
     }
 
-    #[test]
-    fn only_the_first_fault_of_a_run_is_told_and_a_restart_rearms_it() {
-        let mut rig = Rig::new();
+    #[rstest]
+    fn only_the_first_fault_of_a_run_is_told_and_a_restart_rearms_it(mut rig: Rig) {
         rig.status.first_fault = Some(fault());
         rig.status.faults = 7;
         let sent = rig.observe(1);
@@ -296,9 +298,8 @@ mod tests {
         check!(rig.observe(4).len() == 1);
     }
 
-    #[test]
-    fn a_restart_starts_counting_passes_again() {
-        let mut rig = Rig::new();
+    #[rstest]
+    fn a_restart_starts_counting_passes_again(mut rig: Rig) {
         rig.history.passes.extend([pass(0), pass(1)]);
         rig.observe(1);
         rig.history.reset();
@@ -309,9 +310,8 @@ mod tests {
         check!(note.title == "ferrite: pass 1 done");
     }
 
-    #[test]
-    fn the_end_says_how_the_run_went() {
-        let mut rig = Rig::new();
+    #[rstest]
+    fn the_end_says_how_the_run_went(mut rig: Rig) {
         rig.status.passes = 4;
         rig.status.faults = 1;
         let snapshot = Snapshot { status: rig.status, history: &rig.history, faults: &rig.faults };
@@ -320,11 +320,12 @@ mod tests {
         check!(note.message == "ferrite: run ended on ferrite.local after 4 passes, 1 error, 16.0 GiB, 3:00:05");
     }
 
-    #[test]
-    fn a_missing_file_turns_notifications_off_and_a_bad_one_does_too() {
-        check!(notifier(Err(ReadError::NotFound { path: "x".into() })).is_none());
-        check!(notifier(Ok(b"NOTIFY_URL=https://ntfy.sh/t".to_vec())).is_none());
-        check!(notifier(Ok(b"# nothing\n".to_vec())).is_none());
-        check!(notifier(Ok(b"NOTIFY_URL=http://192.0.2.5:8080/t".to_vec())).is_some());
+    #[rstest]
+    #[case::missing_file(Err(ReadError::NotFound { path: "x".into() }), false)]
+    #[case::bad_url(Ok(b"NOTIFY_URL=https://ntfy.sh/t".to_vec()), false)]
+    #[case::no_url(Ok(b"# nothing\n".to_vec()), false)]
+    #[case::good_file(Ok(b"NOTIFY_URL=http://192.0.2.5:8080/t".to_vec()), true)]
+    fn a_missing_or_bad_file_turns_notifications_off(#[case] file: Result<Vec<u8>, ReadError>, #[case] on: bool) {
+        check!(notifier(file).is_some() == on);
     }
 }

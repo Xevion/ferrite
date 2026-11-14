@@ -180,6 +180,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use assert2::{assert, check};
+    use rstest::rstest;
 
     use super::*;
     use crate::notify::Event;
@@ -267,12 +268,12 @@ mod tests {
         check!(outbox.is_empty());
     }
 
-    #[test]
-    fn the_wait_is_capped() {
-        let policy = Policy::default();
-        check!(policy.backoff(5) == Duration::from_secs(16));
-        check!(policy.backoff(6) == Duration::from_secs(30));
-        check!(policy.backoff(1000) == Duration::from_secs(30));
+    #[rstest]
+    #[case::just_under(5, 16)]
+    #[case::at_the_cap(6, 30)]
+    #[case::far_past_the_cap(1000, 30)]
+    fn the_wait_is_capped(#[case] attempt: u32, #[case] secs: u64) {
+        check!(Policy::default().backoff(attempt) == Duration::from_secs(secs));
     }
 
     #[test]

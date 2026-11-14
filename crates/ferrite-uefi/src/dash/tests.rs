@@ -4,6 +4,7 @@ use std::vec::Vec;
 
 use assert2::{assert, check};
 use ferrite_mem::{CpuAddr, Fault};
+use rstest::rstest;
 use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
 use super::*;
@@ -172,19 +173,19 @@ fn too_small_a_screen_is_refused() {
     assert!(let Err(DashError::TooSmall { .. }) = Dashboard::new(800, 400));
 }
 
-#[test]
-fn every_size_renders() {
-    for (w, h) in [(768, 576), (1024, 768), (1280, 800), (1920, 1080)] {
-        for faulted in [false, true] {
-            let mut dash = Dashboard::new(w, h).expect("dashboard");
-            let (history, mut faults) = (history(), VecDeque::new());
-            let mut status = status();
-            if faulted {
-                faulty(&mut status, &mut faults);
-            }
-            check!(render(&mut dash, status, &history, &faults, 523) == [dash.canvas.bounds()]);
-        }
+#[rstest]
+fn every_size_renders(
+    #[values((768, 576), (1024, 768), (1280, 800), (1920, 1080))] size: (u32, u32),
+    #[values(false, true)] faulted: bool,
+) {
+    let (w, h) = size;
+    let mut dash = Dashboard::new(w, h).expect("dashboard");
+    let (history, mut faults) = (history(), VecDeque::new());
+    let mut status = status();
+    if faulted {
+        faulty(&mut status, &mut faults);
     }
+    check!(render(&mut dash, status, &history, &faults, 523) == [dash.canvas.bounds()]);
 }
 
 /// The frames as PNG files in the directory named by `FERRITE_DASH_OUT`, for looking at.

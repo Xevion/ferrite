@@ -4,6 +4,7 @@ use std::vec::Vec;
 use crate::suite::{Config, Span, TestKind, shares};
 use crate::{BLOCK_BYTES, BLOCK_WORDS, Kernel, Region};
 use assert2::{assert, check};
+use rstest::rstest;
 
 use super::*;
 
@@ -353,29 +354,45 @@ impl Platform for Core {
     }
 }
 
-#[test]
-fn an_ap_enters_its_job_only_if_the_core_can_run_it() {
+#[rstest]
+#[case::a_ready_core_runs_it(true, false, false, false, (true, SeatState::Running))]
+#[case::no_sse(false, true, false, false, (false, SeatState::Failed(Failure::NoSse)))]
+#[case::a_tier_the_core_cannot_use(true, false, true, false, (false, SeatState::Failed(Failure::Tier)))]
+#[case::the_start_line_was_abandoned(true, true, false, true, (false, SeatState::Stopped))]
+fn an_ap_enters_its_job_only_if_the_core_can_run_it(
+    #[case] sse: bool,
+    #[case] wide: bool,
+    #[case] wide_kernel: bool,
+    #[case] abandoned: bool,
+    #[case] expected: (bool, SeatState),
+) {
     let clock = Wall(std::time::Instant::now());
-    let narrow = [Kernel::SCALAR];
-    let enter = |core: &Core, kernels: &[Kernel], line: &StartLine| {
-        let (seat, taken) = (Seat::default(), AtomicBool::new(false));
-        let entered = enter_ap(core, &seat, &taken, kernels, line, &clock).is_some();
-        (entered, seat.state())
+    let kernels = if wide_kernel {
+        let Some(wide) = crate::tests::kernels().into_iter().find(|k| k.tier().is_wide()) else {
+            return;
+        };
+        vec![wide]
+    } else {
+        vec![Kernel::SCALAR]
     };
+    let line = StartLine::default();
+    if abandoned {
+        line.abandon();
+    } else {
+        line.release();
+    }
+    let (seat, taken) = (Seat::default(), AtomicBool::new(false));
+    let entered = enter_ap(&Core { sse, wide }, &seat, &taken, &kernels, &line, &clock).is_some();
+    check!((entered, seat.state()) == expected);
+}
+
+#[test]
+fn an_ap_never_enters_a_job_another_core_took() {
+    let clock = Wall(std::time::Instant::now());
     let released = StartLine::default();
     released.release();
-    check!(enter(&Core { sse: true, wide: false }, &narrow, &released) == (true, SeatState::Running));
-    check!(enter(&Core { sse: false, wide: true }, &narrow, &released) == (false, SeatState::Failed(Failure::NoSse)));
-    if let Some(wide) = crate::tests::kernels().into_iter().find(|k| k.tier().is_wide()) {
-        let core = Core { sse: true, wide: false };
-        check!(enter(&core, &[wide], &released) == (false, SeatState::Failed(Failure::Tier)));
-    }
-    let line = StartLine::default();
-    line.abandon();
-    check!(enter(&Core { sse: true, wide: true }, &narrow, &line) == (false, SeatState::Stopped));
-
     let (seat, taken) = (Seat::default(), AtomicBool::new(true));
     let core = Core { sse: true, wide: true };
-    check!(enter_ap(&core, &seat, &taken, &narrow, &released, &clock).is_none());
+    check!(enter_ap(&core, &seat, &taken, &[Kernel::SCALAR], &released, &clock).is_none());
     check!(seat.state() == SeatState::Failed(Failure::Taken));
 }

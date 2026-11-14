@@ -12,6 +12,7 @@ use core::time::Duration;
 
 use assert2::{assert, check};
 use ferrite_hal::Instant;
+use rstest::rstest;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::{tcp, udp};
 use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
@@ -253,35 +254,23 @@ fn a_busy_server_is_retried_and_the_order_kept() {
     check!(bodies == ["ferrite: pass 1 done", "ferrite: pass 1 done", "ferrite: pass 2 done"]);
 }
 
-#[test]
-fn a_refusal_is_not_retried() {
-    let mut rig = Rig::new("NOTIFY_URL=http://10.0.0.1:8080/t", quick());
-    rig.script.push_back(Some(404));
+#[rstest]
+#[case::a_refusal_is_not_retried("http://10.0.0.1:8080/t", &[Some(404)], 1_500, 1)]
+#[case::a_server_that_never_answers_is_tried_three_times("http://10.0.0.1:8080/t", &[None, None, None], 8_000, 3)]
+#[case::nothing_listening_is_a_failed_attempt_not_a_hang("http://10.0.0.1:9/t", &[], 4_000, 0)]
+fn a_failing_server_is_given_up_on_and_leaves_no_sockets(
+    #[case] url: &str,
+    #[case] script: &[Option<u16>],
+    #[case] ms: u64,
+    #[case] requests: usize,
+) {
+    let mut rig = Rig::new(&format!("NOTIFY_URL={url}"), quick());
+    rig.script.extend(script.iter().copied());
     check!(rig.net.notify(pass(1)));
-    rig.run(1_500);
-    check!(rig.requests.len() == 1);
+    rig.run(ms);
     check!(rig.net.notification_stats() == Some(Stats { delivered: 0, dropped: 0, abandoned: 1 }));
     check!(rig.net.notifications_pending() == 0);
-}
-
-#[test]
-fn a_server_that_never_answers_times_out_gives_up_and_leaves_no_sockets() {
-    let mut rig = Rig::new("NOTIFY_URL=http://10.0.0.1:8080/t", quick());
-    rig.script.extend([None, None, None]);
-    check!(rig.net.notify(pass(1)));
-    rig.run(8_000);
-    check!(rig.net.notification_stats() == Some(Stats { delivered: 0, dropped: 0, abandoned: 1 }));
-    check!(rig.net.notifications_pending() == 0);
-    check!(rig.requests.len() == 3, "three attempts, each read and left unanswered");
-    check!(rig.client_sockets() == rig.base_sockets);
-}
-
-#[test]
-fn nothing_listening_is_a_failed_attempt_not_a_hang() {
-    let mut rig = Rig::new("NOTIFY_URL=http://10.0.0.1:9/t", quick());
-    check!(rig.net.notify(pass(1)));
-    rig.run(4_000);
-    check!(rig.net.notification_stats() == Some(Stats { delivered: 0, dropped: 0, abandoned: 1 }));
+    check!(rig.requests.len() == requests);
     check!(rig.client_sockets() == rig.base_sockets);
 }
 

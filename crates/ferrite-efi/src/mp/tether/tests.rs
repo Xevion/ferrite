@@ -1,6 +1,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use assert2::check;
+use rstest::{fixture, rstest};
 
 use super::*;
 
@@ -23,9 +24,13 @@ unsafe impl ApTask for Counting {
 
 const STACK: StackUse = StackUse { bytes: 0 };
 
-#[test]
-fn a_dispatch_that_runs_is_not_cancelled() {
-    let task = Counting::default();
+#[fixture]
+fn task() -> Counting {
+    Counting::default()
+}
+
+#[rstest]
+fn a_dispatch_that_runs_is_not_cancelled(task: Counting) {
     let tether = Tether::new(&task);
     tether.run();
     tether.finish(STACK);
@@ -34,9 +39,8 @@ fn a_dispatch_that_runs_is_not_cancelled() {
     check!(!tether.cancel(), "an AP already in the task cannot be called off");
 }
 
-#[test]
-fn a_cancelled_dispatch_never_touches_the_task_even_when_the_ap_arrives_late() {
-    let task = Counting::default();
+#[rstest]
+fn a_cancelled_dispatch_never_touches_the_task_even_when_the_ap_arrives_late(task: Counting) {
     let tether = Tether::new(&task);
     check!(tether.cancel());
     check!(tether.cancel(), "cancelling twice still says the task is safe");

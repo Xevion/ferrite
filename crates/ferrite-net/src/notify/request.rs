@@ -216,13 +216,9 @@ mod tests {
     #[case::letters(b"HTTP/1.1 2x0 OK\r\n", Reply::Malformed)]
     #[case::four_digits(b"HTTP/1.1 2000 OK\r\n", Reply::Malformed)]
     #[case::no_space(b"HTTP/1.1200 OK\r\n", Reply::Malformed)]
+    #[case::endless_first_line(&[b'x'; 200], Reply::Malformed)]
     fn status_lines(#[case] bytes: &[u8], #[case] want: Reply) {
         check!(parse_status_line(bytes) == want);
-    }
-
-    #[test]
-    fn an_endless_first_line_is_malformed() {
-        check!(parse_status_line(&[b'x'; 200]) == Reply::Malformed);
     }
 
     #[rstest]

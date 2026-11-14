@@ -14,7 +14,7 @@ use ferrite_hal::Instant;
 use ferrite_net::loopback::LoopbackPort;
 use ferrite_net::{MacAddr, Network, PortId, StackConfig};
 use ferrite_wifi::{Shared, StationState};
-use rstest::rstest;
+use rstest::{fixture, rstest};
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp;
 use smoltcp::wire::{IpAddress, Ipv4Address, Ipv4Cidr};
@@ -120,6 +120,11 @@ impl Rig {
     }
 }
 
+#[fixture]
+fn rig() -> Rig {
+    Rig::new()
+}
+
 #[rstest]
 #[case::page("GET / HTTP/1.1\r\nHost: ferrite.local\r\n\r\n", "HTTP/1.1 200 \r\n", "<!doctype html>")]
 #[case::status(
@@ -144,8 +149,7 @@ impl Rig {
     "HTTP/1.1 421 \r\n",
     "use ferrite.local"
 )]
-fn answers(#[case] request: &str, #[case] status_line: &str, #[case] contains: &str) {
-    let mut rig = Rig::new();
+fn answers(#[case] request: &str, #[case] status_line: &str, #[case] contains: &str, mut rig: Rig) {
     rig.connect(49_152);
     rig.request(request);
     rig.run(200);
@@ -156,9 +160,8 @@ fn answers(#[case] request: &str, #[case] status_line: &str, #[case] contains: &
     check!(rig.commands().is_empty());
 }
 
-#[test]
-fn a_control_post_queues_its_command() {
-    let mut rig = Rig::new();
+#[rstest]
+fn a_control_post_queues_its_command(mut rig: Rig) {
     rig.connect(49_152);
     rig.request(&format!(
         "POST /api/cores HTTP/1.1\r\n{HOST}Content-Type: application/json\r\nContent-Length: 11\r\n\r\n{{\"cores\":2}}"
@@ -169,9 +172,8 @@ fn a_control_post_queues_its_command() {
     check!(rig.commands() == [Command::Cores(CoreChoice::Count(core::num::NonZeroUsize::new(2).unwrap()))]);
 }
 
-#[test]
-fn a_running_server_makes_no_allocations() {
-    let mut rig = Rig::new();
+#[rstest]
+fn a_running_server_makes_no_allocations(mut rig: Rig) {
     for pass in 0..64 {
         rig.history.passes.push_back(PassRecord { pass, took: Duration::from_secs(90), faults: 3 });
         rig.faults.push_back(FaultRecord {

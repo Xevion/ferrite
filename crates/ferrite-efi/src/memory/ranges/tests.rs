@@ -1,6 +1,8 @@
+use std::vec;
 use std::vec::Vec;
 
 use assert2::check;
+use rstest::rstest;
 
 use super::*;
 
@@ -30,36 +32,38 @@ fn the_lowest_reserve_is_left_and_the_rest_taken_largest_first() {
     check!(eligible_bytes(&free) - taken.iter().map(|r| r.bytes()).sum::<u64>() == 120 * MIB);
 }
 
-#[test]
-fn nothing_is_taken_when_only_the_reserve_is_free() {
-    check!(select(&[range(1, 100)], 100 * MIB).is_empty());
-    check!(select(&[range(1, 100)], 200 * MIB).is_empty());
+#[rstest]
+#[case::pieces_under_the_minimum_are_dropped(
+    vec![range(1, 100), range(500, 1), Range::new(600 * 256, 255)],
+    0,
+    vec![(1, 100), (500, 1)]
+)]
+#[case::touching_and_overlapping_ranges_become_one(
+    vec![range(48, 16), range(16, 16), range(32, 16), range(60, 8)],
+    0,
+    vec![(16, 52)]
+)]
+#[case::only_the_reserve_is_free(vec![range(1, 100)], 100 * MIB, vec![])]
+#[case::the_reserve_exceeds_what_is_free(vec![range(1, 100)], 200 * MIB, vec![])]
+fn select_takes(#[case] free: Vec<Range>, #[case] reserve: u64, #[case] expected: Vec<(u64, u64)>) {
+    check!(spans(&select(&free, reserve)) == expected);
 }
 
-#[test]
-fn pieces_under_the_minimum_are_dropped() {
-    let free = [range(1, 100), range(500, 1), Range::new(600 * 256, 255)];
-    check!(spans(&select(&free, 0)) == [(1, 100), (500, 1)]);
-}
-
-#[test]
-fn touching_and_overlapping_ranges_become_one() {
-    let free = [range(48, 16), range(16, 16), range(32, 16), range(60, 8)];
-    check!(spans(&select(&free, 0)) == [(16, 52)]);
-}
-
-#[test]
-fn subtracting_cuts_holes_out_of_the_middle_and_the_ends() {
-    let free = [range(10, 100), range(200, 10)];
-    let hole = [range(20, 10), range(100, 20), range(205, 1)];
-    check!(spans(&subtract(&free, &hole)) == [(10, 10), (30, 70), (200, 5), (206, 4)]);
-    check!(subtract(&free, &[range(0, 300)]).is_empty());
-    check!(spans(&subtract(&free, &[])) == [(10, 100), (200, 10)]);
-}
-
-#[test]
-fn overlapping_holes_are_cut_once() {
-    check!(spans(&subtract(&[range(0, 100)], &[range(40, 20), range(50, 20), range(45, 2)])) == [(0, 40), (70, 30)]);
+#[rstest]
+#[case::holes_in_the_middle_and_the_ends(
+    vec![range(10, 100), range(200, 10)],
+    vec![range(20, 10), range(100, 20), range(205, 1)],
+    vec![(10, 10), (30, 70), (200, 5), (206, 4)]
+)]
+#[case::a_hole_covering_everything(vec![range(10, 100), range(200, 10)], vec![range(0, 300)], vec![])]
+#[case::no_holes(vec![range(10, 100), range(200, 10)], vec![], vec![(10, 100), (200, 10)])]
+#[case::overlapping_holes_are_cut_once(
+    vec![range(0, 100)],
+    vec![range(40, 20), range(50, 20), range(45, 2)],
+    vec![(0, 40), (70, 30)]
+)]
+fn subtracting(#[case] free: Vec<Range>, #[case] holes: Vec<Range>, #[case] expected: Vec<(u64, u64)>) {
+    check!(spans(&subtract(&free, &holes)) == expected);
 }
 
 #[test]
