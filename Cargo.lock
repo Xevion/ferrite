@@ -963,6 +963,7 @@ dependencies = [
  "assert2",
  "crc32fast",
  "ferrite-hal",
+ "ferrite-net",
  "ferrite-wire",
  "ferrite-xhci",
  "log",
@@ -1035,8 +1036,12 @@ version = "0.1.0"
 dependencies = [
  "assert2",
  "ferrite-hal",
+ "heapless 0.9.3",
  "log",
+ "picoserve",
+ "rstest 0.28.0",
  "smoltcp",
+ "snafu",
 ]
 
 [[package]]
@@ -1086,11 +1091,11 @@ dependencies = [
  "ferrite-efi",
  "ferrite-hal",
  "ferrite-mem",
+ "ferrite-net",
  "ferrite-rt",
  "fontdue",
  "heapless 0.9.3",
  "log",
- "picoserve",
  "ratatui",
  "ratatui-core",
  "rstest 0.28.0",
@@ -1112,7 +1117,6 @@ dependencies = [
  "ferrite-rt",
  "ferrite-wifi-start",
  "log",
- "smoltcp",
  "snafu",
  "uefi",
 ]

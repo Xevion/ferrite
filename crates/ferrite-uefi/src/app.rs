@@ -14,6 +14,7 @@ use ferrite_efi::link::Link as LoaderLink;
 use ferrite_efi::watchdog::Keepalive;
 use ferrite_hal::{Clock as _, Instant};
 use ferrite_mem::Caps;
+use ferrite_net::NetStatus;
 use ratatui::Terminal;
 use uefi::Event;
 use uefi::boot::{self, EventType, TimerTrigger, Tpl};
@@ -24,7 +25,7 @@ use crate::control::{Command, Commands};
 use crate::dash::{Dashboard, Frame};
 use crate::diag::Diag;
 use crate::gop::Display;
-use crate::net::{Net, NetStatus};
+use crate::net::Net;
 use crate::report::Snapshot;
 use crate::sweep::{CoreChoice, Cores, Flow, Sweep, SweepStatus};
 use crate::ui::{self, View};
@@ -50,6 +51,7 @@ const DRAW_LOG_EVERY: Duration = Duration::from_secs(30);
 
 /// Where frames go: the dashboard on the GOP framebuffer, or a short status screen on the text
 /// console of a machine without GOP.
+#[expect(clippy::large_enum_variant, reason = "one screen exists for the whole run")]
 enum Screen<'a> {
     Pixels { dash: Box<Dashboard>, display: Display },
     Text { terminal: Box<Terminal<UefiBackend<'a>>>, last: Option<View> },
@@ -153,8 +155,7 @@ struct Desk<'a> {
     input: &'a mut Input,
     screen: Screen<'a>,
     clock: Clock,
-    net: Option<Net>,
-    net_err: Option<&'static str>,
+    net: Net,
     diag: Diag,
     waiter: Option<Waiter>,
     draw_failures: u32,
@@ -179,16 +180,13 @@ impl<'a> App<'a> {
     ) -> Result<Self, BackendError> {
         let clock = Clock::start();
         let screen = Screen::open(output, &clock)?;
-        let (net, net_err) = match Net::setup(clock) {
-            Ok(net) => {
-                log::debug!("net: SNP up, {}", net.status());
-                (Some(net), None)
-            },
-            Err(e) => {
-                log::warn!("net: no network: {e}");
-                (None, Some(e.reason()))
-            },
-        };
+        let net = Net::setup(clock);
+        let status = net.status();
+        if status.is_empty() {
+            log::warn!("net: no network: {}", net.reason());
+        } else {
+            log::debug!("net: {} ports up", status.ports().len());
+        }
         let waiter = Waiter::new(input).inspect_err(|e| log::warn!("ui: no wait events, stalling instead: {e}")).ok();
         let loader = LoaderLink::locate();
         let watchdog = loader.map(|_| Keepalive::new(WATCHDOG, WATCHDOG_REARM, clock.now()));
@@ -198,7 +196,6 @@ impl<'a> App<'a> {
             screen,
             clock,
             net,
-            net_err,
             diag: Diag::new(),
             waiter,
             draw_failures: 0,
@@ -309,15 +306,16 @@ impl Desk<'_> {
             watchdog.tick(now);
         }
         let commands = &mut self.commands;
-        let net_wait = self.net.as_mut().map_or(FRAME_INTERVAL, |net| net.poll(now, snapshot, commands));
+        let net_wait = self.net.poll(now, snapshot, commands).unwrap_or(FRAME_INTERVAL);
         self.read_keys(&snapshot.status);
         if self.desktop_stop_requested() {
             self.commands.push(Command::Quit);
         }
         let sweep = &snapshot.status;
-        let net = self.net.as_ref().map(Net::status);
+        let status = self.net.status();
+        let net = (!status.is_empty()).then_some(status);
         if now >= self.next_frame {
-            self.draw(now, snapshot, net);
+            self.draw(now, snapshot, net.as_ref());
             self.next_frame = now + FRAME_INTERVAL;
         }
         self.diag.tick(now, net.as_ref(), sweep);
@@ -364,11 +362,13 @@ impl Desk<'_> {
         asked
     }
 
-    fn draw(&mut self, now: Instant, snapshot: &Snapshot<'_>, net: Option<NetStatus>) {
+    fn draw(&mut self, now: Instant, snapshot: &Snapshot<'_>, net: Option<&NetStatus>) {
+        let net = net.copied();
+        let net_err = net.is_none().then(|| self.net.reason());
         let failure = match &mut self.screen {
             Screen::Pixels { dash, display } => {
                 let start = self.clock.now();
-                dash.render(&Frame { snapshot, net, net_err: self.net_err, now });
+                dash.render(&Frame { snapshot, net, net_err, now });
                 let rendered = self.clock.now();
                 let (canvas, rects) = dash.output();
                 if rects.is_empty() {
@@ -382,7 +382,7 @@ impl Desk<'_> {
                 e.to_string()
             },
             Screen::Text { terminal, last } => {
-                let view = View { sweep: snapshot.status, net, net_err: self.net_err };
+                let view = View { sweep: snapshot.status, net, net_err };
                 if *last == Some(view) {
                     return;
                 }

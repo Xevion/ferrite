@@ -70,8 +70,7 @@ fn every_initcall_returns_0_firmware_loads_and_every_exitcall_runs() {
     }
     check!(stderr.contains("ip: ping 10.42.0.1: 3 of 3 replies"), "{stderr}");
     check!(stderr.contains("ip: udp echo through 10.42.0.1:7 came back: 20 bytes"), "{stderr}");
-    check!(stderr.contains("http: \"GET / HTTP/1.0\" from 10.42.0.2:40001"), "{stderr}");
-    check!(stderr.contains("ip: tcp: \"HTTP/1.0 200 OK\" from 10.42.0.1:80"), "{stderr}");
+    check!(stderr.contains("ip: tcp: \"HTTP/1.1 200 \" from 10.42.0.1:80"), "{stderr}");
     check!(stderr.contains("ip: lab IP checks passed over the encrypted link"), "{stderr}");
     check!(stderr.contains("the main loop finished IP after "), "{stderr}");
     check!(stderr.contains(" ms: passed"), "{stderr}");

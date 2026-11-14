@@ -11,19 +11,16 @@ publish.workspace = true
 target = "x86_64-unknown-linux-gnu"
 
 [dependencies]
-ferrite-efi.workspace = true
+ferrite-efi = { workspace = true, features = ["net"] }
 ferrite-hal.workspace = true
 ferrite-mem.workspace = true
+ferrite-net.workspace = true
 fontdue.workspace = true
 # Fixed-capacity strings for text formatted every frame or request, kept off the heap.
 heapless.workspace = true
 log.workspace = true
-# The status page and its API, over our own smoltcp sockets.
-picoserve.workspace = true
 ratatui.workspace = true
 ratatui-core.workspace = true
-# Answers ping, as a liveness check.
-smoltcp = { workspace = true, features = ["auto-icmp-echo-reply"] }
 snafu.workspace = true
 tiny-skia.workspace = true
 uefi.workspace = true
@@ -37,6 +34,7 @@ uefi = { workspace = true, features = ["global_allocator"] }
 [dev-dependencies]
 assert2.workspace = true
 rstest.workspace = true
+smoltcp.workspace = true
 
 [lints]
 workspace = true

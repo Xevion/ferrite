@@ -27,11 +27,12 @@ use std::vec::Vec;
 
 use assert2::check;
 use ferrite_mem::{CpuAddr, Fault};
+use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
 use super::*;
 use crate::gfx::rect::{Plane, changed_bands};
-use crate::net::{Counters, Link, MacAddr};
 use crate::report::{CpuInfo, History, PassRecord, TestRecord};
+use ferrite_net::{Link, MacAddr, Medium, PortStats, PortStatus, ServiceCounters};
 
 pub(super) use crate::testing::allocations;
 
@@ -138,17 +139,20 @@ impl Scenario {
 }
 
 fn net() -> NetStatus {
-    use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
-    NetStatus {
+    let mut net = NetStatus::default();
+    net.push(PortStatus {
         link: Link {
+            medium: Medium::Ethernet,
             up: true,
             mac: MacAddr::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
             address: Some(Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24)),
             gateway: Some(Ipv4Address::new(10, 0, 2, 2)),
             dns: Some(Ipv4Address::new(10, 0, 2, 3)),
         },
-        counters: Counters::default(),
-    }
+        frames: PortStats::default(),
+        services: ServiceCounters::default(),
+    });
+    net
 }
 
 fn hash(pixels: &[u8]) -> u64 {

@@ -18,6 +18,8 @@ use super::theme::{
 use super::{Frame, State};
 use crate::gfx::text::{Case, Face, Fonts, Style};
 use crate::gfx::{Canvas, Fill, Rect, Rgb, px, whole_px};
+use ferrite_net::{Medium, PortStatus};
+
 use crate::report::{CpuInfo, TestRecord};
 
 pub struct Pen<'d> {
@@ -479,18 +481,36 @@ pub fn net(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         p.canvas.circle(px(r.x) + dot_r, base - l.m(4.5), dot_r, BAD);
         p.text(px(r.x) + l.m(16.0), base, "No network", body_style);
         let big = body.take_top(row_h + row_h / 2);
-        let reason = f.net_err.unwrap_or("no network interface found");
+        let cause = f.net_err.unwrap_or("no wired NIC driven by the firmware");
+        let reason = fixed::<96>(format_args!("{cause}, Wi-Fi not up"));
         let b = p.mid(l.text.body, big.y, big.h);
-        p.fit(px(r.x), b, reason, Pen::style(Face::SemiBold, l.text.body, BAD), px(r.w));
+        p.fit(px(r.x), b, &reason, Pen::style(Face::SemiBold, l.text.body, BAD), px(r.w));
         let hint = body.take_top(row_h);
         let b = p.mid(l.text.small, hint.y, hint.h);
-        p.fit(px(r.x), b, "Wi-Fi is not in this app yet; the status page needs Ethernet", small, px(r.w));
+        p.fit(px(r.x), b, "the status page needs a wired NIC or Wi-Fi with an address", small, px(r.w));
         return;
     };
-    let link = net.link;
-    let (state, color) = if link.up { ("Link up", GOOD) } else { ("Link down", BAD) };
+    match net.ports() {
+        [port] => single_port(p, r, port),
+        ports => port_list(p, r, ports, net.omitted),
+    }
+}
+
+/// The one port in full: link, address as the headline, the page to open, and the rest.
+fn single_port(p: &mut Pen<'_>, r: Rect, port: &PortStatus) {
+    let l = *p.l;
+    let row_h = l.row_h;
+    let mut body = r;
+    let first = body.take_top(row_h);
+    let base = p.mid(l.text.body, first.y, first.h);
+    let body_style = Pen::style(Face::Regular, l.text.body, TEXT);
+    let small = Pen::style(Face::Regular, l.text.small, MUTED);
+    let dot_r = l.m(4.0);
+    let link = port.link;
+    let (state, color) = if link.up { ("link up", GOOD) } else { ("link down", BAD) };
     p.canvas.circle(px(r.x) + dot_r, base - l.m(4.5), dot_r, color);
-    p.text(px(r.x) + l.m(16.0), base, state, body_style);
+    let state = fixed::<32>(format_args!("{} {state}", Titled(link.medium)));
+    p.text(px(r.x) + l.m(16.0), base, &state, body_style);
     p.right(px(r.right()), base, &num(link.mac), Style { face: Face::Mono, ..small });
 
     let big = body.take_top(row_h * 2);
@@ -514,11 +534,69 @@ pub fn net(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let b = p.mid(l.text.small, rest.y, rest.h);
     let tail = fixed::<128>(format_args!(
         "{} \u{b7} gateway {} \u{b7} dns {}",
-        crate::mdns::HOST,
-        crate::net::OptAddr(link.gateway),
-        crate::net::OptAddr(link.dns)
+        ferrite_net::mdns::HOST,
+        ferrite_net::OptAddr(link.gateway),
+        ferrite_net::OptAddr(link.dns)
     ));
     p.fit(px(r.x), b, &tail, Style { color: DIM, ..small }, px(r.w));
+}
+
+/// Several ports, two rows each: medium, link and address, then the page to open.
+fn port_list(p: &mut Pen<'_>, r: Rect, ports: &[PortStatus], omitted: usize) {
+    let l = *p.l;
+    let row_h = l.row_h;
+    let mut body = r;
+    let small = Pen::style(Face::Regular, l.text.small, MUTED);
+    let dot_r = l.m(4.0);
+    let rows = (r.h / row_h) as usize;
+    let shown = if ports.len() * 2 > rows { (rows.saturating_sub(1) / 2).max(1) } else { ports.len() };
+    for port in &ports[..shown.min(ports.len())] {
+        let link = port.link;
+        let head = body.take_top(row_h);
+        let base = p.mid(l.text.body, head.y, head.h);
+        let color = if !link.up {
+            BAD
+        } else if link.address.is_some() {
+            GOOD
+        } else {
+            WARN
+        };
+        p.canvas.circle(px(r.x) + dot_r, base - l.m(4.5), dot_r, color);
+        let x = px(r.x) + l.m(16.0);
+        let title = fixed::<24>(format_args!("{}", Titled(link.medium)));
+        let used = p.text(x, base, &title, Pen::style(Face::SemiBold, l.text.body, TEXT)) + l.m(10.0);
+        let address = match link.address {
+            Some(cidr) => fixed::<32>(format_args!("{}", cidr.address())),
+            None if link.up => fixed::<32>(format_args!("waiting for DHCP")),
+            None => fixed::<32>(format_args!("link down")),
+        };
+        p.fit(x + used, base, &address, Pen::style(Face::MonoBold, l.text.body, TEXT), px(r.right()) - x - used);
+        let detail_row = body.take_top(row_h);
+        let b = p.mid(l.text.small, detail_row.y, detail_row.h);
+        let detail = match link.address {
+            Some(cidr) if link.up => fixed::<96>(format_args!("http://{}/ \u{b7} {}", cidr.address(), link.mac)),
+            _ => fixed::<96>(format_args!("{}", link.mac)),
+        };
+        p.fit(x, b, &detail, Style { color: DIM, ..small }, px(r.right()) - x);
+    }
+    if omitted > 0 || shown < ports.len() {
+        let more = body.take_top(row_h);
+        let b = p.mid(l.text.small, more.y, more.h);
+        let text = fixed::<32>(format_args!("+{} more", ports.len() - shown.min(ports.len()) + omitted));
+        p.text(px(r.x), b, &text, small);
+    }
+}
+
+/// A medium's name with a capital, for headings.
+struct Titled(Medium);
+
+impl core::fmt::Display for Titled {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self.0 {
+            Medium::Ethernet => "Ethernet",
+            Medium::WiFi => "Wi-Fi",
+        })
+    }
 }
 
 pub fn passes(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {

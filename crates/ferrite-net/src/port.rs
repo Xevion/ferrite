@@ -37,12 +37,22 @@ impl fmt::Display for MacAddr {
 }
 
 /// What carries a port's frames, for display.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Medium {
     /// A wired NIC driven by the firmware.
+    #[default]
     Ethernet,
     /// A Wi-Fi station associated with an access point.
     WiFi,
+}
+
+impl fmt::Display for Medium {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Ethernet => "ethernet",
+            Self::WiFi => "wi-fi",
+        })
+    }
 }
 
 /// Why a frame was not sent.
@@ -67,6 +77,8 @@ pub struct PortStats {
     pub tx_dropped: u64,
     /// Frames the device refused or failed to send.
     pub tx_errors: u64,
+    /// Transmit buffers the device never handed back, reused after a timeout.
+    pub tx_reclaimed: u64,
 }
 
 impl fmt::Display for PortStats {
@@ -92,8 +104,8 @@ pub trait Port {
     fn service(&mut self, now: Instant);
     /// Copy the next received frame into `buf` (at least [`FRAME_MAX`] bytes) and return its length.
     fn receive(&mut self, buf: &mut [u8]) -> Option<usize>;
-    /// Whether [`Port::transmit`] would take a frame now.
-    fn can_transmit(&self) -> bool;
+    /// Whether [`Port::transmit`] would take a frame now. May take back buffers the device has finished with.
+    fn can_transmit(&mut self) -> bool;
     /// Send `frame`, a whole Ethernet frame without FCS.
     fn transmit(&mut self, now: Instant, frame: &[u8]) -> Result<(), TxError>;
     fn stats(&self) -> PortStats;

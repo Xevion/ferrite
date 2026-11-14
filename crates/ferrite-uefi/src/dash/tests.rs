@@ -6,8 +6,8 @@ use ferrite_mem::{CpuAddr, Fault};
 use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
 use super::*;
-use crate::net::{Counters, Link, MacAddr};
 use crate::report::{CpuInfo, History, PassRecord, TestRecord};
+use ferrite_net::{Link, MacAddr, Medium, PortStats, PortStatus, ServiceCounters};
 
 const START: Instant = Instant::from_epoch(Duration::from_secs(5));
 
@@ -62,16 +62,20 @@ fn history() -> History {
 }
 
 fn net() -> NetStatus {
-    NetStatus {
+    let mut net = NetStatus::default();
+    net.push(PortStatus {
         link: Link {
+            medium: Medium::Ethernet,
             up: true,
             mac: MacAddr::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
             address: Some(Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24)),
             gateway: Some(Ipv4Address::new(10, 0, 2, 2)),
             dns: Some(Ipv4Address::new(10, 0, 2, 3)),
         },
-        counters: Counters::default(),
-    }
+        frames: PortStats::default(),
+        services: ServiceCounters::default(),
+    });
+    net
 }
 
 fn faulty(status: &mut SweepStatus, faults: &mut VecDeque<FaultRecord>) {
@@ -179,4 +183,33 @@ fn eyeball_frames() {
             std::fs::write(dir.join(name), ppm).expect("write frame");
         }
     }
+}
+
+#[test]
+fn a_port_coming_and_going_redraws_the_network_widget_alone() {
+    let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
+    let (history, faults) = (history(), VecDeque::new());
+    let snapshot = Snapshot { status: status(), history: &history, faults: &faults };
+    let frame = |net: Option<NetStatus>, net_err| Frame { snapshot: &snapshot, net, net_err, now: START };
+
+    dash.render(&frame(Some(net()), None));
+    let mut two = net();
+    two.push(PortStatus {
+        link: Link {
+            medium: Medium::WiFi,
+            up: true,
+            mac: MacAddr::new([0x02, 0, 0, 0, 0, 9]),
+            address: None,
+            ..Link::default()
+        },
+        ..PortStatus::default()
+    });
+    dash.render(&frame(Some(two), None));
+    let l = dash.layout;
+    let rects = dash.output().1.to_vec();
+    check!(!rects.is_empty() && rects.iter().all(|r| l.net.intersect(*r) == *r), "{rects:?}");
+
+    dash.render(&frame(None, Some("no wired NIC driven by the firmware")));
+    let rects = dash.output().1.to_vec();
+    check!(!rects.is_empty() && rects.iter().all(|r| l.net.intersect(*r) == *r), "{rects:?}");
 }

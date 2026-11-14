@@ -19,6 +19,8 @@ pub mod paging;
 pub mod pci;
 pub mod rtc;
 pub mod session;
+#[cfg(feature = "net")]
+pub mod snp;
 pub mod volume;
 pub mod watchdog;
 pub mod xhci;

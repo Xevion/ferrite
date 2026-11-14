@@ -13,16 +13,12 @@ use ferrite_hal::Instant;
 use ferrite_mem::Fault;
 use ferrite_mem::analysis::Classification;
 
-use crate::mdns;
-use crate::net::{Counters, NetStatus};
+use ferrite_net::http::JsonEscape;
+use ferrite_net::mdns;
+use ferrite_net::{NetStatus, PortStatus};
+
 use crate::report::{CpuInfo, FaultRecord, PassRecord, Snapshot, TestRecord};
 use crate::sweep::SweepStatus;
-
-/// Room for a short reply (an error or an acknowledgement) on the stack.
-pub const REPLY_CAP: usize = 256;
-
-/// A short reply, built without touching the heap.
-pub type Reply = heapless::String<REPLY_CAP>;
 
 pub trait ToJson {
     fn to_json(&self, out: &mut dyn fmt::Write);
@@ -66,37 +62,13 @@ impl<'a> Object<'a> {
     }
 }
 
-/// Escapes what is written through it as the inside of a JSON string.
-struct Escape<'a>(&'a mut dyn fmt::Write);
-
-impl fmt::Write for Escape<'_> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let needs_escape = |c: char| matches!(c, '"' | '\\') || u32::from(c) < 0x20;
-        let mut rest = s;
-        while let Some(at) = rest.find(needs_escape) {
-            let (plain, special) = rest.split_at(at);
-            self.0.write_str(plain)?;
-            let mut chars = special.chars();
-            match chars.next() {
-                Some('"') => self.0.write_str("\\\"")?,
-                Some('\\') => self.0.write_str("\\\\")?,
-                Some('\n') => self.0.write_str("\\n")?,
-                Some(c) => write!(self.0, "\\u{:04x}", u32::from(c))?,
-                None => {},
-            }
-            rest = chars.as_str();
-        }
-        self.0.write_str(rest)
-    }
-}
-
 /// A value written as a JSON string through its `Display`.
 pub struct Text<T>(pub T);
 
 impl<T: fmt::Display> ToJson for Text<T> {
     fn to_json(&self, out: &mut dyn fmt::Write) {
         push(out, '"');
-        let _ = write!(Escape(out), "{}", self.0);
+        let _ = write!(JsonEscape(out), "{}", self.0);
         push(out, '"');
     }
 }
@@ -255,33 +227,39 @@ impl ToJson for Classification {
     }
 }
 
-impl ToJson for Counters {
+impl ToJson for PortStatus {
     fn to_json(&self, out: &mut dyn fmt::Write) {
+        let link = &self.link;
+        let (frames, services) = (&self.frames, &self.services);
         Object::new(out)
-            .field("mdns_queries", &self.mdns_queries)
-            .field("mdns_replies", &self.mdns_replies)
-            .field("mdns_malformed", &self.mdns_malformed)
-            .field("http_responses", &self.http_responses)
-            .field("rx_frames", &self.rx_frames)
-            .field("rx_errors", &self.rx_errors)
-            .field("tx_errors", &self.tx_errors)
-            .field("tx_stale_reclaims", &self.tx_stale_reclaims)
+            .field("medium", &Text(link.medium))
+            .field("mac", &Text(link.mac))
+            .field("link_up", &link.up)
+            .field("address", &link.address.map(Text))
+            .field("gateway", &link.gateway.map(Text))
+            .field("dns", &link.dns.map(Text))
+            .field(
+                "counters",
+                &Section(|o: &mut Object<'_>| {
+                    o.field("mdns_queries", &services.mdns_queries)
+                        .field("mdns_replies", &services.mdns_replies)
+                        .field("mdns_malformed", &services.mdns_malformed)
+                        .field("http_responses", &services.http_responses)
+                        .field("rx_frames", &frames.rx_frames)
+                        .field("rx_dropped", &frames.rx_dropped)
+                        .field("tx_frames", &frames.tx_frames)
+                        .field("tx_dropped", &frames.tx_dropped)
+                        .field("tx_errors", &frames.tx_errors)
+                        .field("tx_reclaimed", &frames.tx_reclaimed);
+                }),
+            )
             .finish();
     }
 }
 
 impl ToJson for NetStatus {
     fn to_json(&self, out: &mut dyn fmt::Write) {
-        let link = &self.link;
-        Object::new(out)
-            .field("hostname", &Text(mdns::HOST))
-            .field("mac", &Text(link.mac))
-            .field("link_up", &link.up)
-            .field("address", &link.address.map(Text))
-            .field("gateway", &link.gateway.map(Text))
-            .field("dns", &link.dns.map(Text))
-            .field("counters", &self.counters)
-            .finish();
+        Object::new(out).field("hostname", &Text(mdns::HOST)).field("ports", self.ports()).finish();
     }
 }
 
@@ -365,33 +343,18 @@ impl<F: Fn(&mut Object<'_>)> ToJson for Section<F> {
     }
 }
 
-/// `{"error": message}`.
-pub fn error(message: impl fmt::Display) -> Reply {
-    let mut out = Reply::new();
-    Object::new(&mut out).field("error", &Text(message)).finish();
-    out
-}
-
-/// `{"accepted": name}`, the reply to a control request.
-pub fn accepted(name: &str) -> Reply {
-    let mut out = Reply::new();
-    Object::new(&mut out).field("accepted", name).finish();
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use alloc::format;
     use alloc::string::String;
     use alloc::vec;
 
     use assert2::check;
     use ferrite_mem::CpuAddr;
     use ferrite_mem::suite::{Mode, Preset};
+    use ferrite_net::{Link, MacAddr, Medium, PortStats, ServiceCounters};
     use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
     use super::*;
-    use crate::net::{Link, MacAddr};
     use crate::report::History;
 
     fn at(ms: u64) -> Instant {
@@ -407,17 +370,6 @@ mod tests {
         let mut out = String::new();
         Text("a\"b\\c\nd\u{1}\u{e9}").to_json(&mut out);
         check!(out == "\"a\\\"b\\\\c\\nd\\u0001\u{e9}\"");
-    }
-
-    #[test]
-    fn the_longest_reply_fits_its_buffer() {
-        use crate::net::http::api::{self, Control, Rejection};
-
-        let body = format!(r#"{{"preset":"{}"}}"#, "\u{7f}".repeat(40));
-        let source = api::command(Control::Restart, body.as_bytes()).unwrap_err();
-        let reply = error(Rejection::BadBody { source });
-        check!(reply.ends_with("\"}"), "{reply}");
-        check!(reply.len() < REPLY_CAP, "{} bytes", reply.len());
     }
 
     #[test]
@@ -453,16 +405,19 @@ mod tests {
             paused: true,
         };
         let snapshot = Snapshot { status, history: &history, faults: &faults };
-        let net = NetStatus {
+        let mut net = NetStatus::default();
+        net.push(PortStatus {
             link: Link {
+                medium: Medium::Ethernet,
                 up: true,
                 mac: MacAddr::new([0x52, 0x54, 0, 0x12, 0x34, 0x56]),
                 address: Some(Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24)),
                 gateway: Some(Ipv4Address::new(10, 0, 2, 2)),
                 dns: None,
             },
-            counters: Counters { http_responses: 7, ..Counters::default() },
-        };
+            frames: PortStats { rx_frames: 5, ..PortStats::default() },
+            services: ServiceCounters { http_responses: 7, ..ServiceCounters::default() },
+        });
         let mut out = String::new();
         StatusDoc { snapshot: &snapshot, net: &net, now: at(6_500) }.to_json(&mut out);
         check!(
@@ -480,10 +435,10 @@ mod tests {
                 r#""rate":2147483648,"faults":0}],"#,
                 r#""passes":[{"pass":0,"took_ms":3000,"faults":1}],"#,
                 r#""processors":[{"number":0,"package":0,"core":0,"thread":0,"bsp":true}],"#,
-                r#""net":{"hostname":"ferrite.local","mac":"52:54:00:12:34:56","link_up":true,"#,
-                r#""address":"10.0.2.15/24","gateway":"10.0.2.2","dns":null,"#,
+                r#""net":{"hostname":"ferrite.local","ports":[{"medium":"ethernet","mac":"52:54:00:12:34:56","#,
+                r#""link_up":true,"address":"10.0.2.15/24","gateway":"10.0.2.2","dns":null,"#,
                 r#""counters":{"mdns_queries":0,"mdns_replies":0,"mdns_malformed":0,"http_responses":7,"#,
-                r#""rx_frames":0,"rx_errors":0,"tx_errors":0,"tx_stale_reclaims":0}}}"#
+                r#""rx_frames":5,"rx_dropped":0,"tx_frames":0,"tx_dropped":0,"tx_errors":0,"tx_reclaimed":0}}]}}"#
             )
         );
     }

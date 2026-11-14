@@ -17,13 +17,13 @@ use core::time::Duration;
 use ferrite_hal::Instant;
 use ferrite_mem::analysis::Classification;
 use ferrite_mem::suite::{Mode, Preset, TestKind};
+use ferrite_net::NetStatus;
 use snafu::{OptionExt as _, ResultExt as _, Snafu};
 
 use self::layout::Layout;
 use self::widgets::Pen;
 use crate::gfx::text::{FontError, Fonts};
 use crate::gfx::{Canvas, DirtyRects, Recording, Rect};
-use crate::net::NetStatus;
 use crate::report::{FaultRecord, Snapshot};
 use crate::sweep::SweepStatus;
 

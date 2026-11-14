@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-net"
-description = "Ethernet frames between a kernel network device and smoltcp: bounded queues, the Device, ping and a tiny HTTP responder"
+description = "The network foundation shared by every app: the Port every NIC is seen through, one IP stack per port, and the HTTP server machinery"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,11 +8,15 @@ publish.workspace = true
 
 [dependencies]
 ferrite-hal.workspace = true
+heapless.workspace = true
 log.workspace = true
+picoserve.workspace = true
 smoltcp = { workspace = true, features = ["socket-icmp", "auto-icmp-echo-reply"] }
+snafu.workspace = true
 
 [dev-dependencies]
 assert2.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

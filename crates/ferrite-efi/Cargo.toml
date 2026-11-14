@@ -9,10 +9,13 @@ publish.workspace = true
 [features]
 # Records panics in the boot log and shuts down; apps enabling this must not enable uefi's own `panic_handler`.
 panic-handler = []
+# The firmware's Simple Network Protocol as a `ferrite_net::Port`; pulls in smoltcp, so the loader leaves it off.
+net = ["dep:ferrite-net"]
 
 [dependencies]
 crc32fast.workspace = true
 ferrite-hal.workspace = true
+ferrite-net = { workspace = true, optional = true }
 ferrite-wire.workspace = true
 ferrite-xhci.workspace = true
 log.workspace = true

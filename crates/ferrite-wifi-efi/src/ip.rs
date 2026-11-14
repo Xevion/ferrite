@@ -4,18 +4,17 @@
 //! own), and a plain-text page on TCP port 80, until the hold ends. The verdict goes back to init with
 //! `finish_session`.
 
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::convert::Infallible;
 use core::fmt::Write as _;
 use core::time::Duration;
 
 use ferrite_hal::Instant;
-use ferrite_net::dhcp::DhcpClient;
-use ferrite_net::http::HttpResponder;
-use ferrite_net::ping::Pinger;
-use ferrite_net::{QueuePort, smol_instant};
-use smoltcp::iface::{Interface, SocketSet};
+use ferrite_net::http::{Rejection, Route, Site};
+use ferrite_net::{NetStatus, Network, PortId, QueuePort, StackConfig};
 
 /// How long the DHCP client gets to a lease.
 const DHCP_LIMIT: Duration = Duration::from_secs(10);
@@ -23,17 +22,81 @@ const PINGS: u16 = 4;
 const PING_INTERVAL: Duration = Duration::from_secs(1);
 const PING_TIMEOUT: Duration = Duration::from_secs(1);
 const PING_IDENT: u16 = 0xfe11;
-const HTTP_PORT: u16 = 80;
 const IDLE_POLL: Duration = Duration::from_millis(5);
+
+/// What the page shows of the session, as one poll sees it.
+struct Page<'a> {
+    name: &'a str,
+    started: Instant,
+    hold: Duration,
+}
+
+/// A page of plain text at `/`; no controls.
+struct TextPage;
+
+/// The control that no route has.
+#[derive(Clone, Copy)]
+enum NoControl {}
+
+impl From<NoControl> for &'static str {
+    fn from(control: NoControl) -> Self {
+        match control {}
+    }
+}
+
+impl Site for TextPage {
+    type State<'a> = Page<'a>;
+    type Control = NoControl;
+    type Command = ();
+    type BodyError = Infallible;
+    type Key = ();
+
+    fn document_type(&self) -> &'static str {
+        "text/plain; charset=utf-8"
+    }
+
+    fn page(&self) -> &'static str {
+        ""
+    }
+
+    fn route(&self, method: &str, path: &str) -> Result<Route<NoControl>, Rejection> {
+        match (method, path) {
+            ("GET", "/") => Ok(Route::Document),
+            (_, "/") => Err(Rejection::MethodNotAllowed { allow: "GET" }),
+            _ => Err(Rejection::NotFound),
+        }
+    }
+
+    fn command(&self, control: NoControl, _body: &[u8]) -> Result<(), Infallible> {
+        match control {}
+    }
+
+    fn key(&self, _state: &Page<'_>) {}
+
+    fn render(&self, state: &Page<'_>, net: &NetStatus, now: Instant, out: &mut String) {
+        let _ = writeln!(out, "ferrite wifitrace\ninterface {}", state.name);
+        if let Some(port) = net.ports().first() {
+            let link = &port.link;
+            if let Some(address) = link.address {
+                let router = link.gateway.map_or_else(|| String::from("none"), |r| alloc::format!("{r}"));
+                let _ = writeln!(out, "address {address}\nrouter {router}");
+            }
+            let _ = writeln!(
+                out,
+                "up {} s of {} s\nframes {}",
+                (now - state.started).as_secs(),
+                state.hold.as_secs(),
+                port.frames
+            );
+        }
+    }
+}
 
 struct Session {
     link: Rc<QueuePort>,
     name: String,
-    iface: Interface,
-    sockets: SocketSet<'static>,
-    dhcp: DhcpClient,
-    http: HttpResponder,
-    pinger: Option<Pinger>,
+    network: Network<TextPage>,
+    id: PortId,
     ping_reported: bool,
     started: Instant,
     hold: Duration,
@@ -42,96 +105,64 @@ struct Session {
 
 impl Session {
     fn new(link: Rc<QueuePort>, name: String, now: Instant, seed: u64, hold: Duration) -> Self {
-        let iface = link.interface(smol_instant(now), seed);
-        let mut sockets = SocketSet::new(Vec::new());
-        let dhcp = DhcpClient::new(&mut sockets);
-        let http = HttpResponder::new(&mut sockets, HTTP_PORT);
+        let mut network = Network::new(TextPage);
+        let config = StackConfig { seed, address: None, mdns: false, http: true };
+        let id = network.add(Box::new(Rc::clone(&link)), config, now);
         log::info!(
             "ip: smoltcp on {name}: DHCP for at most {} s, then the link is held until {} s after the port opened",
             DHCP_LIMIT.as_secs(),
             hold.as_secs()
         );
-        Self {
-            link,
-            name,
-            iface,
-            sockets,
-            dhcp,
-            http,
-            pinger: None,
-            ping_reported: false,
-            started: now,
-            hold,
-            failure: None,
-        }
-    }
-
-    fn page(&self, now: Instant) -> String {
-        let mut page = String::from("ferrite wifitrace\n");
-        let _ = writeln!(page, "interface {}", self.name);
-        if let Some(lease) = self.dhcp.lease() {
-            let router = lease.router.map_or_else(|| String::from("none"), |r| alloc::format!("{r}"));
-            let _ = writeln!(page, "address {}\nrouter {router}", lease.address);
-        }
-        let _ = writeln!(
-            page,
-            "up {} s of {} s\nframes {}",
-            (now - self.started).as_secs(),
-            self.hold.as_secs(),
-            self.link.stats()
-        );
-        page
+        Self { link, name, network, id, ping_reported: false, started: now, hold, failure: None }
     }
 
     /// One round of the stack; `Some(passed)` once the hold is over or a step failed early.
     fn poll(&mut self, now: Instant) -> Option<bool> {
-        self.iface.poll(smol_instant(now), &mut self.link.device(), &mut self.sockets);
-        let lease = self.dhcp.poll(&mut self.iface, &mut self.sockets).cloned();
-        if let Some(lease) = lease
-            && self.pinger.is_none()
+        let page = Page { name: &self.name, started: self.started, hold: self.hold };
+        self.network.poll(now, &page, &mut |()| {});
+        let stack = self.network.stack_mut(self.id)?;
+        let link = *stack.link();
+        if let Some(cidr) = link.address
+            && stack.pinger().is_none()
         {
             log::info!(
                 "ip: leased after {} ms; ping {} or fetch http://{}/ until the hold ends",
                 (now - self.started).as_millis(),
-                lease.address.address(),
-                lease.address.address()
+                cidr.address(),
+                cidr.address()
             );
-            if let Some(router) = lease.router {
-                self.pinger =
-                    Some(Pinger::new(&mut self.sockets, router, PING_IDENT, PINGS, PING_INTERVAL, PING_TIMEOUT, now));
+            if let Some(router) = link.gateway {
+                stack.start_ping(router, PING_IDENT, PINGS, PING_INTERVAL, PING_TIMEOUT, now);
             } else {
                 log::error!("ip: the lease names no router to ping");
                 self.failure.get_or_insert("no router");
             }
         }
-        if self.dhcp.lease().is_none() && self.pinger.is_none() && now - self.started >= DHCP_LIMIT {
+        if link.address.is_none() && stack.pinger().is_none() && now - self.started >= DHCP_LIMIT {
             log::error!("ip: no DHCP lease within {} s", DHCP_LIMIT.as_secs());
             return Some(self.end(Some("no DHCP lease")));
         }
-        if let Some(pinger) = &mut self.pinger {
-            pinger.poll(&mut self.sockets, now);
-            if pinger.done() && !self.ping_reported {
-                self.ping_reported = true;
-                let rtts: Vec<Duration> = pinger.replies().collect();
-                if let (Some(min), Some(max)) = (rtts.iter().min(), rtts.iter().max()) {
-                    let avg = rtts.iter().sum::<Duration>() / rtts.len() as u32;
-                    log::info!(
-                        "ip: router {}: {} of {PINGS} replies, round trip min {} us, avg {} us, max {} us",
-                        pinger.target(),
-                        rtts.len(),
-                        min.as_micros(),
-                        avg.as_micros(),
-                        max.as_micros()
-                    );
-                } else {
-                    log::error!("ip: router {}: no reply to {PINGS} echo requests", pinger.target());
-                    self.failure.get_or_insert("no reply from the router");
-                }
+        if let Some(pinger) = stack.pinger()
+            && pinger.done()
+            && !self.ping_reported
+        {
+            self.ping_reported = true;
+            let rtts: Vec<Duration> = pinger.replies().collect();
+            if let (Some(min), Some(max)) = (rtts.iter().min(), rtts.iter().max()) {
+                let avg = rtts.iter().sum::<Duration>() / rtts.len() as u32;
+                log::info!(
+                    "ip: router {}: {} of {PINGS} replies, round trip min {} us, avg {} us, max {} us",
+                    pinger.target(),
+                    rtts.len(),
+                    min.as_micros(),
+                    avg.as_micros(),
+                    max.as_micros()
+                );
+            } else {
+                log::error!("ip: router {}: no reply to {PINGS} echo requests", pinger.target());
+                self.failure.get_or_insert("no reply from the router");
             }
         }
-        let page = self.page(now);
-        self.http.poll(&mut self.sockets, || page);
-        self.iface.poll(smol_instant(now), &mut self.link.device(), &mut self.sockets);
         (now - self.started >= self.hold).then(|| {
             let failure = self.failure;
             self.end(failure)
@@ -139,7 +170,8 @@ impl Session {
     }
 
     fn end(&self, failure: Option<&'static str>) -> bool {
-        log::info!("ip: {} HTTP requests answered; frames {}", self.http.served(), self.link.stats());
+        let served = self.network.stack(self.id).map_or(0, |stack| stack.status().services.http_responses);
+        log::info!("ip: {served} HTTP requests answered; frames {}", self.link.stats());
         if let Some(why) = failure {
             log::error!("ip: failed: {why}");
             return false;
@@ -178,10 +210,8 @@ impl MainNet {
             self.session = None;
             return None;
         }
-        let wait = session
-            .iface
-            .poll_delay(smol_instant(now), &session.sockets)
-            .map_or(IDLE_POLL, |d| Duration::from(d).min(IDLE_POLL));
+        let wait = session.network.stack_mut(session.id).and_then(|stack| stack.poll_delay(now));
+        let wait = wait.map_or(IDLE_POLL, |d| d.min(IDLE_POLL));
         Some(if session.link.tx_pending() { Duration::ZERO } else { wait })
     }
 }

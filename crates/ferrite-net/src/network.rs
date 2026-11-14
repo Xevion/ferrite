@@ -1,0 +1,127 @@
+//! Any number of stacks, one per port, polled together under one site.
+//!
+//! A port can be added at any time and removed when it goes away (a Wi-Fi link that drops); the
+//! stacks run side by side, each with its own address, and the site's server, document and `Host`
+//! check are shared by all of them.
+
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::time::Duration;
+
+use ferrite_hal::{Clock, Instant};
+
+use crate::http::{Site, Web};
+use crate::port::Port;
+use crate::stack::{PollCtx, Stack, StackConfig};
+use crate::status::NetStatus;
+
+/// A port in a [`Network`], valid until it is removed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PortId(u32);
+
+pub struct Network<S: Site> {
+    web: Rc<Web<S>>,
+    stacks: Vec<(PortId, Stack)>,
+    next_id: u32,
+    /// What the document showed at the last poll, to tell when it changed.
+    key: Option<S::Key>,
+    last: NetStatus,
+    clock: Option<Box<dyn Clock>>,
+}
+
+impl<S: Site> Network<S> {
+    pub fn new(site: S) -> Self {
+        Self { web: Web::new(site), stacks: Vec::new(), next_id: 0, key: None, last: NetStatus::default(), clock: None }
+    }
+
+    /// Time the HTTP polls with `clock`, for the periodic summary in the log.
+    #[must_use]
+    pub fn timed(mut self, clock: impl Clock + 'static) -> Self {
+        self.clock = Some(Box::new(clock));
+        self
+    }
+
+    /// Start a stack on `port` at `now`.
+    pub fn add(&mut self, port: Box<dyn Port>, config: StackConfig, now: Instant) -> PortId {
+        let id = PortId(self.next_id);
+        self.next_id += 1;
+        let mut stack = Stack::new(port, config, now);
+        if config.http {
+            stack.serve(&self.web);
+        }
+        log::debug!("net: {} {} added, {}", stack.link().medium, stack.link().mac, stack.link());
+        self.stacks.push((id, stack));
+        id
+    }
+
+    /// Stop the stack of `id` and drop its port. False when there is none.
+    pub fn remove(&mut self, id: PortId) -> bool {
+        let Some(at) = self.stacks.iter().position(|(stack_id, _)| *stack_id == id) else {
+            return false;
+        };
+        let (_, stack) = self.stacks.remove(at);
+        log::debug!("net: {} {} removed", stack.link().medium, stack.link().mac);
+        true
+    }
+
+    pub fn stack(&self, id: PortId) -> Option<&Stack> {
+        self.stacks.iter().find(|(stack_id, _)| *stack_id == id).map(|(_, stack)| stack)
+    }
+
+    pub fn stack_mut(&mut self, id: PortId) -> Option<&mut Stack> {
+        self.stacks.iter_mut().find(|(stack_id, _)| *stack_id == id).map(|(_, stack)| stack)
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = PortId> + '_ {
+        self.stacks.iter().map(|(id, _)| *id)
+    }
+
+    pub fn site(&self) -> &S {
+        self.web.site()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stacks.is_empty()
+    }
+
+    /// Every port's link, frames and services.
+    pub fn status(&self) -> NetStatus {
+        let mut status = NetStatus::default();
+        self.stacks.iter().for_each(|(_, stack)| status.push(stack.status()));
+        status
+    }
+
+    /// Advance every stack to `now`, with the app's `state` as the site sees it. Control requests
+    /// the stacks received are passed to `commands`. Returns how long may pass before the next
+    /// poll, or `None` when there is no port.
+    pub fn poll(
+        &mut self,
+        now: Instant,
+        state: &S::State<'_>,
+        commands: &mut dyn FnMut(S::Command),
+    ) -> Option<Duration> {
+        if self.stacks.is_empty() {
+            return None;
+        }
+        let status = self.status();
+        let web = &*self.web;
+        let key = web.site().key(state);
+        if self.key.as_ref() != Some(&key) || status.links_differ(&self.last) {
+            web.hub().changed();
+            self.key = Some(key);
+        }
+        self.last = status;
+        web.hub().set_addresses(status.ports().iter().filter_map(|port| port.link.address).map(|cidr| cidr.address()));
+
+        let site = web.site();
+        let mut render = |out: &mut alloc::string::String| site.render(state, &status, now, out);
+        let mut wait = Duration::MAX;
+        for (_, stack) in &mut self.stacks {
+            let mut ctx = PollCtx { render: &mut render, clock: self.clock.as_deref() };
+            wait = wait.min(stack.poll(now, &mut ctx));
+        }
+        web.drain_commands(commands);
+        Some(wait)
+    }
+}

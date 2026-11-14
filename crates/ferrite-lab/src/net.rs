@@ -4,17 +4,17 @@
 //! station pings the AP, sends a UDP datagram the AP echoes, and fetches the AP's HTTP page over TCP; the
 //! result goes back to init with `finish_session`.
 
+use std::convert::Infallible;
 use std::rc::Rc;
 use std::time::Duration;
 
 use ferrite_hal::Instant;
-use ferrite_net::dhcp::DhcpClient;
-use ferrite_net::http::HttpResponder;
-use ferrite_net::ping::Pinger;
-use ferrite_net::{QueuePort, smol_instant};
-use smoltcp::iface::{Interface, SocketHandle, SocketSet};
+use ferrite_net::http::{Rejection, Route, Site};
+use ferrite_net::port::MacAddr;
+use ferrite_net::{NetStatus, Network, PortId, QueuePort, Stack, StackConfig};
+use smoltcp::iface::SocketHandle;
 use smoltcp::socket::{tcp, udp};
-use smoltcp::wire::{DhcpMessageType, DhcpPacket, DhcpRepr, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr};
+use smoltcp::wire::{DhcpMessageType, DhcpPacket, DhcpRepr, IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr};
 
 const AP_ADDR: Ipv4Address = Ipv4Address::new(10, 42, 0, 1);
 const STATION_ADDR: Ipv4Address = Ipv4Address::new(10, 42, 0, 2);
@@ -36,44 +36,72 @@ const LIMIT: Duration = Duration::from_secs(8);
 const IDLE_POLL: Duration = Duration::from_millis(5);
 const PAGE: &str = "ferrite lab AP\n";
 
-struct Side {
-    link: Rc<QueuePort>,
-    iface: Interface,
-    sockets: SocketSet<'static>,
+/// The AP's page: `PAGE` as plain text at `/`.
+struct ApPage;
+
+/// The control that no route has.
+#[derive(Clone, Copy)]
+enum NoControl {}
+
+impl From<NoControl> for &'static str {
+    fn from(control: NoControl) -> Self {
+        match control {}
+    }
 }
 
-impl Side {
-    fn new(link: Rc<QueuePort>, addr: Option<Ipv4Address>, now: Instant, seed: u64) -> Self {
-        let mut iface = link.interface(smol_instant(now), seed);
-        if let Some(addr) = addr {
-            iface.update_ip_addrs(|addrs| {
-                let _ = addrs.push(IpCidr::new(IpAddress::Ipv4(addr), PREFIX));
-            });
+impl Site for ApPage {
+    type State<'a> = ();
+    type Control = NoControl;
+    type Command = ();
+    type BodyError = Infallible;
+    type Key = ();
+
+    fn document_type(&self) -> &'static str {
+        "text/plain; charset=utf-8"
+    }
+
+    fn page(&self) -> &'static str {
+        ""
+    }
+
+    fn route(&self, method: &str, path: &str) -> Result<Route<NoControl>, Rejection> {
+        match (method, path) {
+            ("GET", "/") => Ok(Route::Document),
+            (_, "/") => Err(Rejection::MethodNotAllowed { allow: "GET" }),
+            _ => Err(Rejection::NotFound),
         }
-        Self { link, iface, sockets: SocketSet::new(Vec::new()) }
     }
 
-    fn poll(&mut self, now: Instant) {
-        self.iface.poll(smol_instant(now), &mut self.link.device(), &mut self.sockets);
+    fn command(&self, control: NoControl, _body: &[u8]) -> Result<(), Infallible> {
+        match control {}
+    }
+
+    fn key(&self, _state: &()) {}
+
+    fn render(&self, _state: &(), _net: &NetStatus, _now: Instant, out: &mut String) {
+        out.push_str(PAGE);
     }
 }
 
-fn udp_socket(sockets: &mut SocketSet<'static>, port: u16) -> SocketHandle {
+fn udp_socket(stack: &mut Stack, port: u16) -> SocketHandle {
     let buffer = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]);
     let mut socket = udp::Socket::new(buffer(), buffer());
     if let Err(error) = socket.bind(port) {
         log::error!("ip: binding udp :{port} failed: {error}");
     }
-    sockets.add(socket)
+    stack.parts().1.add(socket)
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "the independent progress flags of the checks")]
 pub struct LabNet {
-    station: Side,
-    ap: Side,
+    network: Network<ApPage>,
+    station: PortId,
+    ap: PortId,
+    station_link: Rc<QueuePort>,
+    ap_link: Rc<QueuePort>,
     started: Instant,
-    dhcp: DhcpClient,
     dhcp_server: SocketHandle,
-    pinger: Option<Pinger>,
+    pinging: bool,
     station_udp: SocketHandle,
     ap_udp: SocketHandle,
     udp_sent_at: Option<Instant>,
@@ -82,33 +110,43 @@ pub struct LabNet {
     tcp_started: bool,
     tcp_reply: Vec<u8>,
     tcp_done: bool,
-    http: HttpResponder,
 }
 
 impl LabNet {
     fn new(station: Rc<QueuePort>, ap: Rc<QueuePort>, now: Instant, seed: u64) -> Self {
-        let mut station = Side::new(station, None, now, seed);
-        let mut ap = Side::new(ap, Some(AP_ADDR), now, seed.rotate_left(17));
+        let mut network = Network::new(ApPage);
+        let station_config = StackConfig { seed, address: None, mdns: false, http: false };
+        let ap_config = StackConfig {
+            seed: seed.rotate_left(17),
+            address: Some(Ipv4Cidr::new(AP_ADDR, PREFIX)),
+            mdns: false,
+            http: true,
+        };
+        let station_id = network.add(Box::new(Rc::clone(&station)), station_config, now);
+        let ap_id = network.add(Box::new(Rc::clone(&ap)), ap_config, now);
         log::info!(
             "ip: station on {} asks for a lease; AP {AP_ADDR}/{PREFIX} on {} serves DHCP",
-            mac_text(station.link.mac()),
-            mac_text(ap.link.mac())
+            MacAddr::new(station.mac()),
+            MacAddr::new(ap.mac())
         );
-        let dhcp = DhcpClient::new(&mut station.sockets);
-        let dhcp_server = udp_socket(&mut ap.sockets, DHCP_SERVER_PORT);
-        let station_udp = udp_socket(&mut station.sockets, UDP_LOCAL);
-        let ap_udp = udp_socket(&mut ap.sockets, ECHO_PORT);
-        let tcp = station
-            .sockets
+        let station_stack = network.stack_mut(station_id).expect("the station stack was just added");
+        let station_udp = udp_socket(station_stack, UDP_LOCAL);
+        let tcp = station_stack
+            .parts()
+            .1
             .add(tcp::Socket::new(tcp::SocketBuffer::new(vec![0; 4096]), tcp::SocketBuffer::new(vec![0; 4096])));
-        let http = HttpResponder::new(&mut ap.sockets, HTTP_PORT);
+        let ap_stack = network.stack_mut(ap_id).expect("the AP stack was just added");
+        let dhcp_server = udp_socket(ap_stack, DHCP_SERVER_PORT);
+        let ap_udp = udp_socket(ap_stack, ECHO_PORT);
         Self {
-            station,
-            ap,
+            network,
+            station: station_id,
+            ap: ap_id,
+            station_link: station,
+            ap_link: ap,
             started: now,
-            dhcp,
             dhcp_server,
-            pinger: None,
+            pinging: false,
             station_udp,
             ap_udp,
             udp_sent_at: None,
@@ -117,41 +155,48 @@ impl LabNet {
             tcp_started: false,
             tcp_reply: Vec::new(),
             tcp_done: false,
-            http,
         }
+    }
+
+    fn station(&mut self) -> &mut Stack {
+        self.network.stack_mut(self.station).expect("the station stack lives as long as the session")
+    }
+
+    fn ap(&mut self) -> &mut Stack {
+        self.network.stack_mut(self.ap).expect("the AP stack lives as long as the session")
+    }
+
+    fn step(&mut self, now: Instant) {
+        self.network.poll(now, &(), &mut |()| {});
     }
 
     /// One round of both stacks and the checks; `Some(passed)` once they are over.
     fn poll(&mut self, now: Instant) -> Option<bool> {
-        self.station.poll(now);
-        self.ap.poll(now);
+        self.step(now);
         self.serve_dhcp();
-        self.http.poll(&mut self.ap.sockets, || PAGE.into());
         self.udp_echo();
-        let leased = self.dhcp.poll(&mut self.station.iface, &mut self.station.sockets).cloned();
-        if let Some(lease) = leased
-            && self.pinger.is_none()
+        let leased = self.station().link().address;
+        if let Some(cidr) = leased
+            && !self.pinging
         {
-            log::info!("ip: station leased {} after {} ms", lease.address, (now - self.started).as_millis());
-            self.pinger =
-                Some(Pinger::new(&mut self.station.sockets, AP_ADDR, 0x1ab, PINGS, PING_INTERVAL, PING_TIMEOUT, now));
+            log::info!("ip: station leased {cidr} after {} ms", (now - self.started).as_millis());
+            self.pinging = true;
+            self.station().start_ping(AP_ADDR, 0x1ab, PINGS, PING_INTERVAL, PING_TIMEOUT, now);
         }
-        if let Some(pinger) = &mut self.pinger {
-            pinger.poll(&mut self.station.sockets, now);
+        if self.pinging {
             self.udp(now);
             self.tcp();
         }
-        self.station.poll(now);
-        self.ap.poll(now);
-        let pinged = self.pinger.as_ref().is_some_and(Pinger::done);
+        self.step(now);
+        let pinged = self.station().pinger().is_some_and(ferrite_net::ping::Pinger::done);
         if !(pinged && self.udp_done && self.tcp_done) && now - self.started < LIMIT {
             return None;
         }
-        let leased = self.dhcp.lease().is_some_and(|lease| lease.address == Ipv4Cidr::new(STATION_ADDR, PREFIX));
+        let leased = self.station().link().address == Some(Ipv4Cidr::new(STATION_ADDR, PREFIX));
         if !leased {
             log::error!("ip: the station has no lease of {STATION_ADDR}/{PREFIX} after {} ms", LIMIT.as_millis());
         }
-        let replies = self.pinger.as_ref().map_or(0, |pinger| pinger.replies().count());
+        let replies = self.station().pinger().map_or(0, |pinger| pinger.replies().count());
         log::info!("ip: ping {AP_ADDR}: {replies} of {PINGS} replies");
         let passed = leased && replies == usize::from(PINGS) && self.udp_done && self.tcp_done;
         if !self.udp_done {
@@ -160,7 +205,7 @@ impl LabNet {
         if !self.tcp_done {
             log::error!("ip: no HTTP reply from {AP_ADDR}:{HTTP_PORT} within {} ms", LIMIT.as_millis());
         }
-        log::info!("ip: frames: station {}; AP {}", self.station.link.stats(), self.ap.link.stats());
+        log::info!("ip: frames: station {}; AP {}", self.station_link.stats(), self.ap_link.stats());
         if passed {
             log::info!("ip: lab IP checks passed over the encrypted link");
         }
@@ -168,7 +213,8 @@ impl LabNet {
     }
 
     fn udp_echo(&mut self) {
-        let echo = self.ap.sockets.get_mut::<udp::Socket<'_>>(self.ap_udp);
+        let handle = self.ap_udp;
+        let echo = self.ap().parts().1.get_mut::<udp::Socket<'_>>(handle);
         while let Ok((data, meta)) = echo.recv() {
             let data = data.to_vec();
             if let Err(error) = echo.send_slice(&data, meta.endpoint) {
@@ -179,7 +225,8 @@ impl LabNet {
 
     /// The AP's DHCP server: every DISCOVER gets an OFFER and every REQUEST an ACK of the one lease.
     fn serve_dhcp(&mut self) {
-        let socket = self.ap.sockets.get_mut::<udp::Socket<'_>>(self.dhcp_server);
+        let handle = self.dhcp_server;
+        let socket = self.ap().parts().1.get_mut::<udp::Socket<'_>>(handle);
         let mut out = [0_u8; 576];
         while let Ok((data, _)) = socket.recv() {
             let data = data.to_vec();
@@ -232,7 +279,9 @@ impl LabNet {
         if self.udp_done {
             return;
         }
-        let socket = self.station.sockets.get_mut::<udp::Socket<'_>>(self.station_udp);
+        let handle = self.station_udp;
+        let station = self.network.stack_mut(self.station).expect("the station stack");
+        let socket = station.parts().1.get_mut::<udp::Socket<'_>>(handle);
         while let Ok((data, meta)) = socket.recv() {
             if data == UDP_PAYLOAD {
                 log::info!("ip: udp echo through {} came back: {} bytes", meta.endpoint, data.len());
@@ -252,9 +301,11 @@ impl LabNet {
         if self.tcp_done {
             return;
         }
-        let cx = self.station.iface.context();
-        let socket = self.station.sockets.get_mut::<tcp::Socket<'_>>(self.tcp);
-        if !self.tcp_started {
+        let (handle, started) = (self.tcp, self.tcp_started);
+        let (iface, sockets) = self.network.stack_mut(self.station).expect("the station stack").parts();
+        let cx = iface.context();
+        let socket = sockets.get_mut::<tcp::Socket<'_>>(handle);
+        if !started {
             match socket.connect(cx, (IpAddress::Ipv4(AP_ADDR), HTTP_PORT), TCP_LOCAL) {
                 Ok(()) => self.tcp_started = true,
                 Err(error) => log::warn!("ip: tcp connect to {AP_ADDR}:{HTTP_PORT} failed: {error}"),
@@ -262,7 +313,7 @@ impl LabNet {
             return;
         }
         if socket.may_send() && socket.send_queue() == 0 && self.tcp_reply.is_empty() {
-            let _ = socket.send_slice(b"GET / HTTP/1.0\r\nHost: 10.42.0.1\r\n\r\n");
+            let _ = socket.send_slice(b"GET / HTTP/1.1\r\nHost: 10.42.0.1\r\nConnection: close\r\n\r\n");
         }
         while socket.can_recv() {
             let reply = &mut self.tcp_reply;
@@ -276,27 +327,36 @@ impl LabNet {
                 break;
             }
         }
-        if !socket.may_recv() && !self.tcp_reply.is_empty() {
-            socket.close();
-            let text = String::from_utf8_lossy(&self.tcp_reply);
-            let status = text.lines().next().unwrap_or_default();
-            if status.starts_with("HTTP/1.0 200") && text.ends_with(PAGE) {
-                log::info!("ip: tcp: \"{status}\" from {AP_ADDR}:{HTTP_PORT}, {} bytes", self.tcp_reply.len());
-                self.tcp_done = true;
-            } else {
-                log::error!("ip: tcp: unexpected reply from {AP_ADDR}:{HTTP_PORT}: {text:?}");
-                self.tcp_reply.clear();
-            }
+        if !response_complete(&self.tcp_reply) {
+            return;
+        }
+        socket.close();
+        let text = String::from_utf8_lossy(&self.tcp_reply);
+        let status = text.lines().next().unwrap_or_default();
+        if status.starts_with("HTTP/1.1 200") && text.ends_with(PAGE) {
+            log::info!("ip: tcp: \"{status}\" from {AP_ADDR}:{HTTP_PORT}, {} bytes", self.tcp_reply.len());
+            self.tcp_done = true;
+        } else {
+            log::error!("ip: tcp: unexpected reply from {AP_ADDR}:{HTTP_PORT}: {text:?}");
+            self.tcp_reply.clear();
         }
     }
 
     fn tx_pending(&self) -> bool {
-        self.station.link.tx_pending() || self.ap.link.tx_pending()
+        self.station_link.tx_pending() || self.ap_link.tx_pending()
     }
 }
 
-fn mac_text(mac: [u8; 6]) -> String {
-    mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
+/// Whether `reply` holds a whole response: its head and as many body bytes as `Content-Length` says.
+fn response_complete(reply: &[u8]) -> bool {
+    let Some(head_end) = reply.windows(4).position(|w| w == b"\r\n\r\n") else { return false };
+    let head = String::from_utf8_lossy(&reply[..head_end]);
+    let length = head
+        .lines()
+        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>()))
+        .and_then(Result::ok)
+        .unwrap_or(0);
+    reply.len() >= head_end + 4 + length
 }
 
 /// The main loop's IP: takes the session init publishes, runs the checks and hands back the result.
@@ -328,5 +388,38 @@ impl MainNet {
             return None;
         }
         Some(if lab.tx_pending() { Duration::ZERO } else { IDLE_POLL })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::*;
+
+    /// Carry every frame one side queued to the other, as the frame seam does.
+    fn wire(from: &QueuePort, to: &QueuePort) {
+        while let Some(frame) = from.next_tx() {
+            from.transmitted(true);
+            to.deliver(&frame);
+        }
+    }
+
+    #[test]
+    fn the_station_leases_pings_and_fetches_the_page_from_the_ap() {
+        let station = Rc::new(QueuePort::new([2, 0, 0, 0, 0, 1], 1500, 32, 32));
+        let ap = Rc::new(QueuePort::new([2, 0, 0, 0, 0, 2], 1500, 32, 32));
+        let mut lab = LabNet::new(Rc::clone(&station), Rc::clone(&ap), Instant::default(), 7);
+        let mut verdict = None;
+        for ms in 1..=LIMIT.as_millis() as u64 {
+            let now = Instant::from_epoch(Duration::from_millis(ms));
+            verdict = lab.poll(now);
+            wire(&station, &ap);
+            wire(&ap, &station);
+            if verdict.is_some() {
+                break;
+            }
+        }
+        check!(verdict == Some(true));
     }
 }

@@ -17,7 +17,6 @@ pub mod dash;
 pub mod diag;
 pub mod gfx;
 pub mod gop;
-pub mod mdns;
 pub mod net;
 pub mod report;
 pub mod sweep;
