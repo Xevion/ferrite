@@ -87,8 +87,12 @@ impl Scenario {
     }
 
     /// The network, down for a stretch.
-    fn net(&self) -> (Option<NetStatus>, Option<&'static str>) {
-        if (2000..2060).contains(&self.frame) { (None, Some("link is down")) } else { (Some(net()), None) }
+    fn net(&self) -> (Option<NetStatus>, Option<NoNetwork>) {
+        if (2000..2060).contains(&self.frame) {
+            (None, Some(NoNetwork { wired: "link is down", wifi: "connecting" }))
+        } else {
+            (Some(net()), None)
+        }
     }
 
     fn advance(&mut self) {

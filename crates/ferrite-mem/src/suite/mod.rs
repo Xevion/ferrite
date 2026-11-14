@@ -39,7 +39,7 @@ pub use share::{Mode, shares};
 /// The first four are tiers, cumulative: each runs every test of its tier and the tiers below it,
 /// with [`Config::DEFAULT`]. [`Preset::Memtest86Plus`] is memtest86+'s own tests with its default
 /// counts, so a run can be compared with memtest86+ without editing constants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, strum::IntoStaticStr)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, strum::IntoStaticStr, strum::VariantArray)]
 #[strum(serialize_all = "kebab-case")]
 pub enum Preset {
     /// A fast sanity check.
@@ -56,6 +56,8 @@ pub enum Preset {
 }
 
 impl Preset {
+    pub const ALL: &'static [Self] = <Self as strum::VariantArray>::VARIANTS;
+
     /// Whether a run of this preset includes `kind`.
     #[must_use]
     pub fn runs(self, kind: TestKind) -> bool {

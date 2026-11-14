@@ -14,8 +14,6 @@ use crate::sweep::CoreChoice;
 /// A rejected preset name as far as it is worth echoing back.
 pub type PresetName = heapless::String<24>;
 
-const PRESETS: [Preset; 4] = [Preset::Quick, Preset::Standard, Preset::Thorough, Preset::Destructive];
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
     Pause,
@@ -114,8 +112,9 @@ pub fn command(control: Control, body: &[u8]) -> Result<Command, BodyError> {
 
 /// The preset whose kebab-case name is `name`.
 pub fn preset(name: &str) -> Result<Preset, BodyError> {
-    PRESETS
-        .into_iter()
+    Preset::ALL
+        .iter()
+        .copied()
         .find(|&p| <&str>::from(p) == name)
         .ok_or_else(|| BodyError::UnknownPreset { name: truncated(name) })
 }
@@ -264,6 +263,11 @@ mod tests {
         Control::Restart,
         " { \"x\" : null , \"preset\" : \"thorough\" } ",
         Command::Restart(Preset::Thorough)
+    )]
+    #[case::restart_memtest86_plus(
+        Control::Restart,
+        r#"{"preset":"memtest86-plus"}"#,
+        Command::Restart(Preset::Memtest86Plus)
     )]
     #[case::cores_all(Control::Cores, r#"{"cores":"all"}"#, Command::Cores(CoreChoice::All))]
     #[case::cores_physical(Control::Cores, r#"{"cores":"physical"}"#, Command::Cores(CoreChoice::Physical))]

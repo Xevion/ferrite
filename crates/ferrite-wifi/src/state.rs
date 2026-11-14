@@ -32,9 +32,10 @@ impl Failure {
     }
 }
 
-impl fmt::Display for Failure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+impl Failure {
+    /// The failure in words, for a status line.
+    pub const fn describe(self) -> &'static str {
+        match self {
             Self::Driver => "the card's driver is not running",
             Self::Scan => "the scan failed",
             Self::NotFound => "the network was not found",
@@ -43,7 +44,13 @@ impl fmt::Display for Failure {
             Self::Protocol => "the connection failed",
             Self::Attach => "the network device could not be attached",
             Self::Lost => "the link was lost",
-        })
+        }
+    }
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.describe())
     }
 }
 
@@ -79,6 +86,21 @@ pub enum StationState {
 impl StationState {
     pub const fn is_connected(&self) -> bool {
         matches!(self, Self::Connected { .. })
+    }
+
+    /// The state without its network name, for a line drawn every frame: no formatting, no allocation.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::NoCard => "no Wi-Fi card",
+            Self::NoCredentials => "no network credentials",
+            Self::NoFirmware => "firmware files missing",
+            Self::Scanning => "scanning",
+            Self::Connecting { .. } => "connecting",
+            Self::Connected { .. } => "connected",
+            Self::Failed { reason, .. } => reason.describe(),
+            Self::Stopped => "stopped",
+        }
     }
 
     /// Whether the state will never change again without a new start: the service has ended.

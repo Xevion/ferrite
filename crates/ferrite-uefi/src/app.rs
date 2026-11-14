@@ -243,6 +243,7 @@ impl<'a> App<'a> {
             sweep.analysis
         );
         self.sweep.check_cores();
+        self.desk.net.shutdown();
     }
 
     /// Apply the queued commands in order; [`Flow::Stop`] when one of them was [`Command::Quit`].

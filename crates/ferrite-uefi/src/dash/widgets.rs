@@ -481,10 +481,15 @@ pub fn net(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         p.canvas.circle(px(r.x) + dot_r, base - l.m(4.5), dot_r, BAD);
         p.text(px(r.x) + l.m(16.0), base, "No network", body_style);
         let big = body.take_top(row_h + row_h / 2);
-        let cause = f.net_err.unwrap_or("no wired NIC driven by the firmware");
-        let reason = fixed::<96>(format_args!("{cause}, Wi-Fi not up"));
-        let b = p.mid(l.text.body, big.y, big.h);
-        p.fit(px(r.x), b, &reason, Pen::style(Face::SemiBold, l.text.body, BAD), px(r.w));
+        if let Some(why) = f.net_err {
+            let wired = fixed::<96>(format_args!("wired: {}", why.wired));
+            let b = p.mid(l.text.body, big.y, big.h);
+            p.fit(px(r.x), b, &wired, Pen::style(Face::SemiBold, l.text.body, BAD), px(r.w));
+            let wifi_row = body.take_top(row_h);
+            let wifi = fixed::<96>(format_args!("Wi-Fi: {}", why.wifi));
+            let b = p.mid(l.text.body, wifi_row.y, wifi_row.h);
+            p.fit(px(r.x), b, &wifi, Pen::style(Face::SemiBold, l.text.body, BAD), px(r.w));
+        }
         let hint = body.take_top(row_h);
         let b = p.mid(l.text.small, hint.y, hint.h);
         p.fit(px(r.x), b, "the status page needs a wired NIC or Wi-Fi with an address", small, px(r.w));

@@ -146,6 +146,11 @@ impl WifiStation {
         self.shared.state()
     }
 
+    /// [`StationState::label`] of what the station is doing, for a line drawn every frame.
+    pub fn label(&self) -> &'static str {
+        self.shared.label()
+    }
+
     /// A port that opened or went away since the last call. On `Up` the app starts its stack over the
     /// port; on `Down` it drops that stack.
     pub fn next_port_event(&self) -> Option<PortEvent> {

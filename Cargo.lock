@@ -1094,6 +1094,8 @@ dependencies = [
  "ferrite-mem",
  "ferrite-net",
  "ferrite-rt",
+ "ferrite-wifi",
+ "ferrite-wifi-efi",
  "fontdue",
  "heapless 0.9.3",
  "log",

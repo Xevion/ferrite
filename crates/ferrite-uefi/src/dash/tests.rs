@@ -209,7 +209,7 @@ fn a_port_coming_and_going_redraws_the_network_widget_alone() {
     let rects = dash.output().1.to_vec();
     check!(!rects.is_empty() && rects.iter().all(|r| l.net.intersect(*r) == *r), "{rects:?}");
 
-    dash.render(&frame(None, Some("no wired NIC driven by the firmware")));
+    dash.render(&frame(None, Some(NoNetwork { wired: "no wired NIC driven by the firmware", wifi: "scanning" })));
     let rects = dash.output().1.to_vec();
     check!(!rects.is_empty() && rects.iter().all(|r| l.net.intersect(*r) == *r), "{rects:?}");
 }

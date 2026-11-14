@@ -61,7 +61,9 @@ Boot the target machine from the USB (disable Secure Boot, or sign the image).
 | `ferrite-efi` | UEFI backends for those traits, the boot-volume log, the `log` sink, unattended exit |
 | `ferrite-testing` | Host-only test doubles: mock HAL, simulated DbC register file |
 | `ferrite-mem` | The memory tests: kernels per SIMD tier, the test suite, fault analysis |
-| `ferrite-uefi` | The main app: memory sweep on every core (`sweep.rs`, `crew.rs`), run history and commands (`report.rs`, `control.rs`), framebuffer dashboard (`dash/`, `gfx/`, `gop.rs`) with a text fallback (`ui.rs`, `backend.rs`), SNP + smoltcp networking and the status page (`net/`), mDNS (`mdns.rs`), headless log (`diag.rs`) |
+| `ferrite-net` | The network every app shares: a `Port` per NIC (wired through the firmware's SNP, or a Wi-Fi station's link), one smoltcp stack per port with DHCP, mDNS, ping and the HTTP server, several at once |
+| `ferrite-wifi-efi` | The Linux Wi-Fi drivers under UEFI: the shim's runtime, the `WifiStation` an app holds, and the `wifitrace` test app |
+| `ferrite-uefi` | The main app: memory sweep on every core (`sweep.rs`, `crew.rs`), run history and commands (`report.rs`, `control.rs`), framebuffer dashboard (`dash/`, `gfx/`, `gop.rs`) with a text fallback (`ui.rs`, `backend.rs`), the status page, its JSON and controls over every wired NIC and the Wi-Fi station (`net/`, on `ferrite-net` and `ferrite-wifi-efi`), headless log (`diag.rs`) |
 | `ferrite-recon` | The standalone apps `pciscan`, `xhciscan`, `dbcping`, `dbcbench`, and the code they share |
 
 The crate boundaries, the `no_std` line and the type, error and logging rules are
@@ -159,4 +161,4 @@ one shim plus their Linux drivers covers most machines.
 
 ## License
 
-MIT OR Apache-2.0, matching the vendored `ratatuefi` backend.
+The crate is MIT OR Apache-2.0, matching the vendored `ratatuefi` backend. The app binary links `ferrite-wifi-sys`, which is GPL-2.0-only, so the built `.efi` is distributed under GPL-2.0.

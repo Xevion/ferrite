@@ -15,6 +15,7 @@ ferrite-efi = { workspace = true, features = ["net"] }
 ferrite-hal.workspace = true
 ferrite-mem.workspace = true
 ferrite-net.workspace = true
+ferrite-wifi.workspace = true
 fontdue.workspace = true
 # Fixed-capacity strings for text formatted every frame or request, kept off the heap.
 heapless.workspace = true
@@ -29,6 +30,8 @@ uefi.workspace = true
 [target.'cfg(ferrite_app)'.dependencies]
 ferrite-efi = { workspace = true, features = ["panic-handler"] }
 ferrite-rt.workspace = true
+# The Wi-Fi station; it links the Linux Wi-Fi C, so host builds go without it.
+ferrite-wifi-efi.workspace = true
 uefi = { workspace = true, features = ["global_allocator"] }
 
 [dev-dependencies]

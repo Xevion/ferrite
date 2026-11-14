@@ -24,6 +24,7 @@ use self::layout::Layout;
 use self::widgets::Pen;
 use crate::gfx::text::{FontError, Fonts};
 use crate::gfx::{Canvas, DirtyRects, Recording, Rect};
+use crate::net::NoNetwork;
 use crate::report::{FaultRecord, Snapshot};
 use crate::sweep::SweepStatus;
 
@@ -44,8 +45,8 @@ pub enum DashError {
 pub struct Frame<'a> {
     pub snapshot: &'a Snapshot<'a>,
     pub net: Option<NetStatus>,
-    /// Why there is no network, when setup failed.
-    pub net_err: Option<&'static str>,
+    /// Why there is no network, when no port is up.
+    pub net_err: Option<NoNetwork>,
     pub now: Instant,
 }
 
@@ -102,7 +103,7 @@ struct Keys {
     test: (&'static str, (usize, usize), u16, Mode, usize, bool),
     tests: (u64, (usize, usize), u64, bool),
     faults: (u64, usize, Option<FaultRecord>, Classification, u64),
-    net: (Option<NetStatus>, Option<&'static str>),
+    net: (Option<NetStatus>, Option<NoNetwork>),
     passes: (u64, u64),
     cpus: (u64, Mode, usize),
     hints: bool,

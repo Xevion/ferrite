@@ -12,6 +12,7 @@ use ferrite_net::{NetStatus, PortStatus};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 
+use crate::net::NoNetwork;
 use crate::sweep::SweepStatus;
 
 /// Everything one frame shows; a frame equal to the last one is not redrawn.
@@ -19,8 +20,8 @@ use crate::sweep::SweepStatus;
 pub struct View {
     pub sweep: SweepStatus,
     pub net: Option<NetStatus>,
-    /// Why there is no network, when setup failed.
-    pub net_err: Option<&'static str>,
+    /// Why there is no network, when no port is up.
+    pub net_err: Option<NoNetwork>,
 }
 
 pub fn render(frame: &mut Frame<'_>, view: &View) {
@@ -66,8 +67,7 @@ fn status_lines(view: &View) -> Vec<Line<'static>> {
             lines.push(row(if n == 0 { "network" } else { "" }, port_span(port)));
         }
     } else {
-        let reason = view.net_err.unwrap_or("no wired NIC driven by the firmware");
-        let message = format!("no network: {reason}, Wi-Fi not up");
+        let message = view.net_err.map_or_else(|| String::from("no network"), |why| format!("no network: {why}"));
         lines.push(row("network", Span::styled(message, Style::new().fg(Color::Red))));
     }
     lines.push(row("keys", Span::raw("p pause/resume   r restart   q quit")));

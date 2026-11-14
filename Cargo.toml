@@ -21,6 +21,7 @@ ferrite-rt = { path = "crates/ferrite-rt" }
 ferrite-net = { path = "crates/ferrite-net" }
 ferrite-nl80211 = { path = "crates/ferrite-nl80211" }
 ferrite-wifi = { path = "crates/ferrite-wifi" }
+ferrite-wifi-efi = { path = "crates/ferrite-wifi-efi" }
 ferrite-wifi-start = { path = "crates/ferrite-wifi-start" }
 ferrite-wifi-sys = { path = "crates/ferrite-wifi-sys" }
 ferrite-recon = { path = "crates/ferrite-recon" }

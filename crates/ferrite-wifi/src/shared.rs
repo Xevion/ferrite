@@ -46,6 +46,11 @@ impl Shared {
         self.state.borrow().clone()
     }
 
+    /// [`StationState::label`] of the current state, without cloning it.
+    pub fn label(&self) -> &'static str {
+        self.state.borrow().label()
+    }
+
     pub fn set_state(&self, state: StationState) {
         *self.state.borrow_mut() = state;
     }
