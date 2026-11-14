@@ -1,5 +1,5 @@
-//! Key derivation for WPA2-PSK: the PMK from a passphrase (PBKDF2-HMAC-SHA1) and the PTK from the
-//! 802.11 PRF over the two addresses and nonces.
+//! Key derivation: the WPA2-PSK PMK from a passphrase (PBKDF2-HMAC-SHA1), and the PTK from the
+//! 802.11 PRF (SHA-1 for PSK) or KDF (SHA-256 for SAE) over the two addresses and nonces.
 
 use core::fmt;
 
@@ -8,6 +8,7 @@ use sha1::Sha1;
 use snafu::{Snafu, ensure};
 
 use crate::MacAddr;
+use crate::rsn::Akm;
 
 pub type HmacSha1 = Hmac<Sha1>;
 
@@ -20,8 +21,8 @@ pub const KEY_LEN: usize = 16;
 pub enum CredentialError {
     #[snafu(display("a passphrase has 8 to 63 characters, this one has {len}"))]
     PassphraseLength { len: usize },
-    #[snafu(display("a passphrase is printable ASCII; byte {at} is {byte:#04x}"))]
-    PassphraseByte { at: usize, byte: u8 },
+    #[snafu(display("a passphrase is printable ASCII; byte {at} is not"))]
+    PassphraseByte { at: usize },
     #[snafu(display("an SSID has 1 to 32 bytes, this one has {len}"))]
     SsidLength { len: usize },
 }
@@ -34,13 +35,17 @@ impl Passphrase {
     pub fn new(bytes: &[u8]) -> Result<Self, CredentialError> {
         ensure!((8..=63).contains(&bytes.len()), PassphraseLengthSnafu { len: bytes.len() });
         if let Some(at) = bytes.iter().position(|b| !(0x20..=0x7e).contains(b)) {
-            return Err(CredentialError::PassphraseByte { at, byte: bytes[at] });
+            return Err(CredentialError::PassphraseByte { at });
         }
         Ok(Self(bytes.to_vec()))
     }
 
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.0
     }
 
     pub fn is_empty(&self) -> bool {
@@ -99,6 +104,24 @@ pub fn prf_sha1(key: &[u8], label: &[u8], data: &[u8], out: &mut [u8]) {
     }
 }
 
+/// The 802.11 KDF on HMAC-SHA-256 (12.7.1.6.2): blocks of `HMAC(key, i || label || context || bits)`
+/// with `i` counting from 1 and `bits` the requested length, both 16-bit little-endian, truncated to
+/// `bits`.
+pub fn kdf_sha256(key: &[u8], label: &[u8], context: &[u8], bits: u16) -> alloc::vec::Vec<u8> {
+    let len = usize::from(bits).div_ceil(8);
+    let mut out = alloc::vec::Vec::with_capacity(len.next_multiple_of(32));
+    for i in 1..=len.div_ceil(32) as u16 {
+        let mut mac = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(key).unwrap_or_else(|_| unreachable!());
+        mac.update(&i.to_le_bytes());
+        mac.update(label);
+        mac.update(context);
+        mac.update(&bits.to_le_bytes());
+        out.extend_from_slice(&mac.finalize().into_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
 /// The pairwise transient key for CCMP-128: KCK (MIC), KEK (key wrap) and TK (the temporal key).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Ptk {
@@ -115,8 +138,15 @@ impl fmt::Debug for Ptk {
 
 impl Ptk {
     /// PRF-384(PMK, "Pairwise key expansion", min(AA,SPA) || max(AA,SPA) || min(ANonce,SNonce) ||
-    /// max(ANonce,SNonce)).
-    pub fn derive(pmk: &Pmk, aa: MacAddr, spa: MacAddr, anonce: &[u8; NONCE_LEN], snonce: &[u8; NONCE_LEN]) -> Self {
+    /// max(ANonce,SNonce)), on HMAC-SHA1 for PSK and as the SHA-256 KDF for SAE.
+    pub fn derive(
+        akm: Akm,
+        pmk: &Pmk,
+        aa: MacAddr,
+        spa: MacAddr,
+        anonce: &[u8; NONCE_LEN],
+        snonce: &[u8; NONCE_LEN],
+    ) -> Self {
         let mut data = [0_u8; 12 + 2 * NONCE_LEN];
         let (lo, hi) = if aa.0 <= spa.0 { (aa, spa) } else { (spa, aa) };
         data[..6].copy_from_slice(&lo.0);
@@ -125,7 +155,10 @@ impl Ptk {
         data[12..44].copy_from_slice(lo);
         data[44..].copy_from_slice(hi);
         let mut out = [0_u8; 3 * KEY_LEN];
-        prf_sha1(&pmk.0, b"Pairwise key expansion", &data, &mut out);
+        match akm {
+            Akm::Psk => prf_sha1(&pmk.0, b"Pairwise key expansion", &data, &mut out),
+            Akm::Sae => out.copy_from_slice(&kdf_sha256(&pmk.0, b"Pairwise key expansion", &data, 384)),
+        }
         let mut ptk = Self { kck: [0; KEY_LEN], kek: [0; KEY_LEN], tk: [0; KEY_LEN] };
         ptk.kck.copy_from_slice(&out[..16]);
         ptk.kek.copy_from_slice(&out[16..32]);
@@ -213,7 +246,7 @@ mod tests {
     #[test]
     fn credentials_outside_their_ranges_are_refused() {
         assert!(let Err(CredentialError::PassphraseLength { len: 7 }) = Passphrase::new(b"1234567"));
-        assert!(let Err(CredentialError::PassphraseByte { at: 8, byte: 0x0a }) = Passphrase::new(b"12345678\n"));
+        assert!(let Err(CredentialError::PassphraseByte { at: 8 }) = Passphrase::new(b"12345678\n"));
         assert!(let Err(CredentialError::SsidLength { len: 0 }) = Ssid::new(b""));
         check!(alloc::format!("{:?}", Passphrase::new(b"secret-words").unwrap()) == "Passphrase(12 characters)");
     }

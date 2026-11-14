@@ -36,6 +36,7 @@ arbitrary-int = { version = "2.2.0", default-features = false }
 bitbybit = "2.0.1"
 cc = "1.11.1"
 clap = { version = "4.6.7", features = ["derive"] }
+cmac = { version = "0.8.0", default-features = false }
 corosensei = { version = "0.3.4", default-features = false }
 crc32fast = { version = "1.5.5", default-features = false }
 # The default `simd` (SSE2 only, chosen at compile time) and `hashbrown` (its no_std maps).
@@ -48,6 +49,8 @@ libc = "0.2.191"
 log = "0.4.33"
 nusb = "0.2.9"
 object = { version = "0.41.0", default-features = false, features = ["read_core", "elf", "write_std", "pe"] }
+# Group 19 arithmetic and the SSWU map for SAE; no ECDSA, PEM, std or precomputed tables.
+p256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "hash2curve"] }
 parking_lot = "0.13.0"
 picoserve = { version = "0.20.1", default-features = false, features = ["alloc"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }

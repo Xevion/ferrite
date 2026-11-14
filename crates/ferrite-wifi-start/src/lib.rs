@@ -27,7 +27,7 @@ use ferrite_hal::Instant;
 use ferrite_lkpi::firmware::{FirmwareError, FirmwareProvider};
 use ferrite_lkpi::sched::SchedHandle;
 use ferrite_lkpi::task::LinuxTasks;
-use ferrite_wifi::Shared;
+use ferrite_wifi::{Shared, select};
 use ferrite_wifi_sys::{exitcalls, initcalls};
 use snafu::Snafu;
 
@@ -307,12 +307,28 @@ fn pci_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
         return simulated_wifi(clock, start_up);
     }
     let Some(name) = bring_card_up(clock, start_up.wifi_limit) else { return false };
+    let wanted = load_credentials(start_up);
     enter(c"scanning through nl80211");
     let scanned = match scan::connect().and_then(|mut client| {
-        let report = scan::scan(&mut client, &name, &[], scan_limit, &|| false, log::Level::Info, clock)?;
+        let hidden = wanted.as_ref().ok().and_then(Option::as_ref).map(|c| select::hidden_ssids(c.networks()));
+        let report = scan::scan(
+            &mut client,
+            &name,
+            (&[], &hidden.unwrap_or_default()),
+            scan_limit,
+            &|| false,
+            log::Level::Info,
+            clock,
+        )?;
         Ok((client, report))
     }) {
-        Ok((mut client, report)) => join_from_credentials(&mut client, &name, &report.bsses, start_up, clock),
+        Ok((mut client, report)) => match wanted {
+            Ok(Some(credentials)) => {
+                join_from_credentials(&mut client, &name, &report.bsses, &credentials, start_up, clock)
+            },
+            Ok(None) => true,
+            Err(()) => false,
+        },
         Err(error) => {
             log::error!("nl80211 scan failed: {error}");
             false
@@ -389,80 +405,90 @@ fn bring_card_up(clock: &dyn Fn() -> Instant, limit: Duration) -> Option<alloc::
 /// The file on the firmware volume with the network to join, in `.env` lines.
 pub const CREDENTIALS_FILE: &str = "wifi.env";
 
-/// The strongest BSS of the network `ssid` that offers WPA2 (RSN).
-fn best_bss<'a>(bsses: &'a [ferrite_nl80211::nl80211::Bss], ssid: &[u8]) -> Option<&'a ferrite_nl80211::nl80211::Bss> {
-    use ferrite_nl80211::nl80211::Security;
-    bsses
-        .iter()
-        .filter(|bss| bss.ssid == ssid && bss.security == Security::Rsn)
-        .max_by_key(|bss| bss.signal.map_or(i32::MIN, |s| s.0))
-}
-
-/// Join the network `wifi.env` names, if the scan found it, offer the link to the main loop's IP stack,
-/// and leave it again. Without the file the connect is skipped and that counts as passing; with it, any
-/// failure is logged with its step and fails the run, and the teardown still runs.
-fn join_from_credentials(
-    client: &mut ferrite_nl80211::client::Client<scan::KernelSocket>,
-    name: &str,
-    bsses: &[ferrite_nl80211::nl80211::Bss],
-    start_up: &StartUp,
-    clock: &dyn Fn() -> Instant,
-) -> bool {
-    use ferrite_nl80211::nl80211::SsidDisplay;
+/// The networks `wifi.env` names. `Ok(None)` without the file, where the connect is skipped and that
+/// counts as passing; `Err` for a file that does not parse, which fails the run.
+fn load_credentials(start_up: &StartUp) -> Result<Option<ferrite_wpa::env::Credentials>, ()> {
     let text = match start_up.firmware_reference.load(CREDENTIALS_FILE) {
         Ok(text) => text,
         Err(error) => {
             log::info!("no credentials ({error}); the connect is skipped");
-            return true;
+            return Ok(None);
         },
     };
-    let credentials = match ferrite_wpa::env::Credentials::from_env(&text) {
-        Ok(credentials) => credentials,
+    match ferrite_wpa::env::Credentials::from_env(&text) {
+        Ok(credentials) => Ok(Some(credentials)),
         Err(error) => {
             log::error!("{CREDENTIALS_FILE}: {error}; the connect is skipped");
-            return false;
+            Err(())
         },
-    };
-    let ssid = credentials.ssid.as_bytes();
-    log::info!("credentials for \"{}\": passphrase of {} characters", SsidDisplay(ssid), credentials.passphrase.len());
-    let Some(bss) = best_bss(bsses, ssid) else {
-        log::error!("the scan found no RSN BSS named \"{}\"; the connect is skipped", SsidDisplay(ssid));
+    }
+}
+
+/// Join the first of the networks `wifi.env` names that the scan found and that accepts the station,
+/// offer the link to the main loop's IP stack, and leave it again. Any failure is logged with its step
+/// and fails the run, and the teardown still runs.
+fn join_from_credentials(
+    client: &mut ferrite_nl80211::client::Client<scan::KernelSocket>,
+    name: &str,
+    bsses: &[ferrite_nl80211::nl80211::Bss],
+    credentials: &ferrite_wpa::env::Credentials,
+    start_up: &StartUp,
+    clock: &dyn Fn() -> Instant,
+) -> bool {
+    for network in credentials.networks() {
+        log::info!("credentials: {network}");
+    }
+    let candidates = select::candidates(credentials.networks(), bsses);
+    if candidates.is_empty() {
+        log::error!("the scan found no BSS that any configured network can join; the connect is skipped");
         return false;
-    };
-    let signal = bss.signal.map_or_else(|| alloc::string::String::from("?"), |s| alloc::format!("{s}"));
-    log::info!("connecting to {} on {} MHz at {signal}", bss.bssid, bss.frequency.0);
-    let derive = clock();
-    let pmk = ferrite_wpa::kdf::Pmk::from_passphrase(&credentials.passphrase, &credentials.ssid);
-    log::info!("PMK derived in {} ms", (clock() - derive).as_millis());
-    join(client, name, bss, pmk, None, start_up, clock)
+    }
+    for candidate in candidates {
+        let signal = candidate.bss.signal.map_or_else(|| alloc::string::String::from("?"), |s| alloc::format!("{s}"));
+        log::info!(
+            "connecting to {} on {} MHz at {signal} ({:?})",
+            candidate.bss.bssid,
+            candidate.bss.frequency.0,
+            candidate.join
+        );
+        let derive = clock();
+        let Some(secret) = connect::secret_for(candidate.network, candidate.join) else { continue };
+        log::info!("secret ready in {} ms", (clock() - derive).as_millis());
+        if let Some(passed) = join(client, name, candidate.bss, secret, None, start_up, clock) {
+            return passed;
+        }
+    }
+    false
 }
 
 /// Connect `name` to `bss`, offer the link (and `ap`'s, in the lab) to the main loop's IP stack, hold
-/// the connection until the main loop is done, withdraw the links, detach and leave; true when every
-/// step passed and the main loop reported success.
+/// the connection until the main loop is done, withdraw the links, detach and leave. `None` when the
+/// connection could not be made, so another network may be tried; otherwise whether every step passed
+/// and the main loop reported success.
 fn join(
     client: &mut ferrite_nl80211::client::Client<scan::KernelSocket>,
     name: &str,
     bss: &ferrite_nl80211::nl80211::Bss,
-    pmk: ferrite_wpa::kdf::Pmk,
+    secret: connect::Secret<'_>,
     ap: Option<(ferrite_nl80211::nl80211::IfIndex, &Shared)>,
     start_up: &StartUp,
     clock: &dyn Fn() -> Instant,
-) -> bool {
+) -> Option<bool> {
     enter(c"connecting (association and the 4-way handshake)");
     let interface = match scan::find(client, name) {
         Ok(interface) => interface,
         Err(error) => {
             log::error!("connect: {error}");
-            return false;
+            return Some(false);
         },
     };
     let mut connection =
-        match connect::connect(client, interface.ifindex, interface.mac, bss, pmk, start_up.connect_limit, clock) {
+        match connect::connect(client, interface.ifindex, interface.mac, bss, secret, start_up.connect_limit, clock) {
             Ok(connection) => connection,
             Err(error) => {
                 log::error!("connect failed: {error}");
-                return false;
+                connect::abort(client, interface.ifindex, clock);
+                return None;
             },
         };
     log::info!(
@@ -520,11 +546,11 @@ fn join(
                 held_for.as_millis(),
                 reason.map_or_else(|| alloc::string::String::from("none"), |r| alloc::format!("{r}"))
             );
-            ip
+            Some(ip)
         },
         Err(error) => {
             log::error!("leaving the connection failed: {error}");
-            false
+            Some(false)
         },
     }
 }
@@ -597,15 +623,14 @@ fn simulated_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
         log::error!("the simulated radios need an AP link to offer, and the start-up has none");
         return false;
     };
-    let pmk = ferrite_wpa::kdf::Pmk::from_passphrase(&passphrase, &ssid);
+    let network = station::LabNetwork::PSK;
     enter(c"starting the lab AP through nl80211");
     let ap = scan::connect().and_then(|mut ap_client| {
         let interface = scan::prepare_ap(&mut ap_client, &second, || match wireless(WirelessOp::Up, 1).1 {
             0 => Ok(()),
             code => Err(code),
         })?;
-        let task =
-            lab_ap::start(ap_client, start_up.sched.clone(), interface.ifindex, interface.mac, LAB_SSID, pmk.clone())?;
+        let task = lab_ap::start(ap_client, start_up.sched.clone(), interface.ifindex, interface.mac, &network)?;
         Ok((task, interface.ifindex))
     });
     let (ap, ap_ifindex) = match ap {
@@ -625,8 +650,15 @@ fn simulated_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
     }
     let channel_1 = [ferrite_nl80211::nl80211::Frequency(2412)];
     let result = scan::connect().and_then(|mut client| {
-        let report =
-            scan::scan(&mut client, &first, &channel_1, start_up.scan_limit, &|| false, log::Level::Info, clock)?;
+        let report = scan::scan(
+            &mut client,
+            &first,
+            (&channel_1, &[]),
+            start_up.scan_limit,
+            &|| false,
+            log::Level::Info,
+            clock,
+        )?;
         Ok((client, report))
     });
     let passed = match result {
@@ -638,7 +670,9 @@ fn simulated_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
                     bss.security,
                     report.took.as_millis()
                 );
-                let joined = join(&mut client, &first, bss, pmk, Some((ap_ifindex, ap_shared)), start_up, clock);
+                let secret = connect::Secret::Psk(ferrite_wpa::kdf::Pmk::from_passphrase(&passphrase, &ssid));
+                let joined = join(&mut client, &first, bss, secret, Some((ap_ifindex, ap_shared)), start_up, clock)
+                    .unwrap_or(false);
                 let ap_side =
                     lab_ap::PORT_OPEN.load(Ordering::Acquire) && lab_ap::GROUP_KEY_INSTALLED.load(Ordering::Acquire);
                 if ap_side {

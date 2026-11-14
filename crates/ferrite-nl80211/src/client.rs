@@ -72,10 +72,18 @@ pub enum ScanEnd {
 
 /// The cipher and AKM suite selectors nl80211 takes, and the WPA version bit.
 pub const CIPHER_CCMP: u32 = 0x000f_ac04;
+/// BIP-CMAC-128, the cipher of the integrity group key.
+pub const CIPHER_AES_CMAC: u32 = 0x000f_ac06;
 pub const AKM_PSK: u32 = 0x000f_ac02;
+pub const AKM_SAE: u32 = 0x000f_ac08;
 const WPA_VERSION_2: u32 = 2;
+/// `NL80211_AUTHTYPE_SAE`, `NL80211_MFP_REQUIRED` and `NL80211_HIDDEN_SSID_ZERO_LEN`.
+const AUTHTYPE_SAE: u32 = 4;
+const MFP_REQUIRED: u32 = 1;
+const HIDDEN_SSID_ZERO_LEN: u32 = 1;
 /// `NL80211_STA_FLAG_*` bits.
 const STA_FLAG_AUTHORIZED: u32 = 1 << 1;
+const STA_FLAG_MFP: u32 = 1 << 4;
 const STA_FLAG_AUTHENTICATED: u32 = 1 << 5;
 const STA_FLAG_ASSOCIATED: u32 = 1 << 7;
 /// `enum nl80211_key_attributes` and `nl80211_key_default_types`.
@@ -85,6 +93,7 @@ mod key_attr {
     pub const CIPHER: u16 = 3;
     pub const SEQ: u16 = 4;
     pub const DEFAULT: u16 = 5;
+    pub const DEFAULT_MGMT: u16 = 6;
     pub const TYPE: u16 = 7;
     pub const DEFAULT_TYPES: u16 = 8;
     pub const DEFAULT_TYPE_MULTICAST: u16 = 2;
@@ -92,10 +101,15 @@ mod key_attr {
 const KEYTYPE_GROUP: u32 = 0;
 const KEYTYPE_PAIRWISE: u32 = 1;
 
-/// A network to start on an AP interface: open, or WPA2-PSK with CCMP when `rsn` holds the RSN element.
+/// A network to start on an AP interface: open, or WPA2-PSK and WPA3-SAE with CCMP when `rsn` holds the
+/// RSN element (the beacon's tail, with any RSNX element after it) and `akms` the suites it offers.
 pub struct ApConfig<'a> {
     pub ssid: &'a [u8],
     pub rsn: Option<&'a [u8]>,
+    /// The AKM suite selectors of `rsn`, as `AKM_*`.
+    pub akms: &'a [u32],
+    /// The beacon carries a zero-length SSID; stations ask by name.
+    pub hidden: bool,
     pub frequency: Frequency,
     /// In TU (1024 us); cfg80211 takes 10 to 10000.
     pub beacon_interval: u16,
@@ -104,13 +118,23 @@ pub struct ApConfig<'a> {
 }
 
 /// A WPA2-PSK connection, as iwd asks for one: the supplicant runs in userspace and EAPOL goes over
-/// nl80211 to this socket.
+/// nl80211 to this socket. Without an RSN element the connection is to an open network.
 pub struct ConnectParams<'a> {
     pub ssid: &'a [u8],
     pub bssid: Option<MacAddr>,
     pub frequency: Option<Frequency>,
-    /// The RSN element for the association request.
-    pub rsn: &'a [u8],
+    /// The RSN element for the association request; `None` for an open network.
+    pub rsn: Option<&'a [u8]>,
+}
+
+/// The association after an SAE authentication, which cfg80211's SME cannot run for mac80211: the
+/// authentication frames went through [`Client::authenticate_sae`].
+pub struct AssociateParams<'a> {
+    pub ssid: &'a [u8],
+    pub bssid: MacAddr,
+    pub frequency: Frequency,
+    /// The elements for the association request: the RSN element (with the PMKID) and the RSNX element.
+    pub ies: &'a [u8],
 }
 
 /// A key for `NL80211_CMD_NEW_KEY`.
@@ -131,6 +155,8 @@ pub struct StationParams<'a> {
     pub listen_interval: u16,
     pub capability: u16,
     pub supported_rates: &'a [u8],
+    /// The station negotiated protected management frames.
+    pub mfp: bool,
 }
 
 pub struct Client<S: Socket> {
@@ -219,8 +245,9 @@ impl<S: Socket> Client<S> {
         }
     }
 
-    /// Ask cfg80211's SME to authenticate and associate (`NL80211_CMD_CONNECT`) for WPA2-PSK with
-    /// CCMP, owning the connection and taking EAPOL over nl80211.
+    /// Ask cfg80211's SME to authenticate and associate (`NL80211_CMD_CONNECT`), owning the connection.
+    /// With an RSN element it is WPA2-PSK with CCMP and takes EAPOL over nl80211; without, an open
+    /// network with no keys and no handshake.
     pub fn connect_network(&mut self, ifindex: IfIndex, params: &ConnectParams<'_>) -> Result<(), ClientError> {
         self.run(Command::Connect, false, "CONNECT", |b| {
             let mut b = b.u32(attr::IFINDEX, ifindex.raw()).attr(attr::SSID, params.ssid);
@@ -230,11 +257,56 @@ impl<S: Socket> Client<S> {
             if let Some(frequency) = params.frequency {
                 b = b.u32(attr::WIPHY_FREQ, frequency.0);
             }
-            b.u32(attr::AUTH_TYPE, 0)
-                .attr(attr::IE, params.rsn)
+            let b = b.u32(attr::AUTH_TYPE, 0).flag(attr::SOCKET_OWNER);
+            let Some(rsn) = params.rsn else { return b };
+            b.attr(attr::IE, rsn)
                 .flag(attr::PRIVACY)
                 .u32(attr::WPA_VERSIONS, WPA_VERSION_2)
                 .u32(attr::AKM_SUITES, AKM_PSK)
+                .u32(attr::CIPHER_SUITES_PAIRWISE, CIPHER_CCMP)
+                .u32(attr::CIPHER_SUITE_GROUP, CIPHER_CCMP)
+                .flag(attr::CONTROL_PORT)
+                .flag(attr::CONTROL_PORT_OVER_NL80211)
+                .flag(attr::CONTROL_PORT_NO_PREAUTH)
+        })
+        .map(drop)
+    }
+
+    /// Send one SAE authentication frame (`NL80211_CMD_AUTHENTICATE`): `auth_data` is the transaction
+    /// number and status code (16-bit little-endian each) and the frame body. The access point's
+    /// answers arrive as [`Event::Authenticate`](crate::mlme::Event::Authenticate).
+    pub fn authenticate_sae(
+        &mut self,
+        ifindex: IfIndex,
+        ssid: &[u8],
+        bssid: MacAddr,
+        frequency: Frequency,
+        auth_data: &[u8],
+    ) -> Result<(), ClientError> {
+        self.run(Command::Authenticate, false, "AUTHENTICATE", |b| {
+            b.u32(attr::IFINDEX, ifindex.raw())
+                .attr(attr::MAC, &bssid.0)
+                .attr(attr::SSID, ssid)
+                .u32(attr::WIPHY_FREQ, frequency.0)
+                .u32(attr::AUTH_TYPE, AUTHTYPE_SAE)
+                .attr(attr::AUTH_DATA, auth_data)
+        })
+        .map(drop)
+    }
+
+    /// Associate after an SAE authentication (`NL80211_CMD_ASSOCIATE`) with protected management
+    /// frames required, owning the connection and taking EAPOL over nl80211. The result arrives as
+    /// `Event::Connect`, as for [`Client::connect_network`].
+    pub fn associate_sae(&mut self, ifindex: IfIndex, params: &AssociateParams<'_>) -> Result<(), ClientError> {
+        self.run(Command::Associate, false, "ASSOCIATE", |b| {
+            b.u32(attr::IFINDEX, ifindex.raw())
+                .attr(attr::MAC, &params.bssid.0)
+                .attr(attr::SSID, params.ssid)
+                .u32(attr::WIPHY_FREQ, params.frequency.0)
+                .attr(attr::IE, params.ies)
+                .u32(attr::USE_MFP, MFP_REQUIRED)
+                .u32(attr::WPA_VERSIONS, WPA_VERSION_2)
+                .u32(attr::AKM_SUITES, AKM_SAE)
                 .u32(attr::CIPHER_SUITES_PAIRWISE, CIPHER_CCMP)
                 .u32(attr::CIPHER_SUITE_GROUP, CIPHER_CCMP)
                 .flag(attr::CONTROL_PORT)
@@ -309,6 +381,15 @@ impl<S: Socket> Client<S> {
         .map(drop)
     }
 
+    /// Make integrity group key `index` the default for management frames (`NL80211_CMD_SET_KEY`).
+    pub fn set_default_mgmt_key(&mut self, ifindex: IfIndex, index: u8) -> Result<(), ClientError> {
+        self.run(Command::SetKey, false, "SET_KEY (default management)", |b| {
+            b.u32(attr::IFINDEX, ifindex.raw())
+                .nest(attr::KEY, |n| n.u8(key_attr::IDX, index).flag(key_attr::DEFAULT_MGMT))
+        })
+        .map(drop)
+    }
+
     /// Open the 802.1X port for `peer` (`NL80211_CMD_SET_STATION` with `STA_FLAG_AUTHORIZED`): the AP
     /// on a station interface, or a station on an AP interface.
     pub fn authorize(&mut self, ifindex: IfIndex, peer: MacAddr) -> Result<(), ClientError> {
@@ -323,6 +404,7 @@ impl<S: Socket> Client<S> {
     /// Admit an associated station on an AP interface, not yet authorized.
     pub fn new_station(&mut self, ifindex: IfIndex, station: &StationParams<'_>) -> Result<(), ClientError> {
         let state = STA_FLAG_AUTHENTICATED | STA_FLAG_ASSOCIATED;
+        let mfp = if station.mfp { STA_FLAG_MFP } else { 0 };
         self.run(Command::NewStation, false, "NEW_STATION", |b| {
             b.u32(attr::IFINDEX, ifindex.raw())
                 .attr(attr::MAC, &station.mac.0)
@@ -330,7 +412,7 @@ impl<S: Socket> Client<S> {
                 .u16(attr::STA_LISTEN_INTERVAL, station.listen_interval)
                 .u16(attr::STA_CAPABILITY, station.capability)
                 .attr(attr::STA_SUPPORTED_RATES, station.supported_rates)
-                .attr(attr::STA_FLAGS2, &sta_flags(state | STA_FLAG_AUTHORIZED, state))
+                .attr(attr::STA_FLAGS2, &sta_flags(state | STA_FLAG_AUTHORIZED | STA_FLAG_MFP, state | mfp))
         })
         .map(drop)
     }
@@ -391,8 +473,8 @@ impl<S: Socket> Client<S> {
 
     /// Start beaconing an open network on an AP interface (`NL80211_CMD_START_AP`).
     ///
-    /// With an RSN element the network is WPA2-PSK: the element is the beacon's tail, the privacy bit is
-    /// set, and EAPOL goes over nl80211 to this socket, which owns the AP.
+    /// With an RSN element the network is WPA2-PSK or WPA3-SAE (`akms`): the element is the beacon's
+    /// tail, the privacy bit is set, and EAPOL goes over nl80211 to this socket, which owns the AP.
     pub fn start_ap(&mut self, ifindex: IfIndex, mac: MacAddr, ap: &ApConfig<'_>) -> Result<(), ClientError> {
         let head = beacon_head(mac, ap);
         self.run(Command::StartAp, false, "START_AP", |b| {
@@ -403,16 +485,17 @@ impl<S: Socket> Client<S> {
                 .u32(attr::BEACON_INTERVAL, u32::from(ap.beacon_interval))
                 .u32(attr::DTIM_PERIOD, 1)
                 .attr(attr::SSID, ap.ssid)
-                .u32(attr::HIDDEN_SSID, 0)
+                .u32(attr::HIDDEN_SSID, if ap.hidden { HIDDEN_SSID_ZERO_LEN } else { 0 })
                 .u32(attr::AUTH_TYPE, 0)
                 .u32(attr::WIPHY_FREQ, ap.frequency.0)
                 .u32(attr::WIPHY_CHANNEL_TYPE, 0);
             if ap.rsn.is_none() {
                 return b;
             }
+            let akms: Vec<u8> = ap.akms.iter().flat_map(|akm| akm.to_ne_bytes()).collect();
             b.flag(attr::PRIVACY)
                 .u32(attr::WPA_VERSIONS, WPA_VERSION_2)
-                .u32(attr::AKM_SUITES, AKM_PSK)
+                .attr(attr::AKM_SUITES, &akms)
                 .u32(attr::CIPHER_SUITES_PAIRWISE, CIPHER_CCMP)
                 .u32(attr::CIPHER_SUITE_GROUP, CIPHER_CCMP)
                 .flag(attr::CONTROL_PORT)
@@ -423,9 +506,24 @@ impl<S: Socket> Client<S> {
     }
 
     /// Ask for a scan of every channel (`NL80211_CMD_TRIGGER_SCAN`), or of `frequencies` when given.
-    pub fn trigger_scan(&mut self, ifindex: IfIndex, frequencies: &[Frequency]) -> Result<(), ClientError> {
+    /// With `ssids` the scan is active and probes for each name (`NL80211_ATTR_SCAN_SSIDS`), and for
+    /// the wildcard besides, so that networks that broadcast their names are found as before.
+    pub fn trigger_scan(
+        &mut self,
+        ifindex: IfIndex,
+        frequencies: &[Frequency],
+        ssids: &[&[u8]],
+    ) -> Result<(), ClientError> {
         self.run(Command::TriggerScan, false, "TRIGGER_SCAN", |b| {
-            let b = b.u32(attr::IFINDEX, ifindex.raw());
+            let mut b = b.u32(attr::IFINDEX, ifindex.raw());
+            if !ssids.is_empty() {
+                b = b.nest(attr::SCAN_SSIDS, |mut nest| {
+                    for (n, ssid) in (1_u16..).zip(ssids.iter().copied().chain(core::iter::once(&[][..]))) {
+                        nest = nest.attr(n, ssid);
+                    }
+                    nest
+                });
+            }
             if frequencies.is_empty() {
                 return b;
             }
@@ -590,8 +688,9 @@ fn beacon_head(mac: MacAddr, ap: &ApConfig<'_>) -> Vec<u8> {
     let capability: u16 = if ap.rsn.is_some() { 0x0011 } else { 0x0001 };
     head.extend_from_slice(&capability.to_le_bytes());
     head.push(0);
-    head.push(ap.ssid.len() as u8);
-    head.extend_from_slice(ap.ssid);
+    let shown = if ap.hidden { &[][..] } else { ap.ssid };
+    head.push(shown.len() as u8);
+    head.extend_from_slice(shown);
     head.extend_from_slice(&[1, 4, 0x82, 0x84, 0x8b, 0x96]);
     head.extend_from_slice(&[3, 1, ap.channel]);
     head

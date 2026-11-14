@@ -1,9 +1,14 @@
-//! EAPOL-Key frames (IEEE 802.1X-2010 header, IEEE 802.11 key descriptor type 2), their MIC
-//! (HMAC-SHA1-128 for descriptor version 2) and the key data's AES key wrap.
+//! EAPOL-Key frames, their MIC and the key data's AES key wrap.
+//!
+//! The header is IEEE 802.1X-2010's and the descriptor IEEE 802.11's type 2. The MIC is HMAC-SHA1-128 for
+//! descriptor version 2 and AES-128-CMAC for version 3 and for the version 0 that SAE's key management
+//! defines.
 
 use alloc::vec::Vec;
 
+use aes::Aes128;
 use aes_kw::{KeyInit as _, KwAes128};
+use cmac::Cmac;
 use hmac::Mac;
 use snafu::{Snafu, ensure};
 
@@ -31,7 +36,7 @@ pub enum FrameError {
     Descriptor { kind: u8 },
     #[snafu(display("the key data claims {len} bytes, {left} are left"))]
     KeyDataLength { len: usize, left: usize },
-    #[snafu(display("key descriptor version {version:?} is not HMAC-SHA1/AES (2)"))]
+    #[snafu(display("key descriptor version {version:?} is not the one the key management defines"))]
     Version { version: DescriptorVersion },
     #[snafu(display("encrypted key data of {len} bytes is not a key wrap of 8-byte blocks"))]
     WrapLength { len: usize },
@@ -42,6 +47,8 @@ pub enum FrameError {
 /// Key Information bits 0 to 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DescriptorVersion {
+    /// Left to the key management: for SAE, AES-128-CMAC and AES key wrap.
+    AkmDefined,
     /// HMAC-MD5 and RC4 (WPA1, TKIP).
     Md5Rc4,
     /// HMAC-SHA1-128 and AES key wrap.
@@ -54,6 +61,7 @@ pub enum DescriptorVersion {
 impl DescriptorVersion {
     pub const fn from_raw(raw: u8) -> Self {
         match raw {
+            0 => Self::AkmDefined,
             1 => Self::Md5Rc4,
             2 => Self::Sha1Aes,
             3 => Self::CmacAes,
@@ -63,6 +71,7 @@ impl DescriptorVersion {
 
     pub const fn raw(self) -> u8 {
         match self {
+            Self::AkmDefined => 0,
             Self::Md5Rc4 => 1,
             Self::Sha1Aes => 2,
             Self::CmacAes => 3,
@@ -206,29 +215,49 @@ impl KeyFrame {
     pub fn sign(&mut self, kck: &[u8; KEY_LEN]) -> Vec<u8> {
         self.mic = [0; MIC_LEN];
         let mut bytes = self.to_bytes();
-        let mic = mic(kck, &bytes);
+        let mic = mic(self.info.version, kck, &bytes);
         bytes[MIC_AT..MIC_AT + MIC_LEN].copy_from_slice(&mic);
         self.mic = mic;
         bytes
     }
 
-    /// Whether the MIC of `raw`, the frame as received, verifies under `kck`; constant time.
+    /// Whether the MIC of `raw`, the frame as received, verifies under `kck`; constant time. The
+    /// algorithm is the one its own Key Descriptor Version names.
     pub fn verify(raw: &[u8], kck: &[u8; KEY_LEN]) -> bool {
-        let Some(received) = raw.get(MIC_AT..MIC_AT + MIC_LEN) else { return false };
+        let (Some(received), Some(info)) = (raw.get(MIC_AT..MIC_AT + MIC_LEN), raw.get(5..7)) else { return false };
+        let version = DescriptorVersion::from_raw((u16::from_be_bytes([info[0], info[1]]) & 7) as u8);
         let mut zeroed = raw.to_vec();
         zeroed[MIC_AT..MIC_AT + MIC_LEN].fill(0);
-        let mut mac = <HmacSha1 as hmac::KeyInit>::new_from_slice(kck).unwrap_or_else(|_| unreachable!());
-        mac.update(&zeroed);
-        mac.verify_truncated_left(received).is_ok()
+        match version {
+            DescriptorVersion::Sha1Aes => {
+                let mut mac = <HmacSha1 as hmac::KeyInit>::new_from_slice(kck).unwrap_or_else(|_| unreachable!());
+                mac.update(&zeroed);
+                mac.verify_truncated_left(received).is_ok()
+            },
+            DescriptorVersion::CmacAes | DescriptorVersion::AkmDefined => {
+                let mut mac = <Cmac<Aes128> as hmac::KeyInit>::new_from_slice(kck).unwrap_or_else(|_| unreachable!());
+                mac.update(&zeroed);
+                mac.verify_slice(received).is_ok()
+            },
+            DescriptorVersion::Md5Rc4 | DescriptorVersion::Unknown(_) => false,
+        }
     }
 }
 
-fn mic(kck: &[u8; KEY_LEN], bytes: &[u8]) -> [u8; MIC_LEN] {
-    let mut mac = <HmacSha1 as hmac::KeyInit>::new_from_slice(kck).unwrap_or_else(|_| unreachable!());
-    mac.update(bytes);
-    let full = mac.finalize().into_bytes();
+fn mic(version: DescriptorVersion, kck: &[u8; KEY_LEN], bytes: &[u8]) -> [u8; MIC_LEN] {
     let mut out = [0; MIC_LEN];
-    out.copy_from_slice(&full[..MIC_LEN]);
+    match version {
+        DescriptorVersion::CmacAes | DescriptorVersion::AkmDefined => {
+            let mut mac = <Cmac<Aes128> as hmac::KeyInit>::new_from_slice(kck).unwrap_or_else(|_| unreachable!());
+            mac.update(bytes);
+            out.copy_from_slice(&mac.finalize().into_bytes());
+        },
+        _ => {
+            let mut mac = <HmacSha1 as hmac::KeyInit>::new_from_slice(kck).unwrap_or_else(|_| unreachable!());
+            mac.update(bytes);
+            out.copy_from_slice(&mac.finalize().into_bytes()[..MIC_LEN]);
+        },
+    }
     out
 }
 
@@ -259,6 +288,7 @@ pub fn wrap_key_data(kek: &[u8; KEY_LEN], plain: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use rstest::rstest;
 
     use super::*;
 
@@ -271,20 +301,36 @@ mod tests {
         check!(!info.error && !info.request);
         check!(info.raw() == 0x13ca);
         check!(KeyInfo::from_raw(0x0005).version == DescriptorVersion::Unknown(5));
+        check!(KeyInfo::from_raw(0x13c8).version == DescriptorVersion::AkmDefined);
     }
 
-    #[test]
-    fn a_signed_frame_parses_back_and_a_flipped_byte_fails_its_mic() {
+    #[rstest]
+    #[case::hmac_sha1(DescriptorVersion::Sha1Aes)]
+    #[case::aes_cmac(DescriptorVersion::CmacAes)]
+    #[case::akm_defined(DescriptorVersion::AkmDefined)]
+    fn a_signed_frame_parses_back_and_a_flipped_byte_fails_its_mic(#[case] version: DescriptorVersion) {
         let kck = [7; KEY_LEN];
-        let mut frame = KeyFrame::new(KeyInfo { pairwise: true, mic: true, ..KeyInfo::NONE }, 9);
+        let mut frame = KeyFrame::new(KeyInfo { version, pairwise: true, mic: true, ..KeyInfo::NONE }, 9);
         frame.nonce = [0x42; NONCE_LEN];
         frame.key_data = alloc::vec![0x30, 2, 1, 0];
         let mut bytes = frame.sign(&kck);
         check!(KeyFrame::verify(&bytes, &kck));
+        check!(!KeyFrame::verify(&bytes, &[8; KEY_LEN]));
         assert!(let Ok(parsed) = KeyFrame::parse(&bytes));
         check!(parsed == frame);
         bytes[20] ^= 1;
         check!(!KeyFrame::verify(&bytes, &kck));
+    }
+
+    #[test]
+    fn the_mic_algorithm_follows_the_descriptor_version() {
+        let kck = [7; KEY_LEN];
+        let sign = |version| KeyFrame::new(KeyInfo { version, ..KeyInfo::NONE }, 1).sign(&kck);
+        check!(
+            sign(DescriptorVersion::Sha1Aes)[MIC_AT..MIC_AT + MIC_LEN]
+                != sign(DescriptorVersion::CmacAes)[MIC_AT..MIC_AT + MIC_LEN]
+        );
+        check!(!KeyFrame::verify(&sign(DescriptorVersion::Md5Rc4), &kck), "HMAC-MD5 frames are not accepted");
     }
 
     #[test]

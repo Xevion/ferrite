@@ -136,12 +136,14 @@ pub mod attr {
     pub const WIPHY_CHANNEL_TYPE: u16 = 39;
     pub const IE: u16 = 42;
     pub const SCAN_FREQUENCIES: u16 = 44;
+    pub const SCAN_SSIDS: u16 = 45;
     pub const BSS: u16 = 47;
     pub const FRAME: u16 = 51;
     pub const SSID: u16 = 52;
     pub const AUTH_TYPE: u16 = 53;
     pub const REASON_CODE: u16 = 54;
     pub const KEY_TYPE: u16 = 55;
+    pub const USE_MFP: u16 = 66;
     pub const TIMED_OUT: u16 = 65;
     pub const STA_FLAGS2: u16 = 67;
     pub const CONTROL_PORT: u16 = 68;
@@ -157,6 +159,7 @@ pub mod attr {
     pub const FRAME_MATCH: u16 = 91;
     pub const ACK: u16 = 92;
     pub const PS_STATE: u16 = 93;
+    pub const AUTH_DATA: u16 = 156;
     pub const FRAME_TYPE: u16 = 101;
     pub const CONTROL_PORT_ETHERTYPE: u16 = 102;
     pub const CONTROL_PORT_NO_ENCRYPT: u16 = 103;
@@ -350,11 +353,21 @@ pub struct Bss {
     pub security: Security,
     /// The RSN element, whole, which a 4-way handshake's message 3 must repeat.
     pub rsn: Option<Vec<u8>>,
+    /// The RSNX element, whole, which message 3 repeats when the access point has one.
+    pub rsnx: Option<Vec<u8>>,
+    /// The supported rates carry the SAE hash-to-element membership selector: the network accepts no
+    /// hunting and pecking.
+    pub h2e_only: bool,
 }
 
 /// IEEE 802.11 element ids.
 const ELEMENT_SSID: u8 = 0;
 const ELEMENT_RSN: u8 = 48;
+const ELEMENT_RSNX: u8 = 244;
+const ELEMENT_RATES: u8 = 1;
+const ELEMENT_EXT_RATES: u8 = 50;
+/// The BSS membership selector value (with the basic-rate bit) of SAE hash-to-element only.
+const SELECTOR_SAE_H2E: u8 = 0xfb;
 const ELEMENT_VENDOR: u8 = 221;
 /// Microsoft's OUI and type 1: the WPA element.
 const WPA_VENDOR: [u8; 4] = [0x00, 0x50, 0xf2, 0x01];
@@ -399,8 +412,32 @@ impl Bss {
             element.extend_from_slice(data);
             element
         });
-        Ok(Some(Self { bssid, frequency, signal, ssid, security: security(ies, capability), rsn }))
+        let whole = |id: u8| {
+            elements(ies).find(|(found, _)| *found == id).map(|(_, data)| {
+                let mut element = alloc::vec![id, data.len() as u8];
+                element.extend_from_slice(data);
+                element
+            })
+        };
+        let h2e_only = requires_h2e(ies);
+        Ok(Some(Self {
+            bssid,
+            frequency,
+            signal,
+            ssid,
+            security: security(ies, capability),
+            rsn,
+            rsnx: whole(ELEMENT_RSNX),
+            h2e_only,
+        }))
     }
+}
+
+/// Whether the supported rates carry the SAE hash-to-element membership selector.
+fn requires_h2e(ies: &[u8]) -> bool {
+    elements(ies)
+        .filter(|(id, _)| matches!(*id, ELEMENT_RATES | ELEMENT_EXT_RATES))
+        .any(|(_, rates)| rates.contains(&SELECTOR_SAE_H2E))
 }
 
 /// RSN over WPA over the privacy bit, as `iw scan` reports them.
@@ -446,6 +483,7 @@ mod tests {
     use alloc::string::ToString;
 
     use assert2::check;
+    use rstest::rstest;
 
     use super::*;
 
@@ -471,5 +509,14 @@ mod tests {
     fn signal_prints_in_dbm() {
         check!(Mbm(-4512).to_string() == "-45.12 dBm");
         check!(Mbm(-50).to_string() == "-0.50 dBm");
+    }
+
+    #[rstest]
+    #[case::in_the_rates(&[1, 3, 0x82, 0x84, 0xfb], true)]
+    #[case::in_the_extended_rates(&[1, 2, 0x82, 0x84, 50, 1, 0xfb], true)]
+    #[case::ordinary_rates(&[1, 4, 0x82, 0x84, 0x8b, 0x96], false)]
+    #[case::elsewhere(&[0, 1, 0xfb], false)]
+    fn the_h2e_membership_selector_is_found_among_the_rates(#[case] ies: &[u8], #[case] want: bool) {
+        check!(requires_h2e(ies) == want);
     }
 }

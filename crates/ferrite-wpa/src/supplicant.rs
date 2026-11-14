@@ -12,7 +12,7 @@ use snafu::Snafu;
 
 use crate::eapol::{FrameError, KeyFrame, KeyInfo, unwrap_key_data};
 use crate::kdf::{KEY_LEN, NONCE_LEN, Pmk, Ptk};
-use crate::rsn::{Gtk, parse_key_data};
+use crate::rsn::{Akm, Gtk, Igtk, parse_key_data};
 use crate::{MacAddr, Rng};
 
 #[derive(Debug, Clone, PartialEq, Eq, Snafu)]
@@ -27,8 +27,12 @@ pub enum HandshakeError {
     ANonce,
     #[snafu(display("message 3's RSN element differs from the beacon's"))]
     RsnMismatch,
+    #[snafu(display("message 3's RSNX element differs from the beacon's"))]
+    RsnxMismatch,
     #[snafu(display("the key data carries no GTK"))]
     NoGtk,
+    #[snafu(display("the key data carries no IGTK, which protected management frames need"))]
+    NoIgtk,
     #[snafu(display("a key frame with key information {info:#06x} is not expected now"))]
     Unexpected { info: u16 },
 }
@@ -46,6 +50,8 @@ pub enum Install {
     Pairwise { tk: [u8; KEY_LEN] },
     /// A group key and its receive sequence counter.
     Group { gtk: Gtk, rsc: [u8; 8] },
+    /// The key that protects group-addressed management frames (BIP-CMAC-128).
+    Igtk(Igtk),
 }
 
 impl core::fmt::Debug for Install {
@@ -53,8 +59,23 @@ impl core::fmt::Debug for Install {
         match self {
             Self::Pairwise { .. } => f.write_str("Pairwise"),
             Self::Group { gtk, .. } => write!(f, "Group({gtk:?})"),
+            Self::Igtk(igtk) => write!(f, "Igtk({igtk:?})"),
         }
     }
+}
+
+/// What a supplicant is told about the network and the connection.
+pub struct Params<'a> {
+    pub akm: Akm,
+    pub pmk: Pmk,
+    pub aa: MacAddr,
+    pub spa: MacAddr,
+    /// The RSN and RSNX elements of the AP's beacon, whole, which message 3 must repeat.
+    pub ap_rsn: &'a [u8],
+    pub ap_rsnx: Option<&'a [u8]>,
+    /// The RSN and RSNX elements this station sent in its association request.
+    pub own_rsn: &'a [u8],
+    pub own_rsnx: Option<&'a [u8]>,
 }
 
 /// Which message a frame was taken as.
@@ -78,38 +99,51 @@ pub struct Step {
 }
 
 pub struct Supplicant {
+    akm: Akm,
     pmk: Pmk,
     aa: MacAddr,
     spa: MacAddr,
-    /// The RSN element of the AP's beacon, which message 3 must repeat.
+    /// The elements of the AP's beacon, which message 3 must repeat.
     ap_rsn: Vec<u8>,
-    /// The RSN element this station sent in its association request.
-    own_rsn: Vec<u8>,
+    ap_rsnx: Option<Vec<u8>>,
+    /// The elements this station sent in its association request, which message 2 repeats.
+    own_elements: Vec<u8>,
     /// The authenticator nonce and the PTK derived with it, between messages 1 and 3.
     pending: Option<([u8; NONCE_LEN], Ptk)>,
     ptk: Option<Ptk>,
     replay: Option<u64>,
     gtk: Option<Gtk>,
+    igtk: Option<Igtk>,
 }
 
 impl Supplicant {
-    pub fn new(pmk: Pmk, aa: MacAddr, spa: MacAddr, ap_rsn: &[u8], own_rsn: &[u8]) -> Self {
+    pub fn new(params: Params<'_>) -> Self {
+        let mut own_elements = params.own_rsn.to_vec();
+        own_elements.extend_from_slice(params.own_rsnx.unwrap_or_default());
         Self {
-            pmk,
-            aa,
-            spa,
-            ap_rsn: ap_rsn.to_vec(),
-            own_rsn: own_rsn.to_vec(),
+            akm: params.akm,
+            pmk: params.pmk,
+            aa: params.aa,
+            spa: params.spa,
+            ap_rsn: params.ap_rsn.to_vec(),
+            ap_rsnx: params.ap_rsnx.map(<[u8]>::to_vec),
+            own_elements,
             pending: None,
             ptk: None,
             replay: None,
             gtk: None,
+            igtk: None,
         }
     }
 
     /// Whether the 4-way handshake has completed.
     pub const fn is_complete(&self) -> bool {
         self.ptk.is_some()
+    }
+
+    /// `info` at the descriptor version the key management defines.
+    fn info(&self, info: KeyInfo) -> KeyInfo {
+        KeyInfo { version: self.akm.descriptor_version(), ..info }
     }
 
     fn check_replay(&self, got: u64) -> Result<(), HandshakeError> {
@@ -123,7 +157,7 @@ impl Supplicant {
     pub fn handle(&mut self, raw: &[u8], rng: &mut dyn Rng) -> Result<Step, HandshakeError> {
         let frame = KeyFrame::parse(raw)?;
         let info = frame.info;
-        if info.version != crate::eapol::DescriptorVersion::Sha1Aes {
+        if info.version != self.akm.descriptor_version() {
             return Err(FrameError::Version { version: info.version }.into());
         }
         match (info.pairwise, info.ack, info.mic) {
@@ -138,10 +172,11 @@ impl Supplicant {
         self.check_replay(frame.replay_counter)?;
         let mut snonce = [0; NONCE_LEN];
         rng.fill(&mut snonce);
-        let tptk = Ptk::derive(&self.pmk, self.aa, self.spa, &frame.nonce, &snonce);
-        let mut reply = KeyFrame::new(KeyInfo { pairwise: true, mic: true, ..KeyInfo::NONE }, frame.replay_counter);
+        let tptk = Ptk::derive(self.akm, &self.pmk, self.aa, self.spa, &frame.nonce, &snonce);
+        let mut reply =
+            KeyFrame::new(self.info(KeyInfo { pairwise: true, mic: true, ..KeyInfo::NONE }), frame.replay_counter);
         reply.nonce = snonce;
-        reply.key_data.clone_from(&self.own_rsn);
+        reply.key_data.clone_from(&self.own_elements);
         let reply = reply.sign(&tptk.kck);
         self.pending = Some((frame.nonce, tptk));
         Ok(Step { message: Message::Pairwise1, reply, install: Vec::new(), complete: false })
@@ -163,9 +198,15 @@ impl Supplicant {
         if data.rsn != Some(self.ap_rsn.as_slice()) {
             return Err(HandshakeError::RsnMismatch);
         }
+        if data.rsnx != self.ap_rsnx.as_deref() {
+            return Err(HandshakeError::RsnxMismatch);
+        }
         let gtk = data.gtk.ok_or(HandshakeError::NoGtk)?;
-        let mut reply =
-            KeyFrame::new(KeyInfo { pairwise: true, mic: true, secure: true, ..KeyInfo::NONE }, frame.replay_counter);
+        let igtk = if self.akm.requires_pmf() { Some(data.igtk.ok_or(HandshakeError::NoIgtk)?) } else { None };
+        let mut reply = KeyFrame::new(
+            self.info(KeyInfo { pairwise: true, mic: true, secure: true, ..KeyInfo::NONE }),
+            frame.replay_counter,
+        );
         let reply = reply.sign(&tptk.kck);
         let mut install = Vec::new();
         if self.ptk.as_ref() != Some(tptk) {
@@ -174,9 +215,15 @@ impl Supplicant {
         if self.gtk.as_ref() != Some(&gtk) {
             install.push(Install::Group { gtk: gtk.clone(), rsc: frame.rsc });
         }
+        if let Some(igtk) = &igtk
+            && self.igtk.as_ref() != Some(igtk)
+        {
+            install.push(Install::Igtk(igtk.clone()));
+        }
         self.replay = Some(frame.replay_counter);
         self.ptk = Some(tptk.clone());
         self.gtk = Some(gtk);
+        self.igtk = igtk;
         Ok(Step { message: Message::Pairwise3, reply, install, complete: true })
     }
 
@@ -187,15 +234,27 @@ impl Supplicant {
             return Err(HandshakeError::Mic);
         }
         let plain = unwrap_key_data(&ptk.kek, &frame.key_data)?;
-        let gtk = parse_key_data(&plain).gtk.ok_or(HandshakeError::NoGtk)?;
+        let data = parse_key_data(&plain);
+        if data.gtk.is_none() && data.igtk.is_none() {
+            return Err(HandshakeError::NoGtk);
+        }
         let reply =
-            KeyFrame::new(KeyInfo { mic: true, secure: true, ..KeyInfo::NONE }, frame.replay_counter).sign(&ptk.kck);
+            KeyFrame::new(self.info(KeyInfo { mic: true, secure: true, ..KeyInfo::NONE }), frame.replay_counter)
+                .sign(&ptk.kck);
         let mut install = Vec::new();
-        if self.gtk.as_ref() != Some(&gtk) {
+        if let Some(gtk) = data.gtk
+            && self.gtk.as_ref() != Some(&gtk)
+        {
             install.push(Install::Group { gtk: gtk.clone(), rsc: frame.rsc });
+            self.gtk = Some(gtk);
+        }
+        if let Some(igtk) = data.igtk
+            && self.igtk.as_ref() != Some(&igtk)
+        {
+            install.push(Install::Igtk(igtk.clone()));
+            self.igtk = Some(igtk);
         }
         self.replay = Some(frame.replay_counter);
-        self.gtk = Some(gtk);
         Ok(Step { message: Message::Group1, reply, install, complete: false })
     }
 }

@@ -15,15 +15,15 @@
 | `ferrite-loader` | `no_std`, UEFI app | Resident loader: keeps the DbC up, receives pushed `.efi` images and runs them under a watchdog |
 | `ferrite-wire` | `no_std` + `alloc` | Message formats spoken over the DbC link (the benchmark frames and the loader's `link` protocol), shared by both ends |
 | `ferrite-lkpi` | `no_std` + `alloc` | Linux kernel API shim the Wi-Fi drivers link against; its `stubs` feature holds the generated trace-and-stop stubs |
-| `ferrite-wifi-sys` | `no_std` | Pinned Linux mac80211, cfg80211, rtw89 and iwlwifi C built by `build.rs`, and the tables of its initcalls |
+| `ferrite-wifi-sys` | `no_std` | Pinned Linux mac80211, cfg80211, rtw89, iwlwifi and mt76 C built by `build.rs`, and the tables of its initcalls |
 | `ferrite-nl80211` | `no_std` + `alloc` | Generic netlink and nl80211 messages, and a client over any netlink socket: scan, connect, keys, stations, frames and the control port |
-| `ferrite-wpa` | `no_std` + `alloc` | WPA2-PSK: PMK and PTK derivation, EAPOL-Key frames, the supplicant's 4-way and group key handshakes, credentials from `.env` lines; the `authenticator` feature adds the AP side |
+| `ferrite-wpa` | `no_std` + `alloc` | WPA2-PSK and WPA3-SAE: SAE over P-256 (hash-to-element and hunting and pecking), PMK and PTK derivation, EAPOL-Key frames, the supplicant's 4-way and group key handshakes with protected management frames, the networks of a `.env` file; the `authenticator` feature adds the AP side |
 | `ferrite-net` | `no_std` + `alloc` | The network for every app: the `Port` trait any NIC implements (the firmware's SNP in `ferrite-efi::snp`, a Wi-Fi station's `QueuePort`), one smoltcp `Stack` per port (DHCP, mDNS, ping, HTTP) and a `Network` running many at once, serving an app's `Site` |
-| `ferrite-wifi` | `no_std` + `alloc` | The Wi-Fi station as the rest of the program sees it: its typed state, the reconnect backoff and supervisor, the hand-off of its network port (`Rc<QueuePort>`) to the main loop, and the wake-up of the thread that sends its frames |
+| `ferrite-wifi` | `no_std` + `alloc` | The Wi-Fi station as the rest of the program sees it: its typed state, the reconnect backoff and supervisor, which configured network to try for a scan, the hand-off of its network port (`Rc<QueuePort>`) to the main loop, and the wake-up of the thread that sends its frames |
 | `ferrite-wifi-start` | `no_std` | The Wi-Fi C's kernel entry points, the init thread that the lab and `wifitrace` share (seam checks, initcalls, exitcalls), the station service (join, hold, reconnect with backoff, offer a port), and the frame seam from a netdev to a `QueuePort` |
 | `ferrite-wifi-efi` | `no_std`, UEFI app built as ELF | The shim under UEFI: its platform pieces from firmware services (arena, guarded task stacks, firmware files, clock, PCI I/O devices, the DMA protection probe), `runtime` that brings it up and keeps it polled for an app, `WifiStation` (the Wi-Fi station an app owns), and `wifitrace`, which runs the test script on them |
 | `ferrite-lab` | std | The Wi-Fi C run as a Linux process on the desktop: logger, halt hook with a backtrace, the data fence, the host platform pieces |
-| `ferrite-dev` | std | Desktop tool: `log` (DbC capture), `bench` (dbcbench peer), `run` (one-shot cycle on the laptop), `push` and `loader` (client of the resident loader), `build` (an app's `.efi`, converting ELF-built apps), `vendor` (Linux snapshot), `stubs` (generates the kernel-symbol stubs) |
+| `ferrite-dev` | std | Desktop tool: `log` (DbC capture), `bench` (dbcbench peer), `run` (one-shot cycle on the laptop), `push` and `loader` (client of the resident loader), `build` (an app's `.efi`, converting ELF-built apps), `vendor` (Linux snapshot), `stubs` (generates the kernel-symbol stubs), `firmware` (stages the firmware the compiled drivers request) |
 
 Planned, created when their milestone starts:
 

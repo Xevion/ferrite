@@ -8,15 +8,16 @@ suite before (or instead of) booting an operating system.
 ## Status
 
 - [x] Boots under OVMF in QEMU and on real hardware
-- [x] Framebuffer dashboard drawn with tiny-skia and fontdue, written write-combining; a short text screen where there is no GOP (see Screen)
-- [x] Wired networking: SNP to smoltcp, DHCP, mDNS (`ferrite.local`), a live status page with a JSON API and run controls. Verified under QEMU only, not yet on real hardware (see Networking)
+- [x] Framebuffer dashboard in the style of a firmware setup screen, drawn with tiny-skia and fontdue and written write-combining; a short text screen where there is no GOP (see Screen)
+- [x] Networking over every wired NIC (SNP) and Wi-Fi at once: DHCP, mDNS (`ferrite.local`), a live status page with a JSON API and run controls. Verified on real hardware over Wi-Fi (the laptop, Intel 8265) and under QEMU over Ethernet (see Networking)
+- [x] Push notifications over plain HTTP (e.g. ntfy) when a pass ends, the first fault is found and the run ends (`\EFI\ferrite\notify.env`)
 - [x] A 14-test suite (memtest86+'s tests plus March C- and others) on SIMD kernels from scalar to AVX-512, split over every core through MP Services
 - [x] Headless diagnostics log on the boot volume (`\EFI\ferrite\ferrite-uefi.txt`)
 - [x] Recon apps: `pciscan` (PCI and Wi-Fi registers), `xhciscan` (USB controllers and DbC), `dbcping` and `dbcbench` (DbC link)
 - [x] USB debug serial (xHCI DbC) driver, verified on real hardware with `dbcping` and `dbcbench` (326 MB/s target to desktop, 189 MB/s back)
 - [x] Resident loader: the desktop pushes `.efi` images over DbC and gets live logs and exit status back, with no reboot between runs
 - [x] DbC log output from the main app, through the loader
-- [ ] Wi-Fi via real Linux drivers on a Rust shim
+- [x] Wi-Fi via real Linux drivers on a Rust shim, with a Rust WPA2/WPA3 supplicant
 - [ ] DNS-SD service enumeration (PTR/SRV/TXT) on top of the mDNS responder
 
 ## Quickstart
@@ -72,10 +73,10 @@ in [docs/CONVENTIONS.md](docs/CONVENTIONS.md).
 ### Networking
 
 There are no UDP/TCP wrappers in `uefi` 0.38 (only `http` *client*, `ip4config2`,
-`pxe`, `snp`), so hosting anything means driving raw L2 frames. `net.rs`
-implements a smoltcp [`Device`](https://docs.rs/smoltcp/latest/smoltcp/phy/trait.Device.html)
-over the Simple Network Protocol (`transmit`/`receive`/`mode`), and smoltcp
-supplies the rest of the stack:
+`pxe`, `snp`), so hosting anything means driving raw L2 frames. `ferrite_efi::snp`
+turns each Simple Network Protocol handle (`transmit`/`receive`/`mode`) into a
+`ferrite_net` port, the Wi-Fi station offers one more, and `ferrite_net` runs a
+smoltcp stack on each port with the rest:
 
 - **DHCPv4**: acquires an address, shown on the dashboard once leased.
 - **HTTP** (TCP :80): picoserve over smoltcp sockets, polled from the main loop.
@@ -121,16 +122,18 @@ iPXE SNP driver:
 - The guest answers ping.
 - HTTP gives 200 for `/` (59 ms), 404 for `/favicon.ico` and 405 for `POST /`.
 
-This is the first time mDNS has been verified; before it only DHCP and HTTP
-through SLIRP were. Nothing here has run on real hardware or on a real NIC's SNP
-driver yet. Routing, the control bodies and end-to-end requests over a smoltcp
-loopback are covered by unit tests in `crates/ferrite-uefi/src/net/http/`.
+On real hardware the same stack runs over Wi-Fi on the laptop: a lease in about 6 s,
+`ferrite.local` resolving from other machines on the network, and the page and
+its event stream served while the sweep runs. A real NIC's SNP driver has not
+been tried yet. Routing, the control bodies and end-to-end requests over a smoltcp
+loopback are covered by unit tests in `crates/ferrite-net/src/http/` and
+`crates/ferrite-uefi/src/net/`.
 
 ### Screen
 
 With a GOP the app switches to the display's native mode (the EDID's preferred
 timing) and draws a dashboard: tiny-skia for shapes, fontdue for text from
-embedded Inter and JetBrains Mono, into a BGRA canvas the size of the screen.
+embedded IBM Plex Mono (ASCII subsets), into a BGRA canvas the size of the screen.
 Each widget redraws only when its inputs change, and only the pixels that differ
 are pushed.
 
@@ -152,12 +155,31 @@ Wi-Fi, serves its status page, and advertises itself over mDNS.
 
 Wired networking works today through the firmware's SNP driver. Wi-Fi has no
 ready-made UEFI driver for most chips: firmware Wi-Fi exists only on some
-business laptops and only for recent Intel cards. So ferrite supplies its own.
-The plan is to compile Linux's real Wi-Fi drivers and its `mac80211`/`cfg80211`
-stack unchanged, link them into the app, and implement the Linux kernel
-functions they call in a Rust shim. That is the approach Genode uses to run
+business laptops and only for recent Intel cards. So ferrite supplies its own:
+it compiles Linux's real Wi-Fi drivers and its `mac80211`/`cfg80211` stack
+unchanged, links them into the app, and implements the Linux kernel functions
+they call in a Rust shim. That is the approach Genode uses to run
 unmodified Linux Wi-Fi drivers. A handful of chip families covers most PCs, so
 one shim plus their Linux drivers covers most machines.
+
+Cards covered by the compiled drivers:
+
+| Card | Driver |
+| --- | --- |
+| Intel 8265 | iwlwifi (runs on hardware) |
+| Intel AX200, AX201, AX210, AX211 (and AX101) | iwlwifi, gen2 transport (compiled, not yet run on hardware) |
+| MediaTek MT7921, MT7922, MT7920 | mt76 `mt7921e` (compiled, not yet run on hardware) |
+| Realtek RTL8852CE | rtw89 (lab only, not offered under UEFI) |
+
+`just stage` puts the firmware those drivers request on the stick, from the
+host's `/lib/firmware`.
+
+The networks to join are `.env` lines in `wifi.env` on the stick, which `just stage`
+copies from the repo's `.env`: `WPA_SSID` and `WPA_PASSPHRASE` for one network,
+`WPA_SSID_1`, `WPA_PASSPHRASE_1` and so on for more (the strongest visible one is
+tried first, then the next). `WPA_KEY_MGMT=NONE` makes a network open, `WPA_HIDDEN=1`
+marks one that does not broadcast its name, and a passphrase network joins with
+WPA3-SAE when the access point offers it, WPA2-PSK otherwise.
 
 ## License
 

@@ -117,11 +117,12 @@ const CANCEL_SLICE: Duration = Duration::from_millis(100);
 
 /// Trigger a scan of `name` (which must be up), wait for its end on the scan group for at most
 /// `limit` (or until `cancel` says so, checked every `CANCEL_SLICE`), then dump every BSS and log each
-/// at `bss_level`.
+/// at `bss_level`. The scan covers `frequencies` (every channel when empty) and probes for each `hidden`
+/// name directly, besides the usual scan.
 pub fn scan(
     client: &mut Client<KernelSocket>,
     name: &str,
-    frequencies: &[Frequency],
+    (frequencies, hidden): (&[Frequency], &[&[u8]]),
     limit: Duration,
     cancel: &dyn Fn() -> bool,
     bss_level: log::Level,
@@ -129,7 +130,7 @@ pub fn scan(
 ) -> Result<ScanReport, ScanError> {
     let interface = find(client, name)?;
     let start = clock();
-    client.trigger_scan(interface.ifindex, frequencies)?;
+    client.trigger_scan(interface.ifindex, frequencies, hidden)?;
     log::info!("nl80211: scan triggered on {name} (ifindex {}, wiphy {})", interface.ifindex, interface.wiphy);
     let deadline = start + limit;
     let end = loop {

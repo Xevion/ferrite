@@ -14,12 +14,14 @@ ferrite-net.workspace = true
 ferrite-wifi.workspace = true
 ferrite-wifi-start.workspace = true
 ferrite-wifi-sys.workspace = true
+ferrite-wpa.workspace = true
 libc.workspace = true
 log.workspace = true
 smoltcp.workspace = true
 
 [dev-dependencies]
 assert2.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

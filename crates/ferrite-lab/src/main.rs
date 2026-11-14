@@ -156,7 +156,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if std::env::args().nth(1).as_deref() == Some("station") {
-        return station::run(&mut sched);
+        return station::run(&mut sched, std::env::args().nth(2).as_deref());
     }
     let (station_link, ap_link) = (Shared::new(), Shared::new());
     let start_up = StartUp {

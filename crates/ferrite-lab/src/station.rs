@@ -1,15 +1,22 @@
-//! `ferrite-lab station`: the station service of `ferrite-wifi-start` against the simulated access point,
-//! driven the way an app's main loop drives it. It must connect and offer a port, notice the access point
+//! `ferrite-lab station [scenario]`: the station service of `ferrite-wifi-start` against the simulated
+//! access point, driven the way an app's main loop drives it.
+//!
+//! Without a scenario it must connect to a WPA2-PSK network and offer a port, notice the access point
 //! deauthenticating it, withdraw the port, back off, scan and connect again with a fresh port that carries
 //! IP (a DHCP lease from the lab AP, pings, UDP and HTTP), back off from a stable connection as from a
 //! first one, and stop on request with the state `Stopped`.
+//!
+//! A named scenario serves a different network from the access point and gives the station a `.env` file
+//! to match: open, hidden, WPA3-SAE, a transition network, several networks of which the first fail. Each
+//! must join, lease an address and pass the IP checks over the link, and stop.
 
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use ferrite_lkpi::sched::{NoHooks, Scheduler, Step};
 use ferrite_wifi::{Failure, Policy, Shared, StationState};
-use ferrite_wifi_start::station::{StationConfig, lab_credentials, lab_deauth_station, start_station};
+use ferrite_wifi_start::station::{LabAp, LabNetwork, LabSecurity, StationConfig, lab_deauth_station, start_station};
+use ferrite_wpa::env::Credentials;
 
 use crate::host::{self, HostPlatform, MmapStacks};
 use crate::net::MainNet;
@@ -56,8 +63,143 @@ fn wait_for(
     Ok(())
 }
 
-pub fn run(sched: &mut LabScheduler) -> ExitCode {
-    match drive(sched) {
+/// What a scenario has the station do.
+enum Expect {
+    /// Join, lease an address and pass the IP checks, and stop.
+    Joins,
+    /// Never join: the network is not found (the scan does not ask for its name) or its handshake fails.
+    Fails,
+}
+
+/// A network the access point serves, the `.env` text the station is given, and what must happen.
+struct Scenario {
+    name: &'static str,
+    ap: LabNetwork,
+    env: &'static str,
+    connect_limit: Duration,
+    expect: Expect,
+}
+
+const OPEN_SSID: &[u8] = b"ferrite-open";
+const HIDDEN_SSID: &[u8] = b"ferrite-hidden";
+const SAE_SSID: &[u8] = b"ferrite-sae";
+
+const SCENARIOS: [Scenario; 9] = [
+    Scenario {
+        name: "open",
+        ap: LabNetwork { ssid: OPEN_SSID, passphrase: b"", security: LabSecurity::Open, hidden: false },
+        env: "WPA_SSID=ferrite-open\nWPA_KEY_MGMT=NONE\n",
+        connect_limit: Duration::from_secs(10),
+        expect: Expect::Joins,
+    },
+    Scenario {
+        name: "hidden",
+        ap: LabNetwork {
+            ssid: HIDDEN_SSID,
+            passphrase: b"hidden lab passphrase",
+            security: LabSecurity::Psk,
+            hidden: true,
+        },
+        env: "WPA_SSID=ferrite-hidden\nWPA_PASSPHRASE=hidden lab passphrase\nWPA_HIDDEN=1\n",
+        connect_limit: Duration::from_secs(10),
+        expect: Expect::Joins,
+    },
+    Scenario {
+        name: "hidden-unmarked",
+        ap: LabNetwork {
+            ssid: HIDDEN_SSID,
+            passphrase: b"hidden lab passphrase",
+            security: LabSecurity::Psk,
+            hidden: true,
+        },
+        env: "WPA_SSID=ferrite-hidden\nWPA_PASSPHRASE=hidden lab passphrase\n",
+        connect_limit: Duration::from_secs(10),
+        expect: Expect::Fails,
+    },
+    Scenario {
+        name: "sae",
+        ap: LabNetwork {
+            ssid: SAE_SSID,
+            passphrase: b"sae lab passphrase",
+            security: LabSecurity::Sae { h2e: true },
+            hidden: false,
+        },
+        env: "WPA_SSID=ferrite-sae\nWPA_PASSPHRASE=sae lab passphrase\n",
+        connect_limit: Duration::from_secs(10),
+        expect: Expect::Joins,
+    },
+    Scenario {
+        name: "sae-hunt",
+        ap: LabNetwork {
+            ssid: SAE_SSID,
+            passphrase: b"sae lab passphrase",
+            security: LabSecurity::Sae { h2e: false },
+            hidden: false,
+        },
+        env: "WPA_SSID=ferrite-sae\nWPA_PASSPHRASE=sae lab passphrase\nWPA_KEY_MGMT=SAE\n",
+        connect_limit: Duration::from_secs(10),
+        expect: Expect::Joins,
+    },
+    Scenario {
+        name: "transition",
+        ap: LabNetwork {
+            ssid: SAE_SSID,
+            passphrase: b"sae lab passphrase",
+            security: LabSecurity::Transition,
+            hidden: false,
+        },
+        env: "WPA_SSID=ferrite-sae\nWPA_PASSPHRASE=sae lab passphrase\n",
+        connect_limit: Duration::from_secs(10),
+        expect: Expect::Joins,
+    },
+    Scenario {
+        name: "transition-psk",
+        ap: LabNetwork {
+            ssid: SAE_SSID,
+            passphrase: b"sae lab passphrase",
+            security: LabSecurity::Transition,
+            hidden: false,
+        },
+        env: "WPA_SSID=ferrite-sae\nWPA_PASSPHRASE=sae lab passphrase\nWPA_KEY_MGMT=WPA-PSK\n",
+        connect_limit: Duration::from_secs(10),
+        expect: Expect::Joins,
+    },
+    Scenario {
+        name: "multi",
+        ap: LabNetwork::PSK,
+        env: "WPA_SSID=not-in-the-air\nWPA_PASSPHRASE=nobody home here\n\
+              WPA_SSID_1=ferrite-lab\nWPA_PASSPHRASE_1=the wrong passphrase\n\
+              WPA_SSID_2=ferrite-lab\nWPA_PASSPHRASE_2=ferrite lab passphrase\n",
+        connect_limit: Duration::from_secs(3),
+        expect: Expect::Joins,
+    },
+    Scenario {
+        name: "sae-wrong-password",
+        ap: LabNetwork {
+            ssid: SAE_SSID,
+            passphrase: b"sae lab passphrase",
+            security: LabSecurity::Sae { h2e: true },
+            hidden: false,
+        },
+        env: "WPA_SSID=ferrite-sae\nWPA_PASSPHRASE=another passphrase\n",
+        connect_limit: Duration::from_secs(3),
+        expect: Expect::Fails,
+    },
+];
+
+pub fn run(sched: &mut LabScheduler, scenario: Option<&str>) -> ExitCode {
+    let result = match scenario {
+        None => drive(sched),
+        Some(name) => SCENARIOS.iter().find(|s| s.name == name).map_or_else(
+            || {
+                let names: Vec<&str> = SCENARIOS.iter().map(|s| s.name).collect();
+                log::error!("lab station: no scenario {name}; they are {}", names.join(", "));
+                Err(ExitCode::FAILURE)
+            },
+            |scenario| drive_scenario(sched, scenario),
+        ),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => code,
     }
@@ -89,11 +231,98 @@ fn lose_the_link(
     Ok(wait)
 }
 
-fn drive(sched: &mut LabScheduler) -> Result<(), ExitCode> {
-    let Some(credentials) = lab_credentials() else {
-        log::error!("lab station: the lab credentials are invalid");
-        return Err(ExitCode::FAILURE);
+fn lab_env() -> String {
+    let network = LabNetwork::PSK;
+    format!(
+        "WPA_SSID={}\nWPA_PASSPHRASE={}\n",
+        String::from_utf8_lossy(network.ssid),
+        String::from_utf8_lossy(network.passphrase)
+    )
+}
+
+/// Join the network a scenario serves with the `.env` file it names, or fail to for the scenarios that
+/// must not, then stop.
+fn drive_scenario(sched: &mut LabScheduler, scenario: &Scenario) -> Result<(), ExitCode> {
+    let credentials = Credentials::from_env(scenario.env.as_bytes()).map_err(|error| {
+        log::error!("lab station: the scenario's .env does not parse: {error}");
+        ExitCode::FAILURE
+    })?;
+    let seed = host::stack_seed().map_err(|error| {
+        log::error!("reading host entropy failed: {error}");
+        ExitCode::FAILURE
+    })?;
+    let (shared, ap_link) = (Shared::new(), Shared::new());
+    let config = StationConfig {
+        sched: sched.handle(),
+        credentials,
+        regdb_limit: Duration::from_secs(2),
+        wifi_limit: Duration::from_secs(10),
+        scan_limit: Duration::from_secs(10),
+        connect_limit: scenario.connect_limit,
+        reconnect: POLICY,
+        lab_ap: Some(LabAp { link: ap_link.clone(), network: scenario.ap }),
     };
+    let task = start_station(config, shared.clone()).map_err(|code| {
+        log::error!("starting the station failed: {code}");
+        ExitCode::FAILURE
+    })?;
+    let id = sched.find_by_user(task.as_ptr() as usize).ok_or_else(|| {
+        log::error!("the station has no scheduler task");
+        ExitCode::FAILURE
+    })?;
+    let mut net = MainNet::new(shared.clone(), ap_link, seed);
+
+    match scenario.expect {
+        Expect::Joins => {
+            let mut failed_before_joining = false;
+            wait_for(sched, &mut net, "port and IP verdict from the station", |_, net| {
+                failed_before_joining |= matches!(shared.state(), StationState::Failed { .. });
+                net.links() >= 1 && shared.verdict().is_some()
+            })?;
+            if failed_before_joining {
+                log::error!("lab station: {}: the station backed off before it joined", scenario.name);
+                return Err(ExitCode::FAILURE);
+            }
+            if shared.verdict() != Some(true) || !shared.state().is_connected() {
+                log::error!(
+                    "lab station: {}: the link failed its IP checks; the state is {}",
+                    scenario.name,
+                    shared.state()
+                );
+                return Err(ExitCode::FAILURE);
+            }
+            log::info!(
+                "lab station: {}: {}, leased an address and passed the IP checks",
+                scenario.name,
+                shared.state()
+            );
+        },
+        Expect::Fails => {
+            wait_for(sched, &mut net, "a failed attempt", |_, _| {
+                matches!(shared.state(), StationState::Failed { .. })
+            })?;
+            if net.links() != 0 {
+                log::error!("lab station: {}: a port was offered", scenario.name);
+                return Err(ExitCode::FAILURE);
+            }
+            log::info!("lab station: {}: the station did not join, as expected: {}", scenario.name, shared.state());
+        },
+    }
+    shared.request_stop();
+    wait_for(sched, &mut net, "stop", |sched, _| sched.info(id).is_none())?;
+    if shared.state() != StationState::Stopped || shared.next_port_event().is_some() {
+        log::error!("lab station: after the stop the state is {}", shared.state());
+        return Err(ExitCode::FAILURE);
+    }
+    log::info!("lab station: {}: stopped", scenario.name);
+    Ok(())
+}
+
+fn drive(sched: &mut LabScheduler) -> Result<(), ExitCode> {
+    let credentials = Credentials::from_env(lab_env().as_bytes()).map_err(|error| {
+        log::error!("lab station: the lab credentials are invalid: {error}");
+        ExitCode::FAILURE
+    })?;
     let seed = host::stack_seed().map_err(|error| {
         log::error!("reading host entropy failed: {error}");
         ExitCode::FAILURE
@@ -107,7 +336,7 @@ fn drive(sched: &mut LabScheduler) -> Result<(), ExitCode> {
         scan_limit: Duration::from_secs(10),
         connect_limit: Duration::from_secs(10),
         reconnect: POLICY,
-        lab_ap: Some(ap_link.clone()),
+        lab_ap: Some(LabAp { link: ap_link.clone(), network: LabNetwork::PSK }),
     };
     let task = start_station(config, shared.clone()).map_err(|code| {
         log::error!("starting the station failed: {code}");

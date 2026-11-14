@@ -125,6 +125,14 @@ pub enum Event {
         cookie: u64,
         ack: bool,
     },
+    /// An authentication frame from the access point (`frame` from its 802.11 header on), or its
+    /// timeout (`frame` empty, `timed_out`): `NL80211_CMD_AUTHENTICATE` on the mlme group, which is how
+    /// userspace SAE sees the access point's commit and confirm.
+    Authenticate {
+        ifindex: IfIndex,
+        frame: Vec<u8>,
+        timed_out: bool,
+    },
     Other {
         cmd: Command,
         ifindex: Option<IfIndex>,
@@ -168,6 +176,9 @@ impl Event {
             },
             (Command::Frame, _, Some(frame)) => Self::Frame { ifindex, frequency, frame },
             (Command::FrameTxStatus, _, _) => Self::FrameTxStatus { ifindex, cookie, ack: flag_a },
+            (Command::Authenticate, _, frame) => {
+                Self::Authenticate { ifindex, timed_out: frame.is_none() && flag_a, frame: frame.unwrap_or_default() }
+            },
             _ => Self::Other { cmd, ifindex: Some(ifindex) },
         })
     }
@@ -178,6 +189,7 @@ impl Event {
             | Self::Disconnect { ifindex, .. }
             | Self::ControlPortFrame { ifindex, .. }
             | Self::Frame { ifindex, .. }
+            | Self::Authenticate { ifindex, .. }
             | Self::FrameTxStatus { ifindex, .. } => Some(*ifindex),
             Self::Other { ifindex, .. } => *ifindex,
         }
@@ -189,8 +201,11 @@ mod tests {
     use alloc::string::ToString;
 
     use assert2::check;
+    use rstest::rstest;
 
     use super::*;
+    use crate::genl::FamilyId;
+    use crate::netlink::Flags;
 
     /// Datagrams captured from the lab: wlan0 (ifindex 2) connecting to wlan1's WPA2-PSK AP (ifindex 3).
     const CONNECT: &[u8] = include_bytes!("../testdata/connect-event.bin");
@@ -261,5 +276,34 @@ mod tests {
         check!(StatusCode::from_raw(77) == StatusCode::Unknown(77));
         check!(ReasonCode::from_raw(15).to_string() == "15 (FourWayHandshakeTimeout)");
         check!(ReasonCode::from_raw(99).to_string() == "99 (unknown)");
+    }
+
+    fn built(cmd: Command, attrs: impl FnOnce(netlink::Builder) -> netlink::Builder) -> Event {
+        let family = FamilyId::new(30).unwrap();
+        let bytes = attrs(crate::nl80211::request(family, Flags::ACK, 0, cmd)).finish();
+        let message = netlink::messages(&bytes).next().unwrap().unwrap();
+        let (cmd, genl) = crate::nl80211::parse(message.payload).unwrap();
+        Event::parse(cmd, &genl).unwrap()
+    }
+
+    #[rstest]
+    #[case::the_access_points_frame(Some(&[0xb0, 0, 1, 2][..]), false)]
+    #[case::a_timeout(None, true)]
+    fn an_authentication_event_carries_the_frame_or_the_timeout(#[case] frame: Option<&[u8]>, #[case] timed_out: bool) {
+        let event = built(Command::Authenticate, |b| {
+            let b = b.u32(attr::IFINDEX, 2).attr(attr::MAC, &AP.0);
+            match frame {
+                Some(frame) => b.attr(attr::FRAME, frame),
+                None => b.flag(attr::TIMED_OUT),
+            }
+        });
+        check!(
+            event
+                == Event::Authenticate {
+                    ifindex: IfIndex::new(2).unwrap(),
+                    frame: frame.unwrap_or_default().to_vec(),
+                    timed_out
+                }
+        );
     }
 }

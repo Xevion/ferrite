@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-wifi"
-description = "The Wi-Fi station's state, reconnect policy and the hand-off of its network port to the main loop"
+description = "The Wi-Fi station's state, reconnect policy, choice of network and the hand-off of its network port to the main loop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 ferrite-hal.workspace = true
 ferrite-net.workspace = true
+ferrite-nl80211.workspace = true
+ferrite-wpa.workspace = true
 
 [dev-dependencies]
 assert2.workspace = true

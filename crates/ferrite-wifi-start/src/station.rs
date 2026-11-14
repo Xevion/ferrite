@@ -1,9 +1,11 @@
 //! The station service: the Wi-Fi C kept up as a network port for the program's main loop.
 //!
 //! One kernel thread brings the Linux side up (initcalls, the PCI card, its wireless interface), then
-//! loops: scan, join the configured network, attach the netdev, offer a [`QueuePort`](ferrite_net::QueuePort)
+//! loops: scan (probing for the hidden networks by name), try the configured networks the scan found,
+//! strongest first, until one joins, attach the netdev, offer a [`QueuePort`](ferrite_net::QueuePort)
 //! through [`Shared`], and hold the connection, answering group rekeys, until the link drops or a stop is
-//! requested. A dropped link withdraws the port, detaches the netdev and reconnects with backoff, offering
+//! requested. Only when every candidate of a scan has failed does the attempt end in a failure and a
+//! backoff. A dropped link withdraws the port, detaches the netdev and reconnects with backoff, offering
 //! a new port each time. A stop disconnects, detaches, takes the interface down and runs the exitcalls.
 //! The thread never fails the program: whatever goes wrong ends in a [`StationState`](ferrite_wifi::StationState).
 //!
@@ -21,23 +23,23 @@ use ferrite_hal::Instant;
 use ferrite_lkpi::sched::SchedHandle;
 use ferrite_net::port::MacAddr;
 use ferrite_nl80211::nl80211::{Frequency, SsidDisplay};
+use ferrite_wifi::select::{self, Candidate};
 use ferrite_wifi::{Failure, Next, Policy, Shared, StationState, Supervisor};
 use ferrite_wpa::env::Credentials;
-use ferrite_wpa::kdf::{Passphrase, Pmk, Ssid};
 
 use crate::connect::{self, ConnectError};
 use crate::lab_ap;
 use crate::scan::{self, ScanError};
 use crate::{
-    LAB_PASSPHRASE, LAB_SSID, RegdbError, WirelessOp, best_bss, bring_card_up, enter, lx_kernel_init, msleep,
-    run_exitcalls, run_initcalls, spawn, wait_for_regdb, wireless,
+    LAB_PASSPHRASE, LAB_SSID, RegdbError, WirelessOp, bring_card_up, enter, lx_kernel_init, msleep, run_exitcalls,
+    run_initcalls, spawn, wait_for_regdb, wireless,
 };
 
 /// What the station service needs from the program that starts it.
 pub struct StationConfig {
     /// The scheduler the service runs on, for the clock the limits are measured with.
     pub sched: SchedHandle,
-    /// The network to join.
+    /// The networks to join, tried strongest first.
     pub credentials: Credentials,
     /// How long cfg80211 gets to load `regulatory.db` after its initcalls; without it the service goes on
     /// with the built-in world domain.
@@ -50,14 +52,47 @@ pub struct StationConfig {
     pub connect_limit: Duration,
     pub reconnect: Policy,
     /// Run on the lab's simulated radios when there is no PCI card: the second radio becomes the access
-    /// point of [`lab_credentials`], scans look at its channel only, and the access point's own link is
-    /// offered through this `Shared` for the lab's IP stack to serve DHCP on.
-    pub lab_ap: Option<Rc<Shared>>,
+    /// point of the [`LabAp`]'s network, scans look at its channel only, and the access point's own link
+    /// is offered through its `link` for the lab's IP stack to serve DHCP on.
+    pub lab_ap: Option<LabAp>,
+}
+
+/// How the lab's access point secures its network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabSecurity {
+    Open,
+    /// WPA2-PSK.
+    Psk,
+    /// WPA3-SAE with protected management frames required; `h2e` offers hash-to-element besides
+    /// hunting and pecking.
+    Sae {
+        h2e: bool,
+    },
+    /// WPA2-PSK and WPA3-SAE on one network, with hash-to-element.
+    Transition,
 }
 
 /// The network the lab's access point serves.
-pub fn lab_credentials() -> Option<Credentials> {
-    Some(Credentials { ssid: Ssid::new(LAB_SSID).ok()?, passphrase: Passphrase::new(LAB_PASSPHRASE).ok()? })
+#[derive(Clone, Copy, Debug)]
+pub struct LabNetwork {
+    pub ssid: &'static [u8],
+    /// The passphrase of a secured network; unused when it is open.
+    pub passphrase: &'static [u8],
+    pub security: LabSecurity,
+    /// The beacons carry no name and the access point answers only a probe that names it.
+    pub hidden: bool,
+}
+
+impl LabNetwork {
+    /// The WPA2-PSK network `ferrite-lab` serves unless told otherwise.
+    pub const PSK: Self =
+        Self { ssid: LAB_SSID, passphrase: LAB_PASSPHRASE, security: LabSecurity::Psk, hidden: false };
+}
+
+/// The lab's access point: the network it serves, and where its own link is offered.
+pub struct LabAp {
+    pub link: Rc<Shared>,
+    pub network: LabNetwork,
 }
 
 /// Make the lab's access point deauthenticate its station, as one that drops a client would.
@@ -110,8 +145,8 @@ impl Service {
         }
         if ferrite_lkpi::pci::device_count() > 0 {
             self.serve(&mut supervisor, &clock);
-        } else if let Some(offered) = &self.config.lab_ap {
-            self.serve_simulated(offered, &mut supervisor, &clock);
+        } else if let Some(lab) = &self.config.lab_ap {
+            self.serve_simulated(lab, &mut supervisor, &clock);
         } else {
             log::info!("no PCI Wi-Fi card was handed to the drivers");
             supervisor.unavailable(StationState::NoCard);
@@ -134,7 +169,8 @@ impl Service {
     }
 
     /// The lab: the second simulated radio is the access point the first joins.
-    fn serve_simulated(&self, offered: &Shared, supervisor: &mut Supervisor, clock: &dyn Fn() -> Instant) {
+    fn serve_simulated(&self, lab: &LabAp, supervisor: &mut Supervisor, clock: &dyn Fn() -> Instant) {
+        let offered = &*lab.link;
         let ((first, found_first), (second, found_second)) =
             (wireless(WirelessOp::Find, 0), wireless(WirelessOp::Find, 1));
         if found_first != 0 || found_second != 0 {
@@ -142,12 +178,6 @@ impl Service {
             supervisor.failed(Failure::Driver, clock());
             return;
         }
-        let Some(credentials) = lab_credentials() else {
-            log::error!("station: the lab credentials are invalid");
-            supervisor.failed(Failure::Driver, clock());
-            return;
-        };
-        let pmk = Pmk::from_passphrase(&credentials.passphrase, &credentials.ssid);
         enter(c"starting the lab AP through nl80211");
         let ap = scan::connect().and_then(|mut client| {
             let interface = scan::prepare_ap(&mut client, &second, || match wireless(WirelessOp::Up, 1).1 {
@@ -155,7 +185,7 @@ impl Service {
                 code => Err(code),
             })?;
             let task =
-                lab_ap::start(client, self.config.sched.clone(), interface.ifindex, interface.mac, LAB_SSID, pmk)?;
+                lab_ap::start(client, self.config.sched.clone(), interface.ifindex, interface.mac, &lab.network)?;
             Ok((task, interface.ifindex))
         });
         let (ap, ap_ifindex) = match ap {
@@ -191,7 +221,8 @@ impl Service {
         }
     }
 
-    /// Scan and join `name`'s network, again and again, until stopped or the failure is permanent.
+    /// Scan and join one of the configured networks, again and again, until stopped or the failure is
+    /// permanent.
     fn keep_joined(
         &self,
         name: &str,
@@ -199,21 +230,15 @@ impl Service {
         supervisor: &mut Supervisor,
         clock: &dyn Fn() -> Instant,
     ) {
-        let credentials = &self.config.credentials;
-        log::info!(
-            "station: network \"{}\", passphrase of {} characters",
-            SsidDisplay(credentials.ssid.as_bytes()),
-            credentials.passphrase.len()
-        );
-        let derive = clock();
-        let pmk = Pmk::from_passphrase(&credentials.passphrase, &credentials.ssid);
-        log::debug!("PMK derived in {} ms", (clock() - derive).as_millis());
+        for network in self.config.credentials.networks() {
+            log::info!("station: network {network}");
+        }
         loop {
             if supervisor.stop_requested() {
                 supervisor.stopped();
                 break;
             }
-            match self.attempt(name, frequencies, supervisor, &pmk, clock) {
+            match self.attempt(name, frequencies, supervisor, clock) {
                 Next::Done => break,
                 Next::Retry(wait) => {
                     if !self.pause(wait, clock) {
@@ -239,66 +264,127 @@ impl Service {
         !self.shared.stop_requested()
     }
 
-    /// One scan, connect and hold. Everything it opened is closed again when it returns, and the
-    /// supervisor has been told how it ended.
+    /// One scan, then the candidates it offers one after another until one connects, then the hold.
+    /// Everything it opened is closed again when it returns, and the supervisor has been told how it
+    /// ended: a failure and the backoff come only after every candidate has failed.
     fn attempt(
         &self,
         name: &str,
         frequencies: &[Frequency],
         supervisor: &mut Supervisor,
-        pmk: &Pmk,
         clock: &dyn Fn() -> Instant,
     ) -> Next {
         let stop = || self.shared.stop_requested();
-        let ssid = self.config.credentials.ssid.as_bytes();
+        let networks = self.config.credentials.networks();
         supervisor.scanning();
         enter(c"scanning through nl80211");
         let mut client = match scan::connect() {
             Ok(client) => client,
             Err(error) => return fail(supervisor, Failure::Scan, &error, clock),
         };
-        let report =
-            match scan::scan(&mut client, name, frequencies, self.config.scan_limit, &stop, log::Level::Debug, clock) {
-                Ok(report) => report,
-                Err(ScanError::Cancelled { .. }) => return supervisor.stopped(),
-                Err(error) => return fail(supervisor, Failure::Scan, &error, clock),
-            };
-        let Some(bss) = best_bss(&report.bsses, ssid) else {
+        let hidden = select::hidden_ssids(networks);
+        let report = match scan::scan(
+            &mut client,
+            name,
+            (frequencies, &hidden),
+            self.config.scan_limit,
+            &stop,
+            log::Level::Debug,
+            clock,
+        ) {
+            Ok(report) => report,
+            Err(ScanError::Cancelled { .. }) => return supervisor.stopped(),
+            Err(error) => return fail(supervisor, Failure::Scan, &error, clock),
+        };
+        let candidates = select::candidates(networks, &report.bsses);
+        if candidates.is_empty() {
             log::warn!(
-                "station: the scan found {} BSS and none offers WPA2 for \"{}\"",
-                report.bsses.len(),
-                SsidDisplay(ssid)
+                "station: the scan found {} BSS and none that a configured network can join",
+                report.bsses.len()
             );
             return supervisor.failed(Failure::NotFound, clock());
-        };
-        let signal = bss.signal.map_or_else(|| String::from("?"), |s| s.to_string());
-        log::info!("station: connecting to {} on {} MHz at {signal}", bss.bssid, bss.frequency.0);
-        supervisor.connecting(&SsidDisplay(ssid).to_string());
-        enter(c"connecting (association and the 4-way handshake)");
+        }
         let interface = match scan::find(&mut client, name) {
             Ok(interface) => interface,
             Err(error) => return fail(supervisor, Failure::Scan, &error, clock),
         };
-        let mut connection = match connect::connect(
-            &mut client,
+        let mut last = None;
+        for candidate in &candidates {
+            if supervisor.stop_requested() {
+                return supervisor.stopped();
+            }
+            match self.connect_candidate(&mut client, &interface, candidate, supervisor, clock) {
+                Ok(connection) => {
+                    return self.hold(connection, &mut client, name, &interface, candidate, supervisor, clock);
+                },
+                Err(error) => {
+                    connect::abort(&mut client, interface.ifindex, clock);
+                    log::warn!(
+                        "station: {} at {} failed: {error}{}",
+                        SsidDisplay(candidate.network.ssid.as_bytes()),
+                        candidate.bss.bssid,
+                        if core::ptr::eq(candidate, candidates.last().unwrap_or(candidate)) {
+                            ""
+                        } else {
+                            "; trying the next candidate"
+                        }
+                    );
+                    last = Some(failure_of(&error));
+                },
+            }
+        }
+        supervisor.failed(last.unwrap_or(Failure::Protocol), clock())
+    }
+
+    fn connect_candidate(
+        &self,
+        client: &mut ferrite_nl80211::client::Client<scan::KernelSocket>,
+        interface: &ferrite_nl80211::nl80211::Interface,
+        candidate: &Candidate<'_>,
+        supervisor: &Supervisor,
+        clock: &dyn Fn() -> Instant,
+    ) -> Result<connect::Connection, ConnectError> {
+        let ssid = candidate.network.ssid.as_bytes();
+        let signal = candidate.bss.signal.map_or_else(|| String::from("?"), |s| s.to_string());
+        log::info!(
+            "station: connecting to {} on {} MHz at {signal} ({:?})",
+            candidate.bss.bssid,
+            candidate.bss.frequency.0,
+            candidate.join
+        );
+        supervisor.connecting(&SsidDisplay(ssid).to_string());
+        enter(c"connecting (association and the 4-way handshake)");
+        let derive = clock();
+        let secret = connect::secret_for(candidate.network, candidate.join).ok_or(ConnectError::Unsupported)?;
+        log::debug!("secret ready in {} ms", (clock() - derive).as_millis());
+        connect::connect(
+            client,
             interface.ifindex,
             interface.mac,
-            bss,
-            pmk.clone(),
+            candidate.bss,
+            secret,
             self.config.connect_limit,
             clock,
-        ) {
-            Ok(connection) => connection,
-            Err(error) => {
-                // Best effort: a refused or dropped connection is already down, and closing the client's
-                // socket ends whatever is left of one.
-                let _ = client.disconnect(interface.ifindex, ferrite_nl80211::mlme::ReasonCode::DeauthLeaving);
-                return fail(supervisor, failure_of(&error), &error, clock);
-            },
-        };
+        )
+    }
+
+    /// Offer the connection's port, hold it until the link drops or a stop is requested, and close it.
+    #[expect(clippy::too_many_arguments, reason = "the attempt's state, split off to keep it readable")]
+    fn hold(
+        &self,
+        mut connection: connect::Connection,
+        client: &mut ferrite_nl80211::client::Client<scan::KernelSocket>,
+        name: &str,
+        interface: &ferrite_nl80211::nl80211::Interface,
+        candidate: &Candidate<'_>,
+        supervisor: &mut Supervisor,
+        clock: &dyn Fn() -> Instant,
+    ) -> Next {
+        let stop = || self.shared.stop_requested();
+        let ssid = candidate.network.ssid.as_bytes();
         if supervisor.stop_requested() {
             let next = supervisor.stopped();
-            leave(connection, &mut client, self.config.connect_limit, clock);
+            leave(connection, client, self.config.connect_limit, clock);
             return next;
         }
         // Power save holds frames to the station until the access point's next beacon, up to ~100 ms.
@@ -312,7 +398,7 @@ impl Service {
             Err(code) => {
                 log::error!("station: attaching to {name}'s frames failed: {code}");
                 let next = supervisor.failed(Failure::Attach, clock());
-                leave(connection, &mut client, self.config.connect_limit, clock);
+                leave(connection, client, self.config.connect_limit, clock);
                 return next;
             },
         };
@@ -320,12 +406,12 @@ impl Service {
         log::info!(
             "station: connected to {} on {} MHz: associated after {} ms, handshake {} ms later",
             connection.ap,
-            bss.frequency.0,
+            candidate.bss.frequency.0,
             connection.associated_after.as_millis(),
             connection.handshake_after.as_millis()
         );
         enter(c"holding the connection");
-        let held = connection.watch(&mut client, &stop, clock);
+        let held = connection.watch(client, &stop, clock);
         let (next, left) = match held {
             Ok(()) => (supervisor.stopped(), true),
             Err(error) => {
@@ -335,7 +421,7 @@ impl Service {
         };
         attachment.detach();
         if left {
-            leave(connection, &mut client, self.config.connect_limit, clock);
+            leave(connection, client, self.config.connect_limit, clock);
         }
         next
     }
@@ -354,9 +440,13 @@ fn fail(
 
 fn failure_of(error: &ConnectError) -> Failure {
     match error {
-        ConnectError::Rejected { .. } | ConnectError::Disconnected { .. } => Failure::Rejected,
+        ConnectError::Rejected { .. } | ConnectError::SaeRejected { .. } | ConnectError::Disconnected { .. } => {
+            Failure::Rejected
+        },
         ConnectError::Expired { .. } => Failure::Timeout,
-        ConnectError::Nl80211 { .. } | ConnectError::NoRsn | ConnectError::Unsupported => Failure::Protocol,
+        ConnectError::Nl80211 { .. } | ConnectError::Sae { .. } | ConnectError::NoRsn | ConnectError::Unsupported => {
+            Failure::Protocol
+        },
     }
 }
 
