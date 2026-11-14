@@ -171,6 +171,23 @@ fn a_caller_that_knows_when_the_wait_ends_places_its_start_exactly() {
 }
 
 #[test]
+fn a_wait_the_caller_knows_is_under_way_never_advances_the_work_time_whatever_the_words_say() {
+    // The shape says the wait begins at 100 words; the memory it was made for is gone, and the
+    // test sits in it with 90 done.
+    let shape = Shape::new([Stage::Work(100), Stage::Wait(secs(120)), Stage::Work(100)]);
+    let mut est = Estimator::new(vec![shape], vec![Some(secs(130))]);
+    est.observe(at(0), 0, 0, None);
+    let end = Some(at(125));
+    let start = est.observe(at(5), 0, 90, end);
+    check!(start.position == Position::Wait { nth: 1, waits: 1, left: secs(120) }, "{:?}", start.position);
+    let f = est.observe(at(65), 0, 90, end);
+    check!(f.position == Position::Wait { nth: 1, waits: 1, left: secs(60) }, "{:?}", f.position);
+    check!(f.test_work == secs(5));
+    assert!(let (Some(before), Some(after)) = (start.test_left, f.test_left));
+    check!(before.saturating_sub(after) == secs(60), "{before:?} then {after:?}");
+}
+
+#[test]
 fn time_the_run_was_paused_does_not_count_against_the_test() {
     let mut est = estimator([None, None, None]);
     est.observe(at(0), 0, 0, None);

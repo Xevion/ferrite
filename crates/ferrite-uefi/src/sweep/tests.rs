@@ -543,6 +543,54 @@ mod rotation {
         sweep.restart(Preset::Standard);
         check!(sweep.status().coverage.tested == (MAIN_WORDS * WORD) as u64);
     }
+
+    /// A firmware that hands back a different set of pages than it was lent, so the sweep's memory
+    /// is not the size it was before the window.
+    struct Regrows;
+
+    impl Pages for Regrows {
+        fn open(&mut self, _main: &mut Claim, lend: u64) -> Option<Opened> {
+            Some(Opened {
+                reserve: host_blocks(&[RESERVE_WORDS]),
+                lent: vec![Range::new(1 << 20, (lend / 4096) as usize)],
+                free: lend,
+            })
+        }
+
+        fn close(&mut self, main: &mut Claim, _reserve: Claim, _lent: &[Range]) -> Closed {
+            main.absorb(host_blocks(&[512]));
+            Closed { kept: 0, free: 7 << 20 }
+        }
+    }
+
+    #[test]
+    fn a_bit_fade_after_a_rotation_that_resized_the_memory_counts_its_wait_down_exactly() {
+        use ferrite_mem::eta::Position;
+
+        let fade = Duration::from_secs(5);
+        let config = Config { fade, ..CFG };
+        let mut sweep = Sweep::with_buffer(
+            Some(host_blocks(&[MAIN_WORDS])),
+            Kernels::uniform(Kernel::SCALAR),
+            config,
+            Preset::Thorough,
+            None,
+        )
+        .with_pages(Regrows, 1 << 20);
+        let mut now = Instant::from_epoch(Duration::from_secs(1));
+        // Pass 0 teaches the timings, its rotation changes the memory, pass 1 runs over what came back.
+        drive(&mut sweep, &mut now, |s| s.status().bytes == (MAIN_WORDS + 512) * WORD);
+        check!(sweep.status().passes == 1);
+        drive(&mut sweep, &mut now, |s| s.waiting_until().is_some() && s.status().test == "bit fade");
+        let start = sweep.status().outlook;
+        check!(start.position == Position::Wait { nth: 1, waits: 4, left: fade }, "{:?}", start.position);
+        now = now + Duration::from_secs(2);
+        sweep.tick(now);
+        let later = sweep.status().outlook;
+        check!(later.position == Position::Wait { nth: 1, waits: 4, left: Duration::from_secs(3) });
+        assert!(let (Some(before), Some(after)) = (start.test_left, later.test_left));
+        check!(before.saturating_sub(after) == Duration::from_secs(2), "{before:?} then {after:?}: a wait is not work");
+    }
 }
 
 #[test]

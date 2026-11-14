@@ -423,8 +423,11 @@ impl Pace {
             Scope::Reserve => &mut self.reserve,
         };
         match slot {
-            Some(lane) if lane.key == key => {},
+            // The memory can come back from a rotation a little different in size, which the
+            // key (to the MiB) does not tell, and moves where each test's waits begin.
+            Some(lane) if lane.key == key => lane.estimator.reshape(schedule.shapes()),
             Some(lane) => {
+                lane.estimator.reshape(schedule.shapes());
                 // The processors or the tier changed mid-run: the tests keep their measured times,
                 // and the ones still to run take the times known for the new setup.
                 log::info!("timings: setup now {key}, was {}", lane.key);

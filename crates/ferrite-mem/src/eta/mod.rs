@@ -171,6 +171,20 @@ fn scale(d: Duration, num: u128, den: u128) -> Duration {
     )
 }
 
+/// The place of the wait at stage `stage` of `shape`, if that stage is one.
+fn wait_at(shape: &Shape, stage: usize) -> Option<Place> {
+    matches!(shape.stages().get(stage), Some(Stage::Wait(_))).then(|| Place::Wait {
+        stage,
+        nth: shape.stages()[..=stage].iter().filter(|s| matches!(s, Stage::Wait(_))).count(),
+        waits: shape.wait_count(),
+    })
+}
+
+/// The place of the wait right after the work stage `stage`, if it is followed by one.
+fn wait_after(shape: &Shape, stage: usize) -> Option<Place> {
+    wait_at(shape, stage + 1)
+}
+
 fn nanos(at: Instant) -> i128 {
     at.since_epoch().as_nanos().cast_signed()
 }
@@ -225,6 +239,16 @@ impl Estimator {
     pub fn set_priors(&mut self, mut priors: Vec<Option<Duration>>) {
         priors.resize(self.shapes.len(), None);
         self.priors = priors;
+    }
+
+    /// Take the shapes of the tests as they are now, for memory that came back from a rotation of a
+    /// different size: where a wait begins is a count of words, so shapes of another layout place
+    /// it wrong. Nothing is done, or allocated, when they are the same; they must be one per test
+    /// still, so shapes of another preset are left alone.
+    pub fn reshape(&mut self, shapes: &[Shape]) {
+        if self.shapes.len() == shapes.len() && self.shapes != shapes {
+            self.shapes = shapes.to_vec();
+        }
     }
 
     /// Start the next pass: what each test took now stands in for what it took before.
@@ -285,9 +309,18 @@ impl Estimator {
             let started = self.next_start.take().unwrap_or(now);
             self.current = Some(Current { index, started, last_done: done, wait: None });
         }
-        let place = shape.locate(done);
+        let mut place = shape.locate(done);
         let mut current = self.current.unwrap_or(Current { index, started: now, last_done: done, wait: None });
         current.last_done = done;
+        // A caller that knows the memory is sitting out a wait is believed over the word count,
+        // which only places a wait when it lands on the stage's boundary exactly.
+        if wait_until.is_some_and(|end| now < end)
+            && let Place::Work { stage, .. } = place
+            && let Some(waiting) =
+                wait_after(shape, stage).or_else(|| current.wait.and_then(|(s, _)| wait_at(shape, s)))
+        {
+            place = waiting;
+        }
         let mut position = Position::Work { waits_passed: 0, waits: shape.wait_count() };
         let mut wait_elapsed = Duration::ZERO;
         let mut stage_now = shape.stages().len();
