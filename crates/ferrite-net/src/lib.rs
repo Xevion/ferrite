@@ -4,6 +4,8 @@
 //!   queues), and [`QueuePort`], the port for a device that pushes frames.
 //! - [`Stack`]: the IP stack of one port, with DHCP, mDNS, ICMP echo and the HTTP server.
 //! - [`Network`]: any number of stacks polled together, ports added and removed at any time.
+//! - [`notify`]: push notifications sent by POST over HTTP, queued with retries and sent through the first port
+//!   with an address.
 //! - [`http::Site`]: what an app implements to be served, over every stack at once.
 
 #![no_std]
@@ -17,6 +19,7 @@ pub mod http;
 pub mod loopback;
 pub mod mdns;
 mod network;
+pub mod notify;
 pub mod ping;
 pub mod port;
 mod queue;

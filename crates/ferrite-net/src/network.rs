@@ -12,6 +12,7 @@ use core::time::Duration;
 use ferrite_hal::{Clock, Instant};
 
 use crate::http::{Site, Web};
+use crate::notify::{Notification, Notifier, Stats};
 use crate::port::Port;
 use crate::stack::{PollCtx, Stack, StackConfig};
 use crate::status::NetStatus;
@@ -28,11 +29,20 @@ pub struct Network<S: Site> {
     key: Option<S::Key>,
     last: NetStatus,
     clock: Option<Box<dyn Clock>>,
+    notifier: Option<Notifier>,
 }
 
 impl<S: Site> Network<S> {
     pub fn new(site: S) -> Self {
-        Self { web: Web::new(site), stacks: Vec::new(), next_id: 0, key: None, last: NetStatus::default(), clock: None }
+        Self {
+            web: Web::new(site),
+            stacks: Vec::new(),
+            next_id: 0,
+            key: None,
+            last: NetStatus::default(),
+            clock: None,
+            notifier: None,
+        }
     }
 
     /// Time the HTTP polls with `clock`, for the periodic summary in the log.
@@ -40,6 +50,27 @@ impl<S: Site> Network<S> {
     pub fn timed(mut self, clock: impl Clock + 'static) -> Self {
         self.clock = Some(Box::new(clock));
         self
+    }
+
+    /// Send the notifications given to [`Network::notify`] with `notifier`, over the first port that
+    /// has an address.
+    pub fn set_notifier(&mut self, notifier: Notifier) {
+        self.notifier = Some(notifier);
+    }
+
+    /// Queue `notification` for delivery; false when there is no notifier or its config does not ask
+    /// for the event.
+    pub fn notify(&mut self, notification: Notification) -> bool {
+        self.notifier.as_mut().is_some_and(|notifier| notifier.notify(notification))
+    }
+
+    /// Notifications queued or being sent.
+    pub fn notifications_pending(&self) -> usize {
+        self.notifier.as_ref().map_or(0, Notifier::pending)
+    }
+
+    pub fn notification_stats(&self) -> Option<Stats> {
+        self.notifier.as_ref().map(Notifier::stats)
     }
 
     /// Start a stack on `port` at `now`.
@@ -61,6 +92,11 @@ impl<S: Site> Network<S> {
             return false;
         };
         let (_, stack) = self.stacks.remove(at);
+        if stack.notifying()
+            && let Some(notifier) = &mut self.notifier
+        {
+            notifier.cancel();
+        }
         log::debug!("net: {} {} removed", stack.link().medium, stack.link().mac);
         true
     }
@@ -116,9 +152,15 @@ impl<S: Site> Network<S> {
 
         let site = web.site();
         let mut render = |out: &mut alloc::string::String| site.render(state, &status, now, out);
+        // The stack already sending carries on; else the first with an address takes the next one.
+        let carrier = self.notifier.as_ref().filter(|notifier| notifier.pending() > 0).and_then(|_| {
+            let sending = self.stacks.iter().find(|(_, stack)| stack.notifying());
+            sending.or_else(|| self.stacks.iter().find(|(_, stack)| stack.link().address.is_some())).map(|(id, _)| *id)
+        });
         let mut wait = Duration::MAX;
-        for (_, stack) in &mut self.stacks {
-            let mut ctx = PollCtx { render: &mut render, clock: self.clock.as_deref() };
+        for (id, stack) in &mut self.stacks {
+            let notify = if Some(*id) == carrier { self.notifier.as_mut() } else { None };
+            let mut ctx = PollCtx { render: &mut render, clock: self.clock.as_deref(), notify };
             wait = wait.min(stack.poll(now, &mut ctx));
         }
         web.drain_commands(commands);

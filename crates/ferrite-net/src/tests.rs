@@ -28,7 +28,7 @@ const HOST: &str = "Host: ferrite.local\r\n";
 const PAGE: &str = "<!doctype html><title>toy</title>";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Control {
+pub enum Control {
     Pause,
     Echo,
 }
@@ -43,14 +43,14 @@ impl From<Control> for &'static str {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Command {
+pub enum Command {
     Pause,
     Echo(u32),
     Quit,
 }
 
 #[derive(Debug)]
-struct NotANumber;
+pub struct NotANumber;
 
 impl fmt::Display for NotANumber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -59,12 +59,12 @@ impl fmt::Display for NotANumber {
 }
 
 /// The app's state as one poll sees it.
-struct State {
-    revision: u64,
+pub struct State {
+    pub revision: u64,
 }
 
 #[derive(Default)]
-struct Toy {
+pub struct Toy {
     renders: Cell<u32>,
 }
 

@@ -27,6 +27,7 @@ use crate::dash::{Dashboard, Frame};
 use crate::diag::Diag;
 use crate::gop::Display;
 use crate::net::Net;
+use crate::net::notify::{self, Watch};
 use crate::report::Snapshot;
 use crate::sweep::{Flow, Sweep, SweepStatus};
 use crate::ui::{self, View};
@@ -47,6 +48,10 @@ const SHORT_WAIT: Duration = Duration::from_millis(2);
 /// `WATCHDOG_REARM`, so a long sweep never trips it and a hung loop does.
 const WATCHDOG: Duration = Duration::from_secs(60);
 const WATCHDOG_REARM: Duration = Duration::from_secs(5);
+/// How long the end of the run waits for its notifications to go out.
+const NOTIFY_FLUSH: Duration = Duration::from_secs(4);
+/// Longest gap between network polls while waiting for them.
+const NOTIFY_STEP: Duration = Duration::from_millis(5);
 /// How often draw times are summarised at debug.
 const DRAW_LOG_EVERY: Duration = Duration::from_secs(30);
 
@@ -157,6 +162,8 @@ struct Desk<'a> {
     screen: Screen<'a>,
     clock: Clock,
     net: Net,
+    /// Notices passes and the first fault, for push notifications.
+    watch: Watch,
     diag: Diag,
     waiter: Option<Waiter>,
     draw_failures: u32,
@@ -191,6 +198,7 @@ impl<'a> App<'a> {
             screen,
             clock,
             net,
+            watch: Watch::new(),
             diag: Diag::new(),
             waiter,
             draw_failures: 0,
@@ -238,6 +246,7 @@ impl<'a> App<'a> {
             sweep.analysis
         );
         self.sweep.check_cores();
+        self.desk.announce_end(&self.sweep.snapshot());
         self.desk.net.shutdown();
     }
 
@@ -301,6 +310,8 @@ impl Desk<'_> {
         if let Some(watchdog) = self.watchdog.as_mut() {
             watchdog.tick(now);
         }
+        let net = &mut self.net;
+        self.watch.observe(now, snapshot, &mut |notification| net.notify(notification));
         let commands = &mut self.commands;
         let net_wait = self.net.poll(now, snapshot, commands).unwrap_or(FRAME_INTERVAL);
         self.read_keys(&snapshot.status);
@@ -319,6 +330,34 @@ impl Desk<'_> {
             return None;
         }
         Some((now + net_wait).min(self.next_frame))
+    }
+
+    /// Tell the user the run ended, and give the network a few seconds to deliver that and whatever
+    /// is still queued before it shuts down.
+    fn announce_end(&mut self, snapshot: &Snapshot<'_>) {
+        self.net.notify(notify::run_ended(self.clock.now(), snapshot));
+        let deadline = self.clock.now() + NOTIFY_FLUSH;
+        while self.net.notifications_pending() > 0 {
+            let now = self.clock.now();
+            if now >= deadline {
+                log::warn!("notify: {} notifications not delivered before shutdown", self.net.notifications_pending());
+                return;
+            }
+            if let Some(watchdog) = self.watchdog.as_mut() {
+                watchdog.tick(now);
+            }
+            let Some(wait) = self.net.poll(now, snapshot, &mut self.commands) else {
+                log::warn!("notify: no network to send {} notifications on", self.net.notifications_pending());
+                return;
+            };
+            self.commands.drain().for_each(drop);
+            if let Some(waiter) = self.waiter.as_mut()
+                && let Err(e) = waiter.wait(wait.min(NOTIFY_STEP))
+            {
+                log::debug!("notify: waiting on events failed: {e}");
+                self.waiter = None;
+            }
+        }
     }
 
     /// Queue what the console's keys ask for: `q` or `Esc` quits, `p` pauses or resumes, `r`

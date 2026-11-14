@@ -1,6 +1,6 @@
 //! The IP stack of one port: a smoltcp interface and its sockets, a DHCP client or a fixed address,
-//! the mDNS responder, ICMP echo (answered by smoltcp, sent by [`Stack::start_ping`]) and the HTTP
-//! server.
+//! the mDNS responder, ICMP echo (answered by smoltcp, sent by [`Stack::start_ping`]), the HTTP
+//! server and the sockets of a notification being sent.
 //!
 //! The stack owns its [`Port`] and moves frames through fixed buffers. Several stacks side by side
 //! (one per port) make a [`crate::Network`].
@@ -20,6 +20,7 @@ use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpo
 use crate::device::{PortDevice, Scratch, smol_instant};
 use crate::http::{PollStats, Server, Site, Web};
 use crate::mdns::{self, Destination, Handled, Responder};
+use crate::notify::{Courier, Notifier};
 use crate::ping::Pinger;
 use crate::port::Port;
 use crate::status::{Link, OptAddr, PortStatus, ServiceCounters};
@@ -59,6 +60,8 @@ pub struct PollCtx<'a> {
     pub render: &'a mut dyn FnMut(&mut String),
     /// Times the HTTP poll, for the periodic summary; without one the timings read zero.
     pub clock: Option<&'a dyn Clock>,
+    /// The notifier whose queue this stack carries, when it is the port notifications go out on.
+    pub notify: Option<&'a mut Notifier>,
 }
 
 struct Mdns {
@@ -76,6 +79,7 @@ pub struct Stack {
     mdns: Option<Mdns>,
     http: Option<Server>,
     pinger: Option<Pinger>,
+    courier: Courier,
     link: Link,
     services: ServiceCounters,
     http_stats: PollStats,
@@ -111,6 +115,7 @@ impl Stack {
             mdns,
             http: None,
             pinger: None,
+            courier: Courier::new(config.seed),
             link,
             services: ServiceCounters::default(),
             http_stats: PollStats::default(),
@@ -146,6 +151,7 @@ impl Stack {
             self.services.http_responses = self.services.http_responses.wrapping_add(served.responses);
             served.busy
         });
+        self.courier.poll(&mut self.iface, &mut self.sockets, &self.link, ctx.notify.as_deref_mut(), now);
         // Send what the connections just queued now rather than a poll later.
         let mut device = PortDevice::new(&mut *self.port, &mut self.scratch, now);
         self.iface.poll_egress(at, &mut device, &mut self.sockets);
@@ -269,6 +275,16 @@ impl Stack {
 
     pub const fn pinger(&self) -> Option<&Pinger> {
         self.pinger.as_ref()
+    }
+
+    /// Whether a notification is being sent over this stack.
+    pub const fn notifying(&self) -> bool {
+        self.courier.busy()
+    }
+
+    /// The DNS server to look names up with, for a stack whose address is fixed (a DHCP lease sets it).
+    pub const fn set_dns(&mut self, server: Option<Ipv4Address>) {
+        self.link.dns = server;
     }
 
     /// Link and lease state.

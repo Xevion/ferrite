@@ -7,6 +7,7 @@
 
 mod api;
 mod json;
+pub mod notify;
 #[cfg(test)]
 mod testing;
 mod wifi;
@@ -21,6 +22,7 @@ use ferrite_efi::entropy;
 use ferrite_efi::snp::{self, SnpError};
 use ferrite_hal::{Clock as _, Instant};
 use ferrite_net::http::{Rejection, Route, Site};
+use ferrite_net::notify::Notification;
 use ferrite_net::{NetStatus, Network, PortId, StackConfig};
 use ferrite_wifi::PortEvent;
 
@@ -132,6 +134,9 @@ impl Net {
             wifi_port: None,
         };
         net.open_wired(now);
+        if let Some(notifier) = notify::load() {
+            net.network.set_notifier(notifier);
+        }
         let ports = net.network.status().ports().len();
         if ports > 0 {
             log::debug!("net: {ports} wired ports up");
@@ -190,6 +195,16 @@ impl Net {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
+    }
+
+    /// Queue a push notification, if the settings on the boot volume ask for its event.
+    pub fn notify(&mut self, notification: Notification) {
+        self.network.notify(notification);
+    }
+
+    /// Notifications queued or being sent.
+    pub fn notifications_pending(&self) -> usize {
+        self.network.notifications_pending()
     }
 
     pub fn status(&self) -> NetStatus {
