@@ -7,12 +7,15 @@ use core::fmt;
 
 use serde::Deserialize;
 
+pub use crate::time::ClockFormat;
+
 /// Everything the file can say; each part is optional.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
     pub wifi: Wifi,
     pub notify: Option<Notify>,
     pub run: Run,
+    pub time: Time,
 }
 
 /// A value that must not reach a log: a passphrase, or a URL that works like one. Its `Debug` hides it.
@@ -159,5 +162,31 @@ impl Run {
     /// Whether the section says nothing.
     pub const fn is_empty(&self) -> bool {
         self.passes.is_none() && self.time.is_none() && !self.stop_on_fault
+    }
+}
+
+/// `[time]`: keeping the clock right, and showing times.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Time {
+    /// Keep the clock right over the network (SNTP). On unless the file says otherwise.
+    pub ntp: bool,
+    /// Servers to ask first, IPv4 addresses or host names, at most four.
+    pub servers: Option<Vec<String>>,
+    /// An IANA time zone name, such as `America/Chicago`; UTC when absent.
+    pub zone: Option<String>,
+    pub clock: ClockFormat,
+}
+
+impl Default for Time {
+    fn default() -> Self {
+        Self { ntp: true, servers: None, zone: None, clock: ClockFormat::default() }
+    }
+}
+
+impl Time {
+    /// Whether the section says nothing.
+    pub const fn is_default(&self) -> bool {
+        self.ntp && self.servers.is_none() && self.zone.is_none() && matches!(self.clock, ClockFormat::Twelve)
     }
 }

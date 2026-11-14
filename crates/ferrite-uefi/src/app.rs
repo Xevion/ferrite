@@ -5,6 +5,7 @@
 //! from inside it.
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::ToString as _;
 use core::time::Duration;
 
@@ -13,8 +14,8 @@ use ferrite_efi::config;
 use ferrite_efi::cores::{CoreChoice, Cores};
 use ferrite_efi::cpu::VectorState;
 use ferrite_efi::link::Link as LoaderLink;
-use ferrite_efi::watchdog::Keepalive;
-use ferrite_hal::{Clock as _, Instant};
+use ferrite_efi::{rtc, watchdog::Keepalive};
+use ferrite_hal::{Clock as _, Instant, UnixTime, WallClock};
 use ferrite_mem::Caps;
 use ferrite_net::NetStatus;
 use ratatui::Terminal;
@@ -33,6 +34,7 @@ use crate::net::notify::{self, Watch};
 use crate::report::Snapshot;
 use crate::sweep::{Flow, Sweep, SweepStatus, Tended};
 use crate::ui::{self, View};
+use crate::wall::Wall;
 
 /// The processors split tests run on. Every logical processor: verify-heavy kernels scale up to
 /// all eight threads on the laptop, while fills saturate at two cores either way.
@@ -150,6 +152,17 @@ impl Drop for Waiter {
     }
 }
 
+/// The wall clock as the firmware's RTC reads it now, or none when it cannot be read.
+fn rtc_clock(clock: &Clock) -> Option<WallClock> {
+    match rtc::now() {
+        Ok(utc) => Some(WallClock::from_rtc(clock.now(), UnixTime::from_epoch(utc))),
+        Err(e) => {
+            log::warn!("time: the firmware RTC cannot be read ({e}); there is no time of day until an NTP sync");
+            None
+        },
+    }
+}
+
 pub struct App<'a> {
     desk: Desk<'a>,
     sweep: Sweep,
@@ -163,6 +176,8 @@ struct Desk<'a> {
     input: &'a mut Input,
     screen: Screen<'a>,
     clock: Clock,
+    /// The time of day: the RTC, corrected by the network's time client.
+    wall: Rc<Wall>,
     net: Net,
     /// Notices passes and the first fault, for push notifications.
     watch: Watch,
@@ -195,7 +210,9 @@ impl<'a> App<'a> {
         let settings = config::load();
         let goal = settings.run.map_or(Goal::UNLIMITED, Goal::from);
         log::info!("run: goal {goal}");
-        let net = Net::setup(clock, settings.credentials, settings.notify);
+        let time = settings.time.unwrap_or_default();
+        let wall = Rc::new(Wall::new(rtc_clock(&clock), time.zone.clone(), time.clock));
+        let net = Net::setup(clock, settings.credentials, settings.notify, &time, Rc::clone(&wall));
         let waiter = Waiter::new(input).inspect_err(|e| log::warn!("ui: no wait events, stalling instead: {e}")).ok();
         let loader = LoaderLink::locate();
         let watchdog = loader.map(|_| Keepalive::new(WATCHDOG, WATCHDOG_REARM, clock.now()));
@@ -204,6 +221,7 @@ impl<'a> App<'a> {
             input,
             screen,
             clock,
+            wall,
             net,
             watch: Watch::new(),
             diag: Diag::new(),
@@ -433,10 +451,13 @@ impl Desk<'_> {
     fn draw(&mut self, now: Instant, snapshot: &Snapshot<'_>, net: Option<&NetStatus>) {
         let net = net.copied();
         let net_err = net.is_none().then(|| self.net.reason());
+        let outlook = &snapshot.status.outlook;
+        let elapsed = snapshot.history.run_started.map_or(Duration::ZERO, |start| now - start);
+        let time = self.wall.line(now, outlook.overall(elapsed).left, outlook.pass);
         let failure = match &mut self.screen {
             Screen::Pixels { dash, display } => {
                 let start = self.clock.now();
-                dash.render(&Frame { snapshot, net, net_err, now });
+                dash.render(&Frame { snapshot, net, net_err, now, time });
                 let rendered = self.clock.now();
                 let (canvas, rects) = dash.output();
                 if rects.is_empty() {
@@ -451,7 +472,7 @@ impl Desk<'_> {
             },
             Screen::Text { terminal, last } => {
                 let elapsed = snapshot.history.run_started.map_or(0, |start| (now - start).as_secs());
-                let view = View { sweep: snapshot.status, net, net_err, elapsed };
+                let view = View { sweep: snapshot.status, net, net_err, elapsed, time };
                 if *last == Some(view) {
                     return;
                 }

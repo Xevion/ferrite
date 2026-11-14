@@ -45,7 +45,8 @@ fontdue = "0.9.5"
 heapless = { version = "0.9.3", default-features = false }
 hmac = { version = "0.13.0", default-features = false }
 humantime = "2.4.0"
-jiff = "0.2.43"
+# `no_std` for the apps (`alloc` and the bundled tz database); ferrite-dev turns on `std` and the system zone.
+jiff = { version = "0.2.43", default-features = false }
 libc = "0.2.191"
 log = "0.4.33"
 nusb = "0.2.9"

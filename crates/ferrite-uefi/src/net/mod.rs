@@ -13,16 +13,19 @@ pub(crate) mod testing;
 mod wifi;
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use core::fmt;
 use core::time::Duration;
 
+use ferrite_config::TimeSettings;
 use ferrite_efi::clock::Clock;
 use ferrite_efi::entropy;
 use ferrite_efi::snp::{self, SnpError};
 use ferrite_hal::{Clock as _, Instant};
 use ferrite_net::http::{Rejection, Route, Site};
 use ferrite_net::notify::{Config as NotifyConfig, Notification, Notifier};
+use ferrite_net::sntp::Sync;
 use ferrite_net::{NetStatus, Network, PortId, StackConfig};
 use ferrite_wifi::PortEvent;
 use ferrite_wpa::env::Credentials;
@@ -33,6 +36,7 @@ use self::wifi::{Wifi, WifiKey, WifiView};
 use crate::control::{Command, Commands};
 use crate::report::Snapshot;
 use crate::sweep::SweepStatus;
+use crate::wall::Wall;
 
 static PAGE: &str = include_str!("page.html");
 
@@ -69,11 +73,13 @@ pub struct Key {
 /// The status page, its API and the run's controls.
 pub struct Console {
     wifi: WifiView,
+    /// The clock the document's times come from.
+    wall: Rc<Wall>,
 }
 
 impl Console {
-    pub const fn new(wifi: WifiView) -> Self {
-        Self { wifi }
+    pub const fn new(wifi: WifiView, wall: Rc<Wall>) -> Self {
+        Self { wifi, wall }
     }
 }
 
@@ -111,7 +117,7 @@ impl Site for Console {
     }
 
     fn render(&self, snapshot: &Snapshot<'_>, net: &NetStatus, now: Instant, out: &mut String) {
-        StatusDoc { snapshot, net, wifi: &self.wifi, now }.to_json(out);
+        StatusDoc { snapshot, net, wifi: &self.wifi, now, wall: &self.wall }.to_json(out);
     }
 }
 
@@ -122,20 +128,30 @@ pub struct Net {
     wifi: Wifi,
     /// The stack over the Wi-Fi link, while the station offers one.
     wifi_port: Option<PortId>,
+    /// The clock the network's time client corrects.
+    wall: Rc<Wall>,
 }
 
 impl Net {
     /// Open every wired NIC the firmware drives as a port, each with its own stack, and start the
     /// Wi-Fi station to join the `networks`, whose link joins as one more port once it is up. Push
-    /// notifications go as `notify` says. Call before the sweep claims memory.
-    pub fn setup(clock: Clock, networks: Option<Credentials>, notify: Option<NotifyConfig>) -> Self {
+    /// notifications go as `notify` says, and `wall` is kept right over the network as `time` says. Call
+    /// before the sweep claims memory.
+    pub fn setup(
+        clock: Clock,
+        networks: Option<Credentials>,
+        notify: Option<NotifyConfig>,
+        time: &TimeSettings,
+        wall: Rc<Wall>,
+    ) -> Self {
         let now = clock.now();
         let wifi = Wifi::start(clock, networks);
         let mut net = Self {
-            network: Network::new(Console::new(wifi.view())).timed(clock),
+            network: Network::new(Console::new(wifi.view(), Rc::clone(&wall))).timed(clock),
             failure: None,
             wifi,
             wifi_port: None,
+            wall,
         };
         net.open_wired(now);
         if let Some(config) = notify {
@@ -150,6 +166,7 @@ impl Net {
         } else {
             log::info!("notify: off");
         }
+        net.start_time(now, time);
         let ports = net.network.status().ports().len();
         if ports > 0 {
             log::debug!("net: {ports} wired ports up");
@@ -159,6 +176,21 @@ impl Net {
             log::warn!("net: no network: {}", net.reason());
         }
         net
+    }
+
+    fn start_time(&mut self, now: Instant, time: &TimeSettings) {
+        let zone = self.wall.zone_name();
+        if time.ntp {
+            log::info!(
+                "time: NTP on, {} configured servers, then the lease's and the pool; zone {zone}, {} clock",
+                time.servers.len(),
+                time.clock.name()
+            );
+            let sync = Sync::new(time.servers.clone(), Box::new(entropy::random_u64), self.wall.pivot(now));
+            self.network.set_sync(sync);
+        } else {
+            log::info!("time: NTP off, the clock stays on the firmware's; zone {zone}, {} clock", time.clock.name());
+        }
     }
 
     fn open_wired(&mut self, now: Instant) {
@@ -203,7 +235,11 @@ impl Net {
     pub fn poll(&mut self, now: Instant, snapshot: &Snapshot<'_>, commands: &mut Commands) -> Option<Duration> {
         let wifi = self.wifi.poll();
         self.sync_wifi(now);
+        self.network.set_time_pivot(self.wall.pivot(now));
         let stacks = self.network.poll(now, snapshot, &mut |command| commands.push(command));
+        if let Some(fix) = self.network.take_time_fix() {
+            self.wall.apply(&fix);
+        }
         match (wifi, stacks) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),

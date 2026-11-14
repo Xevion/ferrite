@@ -157,6 +157,7 @@ fn net() -> NetStatus {
             address: Some(Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24)),
             gateway: Some(Ipv4Address::new(10, 0, 2, 2)),
             dns: Some(Ipv4Address::new(10, 0, 2, 3)),
+            ..Link::default()
         },
         frames: PortStats::default(),
         services: ServiceCounters::default(),
@@ -265,7 +266,7 @@ fn profile_full_redraws() {
         stats: &TestStats::default(),
     };
     let (net, net_err) = scenario.net();
-    let frame = Frame { snapshot: &snapshot, net, net_err, now: scenario.now() };
+    let frame = Frame { snapshot: &snapshot, net, net_err, now: scenario.now(), time: None };
     dash.render(&frame);
     let mut costs = Vec::new();
     for _ in 0..rounds {
@@ -316,7 +317,7 @@ fn profile_a_sweep() {
             stats: &TestStats::default(),
         };
         let (net, net_err) = scenario.net();
-        let frame = Frame { snapshot: &snapshot, net, net_err, now: scenario.now() };
+        let frame = Frame { snapshot: &snapshot, net, net_err, now: scenario.now(), time: None };
 
         let before = allocations();
         let t = Clock::now();

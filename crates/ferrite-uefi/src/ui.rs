@@ -19,6 +19,7 @@ use ferrite_mem::eta::{BasisPoints, Confidence, Position};
 use crate::dash::format;
 use crate::net::NoNetwork;
 use crate::sweep::SweepStatus;
+use crate::wall::{Ends, TimeLine};
 
 /// Everything one frame shows; a frame equal to the last one is not redrawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +30,8 @@ pub struct View {
     pub net_err: Option<NoNetwork>,
     /// Whole seconds since the run started.
     pub elapsed: u64,
+    /// The time of day and when the times left end, when the clock has a source.
+    pub time: Option<TimeLine>,
 }
 
 /// The page: dark ink on grey.
@@ -57,7 +60,14 @@ pub fn render(frame: &mut Frame<'_>, view: &View) {
         Span::raw("  Memory Diagnostic  "),
         Span::raw(concat!("v", env!("CARGO_PKG_VERSION"))),
     ]);
+    let heading_width = heading.width();
     frame.render_widget(Paragraph::new(heading).style(BAR), title);
+    if let Some(time) = view.time {
+        let now = format!("{} ", time.now.text(time.format));
+        if usize::from(title.width) > heading_width + now.len() {
+            frame.render_widget(Paragraph::new(now).alignment(Alignment::Right).style(BAR), title);
+        }
+    }
     frame.render_widget(Paragraph::new(lines), rows);
 
     let sweep = &view.sweep;
@@ -85,11 +95,16 @@ fn key_hints(paused: bool) -> Line<'static> {
     Line::from(spans)
 }
 
-/// A time left in the ink that says how far to trust it.
-fn left_span(eta: ferrite_mem::eta::Eta) -> Span<'static> {
+/// A time left, and when it ends, in the ink that says how far to trust it.
+fn left_span(eta: ferrite_mem::eta::Eta, ends: Option<(Ends, &TimeLine)>) -> Span<'static> {
+    let mut text = format::left(eta.remaining).to_string();
+    if let Some((ends, time)) = ends {
+        // The console's character set is plain, so the separator is too.
+        text = format!("{text}, ends {}", ends.text(time.format));
+    }
     match eta.confidence {
-        Confidence::Measured => Span::raw(format::left(eta.remaining).to_string()),
-        Confidence::Estimated => Span::styled(format::left(eta.remaining).to_string(), GUESS),
+        Confidence::Measured => Span::raw(text),
+        Confidence::Estimated => Span::styled(text, GUESS),
     }
 }
 
@@ -103,9 +118,13 @@ fn status_lines(view: &View) -> Vec<Line<'static>> {
         Position::Work { .. } => String::new(),
     };
     let test = format!("{} ({i}/{n}) {}{phase}{state}", sweep.test, o.test_progress);
+    let time = view.time.as_ref();
     let pass = o.pass.map_or_else(
         || vec![Span::raw(format!("{}", o.pass_progress))],
-        |eta| vec![Span::raw(format!("{}  ", o.pass_progress)), left_span(eta)],
+        |eta| {
+            let ends = time.and_then(|time| time.pass.map(|ends| (ends, time)));
+            vec![Span::raw(format!("{}  ", o.pass_progress)), left_span(eta, ends)]
+        },
     );
     let faults = match sweep.faults {
         0 => Span::styled("none", Style::new().fg(Color::Green)),
@@ -133,7 +152,8 @@ fn status_lines(view: &View) -> Vec<Line<'static>> {
     let overall = o.overall(core::time::Duration::from_secs(view.elapsed));
     let overall = match (overall.fill, overall.left) {
         (Some(fill), Some(left)) => {
-            vec![Span::raw(format!("{fill}, ")), left_span(left), Span::raw(format!(" (goal: {})", o.goal))]
+            let ends = time.and_then(|time| time.overall.map(|ends| (ends, time)));
+            vec![Span::raw(format!("{fill}, ")), left_span(left, ends), Span::raw(format!(" (goal: {})", o.goal))]
         },
         (Some(fill), None) => vec![Span::raw(format!("{fill} (goal: {})", o.goal))],
         (None, _) => vec![Span::raw(format!("no goal, running {}", format::clock(overall.elapsed)))],
@@ -188,14 +208,21 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Cell;
 
+    use ferrite_config::ClockFormat;
+
     use super::*;
     use crate::goal::Goal;
     use crate::net::testing::idle_status;
     use crate::pace::{Delta, Outlook};
+    use crate::wall::{Day, TimeOfDay};
 
     fn screen(sweep: &SweepStatus, elapsed: u64) -> String {
+        screen_at(sweep, elapsed, None)
+    }
+
+    fn screen_at(sweep: &SweepStatus, elapsed: u64, time: Option<TimeLine>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 14)).expect("a test terminal");
-        let view = View { sweep: *sweep, net: None, net_err: None, elapsed };
+        let view = View { sweep: *sweep, net: None, net_err: None, elapsed, time };
         terminal.draw(|frame| render(frame, &view)).expect("draws");
         let buffer = terminal.backend().buffer().clone();
         let width = usize::from(buffer.area.width);
@@ -235,5 +262,30 @@ mod tests {
         check!(shown.contains("45.12%"), "{shown}");
         check!(shown.contains("now -, test avg 7.90 GB/s -6%, pace 98%"), "{shown}");
         check!(shown.contains("(goal: 4 passes)"), "{shown}");
+        check!(!shown.contains("ends") && !shown.contains(" AM"), "no clock, no times: {shown}");
+    }
+
+    #[test]
+    fn the_text_screen_shows_the_time_of_day_and_when_the_times_left_end() {
+        let outlook = Outlook {
+            goal: Goal { passes: NonZeroU64::new(4), time: None, stop_on_fault: false },
+            settled: 1,
+            pass: Some(Eta { remaining: Duration::from_mins(10), confidence: Confidence::Estimated }),
+            pass_progress: BasisPoints::new(7234).unwrap(),
+            cycle: Some(Duration::from_mins(40)),
+            cycle_left: Some(Eta { remaining: Duration::from_mins(15), confidence: Confidence::Measured }),
+            ..Outlook::NONE
+        };
+        let ends = |day| Some(Ends { day, time: TimeOfDay { hour: 3, minute: 14, second: 0 } });
+        let time = TimeLine {
+            now: TimeOfDay { hour: 1, minute: 27, second: 43 },
+            format: ClockFormat::Twelve,
+            overall: ends(Day::Weekday(jiff::civil::Weekday::Saturday)),
+            pass: ends(Day::Today),
+        };
+        let shown = screen_at(&SweepStatus { outlook, ..idle_status() }, 125, Some(time));
+        check!(shown.lines().next().unwrap().trim_end().ends_with("01:27:43 AM"), "{shown}");
+        check!(shown.contains("PASS      72.34%  10 min left, ends 03:14 AM"), "{shown}");
+        check!(shown.contains("OVERALL"), "{shown}");
     }
 }

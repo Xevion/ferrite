@@ -12,7 +12,7 @@ crc32fast = { workspace = true, features = ["std"] }
 ferrite-config.workspace = true
 ferrite-wire.workspace = true
 humantime.workspace = true
-jiff.workspace = true
+jiff = { workspace = true, features = ["std", "tz-system", "tz-fat", "tzdb-bundle-platform", "tzdb-zoneinfo", "tzdb-concatenated", "perf-inline"] }
 nusb.workspace = true
 object = { workspace = true, features = ["archive"] }
 rustix.workspace = true

@@ -39,6 +39,12 @@ events = ["pass", "end"]
 passes = 3
 time = "1h30m"
 stop_on_fault = true
+
+[time]
+ntp = false
+servers = ["192.0.2.1", "time.example.org"]
+zone = "America/Chicago"
+clock = "24h"
 "#;
 
 #[test]
@@ -78,6 +84,12 @@ fn a_file_with_every_section_is_read_in_file_order() {
                 stop_on_fault: true,
             })
     );
+
+    assert!(let Some(time) = &loaded.time);
+    check!(!time.ntp);
+    check!(time.servers == [Host::parse("192.0.2.1").unwrap(), Host::Name(HostName::new("time.example.org").unwrap())]);
+    check!(time.zone.iana_name() == Some("America/Chicago"));
+    check!(time.clock == ClockFormat::TwentyFour);
 }
 
 #[rstest]
@@ -86,17 +98,20 @@ fn a_file_with_every_section_is_read_in_file_order() {
 fn a_file_that_configures_nothing_is_not_an_error(#[case] text: &str) {
     let loaded = load(text.as_bytes());
     check!(loaded.errors.is_empty());
-    check!(loaded.credentials.is_none() && loaded.notify.is_none() && loaded.run.is_none());
+    check!(loaded.credentials.is_none() && loaded.notify.is_none() && loaded.run.is_none() && loaded.time.is_none());
 }
 
 #[test]
 fn defaults_apply_to_what_a_section_leaves_out() {
-    let loaded =
-        load(b"[notify]\nurl = \"http://h/t\"\n[run]\n[[wifi.networks]]\nssid = \"x\"\npassphrase = \"12345678\"\n");
+    let loaded = load(
+        b"[notify]\nurl = \"http://h/t\"\n[run]\n[time]\n[[wifi.networks]]\nssid = \"x\"\npassphrase = \"12345678\"\n",
+    );
     check!(loaded.errors.is_empty());
     let notify = loaded.notify.unwrap();
     check!(notify.format == Format::Text && notify.events == Events::ALL);
     check!(loaded.run == Some(RunGoal::default()));
+    check!(loaded.time == Some(TimeSettings::default()));
+    check!(TimeSettings::default().ntp, "the clock is kept right over the network unless the file says no");
     let credentials = loaded.credentials.unwrap();
     let network = &credentials.networks()[0];
     check!(!network.hidden);
@@ -221,6 +236,23 @@ fn at(path: &str) -> Path {
     2, 7, "notify.url", Some(Problem::Url { problem: ferrite_net::notify::Problem::Port })
 )]
 #[case::no_events("[notify]\nurl = \"http://h/t\"\nevents = []\n".into(), 3, 10, "notify.events", Some(Problem::NoEvents))]
+#[case::unknown_zone(format!("[time]\nzone = \"Mars/{SECRET}\"\n"), 2, 8, "time.zone", Some(Problem::Zone))]
+#[case::unknown_zone_spelling("[time]\nzone = \"Chicago\"\n".into(), 2, 8, "time.zone", Some(Problem::Zone))]
+#[case::zone_type("[time]\nzone = 5\n".into(), 2, 8, "time.zone", Some(Problem::WrongType { expected: "a string".into() }))]
+#[case::ntp_type(format!("[time]\nntp = \"{SECRET}\"\n"), 2, 7, "time.ntp", Some(Problem::WrongType { expected: "a boolean".into() }))]
+#[case::clock_variant(
+    format!("[time]\nclock = \"{SECRET}\"\n"),
+    2, 9, "time.clock", Some(Problem::BadValue { expected: "`12h` or `24h`".into() })
+)]
+#[case::server_not_a_host(
+    format!("[time]\nservers = [\"10.0.0.1\", \"bad host {SECRET}\"]\n"),
+    2, 24, "time.servers[1]", Some(Problem::NtpServer)
+)]
+#[case::server_is_a_url(
+    format!("[time]\nservers = [\"http://{SECRET}\"]\n"),
+    2, 12, "time.servers[0]", Some(Problem::NtpServer)
+)]
+#[case::unknown_time_key(format!("[time]\nzones = \"{SECRET}\"\n"), 2, 1, "time.zones", Some(Problem::UnknownKey))]
 fn a_bad_file_names_its_line_column_and_key_and_never_the_value(
     #[case] text: String,
     #[case] line: usize,
@@ -247,6 +279,38 @@ fn too_many_networks_are_refused_at_the_first_one_beyond_the_limit() {
     check!(error.problem == Problem::TooManyNetworks { max: MAX_NETWORKS });
     check!(error.path == at(&format!("wifi.networks[{MAX_NETWORKS}]")));
     check!(load(text.lines().take(MAX_NETWORKS * 3).collect::<Vec<_>>().join("\n").as_bytes()).errors.is_empty());
+}
+
+#[test]
+fn too_many_ntp_servers_are_refused_at_the_first_beyond_the_limit() {
+    let list = |n: usize| (0..n).map(|i| format!("\"10.0.0.{i}\"")).collect::<Vec<_>>().join(", ");
+    let max = ferrite_net::sntp::MAX_SERVERS;
+    let error = failing(&format!("[time]\nservers = [{}]\n", list(max + 1)));
+    check!(error.problem == Problem::TooManyNtpServers { max });
+    check!(error.path == at(&format!("time.servers[{max}]")));
+    check!(load(format!("[time]\nservers = [{}]\n", list(max)).as_bytes()).errors.is_empty());
+}
+
+#[rstest]
+#[case("UTC", "UTC")]
+#[case("Etc/UTC", "Etc/UTC")]
+#[case("america/new_york", "America/New_York")]
+#[case("Asia/Kolkata", "Asia/Kolkata")]
+fn a_zone_is_a_name_of_the_bundled_tz_database_in_any_case(#[case] given: &str, #[case] canonical: &str) {
+    let loaded = load(format!("[time]\nzone = \"{given}\"\n").as_bytes());
+    check!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+    check!(loaded.time.unwrap().zone.iana_name() == Some(canonical));
+}
+
+#[test]
+fn the_zone_keeps_its_daylight_saving_rules() {
+    use jiff::Timestamp;
+
+    let loaded = load(b"[time]\nzone = \"America/Chicago\"\n");
+    let zone = loaded.time.unwrap().zone;
+    let offset = |ts: &str| zone.to_offset(ts.parse::<Timestamp>().unwrap()).seconds();
+    check!(offset("2026-01-15T12:00:00Z") == -6 * 3600);
+    check!(offset("2026-07-15T12:00:00Z") == -5 * 3600);
 }
 
 #[test]
@@ -331,6 +395,7 @@ fn debug_output_hides_passphrases_and_the_url() {
         },
         notify: Some(Notify { url: Secret::new("http://h/s3cr3t-topic"), format: NotifyFormat::Text, events: None }),
         run: Run::default(),
+        time: Time::default(),
     };
     check!(!format!("{plain:?}").contains("s3cr3t"));
 }
@@ -367,6 +432,12 @@ fn sample() -> Config {
             events: Some(alloc::vec![NotifyEvent::Fault, NotifyEvent::End]),
         }),
         run: Run { passes: Some(2), time: Some("45m".into()), stop_on_fault: true },
+        time: Time {
+            ntp: false,
+            servers: Some(alloc::vec!["10.1.1.1".into(), "ntp.lab.example".into()]),
+            zone: Some("Europe/Berlin".into()),
+            clock: ClockFormat::TwentyFour,
+        },
     }
 }
 
@@ -389,6 +460,10 @@ fn a_rendered_file_reads_back_as_the_configuration_it_came_from() {
     check!(notify.events == Events::of(&[Event::Fault, Event::End]));
     check!(notify.endpoint.target == "/t?a=b");
     check!(loaded.run.unwrap().time == Some(Duration::from_mins(45)));
+    let time = loaded.time.unwrap();
+    check!(!time.ntp && time.clock == ClockFormat::TwentyFour);
+    check!(time.zone.iana_name() == Some("Europe/Berlin"));
+    check!(time.servers == [Host::parse("10.1.1.1").unwrap(), Host::Name(HostName::new("ntp.lab.example").unwrap())]);
 }
 
 #[test]
@@ -396,11 +471,24 @@ fn the_template_is_all_comments_and_reads_as_nothing_configured() {
     let template = Config::template();
     let loaded = load(template.as_bytes());
     check!(loaded.errors.is_empty(), "{:?}", loaded.errors);
-    check!(loaded.credentials.is_none() && loaded.notify.is_none() && loaded.run.is_none());
+    check!(loaded.credentials.is_none() && loaded.notify.is_none() && loaded.run.is_none() && loaded.time.is_none());
     check!(template.lines().all(|line| line.is_empty() || line.starts_with('#')));
-    for key in
-        ["ssid", "passphrase", "security", "hidden", "url", "format", "events", "passes", "time", "stop_on_fault"]
-    {
+    for key in [
+        "ssid",
+        "passphrase",
+        "security",
+        "hidden",
+        "url",
+        "format",
+        "events",
+        "passes",
+        "time",
+        "stop_on_fault",
+        "ntp",
+        "servers",
+        "zone",
+        "clock",
+    ] {
         check!(template.contains(&format!("# {key} = ")) || template.contains(&format!("{key} = ")), "{key}");
     }
 }
@@ -418,7 +506,7 @@ fn uncommenting_every_key_and_header_of_the_template_gives_a_valid_file() {
     });
     let loaded = load(uncommented.as_bytes());
     check!(loaded.errors.is_empty(), "{:?}\n{uncommented}", loaded.errors);
-    check!(loaded.credentials.is_some() && loaded.notify.is_some() && loaded.run.is_some());
+    check!(loaded.credentials.is_some() && loaded.notify.is_some() && loaded.run.is_some() && loaded.time.is_some());
 }
 
 #[test]
@@ -434,12 +522,23 @@ fn defaults_stay_commented_when_values_are_filled_in() {
         },
         notify: Some(Notify { url: Secret::new("http://h/t"), format: NotifyFormat::Text, events: None }),
         run: Run::default(),
+        time: Time::default(),
     };
     let text = config.render();
     for set in ["\nssid = ", "\npassphrase = ", "\nurl = ", "\n[[wifi.networks]]", "\n[notify]"] {
         check!(text.contains(set), "{set}");
     }
-    for unset in ["\n# security = ", "\n# hidden = ", "\n# format = ", "\n# events = ", "\n# [run]", "\n# passes = "] {
+    for unset in [
+        "\n# security = ",
+        "\n# hidden = ",
+        "\n# format = ",
+        "\n# events = ",
+        "\n# [run]",
+        "\n# passes = ",
+        "\n# [time]",
+        "\n# ntp = ",
+        "\n# zone = ",
+    ] {
         check!(text.contains(unset), "{unset}");
     }
 }

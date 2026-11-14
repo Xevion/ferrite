@@ -1011,6 +1011,7 @@ dependencies = [
  "assert2",
  "ferrite-net",
  "ferrite-wpa",
+ "jiff",
  "rstest 0.28.0",
  "serde",
  "snafu",
@@ -1062,6 +1063,10 @@ dependencies = [
 [[package]]
 name = "ferrite-hal"
 version = "0.1.0"
+dependencies = [
+ "assert2",
+ "rstest 0.28.0",
+]
 
 [[package]]
 name = "ferrite-lab"
@@ -1195,6 +1200,7 @@ dependencies = [
  "ferrite-wpa",
  "fontdue",
  "heapless 0.9.3",
+ "jiff",
  "log",
  "ratatui",
  "ratatui-core",
@@ -1732,6 +1738,7 @@ checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
 dependencies = [
  "jiff-core",
  "jiff-static",
+ "jiff-tzdb",
  "jiff-tzdb-platform",
  "log",
  "portable-atomic",

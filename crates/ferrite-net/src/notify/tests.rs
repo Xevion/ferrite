@@ -113,7 +113,7 @@ impl Rig {
         let now = Instant::from_epoch(Duration::from_millis(self.ms));
         self.net.poll(now, &State { revision: 0 }, &mut |_| {});
         let mut render = |_: &mut String| {};
-        self.server.poll(now, &mut PollCtx { render: &mut render, clock: None, notify: None });
+        self.server.poll(now, &mut PollCtx { render: &mut render, clock: None, notify: None, sntp: None });
         self.serve_http();
         self.serve_dns();
         for (from, to) in [(&self.client_link, &self.server_link), (&self.server_link, &self.client_link)] {

@@ -23,6 +23,7 @@ use crate::goal::Goal;
 use crate::pace::{Delta, Outlook, Steadiness, TestStat};
 use crate::report::{CpuInfo, FaultRecord, PassRecord, Snapshot, TestRecord};
 use crate::sweep::SweepStatus;
+use crate::wall::Wall;
 
 pub trait ToJson {
     fn to_json(&self, out: &mut dyn fmt::Write);
@@ -104,13 +105,30 @@ impl ToJson for Secs {
     }
 }
 
-/// A time left: seconds and what the figure rests on.
-fn eta_fields(o: &mut Object<'_>, eta: Eta) {
+/// A time left: seconds, what the figure rests on, and when it ends in Unix milliseconds, which is
+/// absent until the clock has a source.
+fn eta_fields(o: &mut Object<'_>, eta: Eta, ends_unix_ms: Option<u64>) {
     let confidence = match eta.confidence {
         Confidence::Measured => "measured",
         Confidence::Estimated => "estimated",
     };
-    o.field("left_s", &Secs(eta.remaining)).field("confidence", confidence);
+    o.field("left_s", &Secs(eta.remaining)).field("confidence", confidence).field("ends_unix_ms", &ends_unix_ms);
+}
+
+/// The clock: the time in Unix milliseconds, which the page shows in its own zone, and whether the
+/// network has corrected it.
+struct ClockDoc<'a> {
+    wall: &'a Wall,
+    now: Instant,
+}
+
+impl ToJson for ClockDoc<'_> {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        Object::new(out)
+            .field("unix_ms", &self.wall.now(self.now).map(ferrite_hal::UnixTime::as_millis))
+            .field("synced", &self.wall.is_synced())
+            .finish();
+    }
 }
 
 impl ToJson for Goal {
@@ -150,13 +168,21 @@ impl ToJson for BasisPoints {
 struct ProgressDoc<'a> {
     outlook: &'a Outlook,
     elapsed: Duration,
+    wall: &'a Wall,
+    now: Instant,
 }
 
 impl ToJson for ProgressDoc<'_> {
     fn to_json(&self, out: &mut dyn fmt::Write) {
         let o = self.outlook;
         let overall = o.overall(self.elapsed);
-        let eta = |e: Option<Eta>| e.map(|e| Section(move |o: &mut Object<'_>| eta_fields(o, e)));
+        let (wall, now) = (self.wall, self.now);
+        let eta = |e: Option<Eta>| {
+            e.map(|e| {
+                let ends = wall.ends_unix_ms(now, e.remaining);
+                Section(move |o: &mut Object<'_>| eta_fields(o, e, ends))
+            })
+        };
         Object::new(out)
             .field("settled", &o.settled)
             .field("reserve", &o.reserve)
@@ -413,6 +439,7 @@ pub struct StatusDoc<'a> {
     pub net: &'a NetStatus,
     pub wifi: &'a WifiView,
     pub now: Instant,
+    pub wall: &'a Wall,
 }
 
 impl StatusDoc<'_> {
@@ -431,6 +458,7 @@ impl ToJson for StatusDoc<'_> {
         Object::new(out)
             .field("version", env!("CARGO_PKG_VERSION"))
             .field("uptime_ms", &Millis(self.now.since_epoch()))
+            .field("clock", &ClockDoc { wall: self.wall, now: self.now })
             .field("preset", preset)
             .field("paused", &status.paused)
             .field("elapsed_ms", &history.run_started.map(|start| self.since(start)))
@@ -468,6 +496,8 @@ impl ToJson for StatusDoc<'_> {
                 &ProgressDoc {
                     outlook: &status.outlook,
                     elapsed: history.run_started.map_or(Duration::ZERO, |start| self.now - start),
+                    wall: self.wall,
+                    now: self.now,
                 },
             )
             .field(
@@ -519,6 +549,8 @@ mod tests {
     use core::num::NonZeroU64;
 
     use assert2::check;
+    use ferrite_config::{ClockFormat, zone_named};
+    use ferrite_hal::{UnixTime, WallClock};
     use ferrite_mem::CpuAddr;
     use ferrite_mem::histogram::Histogram;
     use ferrite_mem::suite::{Mode, Preset};
@@ -635,17 +667,21 @@ mod tests {
                 address: Some(Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24)),
                 gateway: Some(Ipv4Address::new(10, 0, 2, 2)),
                 dns: None,
+                ..Link::default()
             },
             frames: PortStats { rx_frames: 5, ..PortStats::default() },
             services: ServiceCounters { http_responses: 7, ..ServiceCounters::default() },
         });
         let mut out = String::new();
         let wifi = WifiView::absent("not in this build");
-        StatusDoc { snapshot: &snapshot, net: &net, wifi: &wifi, now: at(6_500) }.to_json(&mut out);
+        // The RTC said 1794646670 s at the start, so 6.5 s in the time is 1794646676500 ms.
+        let seed = WallClock::from_rtc(at(0), UnixTime::from_epoch(Duration::from_secs(1_794_646_670)));
+        let wall = Wall::new(Some(seed), zone_named("UTC").unwrap(), ClockFormat::Twelve);
+        StatusDoc { snapshot: &snapshot, net: &net, wifi: &wifi, now: at(6_500), wall: &wall }.to_json(&mut out);
         let expected = concat!(
             r#"{"version":""#,
             env!("CARGO_PKG_VERSION"),
-            r#"","uptime_ms":6500,"preset":"thorough","paused":true,"elapsed_ms":5500,"bytes":1073741824,"#,
+            r#"","uptime_ms":6500,"clock":{"unix_ms":1794646676500,"synced":false},"preset":"thorough","paused":true,"elapsed_ms":5500,"bytes":1073741824,"#,
             r#""coverage":{"tested":0,"free":0},"#,
             r#""tier":"avx2","bandwidth":18400000000,"mode":"split","cpus":4,"#,
             r#""pass":{"number":1,"percent":15,"elapsed_ms":2500},"#,
@@ -654,9 +690,10 @@ mod tests {
             r#""progress":{"settled":1,"reserve":false,"rate":8000000000,"#,
             r#""position":{"kind":"wait","nth":2,"waits":4,"left_s":192},"#,
             r#""test":{"left_s":312,"basis_points":4512,"avg_rate":7900000000,"delta_percent":-6},"#,
-            r#""pass":{"left_s":600,"confidence":"estimated"},"pass_basis_points":1537,"#,
-            r#""cycle_s":2400,"cycle_left":{"left_s":1500,"confidence":"estimated"},"#,
-            r#""overall":{"elapsed_ms":5500,"basis_points":4583,"left":{"left_s":3900,"confidence":"estimated"}},"#,
+            r#""pass":{"left_s":600,"confidence":"estimated","ends_unix_ms":1794647276500},"pass_basis_points":1537,"#,
+            r#""cycle_s":2400,"cycle_left":{"left_s":1500,"confidence":"estimated","ends_unix_ms":1794648176500},"#,
+            r#""overall":{"elapsed_ms":5500,"basis_points":4583,"#,
+            r#""left":{"left_s":3900,"confidence":"estimated","ends_unix_ms":1794650576500}},"#,
             r#""timings":{"known":11,"of":11},"pace_percent":98,"pass_median_ms":128000},"#,
             r#""faults":{"total":1,"analysis":{"kind":"stuck-bits","stuck":"0x10","text":"stuck bits 0x10"},"#,
             r#""first":{"test":"moving-inversions","cpu":2,"addr":"0x40001008","expected":"0xffffffffffffffff","#,
@@ -677,6 +714,20 @@ mod tests {
         )
         .replace("@MEDIAN@", &std::format!("{}", steadiness.median));
         check!(out == expected);
+    }
+
+    #[test]
+    fn a_clock_with_no_source_gives_no_times() {
+        let wall = Wall::new(None, zone_named("UTC").unwrap(), ClockFormat::Twelve);
+        let mut out = String::new();
+        ClockDoc { wall: &wall, now: at(1_000) }.to_json(&mut out);
+        check!(out == r#"{"unix_ms":null,"synced":false}"#);
+
+        let outlook = live_outlook();
+        let mut out = String::new();
+        ProgressDoc { outlook: &outlook, elapsed: Duration::from_secs(5), wall: &wall, now: at(1_000) }
+            .to_json(&mut out);
+        check!(out.contains(r#""pass":{"left_s":600,"confidence":"estimated","ends_unix_ms":null}"#), "{out}");
     }
 
     #[test]

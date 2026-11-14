@@ -131,6 +131,14 @@ impl fmt::Display for Host {
     }
 }
 
+impl Host {
+    /// An IPv4 address, else a host name.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        Ipv4Address::from_str(text).map(Self::Addr).ok().or_else(|| HostName::new(text).map(Self::Name))
+    }
+}
+
 /// An `http://` URL taken apart.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoint {
@@ -174,11 +182,7 @@ impl Endpoint {
             Some((host, port)) => (host, port.parse::<u16>().ok().filter(|port| *port != 0).ok_or(Problem::Port)?),
             None => (authority, DEFAULT_PORT),
         };
-        let host = Ipv4Address::from_str(host)
-            .map(Host::Addr)
-            .ok()
-            .or_else(|| HostName::new(host).map(Host::Name))
-            .ok_or(Problem::Host)?;
+        let host = Host::parse(host).ok_or(Problem::Host)?;
         let target = match tail {
             "" => String::from("/"),
             t if t.starts_with('?') => alloc::format!("/{t}"),

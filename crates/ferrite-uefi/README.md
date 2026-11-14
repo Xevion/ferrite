@@ -86,6 +86,13 @@ smoltcp stack on each port with the rest:
   cross-site form cannot send.
 - **mDNS** (UDP :5353): answers `A` queries for `ferrite.local` so a laptop on
   the same segment can browse to `http://ferrite.local`.
+- **SNTP** (UDP :123 out): on by default, keeps the clock right so the dashboard
+  shows the time of day and when the ETA ends. The clock starts from the
+  firmware's RTC, then steps to the time of the first server that answers:
+  the `[time]` servers, the DHCP lease's (option 42), `pool.ntp.org`. It
+  resyncs every 30 minutes and learns the monotonic clock's drift in between.
+  `ntp = false` under `[time]` in `ferrite.toml` sends nothing, and `zone` sets
+  the time zone shown (UTC by default; the status page shows the browser's own).
 
 `wait_for_packet_event` is documented as never firing under QEMU, so the stack
 *polls* `receive` on every render tick rather than blocking on the event.

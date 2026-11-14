@@ -31,6 +31,7 @@ use crate::net::NoNetwork;
 use crate::pace::{Delta, Overall};
 use crate::report::{FaultRecord, Snapshot};
 use crate::sweep::{Coverage, SweepStatus};
+use crate::wall::{Ends, TimeLine, TimeOfDay};
 
 /// Below this the layout has no room for its tables: three quarters of the 1024x768 design.
 pub const MIN_SIZE: (u32, u32) = (768, 576);
@@ -52,6 +53,8 @@ pub struct Frame<'a> {
     /// Why there is no network, when no port is up.
     pub net_err: Option<NoNetwork>,
     pub now: Instant,
+    /// The time of day and when the times left end, when the clock has a source.
+    pub time: Option<TimeLine>,
 }
 
 impl Frame<'_> {
@@ -112,7 +115,7 @@ type TestsKey = (u64, (usize, usize), u64, bool, u64, Live);
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Keys {
     setup: Setup,
-    clock: (State, u64, u64),
+    clock: (State, u64, u64, Option<(TimeOfDay, Option<Ends>)>),
     tabs: u64,
     system: SystemKey,
     pass: PassKey,
@@ -134,7 +137,7 @@ impl Keys {
         let live = (s.outlook.rate, s.outlook.test_avg, s.outlook.test_delta);
         Self {
             setup: Setup { width, height },
-            clock: (f.state(), s.faults, f.elapsed().as_secs()),
+            clock: (f.state(), s.faults, f.elapsed().as_secs(), f.time.map(|time| (time.now, time.overall))),
             tabs: s.faults,
             system: (
                 s.preset,

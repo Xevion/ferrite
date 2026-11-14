@@ -21,6 +21,40 @@ impl fmt::Display for OptAddr {
     }
 }
 
+/// NTP servers a lease names (DHCP option 42).
+pub const MAX_NTP_SERVERS: usize = 4;
+
+/// The NTP servers of a lease, in the order it lists them; those past [`MAX_NTP_SERVERS`] are left out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NtpServers([Option<Ipv4Address>; MAX_NTP_SERVERS]);
+
+impl NtpServers {
+    /// Add `server`; false when the list is full.
+    pub fn push(&mut self, server: Ipv4Address) -> bool {
+        self.0.iter_mut().find(|slot| slot.is_none()).map(|slot| *slot = Some(server)).is_some()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Ipv4Address> + '_ {
+        self.0.iter().flatten().copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0[0].is_none()
+    }
+}
+
+impl fmt::Display for NtpServers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_empty() {
+            return f.write_str("-");
+        }
+        for (i, server) in self.iter().enumerate() {
+            write!(f, "{}{server}", if i > 0 { " " } else { "" })?;
+        }
+        Ok(())
+    }
+}
+
 /// Link and lease state: what changes rarely and is worth logging when it does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Link {
@@ -30,6 +64,7 @@ pub struct Link {
     pub address: Option<Ipv4Cidr>,
     pub gateway: Option<Ipv4Address>,
     pub dns: Option<Ipv4Address>,
+    pub ntp: NtpServers,
 }
 
 impl fmt::Display for Link {

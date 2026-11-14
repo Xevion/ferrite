@@ -9,11 +9,12 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use ferrite_hal::{Clock, Instant};
+use ferrite_hal::{Clock, Instant, UnixTime};
 
 use crate::http::{Site, Web};
 use crate::notify::{Notification, Notifier, Stats};
 use crate::port::Port;
+use crate::sntp::{Fix, Sync};
 use crate::stack::{PollCtx, Stack, StackConfig};
 use crate::status::NetStatus;
 
@@ -30,6 +31,7 @@ pub struct Network<S: Site> {
     last: NetStatus,
     clock: Option<Box<dyn Clock>>,
     notifier: Option<Notifier>,
+    sync: Option<Sync>,
 }
 
 impl<S: Site> Network<S> {
@@ -42,6 +44,7 @@ impl<S: Site> Network<S> {
             last: NetStatus::default(),
             clock: None,
             notifier: None,
+            sync: None,
         }
     }
 
@@ -56,6 +59,24 @@ impl<S: Site> Network<S> {
     /// has an address.
     pub fn set_notifier(&mut self, notifier: Notifier) {
         self.notifier = Some(notifier);
+    }
+
+    /// Keep the clock right with `sync`, asking over the first port that has an address; what it
+    /// learns comes out of [`Network::take_time_fix`].
+    pub fn set_sync(&mut self, sync: Sync) {
+        self.sync = Some(sync);
+    }
+
+    /// The sync a finished round gave, once; `None` without a client or without news.
+    pub fn take_time_fix(&mut self) -> Option<Fix> {
+        self.sync.as_mut().and_then(Sync::take_fix)
+    }
+
+    /// The current time as the clock has it, which the time client places the server's timestamps by.
+    pub fn set_time_pivot(&mut self, utc: UnixTime) {
+        if let Some(sync) = &mut self.sync {
+            sync.set_pivot(utc);
+        }
     }
 
     /// Queue `notification` for delivery; false when there is no notifier or its config does not ask
@@ -96,6 +117,11 @@ impl<S: Site> Network<S> {
             && let Some(notifier) = &mut self.notifier
         {
             notifier.cancel();
+        }
+        if stack.syncing()
+            && let Some(sync) = &mut self.sync
+        {
+            sync.cancel();
         }
         log::debug!("net: {} {} removed", stack.link().medium, stack.link().mac);
         true
@@ -152,15 +178,24 @@ impl<S: Site> Network<S> {
 
         let site = web.site();
         let mut render = |out: &mut alloc::string::String| site.render(state, &status, now, out);
+        let leased = status.ports().iter().any(|port| port.link.address.is_some());
+        if let Some(sync) = &mut self.sync {
+            sync.observe(now, leased);
+        }
         // The stack already sending carries on; else the first with an address takes the next one.
         let carrier = self.notifier.as_ref().filter(|notifier| notifier.pending() > 0).and_then(|_| {
             let sending = self.stacks.iter().find(|(_, stack)| stack.notifying());
             sending.or_else(|| self.stacks.iter().find(|(_, stack)| stack.link().address.is_some())).map(|(id, _)| *id)
         });
+        let timekeeper = self.sync.as_ref().filter(|sync| sync.wants_port(now)).and_then(|_| {
+            let asking = self.stacks.iter().find(|(_, stack)| stack.syncing());
+            asking.or_else(|| self.stacks.iter().find(|(_, stack)| stack.link().address.is_some())).map(|(id, _)| *id)
+        });
         let mut wait = Duration::MAX;
         for (id, stack) in &mut self.stacks {
             let notify = if Some(*id) == carrier { self.notifier.as_mut() } else { None };
-            let mut ctx = PollCtx { render: &mut render, clock: self.clock.as_deref(), notify };
+            let sntp = if Some(*id) == timekeeper { self.sync.as_mut() } else { None };
+            let mut ctx = PollCtx { render: &mut render, clock: self.clock.as_deref(), notify, sntp };
             wait = wait.min(stack.poll(now, &mut ctx));
         }
         web.drain_commands(commands);

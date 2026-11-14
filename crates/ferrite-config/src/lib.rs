@@ -26,11 +26,18 @@
 //! passes = 3
 //! time = "2h"
 //! stop_on_fault = true
+//!
+//! [time]
+//! ntp = true
+//! servers = ["192.0.2.1", "time.example.org"]
+//! zone = "America/Chicago"
+//! clock = "12h"
 //! ```
 //!
 //! Unknown keys and sections are errors, so a typo is caught instead of ignored. Validation reuses the
 //! constructors of the types the apps run on ([`ferrite_wpa::kdf::Ssid`] and
-//! [`ferrite_wpa::kdf::Passphrase`], [`ferrite_net::notify::Config`], [`parse_duration`]), which is why
+//! [`ferrite_wpa::kdf::Passphrase`], [`ferrite_net::notify::Config`], [`ferrite_net::notify::Host`],
+//! [`parse_duration`]) and the tz database that is bundled into the binary ([`zone_named`]), which is why
 //! this crate depends on `ferrite-wpa` and `ferrite-net` and not the other way round.
 //!
 //! An error names the line, the column and the key, never the value: [`ConfigError`]. Each section is
@@ -50,12 +57,14 @@ mod run;
 mod schema;
 #[cfg(test)]
 mod tests;
+mod time;
 
 pub use convert::MAX_NETWORKS;
 pub use error::{ConfigError, Path, Problem, Segment};
 pub use load::{Loaded, load};
 pub use run::{Compact, RunGoal, parse_duration};
-pub use schema::{Config, Network, Notify, NotifyEvent, NotifyFormat, Run, Secret, Security, Wifi};
+pub use schema::{Config, Network, Notify, NotifyEvent, NotifyFormat, Run, Secret, Security, Time, Wifi};
+pub use time::{ClockFormat, TimeSettings, zone_named};
 
 /// Where the file lives on the boot volume.
 pub const PATH: &str = "\\EFI\\ferrite\\ferrite.toml";

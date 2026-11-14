@@ -9,13 +9,13 @@ use core::time::Duration;
 
 use ferrite_hal::Instant;
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
-use smoltcp::socket::dns::{self, GetQueryResultError, QueryHandle};
 use smoltcp::socket::tcp;
-use smoltcp::wire::{DnsQueryType, IpAddress, Ipv4Address};
+use smoltcp::wire::{IpAddress, Ipv4Address};
 
 use super::config::Host;
 use super::request::{Reply, parse_status_line};
 use super::{Dispatch, Notifier};
+use crate::lookup::{Lookup, Progress, Refused};
 use crate::status::Link;
 
 /// The reply is only read as far as its status line.
@@ -61,10 +61,7 @@ impl fmt::Display for Failure {
 
 #[derive(Clone, Copy)]
 enum Phase {
-    Resolving {
-        socket: SocketHandle,
-        query: QueryHandle,
-    },
+    Resolving(Lookup),
     /// Connecting, then sending the request.
     Sending {
         tcp: SocketHandle,
@@ -164,12 +161,11 @@ impl Courier {
         let phase = match host {
             Host::Addr(ip) => Phase::Sending { tcp: self.connect(iface, sockets, ip, port, request.len())? },
             Host::Name(name) => {
-                let server = link.dns.ok_or(Failure::NoDnsServer)?;
-                let mut socket = dns::Socket::new(&[IpAddress::Ipv4(server)], vec![None]);
-                let query = socket
-                    .start_query(iface.context(), name.as_str(), DnsQueryType::A)
-                    .map_err(|_| Failure::BadName)?;
-                Phase::Resolving { socket: sockets.add(socket), query }
+                let lookup = Lookup::start(iface, sockets, link.dns, &name).map_err(|refused| match refused {
+                    Refused::NoServer => Failure::NoDnsServer,
+                    Refused::BadName => Failure::BadName,
+                })?;
+                Phase::Resolving(lookup)
             },
         };
         Ok(Attempt { started: now, phase, request, port, sent: 0, reply: Vec::with_capacity(REPLY_MAX) })
@@ -195,17 +191,13 @@ impl Courier {
 
     fn advance(&mut self, attempt: &mut Attempt, iface: &mut Interface, sockets: &mut SocketSet<'static>) -> Step {
         match attempt.phase {
-            Phase::Resolving { socket, query } => {
-                let result = sockets.get_mut::<dns::Socket<'_>>(socket).get_query_result(query);
-                let addresses = match result {
-                    Ok(addresses) => addresses,
-                    Err(GetQueryResultError::Pending) => return Step::Pending,
-                    Err(GetQueryResultError::Failed) => return Step::Failed(Failure::Resolve),
+            Phase::Resolving(lookup) => {
+                let ip = match lookup.poll(sockets) {
+                    Progress::Found(ip) => ip,
+                    Progress::Pending => return Step::Pending,
+                    Progress::Failed => return Step::Failed(Failure::Resolve),
                 };
-                let Some(&IpAddress::Ipv4(ip)) = addresses.first() else {
-                    return Step::Failed(Failure::Resolve);
-                };
-                sockets.remove(socket);
+                lookup.release(sockets);
                 match self.connect(iface, sockets, ip, attempt.port, attempt.request.len()) {
                     Ok(tcp) => {
                         attempt.phase = Phase::Sending { tcp };
@@ -257,9 +249,7 @@ impl Courier {
     /// Give back an attempt's sockets: a lookup's at once, a connection's once its close finishes.
     fn release(&mut self, sockets: &mut SocketSet<'static>, phase: Phase, now: Instant) {
         match phase {
-            Phase::Resolving { socket, .. } => {
-                sockets.remove(socket);
-            },
+            Phase::Resolving(lookup) => lookup.release(sockets),
             Phase::Sending { tcp } | Phase::Reading { tcp } => {
                 sockets.get_mut::<tcp::Socket<'_>>(tcp).close();
                 self.closing.push((tcp, now));

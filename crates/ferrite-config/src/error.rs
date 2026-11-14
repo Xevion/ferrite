@@ -42,7 +42,7 @@ impl Path {
         self.0.is_empty()
     }
 
-    /// The top-level key the path starts with: `wifi`, `notify` or `run`.
+    /// The top-level key the path starts with: `wifi`, `notify`, `run` or `time`.
     pub fn section(&self) -> Option<&str> {
         match self.0.first() {
             Some(Segment::Key(key)) => Some(key),
@@ -114,6 +114,12 @@ pub enum Problem {
     Time,
     #[snafu(display("expected a whole number of passes, at least 1"))]
     Passes,
+    #[snafu(display("not an NTP server: expected an IPv4 address or a host name"))]
+    NtpServer,
+    #[snafu(display("at most {max} NTP servers"))]
+    TooManyNtpServers { max: usize },
+    #[snafu(display("not a time zone of the tz database, expected a name such as America/Chicago or UTC"))]
+    Zone,
 }
 
 /// A problem with its place in the file, as the line and column a text editor shows (both from 1).

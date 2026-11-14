@@ -18,7 +18,8 @@ b{font-weight:700}
 .brand b{font-size:1.23em;letter-spacing:3px}
 .brand span:last-child{color:var(--bar-dim)}
 .hdr{display:flex;align-items:baseline;gap:22px;font-size:.92em;letter-spacing:.5px;color:var(--bar-dim)}
-.hdr .elapsed{color:var(--bar-text)}
+.hdr .elapsed,#wall{color:var(--bar-text)}
+#wall:empty{display:none}
 #state.loud{color:var(--bar-text);font-weight:700}
 .live{display:inline-flex;align-items:center;gap:6px}
 .live i{width:8px;height:8px;background:var(--bar-dim)}
@@ -47,7 +48,7 @@ h2{margin:0 0 8px;padding:0 0 4px;font-size:.92em;line-height:1.3;font-weight:60
 .warn{color:var(--warn)}
 .row{display:flex;align-items:center;gap:12px;margin-bottom:8px}
 .row>.k{width:92px;flex:none;color:var(--dim)}
-.row>.v{width:216px;flex:none;text-align:right;white-space:nowrap}
+.row>.v{width:47ch;flex:none;text-align:right;white-space:nowrap}
 .track{flex:1;height:16px;background:var(--track);border:1px solid var(--line)}
 .track i{display:block;height:100%;width:0;background:var(--fill)}
 .paused .track i{background:var(--reserved)}
@@ -115,13 +116,13 @@ label.d{display:inline-flex;align-items:center;gap:4px}
 #gone{display:none;position:fixed;inset:0;background:#000c;color:#fff;align-items:center;justify-content:center;font-size:1.5em}
 #gone.on{display:flex}
 @media(max-width:940px){main{grid-template-columns:minmax(0,1fr)}.keys .sp{margin-left:0}}
-@media(max-width:560px){.kv{grid-template-columns:84px minmax(0,1fr)}.row>.v{width:150px}}
+@media(max-width:560px){.kv{grid-template-columns:84px minmax(0,1fr)}.row>.v{width:150px;white-space:normal}}
 </style>
 </head>
 <body>
 <header class="bar" id="title">
 <div class="brand"><b>FERRITE</b><span>Memory Diagnostic</span><span id="ver"></span></div>
-<div class="hdr"><span class="elapsed">ELAPSED <span id="elapsed">--:--:--</span></span><span id="state">-</span><span class="live offline" id="live"><i></i><span id="livetxt">connecting</span></span></div>
+<div class="hdr"><span id="wall"></span><span class="elapsed">ELAPSED <span id="elapsed">--:--:--</span></span><span id="state">-</span><span class="live offline" id="live"><i></i><span id="livetxt">connecting</span></span></div>
 </header>
 <nav class="tabs" aria-label="screens"><span class="tab on">Run</span><span class="tab" id="tabres" aria-disabled="true">Results</span><span class="tab" aria-disabled="true">Setup</span><span class="tab" aria-disabled="true">Log</span></nav>
 <div id="banner" role="alert"><strong id="btitle"></strong><span id="bdetail"></span></div>
@@ -203,6 +204,12 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]);
 const p2=n=>String(n).padStart(2,"0");
 const DASH="\u2014",DOT=" \u00b7 ",CELLS=128;
+// Times of day are the browser's to format, in its own zone and style.
+const tf=(o)=>new Intl.DateTimeFormat(undefined,o),HM={hour:"2-digit",minute:"2-digit"};
+const secF=tf({...HM,second:"2-digit"}),minF=tf(HM),dayF=tf({weekday:"short",...HM}),dateF=tf({month:"short",day:"numeric",...HM});
+const dayNo=ms=>{const d=new Date(ms);return Math.floor(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())/864e5)};
+// When a time left ends: the time today, the weekday within six days, else the date.
+function endsAt(end,now){if(end==null)return"";const gap=dayNo(end)-dayNo(now==null?end:now);return DOT+"ends "+(gap<=0?minF:gap<=6?dayF:dateF).format(end)}
 function hms(ms){if(ms==null)return"--:--:--";const s=Math.floor(ms/1000);return p2(Math.floor(s/3600))+":"+p2(Math.floor(s/60)%60)+":"+p2(s%60)}
 function clk(ms){if(ms==null)return DASH;const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor(s/60)%60;return h?h+":"+p2(m)+":"+p2(s%60):m+":"+p2(s%60)}
 function took(ms){if(ms==null)return DASH;if(ms<9995)return(ms/1000).toFixed(2)+" s";if(ms<59950)return(ms/1000).toFixed(1)+" s";return clk(Math.round(ms/1000)*1000)}
@@ -226,17 +233,19 @@ function clock(){
   if(!base)return;
   const dt=performance.now()-base.at,el=base.el==null?null:base.el+dt;
   text("elapsed",hms(el));
+  const wallMs=base.unix==null?null:base.unix+dt;
+  text("wall",wallMs==null?"":secF.format(wallMs));
   const run=!paused,tick=x=>x==null?null:run?Math.max(0,x-dt):x;
   // Between two documents a figure carries on at the pace its own time left implies, so the hundredths keep moving.
   const grow=(bp,ms)=>ms==null||!run||ms<=0?bp:Math.min(10000,bp+(10000-bp)*dt/ms);
   const pb=grow(base.pbp,base.pl?base.pl.ms:null),pl=base.pl;
-  figure("passfig",bpct(pb)+DOT,pl?left(tick(pl.ms)/1000):clk(base.pel==null?null:base.pel+dt),pl&&pl.e.confidence!="measured");
+  figure("passfig",bpct(pb)+DOT,pl?left(tick(pl.ms)/1000)+endsAt(pl.e.ends_unix_ms,wallMs):clk(base.pel==null?null:base.pel+dt),pl&&pl.e.confidence!="measured");
   $("passbar").style.width=pb/100+"%";
   const ov=base.ov;
   if(ov){
     const ob=ov.bp==null?0:grow(ov.bp,ov.left?ov.ms:null);
     if(ov.bp==null)figure("allfig",(ov.nogoal||"no goal")+DOT,clk(el));
-    else figure("allfig",bpct(ob)+DOT,ov.left?left(tick(ov.ms)/1000):clk(el),ov.left&&ov.left.confidence!="measured");
+    else figure("allfig",bpct(ob)+DOT,ov.left?left(tick(ov.ms)/1000)+endsAt(ov.left.ends_unix_ms,wallMs):clk(el),ov.left&&ov.left.confidence!="measured");
     $("allbar").style.width=ob/100+"%";
   }
   const t=base.test;
@@ -340,7 +349,7 @@ function render(d){
   $("net").innerHTML=net+item("Uptime",clk(d.uptime_ms),"up");
   const prev=bad&&lf?"ERROR "+lf.test+DOT+hx(lf.addr)+DOT+"cpu "+lf.cpu:lt?"pass "+(lt.pass+1)+DOT+lt.test+" finished in "+took(lt.took_ms):"";
   const lp=$("logprev");lp.textContent=prev;lp.className=bad&&lf?"bad":"d";
-  base={at:performance.now(),up:d.uptime_ms,el:d.elapsed_ms,pel:d.pass.elapsed_ms,pbp:pr.pass_basis_points,
+  base={at:performance.now(),up:d.uptime_ms,unix:d.clock?d.clock.unix_ms:null,el:d.elapsed_ms,pel:d.pass.elapsed_ms,pbp:pr.pass_basis_points,
     pl:pr.pass?{e:pr.pass,ms:pr.pass.left_s*1000}:null,
     ov:{bp:ov.basis_points,left:ov.left,ms:ov.left?ov.left.left_s*1000:null,nogoal:g.stop_on_fault&&g.passes==null&&g.time_s==null?"first fault":"no goal"},
     test:{count:t.count,bp:pr.test.basis_points,ms:pr.test.left_s!=null?pr.test.left_s*1000:null,wait:ps0.kind=="wait"?{nth:ps0.nth,waits:ps0.waits,ms:ps0.left_s*1000}:null},

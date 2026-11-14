@@ -21,6 +21,7 @@ ferrite-wpa.workspace = true
 fontdue.workspace = true
 # Fixed-capacity strings for text formatted every frame or request, kept off the heap.
 heapless.workspace = true
+jiff = { workspace = true, features = ["alloc", "tzdb-bundle-always"] }
 log.workspace = true
 ratatui.workspace = true
 ratatui-core.workspace = true

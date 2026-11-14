@@ -4,13 +4,15 @@
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
-use ferrite_net::notify::{self, Event, Events, Format};
+use ferrite_net::notify::{self, Event, Events, Format, Host};
+use ferrite_net::sntp::MAX_SERVERS;
 use ferrite_wpa::env::{Allow, Auth, Credentials, Network};
 use ferrite_wpa::kdf::{Passphrase, Ssid};
 
 use crate::error::{Path, Problem};
 use crate::run::{RunGoal, parse_duration};
 use crate::schema::{self, NotifyEvent, NotifyFormat, Security};
+use crate::time::{TimeSettings, zone_named};
 
 /// The most networks a file may list. The station tries a few at a time, so more is a mistake.
 pub const MAX_NETWORKS: usize = 16;
@@ -96,4 +98,23 @@ pub fn run_goal(section: &schema::Run) -> Result<RunGoal, Invalid> {
         .map(|text| parse_duration(text).ok_or_else(|| invalid(at.clone().key("time"), Problem::Time)))
         .transpose()?;
     Ok(RunGoal { passes, time, stop_on_fault: section.stop_on_fault })
+}
+
+pub fn time_settings(section: &schema::Time) -> Result<TimeSettings, Invalid> {
+    let at = Path::default().key("time");
+    let list = at.clone().key("servers");
+    let named = section.servers.as_deref().unwrap_or_default();
+    if named.len() > MAX_SERVERS {
+        return Err(invalid(list.index(MAX_SERVERS), Problem::TooManyNtpServers { max: MAX_SERVERS }));
+    }
+    let servers = named
+        .iter()
+        .enumerate()
+        .map(|(i, text)| Host::parse(text).ok_or_else(|| invalid(list.clone().index(i), Problem::NtpServer)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let zone = match &section.zone {
+        None => jiff::tz::TimeZone::UTC,
+        Some(name) => zone_named(name).ok_or_else(|| invalid(at.key("zone"), Problem::Zone))?,
+    };
+    Ok(TimeSettings { ntp: section.ntp, servers, zone, clock: section.clock })
 }

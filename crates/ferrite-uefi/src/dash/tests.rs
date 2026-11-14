@@ -14,9 +14,12 @@ use core::num::NonZeroU64;
 use ferrite_mem::eta::{BasisPoints, Confidence, Eta, Position};
 use ferrite_mem::histogram::Histogram;
 
+use ferrite_config::ClockFormat;
+
 use crate::goal::Goal;
 use crate::pace::{Delta, Outlook, Steadiness, TestStat, TestStats};
 use crate::sweep::Coverage;
+use crate::wall::{Day, Ends, TimeLine, TimeOfDay};
 use ferrite_net::{Link, MacAddr, Medium, PortStats, PortStatus, ServiceCounters};
 
 const START: Instant = Instant::from_epoch(Duration::from_secs(5));
@@ -133,6 +136,7 @@ fn net() -> NetStatus {
             address: Some(Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24)),
             gateway: Some(Ipv4Address::new(10, 0, 2, 2)),
             dns: Some(Ipv4Address::new(10, 0, 2, 3)),
+            ..Link::default()
         },
         frames: PortStats::default(),
         services: ServiceCounters::default(),
@@ -161,7 +165,13 @@ fn render(
 ) -> Vec<Rect> {
     let finished = finished_tests();
     let snapshot = Snapshot { status, history, faults, stats: &finished };
-    let frame = Frame { snapshot: &snapshot, net: Some(net()), net_err: None, now: START + Duration::from_secs(at) };
+    let frame = Frame {
+        snapshot: &snapshot,
+        net: Some(net()),
+        net_err: None,
+        now: START + Duration::from_secs(at),
+        time: None,
+    };
     dash.render(&frame);
     dash.output().1.to_vec()
 }
@@ -214,6 +224,7 @@ fn the_bar_of_a_short_goal_moves_a_quarter_second_at_a_time_while_the_clocks_wai
         net: Some(net()),
         net_err: None,
         now: START + Duration::from_millis(millis),
+        time: None,
     };
     dash.render(&at(500_000));
     dash.render(&at(500_100));
@@ -227,16 +238,24 @@ fn the_bar_of_a_short_goal_moves_a_quarter_second_at_a_time_while_the_clocks_wai
 #[test]
 fn a_clock_tick_allocates_nothing() {
     let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
-    let (history, faults) = (history(), VecDeque::new());
+    let (history, faults, finished) = (history(), VecDeque::new(), finished_tests());
+    let snapshot = Snapshot { status: status(), history: &history, faults: &faults, stats: &finished };
+    // The time of day ticks with the run clock, and its end time is on the pass's figure.
+    let ends =
+        Ends { day: Day::Weekday(jiff::civil::Weekday::Saturday), time: TimeOfDay { hour: 3, minute: 14, second: 0 } };
+    let frame = |at: u64| Frame {
+        snapshot: &snapshot,
+        net: Some(net()),
+        net_err: None,
+        now: START + Duration::from_secs(at),
+        time: Some(at_one_twenty_seven((at % 60) as u8, ends)),
+    };
     // The first frames size the scratch buffer and rasterize each digit the clocks show.
     for at in 500..560 {
-        render(&mut dash, status(), &history, &faults, at);
+        dash.render(&frame(at));
     }
-    let finished = finished_tests();
-    let snapshot = Snapshot { status: status(), history: &history, faults: &faults, stats: &finished };
-    let frame = Frame { snapshot: &snapshot, net: Some(net()), net_err: None, now: START + Duration::from_secs(560) };
     let before = bench::allocations().0;
-    dash.render(&frame);
+    dash.render(&frame(560));
     let allocated = bench::allocations().0 - before;
     check!(!dash.output().1.is_empty());
     check!(allocated == 0);
@@ -342,7 +361,12 @@ fn png_frames() {
             let snapshot = Snapshot { status, history: &history, faults: &faults, stats: &finished };
             let (net, net_err) = if scene == "no-network" { (None, no_network) } else { (Some(net()), None) };
             let at = START + Duration::from_secs(523);
-            dash.render(&Frame { snapshot: &snapshot, net, net_err, now: at });
+            let ends = Ends {
+                day: Day::Weekday(jiff::civil::Weekday::Saturday),
+                time: TimeOfDay { hour: 3, minute: 14, second: 0 },
+            };
+            let time = Some(at_one_twenty_seven(43, ends));
+            dash.render(&Frame { snapshot: &snapshot, net, net_err, now: at, time });
             let bytes = png(w, h, dash.canvas.bgra());
             std::fs::write(dir.join(std::format!("{scene}-{w}x{h}.png")), bytes).expect("write frame");
         }
@@ -400,7 +424,7 @@ fn a_port_coming_and_going_redraws_the_network_widget_alone() {
     let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
     let (history, faults) = (history(), VecDeque::new());
     let snapshot = Snapshot { status: status(), history: &history, faults: &faults, stats: &TestStats::default() };
-    let frame = |net: Option<NetStatus>, net_err| Frame { snapshot: &snapshot, net, net_err, now: START };
+    let frame = |net: Option<NetStatus>, net_err| Frame { snapshot: &snapshot, net, net_err, now: START, time: None };
 
     dash.render(&frame(Some(net()), None));
     let mut two = net();
@@ -422,4 +446,31 @@ fn a_port_coming_and_going_redraws_the_network_widget_alone() {
     dash.render(&frame(None, Some(NoNetwork { wired: "no wired NIC driven by the firmware", wifi: "scanning" })));
     let rects = dash.output().1.to_vec();
     check!(!rects.is_empty() && rects.iter().all(|r| l.net.body.intersect(*r) == *r), "{rects:?}");
+}
+
+fn at_one_twenty_seven(second: u8, ends: Ends) -> TimeLine {
+    let time = TimeOfDay { hour: 1, minute: 27, second };
+    TimeLine { now: time, format: ClockFormat::Twelve, overall: Some(ends), pass: Some(ends) }
+}
+
+#[test]
+fn the_time_of_day_and_the_end_time_redraw_only_the_title_bar() {
+    let ends = |hour| Ends { day: Day::Today, time: TimeOfDay { hour, minute: 14, second: 0 } };
+    let mut dash = Dashboard::new(1280, 800).expect("dashboard");
+    let (history, faults, finished) = (history(), VecDeque::new(), finished_tests());
+    let snapshot = Snapshot { status: status(), history: &history, faults: &faults, stats: &finished };
+    let draw = |dash: &mut Dashboard, time: TimeLine| {
+        let now = START + Duration::from_secs(500);
+        dash.render(&Frame { snapshot: &snapshot, net: Some(net()), net_err: None, now, time: Some(time) });
+        dash.output().1.to_vec()
+    };
+    draw(&mut dash, at_one_twenty_seven(43, ends(3)));
+    check!(draw(&mut dash, at_one_twenty_seven(43, ends(3))).is_empty());
+
+    let l = dash.layout;
+    let rects = draw(&mut dash, at_one_twenty_seven(44, ends(3)));
+    check!(!rects.is_empty() && rects.iter().all(|r| l.clock.intersect(*r) == *r), "a new second: {rects:?}");
+
+    let rects = draw(&mut dash, at_one_twenty_seven(44, ends(4)));
+    check!(!rects.is_empty() && rects.iter().all(|r| l.clock.intersect(*r) == *r), "a new end time: {rects:?}");
 }

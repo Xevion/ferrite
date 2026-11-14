@@ -6,9 +6,13 @@
 
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 mod addr;
 mod reg;
 mod time;
+mod wall;
 
 use core::fmt;
 use core::ptr::NonNull;
@@ -17,6 +21,7 @@ use core::time::Duration;
 pub use addr::{BusAddr, BusAddr32, PciAddress, PhysAddr};
 pub use reg::{DmaPtrReg, MmioExt, ReadOnly, ReadWrite, Readable, Reg, RegValue, Rw1c, Rw1cWrite};
 pub use time::{Instant, PageCount};
+pub use wall::{Correction, MAX_RATE_PPM, Offset, UnixTime, WallClock};
 
 /// Size of one DMA page in bytes.
 pub const PAGE_SIZE: usize = 4096;

@@ -15,6 +15,7 @@ use toml::de::{DeTable, DeValue, Error as DeError, ValueDeserializer};
 use crate::convert::{self, Invalid};
 use crate::error::{ConfigError, Path, Problem};
 use crate::run::RunGoal;
+use crate::time::TimeSettings;
 
 /// What a settings file configures, and what in it was wrong.
 ///
@@ -25,6 +26,7 @@ pub struct Loaded {
     pub credentials: Option<Credentials>,
     pub notify: Option<notify::Config>,
     pub run: Option<RunGoal>,
+    pub time: Option<TimeSettings>,
     /// One per section that could not be used, in file order, or the one that stopped the whole file.
     pub errors: Vec<ConfigError>,
 }
@@ -43,6 +45,7 @@ impl fmt::Debug for Loaded {
             .field("networks", &self.credentials.as_ref().map(|c| c.networks().len()))
             .field("notify", &self.notify.is_some())
             .field("run", &self.run)
+            .field("time", &self.time)
             .field("errors", &self.errors)
             .finish()
     }
@@ -75,6 +78,7 @@ pub fn load(bytes: &[u8]) -> Loaded {
             "wifi" => source.section(key, value, convert::credentials).map(|c| loaded.credentials = Some(c)),
             "notify" => source.section(key, value, convert::notify_config).map(|c| loaded.notify = Some(c)),
             "run" => source.section(key, value, convert::run_goal).map(|g| loaded.run = Some(g)),
+            "time" => source.section(key, value, convert::time_settings).map(|t| loaded.time = Some(t)),
             name => {
                 let (line, column) = position(text, key.span().start);
                 Err(ConfigError { line, column, path: Path::default().key(name), problem: Problem::UnknownKey })

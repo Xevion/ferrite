@@ -46,7 +46,8 @@ impl Rig {
     fn new() -> Self {
         let wifi = Shared::new();
         wifi.set_state(StationState::Connected { ssid: "home".into(), bssid: MacAddr::new([2, 0, 0, 0, 0, 1]) });
-        let mut net = Network::new(Console::new(WifiView::new(Rc::clone(&wifi))));
+        let wall = Rc::new(Wall::new(None, jiff::tz::TimeZone::UTC, ferrite_config::ClockFormat::Twelve));
+        let mut net = Network::new(Console::new(WifiView::new(Rc::clone(&wifi)), wall));
         let config =
             StackConfig { seed: 1, address: Some(Ipv4Cidr::new(Ipv4Address::LOCALHOST, 8)), mdns: false, http: true };
         let id = net.add(Box::new(LoopbackPort::new()), config, Instant::default());

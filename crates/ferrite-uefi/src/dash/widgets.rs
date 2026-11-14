@@ -274,11 +274,19 @@ impl TestCols {
     }
 }
 
+/// The gap between the title bar's figures, in design pixels.
+const CLOCK_GAP: f32 = 22.0;
+
+/// The style of the title bar's figures before their emphasis.
+fn clock_style(l: &Layout) -> Style {
+    Style { tracking: l.m(0.5), ..Pen::style(Face::Regular, l.text.label, BAR_DIM) }
+}
+
 pub fn clock(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
     let l = *p.l;
     let base = p.mid(l.text.label, r.y, r.h);
-    let plain = Style { tracking: l.m(0.5), ..Pen::style(Face::Regular, l.text.label, BAR_DIM) };
+    let plain = clock_style(&l);
     let (word, loud) = match f.state() {
         State::Starting => ("STARTING", false),
         State::Running => ("RUNNING", false),
@@ -291,13 +299,23 @@ pub fn clock(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     };
     let state_style = if loud || s.faults > 0 { Style { face: Face::Bold, color: BAR_TEXT, ..plain } } else { plain };
     let mut right = px(r.right());
-    right -= p.right(right, base, &state, state_style) + l.m(22.0);
-    p.right(
-        right,
-        base,
-        &fixed::<32>(format_args!("ELAPSED {}", hms(f.elapsed()))),
-        Style { color: BAR_TEXT, ..plain },
-    );
+    right -= p.right(right, base, &state, state_style) + l.m(CLOCK_GAP);
+    let bright = Style { color: BAR_TEXT, ..plain };
+    right -= p.right(right, base, &fixed::<32>(format_args!("ELAPSED {}", hms(f.elapsed()))), bright);
+    if let Some(time) = f.time {
+        let now = time.now.text(time.format);
+        // The end time is the first thing given up when the bar runs out of room.
+        if let Some(ends) = time.overall {
+            let ends = fixed::<32>(format_args!("ENDS {}", ends.text(time.format)));
+            let need = p.measure(&ends, bright) + p.measure(&now, bright) + 2.0 * l.m(CLOCK_GAP);
+            if right - need >= px(r.x) {
+                right -= l.m(CLOCK_GAP);
+                right -= p.right(right, base, &ends, bright);
+            }
+        }
+        right -= l.m(CLOCK_GAP);
+        p.right(right, base, &now, bright);
+    }
 }
 
 pub fn tabs(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
@@ -909,4 +927,39 @@ pub fn hints(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     };
     draw(p, px(r.x) + l.m(20.0), &left);
     draw(p, px(r.right()) - l.m(20.0) - total, &right);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::format;
+    use std::string::ToString as _;
+
+    use assert2::check;
+    use rstest::rstest;
+
+    use super::*;
+
+    /// Every size the layout is checked at in `layout.rs`, and the wide screens beyond.
+    #[rstest]
+    #[case::smallest(768, 576)]
+    #[case::compact(1024, 768)]
+    #[case::ovmf_default(1280, 800)]
+    #[case::laptop(1366, 768)]
+    #[case::full_hd(1920, 1080)]
+    #[case::uhd(3840, 2160)]
+    fn the_title_bars_figures_fit_beside_each_other_at_their_longest(#[case] w: u32, #[case] h: u32) {
+        let l = Layout::new(w, h);
+        let mut fonts = Fonts::load().expect("fonts");
+        let plain = clock_style(&l);
+        let loud = Style { face: Face::Bold, ..plain };
+        // The widest state, the run clock of a 365 day run, and the widest time of day.
+        let longest = [
+            (format!("99999 ERRORS {SEPARATOR} PAUSED"), loud),
+            ("ELAPSED 8760:00:00".to_string(), plain),
+            ("12:59:59 PM".to_string(), plain),
+        ];
+        let used: f32 =
+            longest.iter().map(|(text, style)| fonts.measure(text, *style)).sum::<f32>() + 2.0 * l.m(CLOCK_GAP);
+        check!(used <= px(l.clock.w), "{used} of {} px at {w}x{h}", l.clock.w);
+    }
 }

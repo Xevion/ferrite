@@ -6,7 +6,8 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::MAX_NETWORKS;
-use crate::schema::{Config, Network, Notify, NotifyEvent, NotifyFormat, Run, Secret, Security};
+use crate::schema::{Config, Network, Notify, NotifyEvent, NotifyFormat, Run, Secret, Security, Time};
+use crate::time::ClockFormat;
 
 const HEADER: &str = "\
 ## ferrite settings, read from \\EFI\\ferrite\\ferrite.toml on the boot volume when an app starts.
@@ -26,6 +27,11 @@ const NOTIFY_DOC: &str = "\
 
 const RUN_DOC: &str = "\
 ## When a run ends by itself: the first part met ends it. With none set it goes on until stopped.
+";
+
+const TIME_DOC: &str = "\
+## The clock: set from the firmware's RTC at start, then kept right over the network (SNTP) about every
+## 30 minutes, and the zone and style of the times shown.
 ";
 
 fn example_network() -> Network {
@@ -71,6 +77,9 @@ impl Config {
         out.push('\n');
         out.push_str(RUN_DOC);
         run(&mut out, &self.run);
+        out.push('\n');
+        out.push_str(TIME_DOC);
+        time(&mut out, &self.time);
         out
     }
 }
@@ -136,4 +145,21 @@ fn run(out: &mut String, r: &Run) {
     line(out, r.time.is_some(), "time", &time, text);
     let text = &["End the run at the first memory fault."];
     line(out, r.stop_on_fault, "stop_on_fault", if r.stop_on_fault { "true" } else { "false" }, text);
+}
+
+fn time(out: &mut String, t: &Time) {
+    header(out, t.is_default(), "[time]");
+    let text = &["Keep the clock right over the network. On by default; false sends nothing."];
+    line(out, !t.ntp, "ntp", if t.ntp { "true" } else { "false" }, text);
+    let text = &[
+        "Servers to ask first, IPv4 addresses or host names, at most four. Then come the ones DHCP names",
+        "and the public pool (pool.ntp.org).",
+    ];
+    let example = ["192.0.2.1".to_string(), "time.example.org".to_string()];
+    let servers: Vec<String> = t.servers.as_deref().unwrap_or(&example).iter().map(|server| quote(server)).collect();
+    line(out, t.servers.is_some(), "servers", &alloc::format!("[{}]", servers.join(", ")), text);
+    let text = &["An IANA time zone name for the times shown, such as America/Chicago. UTC when left out."];
+    line(out, t.zone.is_some(), "zone", &quote(t.zone.as_deref().unwrap_or("America/Chicago")), text);
+    let text = &["12h shows 01:27:43 AM, 24h shows 13:27:43."];
+    line(out, t.clock != ClockFormat::Twelve, "clock", &quote(t.clock.name()), text);
 }

@@ -3,7 +3,8 @@
 //! The `.env` lines are the developer's own credentials, so nothing here prints a value: an error names
 //! the `.env` key and its line. The text is converted to the plain data of `ferrite-config`, rendered,
 //! and read back through `ferrite_config::load`, so a file that would be refused on the stick is refused
-//! here, by the same checks.
+//! here, by the same checks. The `[time]` zone is the host's own, read from where the system keeps it
+//! ([`zone_name`]), since a file for a machine on the same desk is nearly always in the same zone.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,7 +12,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use ferrite_config::{Config, ConfigError, Network, Notify, NotifyEvent, NotifyFormat, Path as At, Problem, Run};
-use ferrite_config::{Secret, Security, Wifi};
+use ferrite_config::{Secret, Security, Time, Wifi};
 use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Clone)]
@@ -75,7 +76,7 @@ pub fn run(options: &SettingsOptions) -> Result<(), SettingsError> {
         Some(path) => {
             let bytes = fs::read(path).context(ReadSnafu { path })?;
             let env = String::from_utf8(bytes).map_err(|_| SettingsError::NotText { path: path.clone() })?;
-            from_env(&env).context(EnvSnafu { path })?
+            from_env(&env, host_zone().as_deref()).context(EnvSnafu { path })?
         },
     };
     match &options.out {
@@ -89,10 +90,30 @@ pub fn run(options: &SettingsOptions) -> Result<(), SettingsError> {
     }
 }
 
+/// The IANA name of this host's time zone, when it can be told and the apps' tz database knows it.
+pub fn host_zone() -> Option<String> {
+    let link = fs::read_link("/etc/localtime").ok();
+    let file = fs::read_to_string("/etc/timezone").ok();
+    zone_name(link.as_deref(), file.as_deref())
+}
+
+/// The zone a host's files name: the part of the `/etc/localtime` symlink's target under a `zoneinfo`
+/// directory, else the first line of `/etc/timezone`. Only a name the bundled tz database knows counts.
+pub fn zone_name(localtime_target: Option<&Path>, timezone_file: Option<&str>) -> Option<String> {
+    let linked = localtime_target.and_then(|target| {
+        let parts: Vec<_> = target.components().map(|part| part.as_os_str().to_str()).collect::<Option<_>>()?;
+        let under = parts.iter().rposition(|part| *part == "zoneinfo")?;
+        Some(parts[under + 1..].join("/"))
+    });
+    let named = timezone_file.and_then(|text| text.lines().next()).map(|line| line.trim().to_string());
+    linked.into_iter().chain(named).find(|name| ferrite_config::zone_named(name).is_some())
+}
+
 /// The settings file for the `WPA_`, `NOTIFY_` and `RUN_` lines of `.env` text, checked the way the
-/// apps will check it.
-pub fn from_env(text: &str) -> Result<String, EnvError> {
-    let converted = convert(text)?;
+/// apps will check it, with `[time]` in `zone` when there is one.
+pub fn from_env(text: &str, zone: Option<&str>) -> Result<String, EnvError> {
+    let mut converted = convert(text)?;
+    converted.config.time = Time { zone: zone.map(str::to_string), ..Time::default() };
     let rendered = converted.config.render();
     let loaded = ferrite_config::load(rendered.as_bytes());
     if let Some(error) = loaded.errors.first() {
@@ -247,7 +268,7 @@ fn convert(text: &str) -> Result<Converted, EnvError> {
     }
     let notify = notify_section(&notify, &mut origins)?;
     let run = run_section(&run, &mut origins)?;
-    Ok(Converted { config: Config { wifi: Wifi { networks }, notify, run }, origins })
+    Ok(Converted { config: Config { wifi: Wifi { networks }, notify, run, time: Time::default() }, origins })
 }
 
 fn origin(origins: &mut Vec<Origin>, at: At, line: Line<'_>) {
@@ -405,13 +426,14 @@ WPA_SSID_01=last-one-wins\r
                 events: Some(vec![NotifyEvent::Pass, NotifyEvent::End]),
             }),
             run: Run { passes: Some(3), time: Some("1h30m".into()), stop_on_fault: true },
+            time: Time::default(),
         };
         check!(config == want);
     }
 
     #[test]
     fn the_file_written_from_env_is_accepted_by_the_apps_checks() {
-        let text = from_env(ENV).unwrap();
+        let text = from_env(ENV, None).unwrap();
         let loaded = load(text.as_bytes());
         check!(loaded.errors.is_empty(), "{:?}", loaded.errors);
         check!(loaded.credentials.is_some_and(|c| c.networks().len() == 4));
@@ -423,7 +445,7 @@ WPA_SSID_01=last-one-wins\r
     #[case::nothing("")]
     #[case::unrelated("PATH=/bin\nFOO_BAR=1\n# WPA_SSID=x\n")]
     fn an_env_without_settings_gives_the_template(#[case] env: &str) {
-        let text = from_env(env).unwrap();
+        let text = from_env(env, None).unwrap();
         check!(text == Config::template());
         check!(load(text.as_bytes()).credentials.is_none());
     }
@@ -474,10 +496,44 @@ WPA_SSID_01=last-one-wins\r
     )]
     #[case::flag(format!("RUN_STOP_ON_FAULT={SECRET}\n"), "line 1: RUN_STOP_ON_FAULT is not 1 or 0 (or yes, no, true, false, on, off)")]
     fn a_broken_env_is_refused_by_key_and_line_and_never_by_value(#[case] env: String, #[case] message: &str) {
-        let error = from_env(&env).unwrap_err();
+        let error = from_env(&env, None).unwrap_err();
         check!(error.to_string() == message);
         let shown = format!("{error} {error:?}");
         check!(!shown.contains(SECRET) && !shown.contains("s3cr3t"), "{shown}");
+    }
+
+    #[test]
+    fn the_hosts_zone_is_written_into_the_file_and_read_back_by_the_apps_checks() {
+        let text = from_env("RUN_PASSES=2\n", Some("America/Chicago")).unwrap();
+        check!(text.contains("\n[time]\n"), "{text}");
+        check!(text.contains("\nzone = \"America/Chicago\"\n"), "{text}");
+        let time = load(text.as_bytes()).time.unwrap();
+        check!(time.zone.iana_name() == Some("America/Chicago"));
+        check!(time.ntp, "the other keys stay at their defaults, commented");
+    }
+
+    #[rstest]
+    #[case::debian_link(Some("/usr/share/zoneinfo/America/Chicago"), None, Some("America/Chicago"))]
+    #[case::relative_link(Some("../usr/share/zoneinfo/Europe/Berlin"), None, Some("Europe/Berlin"))]
+    #[case::mac_link(Some("/var/db/timezone/zoneinfo/Asia/Tokyo"), None, Some("Asia/Tokyo"))]
+    #[case::one_part(Some("/usr/share/zoneinfo/UTC"), None, Some("UTC"))]
+    #[case::the_link_wins(Some("/usr/share/zoneinfo/Europe/Paris"), Some("Asia/Tokyo\n"), Some("Europe/Paris"))]
+    #[case::a_copy_not_a_link(None, Some("America/New_York\n"), Some("America/New_York"))]
+    #[case::a_link_elsewhere(Some("/etc/mytz"), Some("America/Denver"), Some("America/Denver"))]
+    #[case::a_name_the_database_lacks(Some("/usr/share/zoneinfo/posix/America/Chicago"), None, None)]
+    #[case::a_name_the_database_lacks_then_the_file(
+        Some("/usr/share/zoneinfo/right/UTC"),
+        Some("Etc/UTC\n"),
+        Some("Etc/UTC")
+    )]
+    #[case::garbage(Some("/dev/null"), Some("Local\n"), None)]
+    #[case::nothing(None, None, None)]
+    fn the_hosts_zone_is_the_name_its_files_give(
+        #[case] link: Option<&str>,
+        #[case] file: Option<&str>,
+        #[case] want: Option<&str>,
+    ) {
+        check!(zone_name(link.map(Path::new), file).as_deref() == want);
     }
 
     #[test]
@@ -487,7 +543,7 @@ WPA_SSID_01=last-one-wins\r
         for n in 0..=max {
             let _ = writeln!(env, "WPA_SSID_{n}=n{n}\nWPA_KEY_MGMT_{n}=NONE");
         }
-        let error = from_env(&env).unwrap_err();
+        let error = from_env(&env, None).unwrap_err();
         check!(error.to_string() == format!("line {}: WPA_SSID_{max}: at most {max} networks", max * 2 + 1));
     }
 

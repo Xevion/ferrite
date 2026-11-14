@@ -18,12 +18,14 @@ use smoltcp::socket::{dhcpv4, udp};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr};
 
 use crate::device::{PortDevice, Scratch, smol_instant};
+use crate::dhcp;
 use crate::http::{PollStats, Server, Site, Web};
 use crate::mdns::{self, Destination, Handled, Responder};
 use crate::notify::{Courier, Notifier};
 use crate::ping::Pinger;
 use crate::port::Port;
-use crate::status::{Link, OptAddr, PortStatus, ServiceCounters};
+use crate::sntp::{Prober, Sync};
+use crate::status::{Link, NtpServers, OptAddr, PortStatus, ServiceCounters};
 
 const MDNS_BUFFER: usize = 1500;
 const MDNS_PACKETS: usize = 4;
@@ -62,6 +64,8 @@ pub struct PollCtx<'a> {
     pub clock: Option<&'a dyn Clock>,
     /// The notifier whose queue this stack carries, when it is the port notifications go out on.
     pub notify: Option<&'a mut Notifier>,
+    /// The time client whose requests this stack carries, when it is the port they go out on.
+    pub sntp: Option<&'a mut Sync>,
 }
 
 struct Mdns {
@@ -80,6 +84,7 @@ pub struct Stack {
     http: Option<Server>,
     pinger: Option<Pinger>,
     courier: Courier,
+    prober: Prober,
     link: Link,
     services: ServiceCounters,
     http_stats: PollStats,
@@ -104,7 +109,7 @@ impl Stack {
             });
             link.address = Some(cidr);
         }
-        let dhcp = config.address.is_none().then(|| sockets.add(dhcpv4::Socket::new()));
+        let dhcp = config.address.is_none().then(|| sockets.add(dhcp_socket()));
         let mdns = config.mdns.then(|| Mdns::new(&mut iface, &mut sockets));
         Self {
             port,
@@ -116,6 +121,7 @@ impl Stack {
             http: None,
             pinger: None,
             courier: Courier::new(config.seed),
+            prober: Prober::default(),
             link,
             services: ServiceCounters::default(),
             http_stats: PollStats::default(),
@@ -152,6 +158,7 @@ impl Stack {
             served.busy
         });
         self.courier.poll(&mut self.iface, &mut self.sockets, &self.link, ctx.notify.as_deref_mut(), now);
+        self.prober.poll(&mut self.iface, &mut self.sockets, &self.link, ctx.sntp.as_deref_mut(), now);
         // Send what the connections just queued now rather than a poll later.
         let mut device = PortDevice::new(&mut *self.port, &mut self.scratch, now);
         self.iface.poll_egress(at, &mut device, &mut self.sockets);
@@ -167,18 +174,26 @@ impl Stack {
         let Some(handle) = self.dhcp else { return };
         // The event borrows the socket, so copy out what is needed first.
         let lease = match self.sockets.get_mut::<dhcpv4::Socket<'_>>(handle).poll() {
-            Some(dhcpv4::Event::Configured(c)) => Some(Some((c.address, c.router, c.dns_servers.first().copied()))),
+            Some(dhcpv4::Event::Configured(c)) => Some(Some(Lease {
+                address: c.address,
+                router: c.router,
+                dns: c.dns_servers.first().copied(),
+                ntp: c.packet.map_or_else(NtpServers::default, |packet| dhcp::ntp_servers(packet.into_inner())),
+            })),
             Some(dhcpv4::Event::Deconfigured) => Some(None),
             None => None,
         };
         match lease {
-            Some(Some((address, router, dns))) => self.apply_lease(now, address, router, dns),
+            // The client reports every renewal, since it keeps the reply; only a change is news.
+            Some(Some(lease)) if lease.is_in_force(&self.link) => {},
+            Some(Some(lease)) => self.apply_lease(now, &lease),
             Some(None) => self.clear_lease(),
             None => {},
         }
     }
 
-    fn apply_lease(&mut self, now: Instant, address: Ipv4Cidr, router: Option<Ipv4Address>, dns: Option<Ipv4Address>) {
+    fn apply_lease(&mut self, now: Instant, lease: &Lease) {
+        let Lease { address, router, dns, ntp } = *lease;
         self.iface.update_ip_addrs(|addrs| {
             addrs.clear();
             // The list was just emptied and holds at least one address, so this push cannot fail.
@@ -195,7 +210,7 @@ impl Stack {
             },
         }
         log::info!(
-            "dhcp: lease {} (prefix /{}), router {}, DNS {}",
+            "dhcp: lease {} (prefix /{}), router {}, DNS {}, NTP {ntp}",
             address.address(),
             address.prefix_len(),
             OptAddr(router),
@@ -209,6 +224,7 @@ impl Stack {
         self.link.address = Some(address);
         self.link.gateway = router;
         self.link.dns = dns;
+        self.link.ntp = ntp;
     }
 
     fn clear_lease(&mut self) {
@@ -221,6 +237,7 @@ impl Stack {
         self.link.address = None;
         self.link.gateway = None;
         self.link.dns = None;
+        self.link.ntp = NtpServers::default();
     }
 
     /// Answer queued mDNS queries and send any due announcement.
@@ -282,6 +299,11 @@ impl Stack {
         self.courier.busy()
     }
 
+    /// Whether a time request is being sent over this stack.
+    pub const fn syncing(&self) -> bool {
+        self.prober.busy()
+    }
+
     /// The DNS server to look names up with, for a stack whose address is fixed (a DHCP lease sets it).
     pub const fn set_dns(&mut self, server: Option<Ipv4Address>) {
         self.link.dns = server;
@@ -309,6 +331,32 @@ impl Stack {
     pub fn poll_delay(&mut self, now: Instant) -> Option<Duration> {
         self.iface.poll_delay(smol_instant(now), &self.sockets).map(Duration::from)
     }
+}
+
+/// What a DHCP lease configures.
+#[derive(Clone, Copy)]
+struct Lease {
+    address: Ipv4Cidr,
+    router: Option<Ipv4Address>,
+    dns: Option<Ipv4Address>,
+    ntp: NtpServers,
+}
+
+impl Lease {
+    fn is_in_force(&self, link: &Link) -> bool {
+        link.address == Some(self.address)
+            && link.gateway == self.router
+            && link.dns == self.dns
+            && link.ntp == self.ntp
+    }
+}
+
+/// A DHCP client that also asks for the NTP servers and keeps the reply to read them from.
+fn dhcp_socket() -> dhcpv4::Socket<'static> {
+    let mut socket = dhcpv4::Socket::new();
+    socket.set_parameter_request_list(&dhcp::PARAMETER_REQUEST_LIST);
+    socket.set_receive_packet_buffer(dhcp::reply_buffer());
+    socket
 }
 
 impl Mdns {

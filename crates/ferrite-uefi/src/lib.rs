@@ -26,3 +26,4 @@ pub mod sweep;
 mod testing;
 pub mod timings;
 pub mod ui;
+pub mod wall;
