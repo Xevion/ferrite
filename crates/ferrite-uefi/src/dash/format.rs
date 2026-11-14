@@ -37,6 +37,29 @@ pub fn clock(d: Duration) -> Text {
     if h > 0 { fixed(format_args!("{h}:{m:02}:{s:02}")) } else { fixed(format_args!("{m}:{s:02}")) }
 }
 
+/// A clock with every field: `hh:mm:ss`.
+#[must_use]
+pub fn hms(d: Duration) -> Text {
+    let secs = d.as_secs();
+    fixed(format_args!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60))
+}
+
+/// An address in hex with its digits in groups of four: `0x4_7A3C_1F08`.
+#[must_use]
+pub fn addr(value: u64) -> Text {
+    let digits = fixed::<16>(format_args!("{value:X}"));
+    let mut out = Text::new();
+    // Cut only if the text does not fit, which 16 digits and their separators always do.
+    out.push_str("0x").ok();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(4) {
+            out.push('_').ok();
+        }
+        out.push(c).ok();
+    }
+    out
+}
+
 /// How long something took: hundredths under ten seconds, tenths under a minute, then a clock.
 #[must_use]
 pub fn took(d: Duration) -> Text {
@@ -67,13 +90,16 @@ pub fn rate(bytes_per_sec: u64) -> Text {
     fixed(format_args!("{}.{} GB/s", deci / 10, deci % 10))
 }
 
-/// A buffer size in the largest binary unit it is a whole number of, else MiB.
+/// A buffer size in the largest binary unit it is a whole number of, else MiB, or KiB under one.
 #[must_use]
 pub fn size(bytes: usize) -> Text {
+    const KIB: usize = 1 << 10;
     const MIB: usize = 1 << 20;
     const GIB: usize = 1 << 30;
     if bytes >= GIB && bytes.is_multiple_of(GIB) {
         fixed(format_args!("{} GiB", bytes / GIB))
+    } else if (KIB..MIB).contains(&bytes) {
+        fixed(format_args!("{} KiB", bytes / KIB))
     } else {
         fixed(format_args!("{} MiB", bytes / MIB))
     }
@@ -104,6 +130,24 @@ mod tests {
     #[case(3_661, "1:01:01")]
     fn clocks(#[case] secs: u64, #[case] expected: &str) {
         check!(clock(Duration::from_secs(secs)) == expected);
+    }
+
+    #[rstest]
+    #[case(0x4_7a3c_1f08, "0x4_7A3C_1F08")]
+    #[case(0x1000, "0x1000")]
+    #[case(0x1_0000, "0x1_0000")]
+    #[case(0, "0x0")]
+    #[case(0xaaaa_aaaa_5555_5555, "0xAAAA_AAAA_5555_5555")]
+    fn addresses_group_by_four(#[case] value: u64, #[case] expected: &str) {
+        check!(addr(value) == expected);
+    }
+
+    #[rstest]
+    #[case(1 << 30, "1 GiB")]
+    #[case(128 << 20, "128 MiB")]
+    #[case(512 << 10, "512 KiB")]
+    fn sizes(#[case] bytes: usize, #[case] expected: &str) {
+        check!(size(bytes) == expected);
     }
 
     #[rstest]

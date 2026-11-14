@@ -13,8 +13,8 @@ fn fonts() -> Fonts {
 #[test]
 fn every_face_has_the_symbols_the_dashboard_draws() {
     let fonts = fonts();
-    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono, Face::MonoBold] {
-        for c in [ELLIPSIS, '\u{b7}', 'g', '0'] {
+    for face in Face::ALL {
+        for c in [ELLIPSIS, '\u{b7}', '\u{2014}', '\u{d7}', '\u{2190}', '\u{2192}', 'g', '0'] {
             check!(fonts.faces[face as usize].has_glyph(c), "{face:?} lacks {c:?}");
         }
     }

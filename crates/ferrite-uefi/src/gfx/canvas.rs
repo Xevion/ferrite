@@ -71,19 +71,6 @@ const fn mix(under: u8, over: u8, alpha: u8) -> u8 {
     ((under * (255 - alpha) + over * alpha + 127) / 255) as u8
 }
 
-/// Coverage lifted towards opaque. Light text blended in sRGB space reads thin and grey on a dark
-/// ground; this is close to a 1/1.5 gamma on coverage without needing `powf`.
-const BOOST: [u8; 256] = {
-    let mut table = [0; 256];
-    let mut coverage = 0;
-    while coverage < 256 {
-        let a = coverage as u16;
-        table[coverage] = (a + a * (255 - a) / 512) as u8;
-        coverage += 1;
-    }
-    table
-};
-
 /// A piece of a recording's text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Span {
@@ -193,6 +180,13 @@ impl Op {
 /// The columns two versions of a solid bar can differ in, when only its right end moved: its left
 /// end and straight edges are the same pixels in both.
 fn bar_growth(old: &Item, new: &Item) -> Option<Rect> {
+    if let (Op::Fill { rect: a, color }, Op::Fill { rect: b, color: color2 }) = (old.op, new.op) {
+        if color != color2 || (a.x, a.y, a.h) != (b.x, b.y, b.h) {
+            return None;
+        }
+        let from = a.right().min(b.right());
+        return Some(Rect::new(from, a.y, a.right().max(b.right()) - from, a.h));
+    }
     let (Op::Round { x, w, h, radius, fill: Fill::Solid(_), .. }, Op::Round { w: w2, .. }) = (old.op, new.op) else {
         return None;
     };
@@ -538,10 +532,9 @@ impl Painter<'_, '_> {
                 if coverage == 0 {
                     continue;
                 }
-                let a = BOOST[coverage as usize];
-                px[0] = mix(px[0], color.b, a);
-                px[1] = mix(px[1], color.g, a);
-                px[2] = mix(px[2], color.r, a);
+                px[0] = mix(px[0], color.b, coverage);
+                px[1] = mix(px[1], color.g, coverage);
+                px[2] = mix(px[2], color.r, coverage);
             }
         }
     }

@@ -213,13 +213,12 @@ fn timed_render(dash: &mut Dashboard, f: &Frame<'_>, prof: &mut Profile) {
     let bounds = dash.canvas.bounds();
     let keys = Keys::of(f, (bounds.w, bounds.h));
     prof.keys += t.elapsed();
-    let faulted = keys.setup.faulted;
     let last = dash.last.filter(|last| last.setup == keys.setup);
     let full = last.is_none();
     if full {
         let t = Clock::now();
-        dash.layout = Layout::new(bounds.w, bounds.h, keys.setup.tests, faulted);
-        dash.pen(faulted).backdrop();
+        dash.layout = Layout::new(bounds.w, bounds.h);
+        dash.pen().backdrop();
         dash.dirty.add_all();
         prof.backdrop.0 += 1;
         prof.backdrop.1 += t.elapsed();
@@ -231,7 +230,7 @@ fn timed_render(dash: &mut Dashboard, f: &Frame<'_>, prof: &mut Profile) {
             continue;
         }
         let rect = widget.rect(&l);
-        let mut pen = Pen { canvas: &mut dash.canvas, fonts: &mut dash.fonts, l: &l, faulted };
+        let mut pen = Pen { canvas: &mut dash.canvas, fonts: &mut dash.fonts, l: &l };
         let t = Clock::now();
         pen.begin(rect);
         widget.draw()(&mut pen, rect, f);

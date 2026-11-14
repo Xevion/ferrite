@@ -1,5 +1,5 @@
-//! The cards behind the widgets, and each widget's drawing. A widget draws only inside its own
-//! rectangle, starting from a cleared ground, so it can be redrawn alone.
+//! The static chrome behind the widgets, and each widget's drawing. A widget draws only inside its
+//! own rectangle, starting from a cleared ground, so it can be redrawn alone.
 
 #![expect(
     clippy::many_single_char_names,
@@ -7,93 +7,110 @@
 )]
 
 use ferrite_mem::suite::{Mode, TestKind};
+use ferrite_net::{Medium, PortStatus};
 use heapless::String;
 
-use super::format::{self, fixed, num, plural};
-use super::layout::{Layout, tile_grid, window};
+use super::format::{self, addr, fixed, hms, num, plural};
+use super::layout::{Layout, MAP_COLS, MAP_ROWS, Section, window};
 use super::theme::{
-    ACCENT, ACCENT_FROM, BAD, BAD_DEEP, BAD_EDGE, BAD_GROUND, CARD, CARD_EDGE, CHIP, DIM, GOOD, MUTED, PAGE, ROW, TEXT,
-    TRACK, WARN,
+    ACTIVE, ACTIVE_RING, BAR, BAR_DIM, BAR_RULE, BAR_TEXT, BG, DIM, ERR, FILL, HELD, KEY, KEY_INK, LABEL, LINE, PASS,
+    PENDING, SEL, SEL_INK, STRONG, TAB_ON, TAB_ON_INK, TAB_TEXT, TESTED, TEXT, TRACK,
 };
 use super::{Frame, State};
 use crate::gfx::text::{Case, Face, Fonts, Style};
-use crate::gfx::{Canvas, Fill, Rect, Rgb, px, whole_px};
-use ferrite_net::{Medium, PortStatus};
+use crate::gfx::{Canvas, Rect, Rgb, px, whole_px};
+use crate::report::{CpuInfo, FaultRecord, TestRecord};
 
-use crate::report::{CpuInfo, TestRecord};
+/// The placeholder for what this build cannot read from the machine.
+const NONE: &str = "\u{2014}";
+const SEPARATOR: &str = "\u{b7}";
+
+/// Cells of the memory map.
+pub const CELLS: usize = (MAP_COLS * MAP_ROWS) as usize;
+
+/// The memory map cell a test at `percent` is working in.
+#[must_use]
+pub fn active_cell(percent: u16) -> usize {
+    (usize::from(percent.min(100)) * CELLS / 100).min(CELLS - 1)
+}
 
 pub struct Pen<'d> {
     pub canvas: &'d mut Canvas,
     pub fonts: &'d mut Fonts,
     pub l: &'d Layout,
-    /// Faults were found: the header and the fault log turn red.
-    pub faulted: bool,
 }
 
 impl Pen<'_> {
-    fn header_ground(&self) -> Rgb {
-        if self.faulted { BAD_GROUND } else { CARD }
-    }
-
     /// Start drawing the widget in `r`, which is cleared to what lies behind it and drawn only in.
     pub fn begin(&mut self, r: Rect) {
-        let ground = if self.l.header.intersect(r) == r {
-            self.header_ground()
-        } else if self.l.footer.intersect(r) == r {
-            PAGE
-        } else {
-            CARD
-        };
+        let bars = [self.l.header, self.l.tabs, self.l.footer];
+        let ground = if bars.iter().any(|bar| bar.intersect(r) == r) { BAR } else { BG };
         self.canvas.begin(r, ground);
     }
 
-    /// The page and the cards, with their titles.
+    /// The page, the title bar and the section labels.
     pub fn backdrop(&mut self) {
         let l = *self.l;
         let all = self.canvas.bounds();
-        self.canvas.fill(all, PAGE);
-        let (header_edge, fault_edge) = if self.faulted { (BAD_EDGE, BAD_EDGE) } else { (CARD_EDGE, CARD_EDGE) };
-        self.card(l.header, self.header_ground(), header_edge);
-        self.card(l.progress, CARD, CARD_EDGE);
+        self.canvas.fill(all, BG);
+        self.canvas.fill(l.header, BAR);
+        self.brand();
         let titled = [
-            (l.tests_card, "Tests in this pass", CARD_EDGE, MUTED),
-            (l.faults_card, "Faults", fault_edge, if self.faulted { BAD } else { MUTED }),
-            (l.net_card, "Network", CARD_EDGE, MUTED),
-            (l.passes_card, "Passes", CARD_EDGE, MUTED),
-            (l.cpus_card, "Processors", CARD_EDGE, MUTED),
+            (l.system, "SYSTEM"),
+            (l.progress, "PROGRESS"),
+            (l.tests, "TESTS"),
+            (l.map, "MEMORY MAP"),
+            (l.net, "NETWORK"),
+            (l.errors, "ERRORS"),
         ];
-        for (card, title, edge, color) in titled {
-            self.card(card, CARD, edge);
-            let base = self.mid(l.text.label, card.y + l.pad, l.title_h);
-            self.label(px(card.x + l.pad), base, title, color);
+        for (section, title) in titled {
+            self.section_label(section, title);
         }
+        self.dashes(l.detail_rule);
+        self.tests_head();
+        self.canvas.fill(l.log_rule, LINE);
     }
 
-    fn card(&mut self, r: Rect, fill: Rgb, edge: Rgb) {
-        let (x, y, w, h) = (px(r.x), px(r.y), px(r.w), px(r.h));
-        let radius = self.l.radius;
-        self.canvas.round_rect(x, y, w, h, radius, Fill::Solid(edge));
-        self.canvas.round_rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, radius - 1.0, Fill::Solid(fill));
+    fn brand(&mut self) {
+        let l = *self.l;
+        let h = l.header;
+        let name = Style { tracking: l.m(3.0), ..Self::style(Face::Bold, l.text.title, BAR_TEXT) };
+        let base = self.mid(l.text.title, h.y, h.h);
+        let mut x = px(h.x) + l.m(20.0);
+        x += self.text(x, base, "FERRITE", name) + l.m(14.0);
+        x += self.text(x, base, "Memory Diagnostic", Self::style(Face::Regular, l.text.base, BAR_TEXT)) + l.m(14.0);
+        self.text(x, base, concat!("v", env!("CARGO_PKG_VERSION")), Self::style(Face::Regular, l.text.base, BAR_DIM));
+    }
+
+    fn section_label(&mut self, s: Section, title: &str) {
+        let l = *self.l;
+        let base = self.mid(l.text.label, s.label.y, l.row_h - l.row_h / 8);
+        let style = self.label_style(LABEL);
+        self.canvas.text(self.fonts, px(s.label.x), base, title, style);
+        self.canvas.fill(Rect::new(s.label.x, s.label.bottom() - 1, s.label.w, 1), LINE);
+    }
+
+    /// A one pixel rule of three pixel dashes.
+    fn dashes(&mut self, r: Rect) {
+        let dash = whole_px(self.l.m(3.0)).max(2);
+        let mut x = r.x;
+        while x < r.right() {
+            self.canvas.fill(Rect::new(x, r.y, dash.min(r.right() - x), 1), LINE);
+            x += 2 * dash;
+        }
     }
 
     const fn style(face: Face, px: u16, color: Rgb) -> Style {
         Style { face, px, color, tracking: 0.0, case: Case::AsWritten }
     }
 
+    fn body(&self, color: Rgb) -> Style {
+        Self::style(Face::Regular, self.l.text.base, color)
+    }
+
     fn label_style(&self, color: Rgb) -> Style {
         let px = self.l.text.label;
-        Style { face: Face::SemiBold, px, color, tracking: f32::from(px) * 0.08, case: Case::Upper }
-    }
-
-    /// Small capitals.
-    fn label(&mut self, x: f32, base: f32, text: &str, color: Rgb) -> f32 {
-        let style = self.label_style(color);
-        self.canvas.text(self.fonts, x, base, text, style)
-    }
-
-    fn label_width(&mut self, text: &str) -> f32 {
-        let style = self.label_style(MUTED);
-        self.fonts.measure(text, style)
+        Style { face: Face::SemiBold, px, color, tracking: self.l.m(2.0), case: Case::Upper }
     }
 
     /// The baseline that centres capitals at `px_size` in the band `top..top + h`.
@@ -120,159 +137,230 @@ impl Pen<'_> {
         self.fonts.measure(text, style)
     }
 
-    /// A progress bar of `permille` thousandths, rounded at both ends.
-    fn bar(&mut self, x: f32, y: f32, w: f32, h: f32, permille: u32, fill: Fill) {
-        self.canvas.round_rect(x, y, w, h, h / 2.0, Fill::Solid(TRACK));
-        if permille > 0 {
-            let filled = (w * px(permille.min(1000)) / 1000.0).max(h);
-            self.canvas.round_rect(x, y, filled, h, h / 2.0, fill);
+    /// A square-ended progress bar: a bordered track and its fill, always the same three steps so
+    /// a growing fill redraws only the columns it gained.
+    fn bar(&mut self, r: Rect, permille: u32, fill: Rgb) {
+        let inner = Rect::new(r.x + 1, r.y + 1, r.w.saturating_sub(2), r.h.saturating_sub(2));
+        self.canvas.fill(r, LINE);
+        self.canvas.fill(inner, TRACK);
+        let filled = inner.w * permille.min(1000) / 1000;
+        self.canvas.fill(Rect::new(inner.x, inner.y, filled, inner.h), fill);
+    }
+
+    /// One line: a label column, a bar and a right-aligned figure.
+    fn bar_row(&mut self, row: Rect, label: &str, figure: &str, permille: u32, fill: Rgb) {
+        let l = *self.l;
+        let gap = whole_px(l.m(12.0));
+        let base = self.mid(l.text.base, row.y, row.h);
+        self.fit(px(row.x), base, label, self.body(DIM), px(l.lab));
+        let bar_h = whole_px(l.m(16.0)).min(row.h);
+        let x = row.x + l.lab + gap;
+        let w = row.w.saturating_sub(l.lab + l.pw + 2 * gap);
+        self.bar(Rect::new(x, row.y + (row.h - bar_h) / 2, w, bar_h), permille, fill);
+        self.right(px(row.right()), base, figure, self.body(TEXT));
+    }
+
+    /// Pairs of a dim label and a value, two pairs to a row, over `rows` rows.
+    fn pairs(&mut self, r: Rect, cells: &[(&str, &str)]) {
+        let l = *self.l;
+        let (lab, gap) = (px(l.lab), l.m(12.0));
+        let value_w = (px(r.w) - 2.0 * lab - 3.0 * gap) / 2.0;
+        for (n, (key, value)) in cells.iter().enumerate() {
+            let (row, col) = (u32::try_from(n / 2).unwrap_or(0), u32::try_from(n % 2).unwrap_or(0));
+            let x = px(r.x) + px(col) * (lab + gap + value_w + gap);
+            let base = self.mid(l.text.base, r.y + row * l.pitch, l.row_h);
+            self.fit(x, base, key, self.body(DIM), lab);
+            let color = if *value == NONE { DIM } else { TEXT };
+            self.fit(x + lab + gap, base, value, self.body(color), value_w);
         }
     }
 
-    fn pill_width(&mut self, text: &str, style: Style, dot: bool) -> f32 {
-        let pad = self.l.m(9.0);
-        let dot_w = if dot { self.l.m(12.0) } else { 0.0 };
-        self.measure(text, style) + 2.0 * pad + dot_w
+    /// A label and a value on row `row` of `r`.
+    fn line(&mut self, r: Rect, row: u32, key: &str, value: &str, color: Rgb) -> f32 {
+        let l = *self.l;
+        let key_w = l.m(100.0);
+        let base = self.mid(l.text.base, r.y + row * l.pitch, l.row_h);
+        self.fit(px(r.x), base, key, self.body(DIM), key_w);
+        let x = px(r.x) + key_w;
+        x + self.fit(x, base, value, self.body(color), px(r.right()) - x)
     }
 
-    /// A rounded chip from `x`, centred in the band `r`; returns its width.
-    fn pill(&mut self, x: f32, r: Rect, text: &str, style: Style, ground: Rgb, dot: Option<Rgb>) -> f32 {
-        let w = self.pill_width(text, style, dot.is_some());
-        let h = self.l.m(24.0).min(px(r.h));
-        let y = px(r.y) + (px(r.h) - h) / 2.0;
-        self.canvas.round_rect(x, y, w, h, h / 2.0, Fill::Solid(ground));
-        let mut tx = x + self.l.m(9.0);
-        if let Some(dot) = dot {
-            self.canvas.circle(tx + self.l.m(3.5), y + h / 2.0, self.l.m(3.5), dot);
-            tx += self.l.m(12.0);
-        }
-        let base = self.fonts.centred_baseline(style.px, y, h);
-        self.text(tx, base, text, style);
-        w
+    fn tests_head(&mut self) {
+        let l = *self.l;
+        let head = l.tests_head;
+        let cols = TestCols::of(&l, l.tests_rows);
+        let base = self.mid(l.text.label, head.y, head.h.saturating_sub(4));
+        let style = Style { tracking: 0.0, ..self.label_style(DIM) };
+        let style = Style { face: Face::Regular, ..style };
+        self.text(cols.num_x, base, "#", style);
+        self.text(cols.name_x, base, "NAME", style);
+        self.text(cols.status_x, base, "STATUS", style);
+        let w = self.measure("ERRORS", style);
+        self.text(cols.errors_r - w, base, "ERRORS", style);
+        let w = self.measure("TIME", style);
+        self.text(cols.time_r - w, base, "TIME", style);
+        self.canvas.fill(Rect::new(head.x, head.bottom() - 1, head.w, 1), LINE);
     }
 }
 
-pub fn brand(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
-    let s = f.status();
-    let l = *p.l;
-    let word = Pen::style(Face::Bold, l.text.title + l.text.title / 3, TEXT);
-    let base = p.mid(word.px, r.y, r.h);
-    let mut x = px(r.x);
-    x += p.text(x, base, "ferrite", word);
-    x += l.m(8.0);
-    x += p.text(x, base, "memory test", Pen::style(Face::Regular, l.text.body, MUTED));
-    x += l.m(18.0);
-    let preset: &str = s.preset.into();
-    let cpus = f.snapshot.history.cpus.len().max(1);
-    let (size, cpu_text) = (format::size(s.bytes), fixed::<16>(format_args!("{cpus} cpu{}", plural(cpus))));
-    let chips = [preset, s.tier, &size, &cpu_text];
-    let style = Pen::style(Face::Regular, l.text.small, MUTED);
-    for chip in chips {
-        if x + p.pill_width(chip, style, false) > px(r.right()) {
-            break;
-        }
-        x += p.pill(x, r, chip, style, CHIP, None) + l.m(6.0);
+/// Where the tests table's columns go within `r`.
+struct TestCols {
+    num_x: f32,
+    name_x: f32,
+    name_max: f32,
+    status_x: f32,
+    errors_r: f32,
+    time_r: f32,
+}
+
+impl TestCols {
+    fn of(l: &Layout, r: Rect) -> Self {
+        let [num_w, status_w, errors_w, time_w] = l.cols.map(px);
+        let (pad, gap) = (l.m(14.0), l.m(8.0));
+        let num_x = px(r.x) + pad;
+        let name_x = num_x + num_w + gap;
+        let time_r = px(r.right()) - pad;
+        let errors_r = time_r - time_w - gap;
+        let status_x = errors_r - errors_w - gap - status_w;
+        Self { num_x, name_x, name_max: status_x - gap - name_x, status_x, errors_r, time_r }
     }
 }
 
 pub fn clock(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
     let l = *p.l;
-    let time = Pen::style(Face::Mono, l.text.title + l.text.title / 6, TEXT);
-    let base = p.mid(time.px, r.y, r.h);
-    let mut right = px(r.right());
-    right -= p.right(right, base, &format::clock(f.elapsed()), time) + l.m(8.0);
-    right -= p.label_width("elapsed");
-    p.label(right, base, "elapsed", DIM);
-    right -= l.m(18.0);
-
-    let (text, color) = match f.state() {
-        State::Starting => ("Starting", MUTED),
-        State::Running => ("Running", GOOD),
-        State::Paused => ("Paused", WARN),
+    let base = p.mid(l.text.label, r.y, r.h);
+    let plain = Style { tracking: l.m(0.5), ..Pen::style(Face::Regular, l.text.label, BAR_DIM) };
+    let (word, loud) = match f.state() {
+        State::Starting => ("STARTING", false),
+        State::Running => ("RUNNING", false),
+        State::Paused => ("PAUSED", true),
     };
-    let style = Pen::style(Face::SemiBold, l.text.small, color);
-    right -= p.pill_width(text, style, true);
-    p.pill(right, r, text, style, CHIP, Some(color));
-    if s.faults > 0 {
-        let text = fixed::<32>(format_args!("{} fault{}", s.faults, plural(s.faults)));
-        let style = Pen::style(Face::Bold, l.text.small, TEXT);
-        right -= p.pill_width(&text, style, true) + l.m(8.0);
-        p.pill(right, r, &text, style, BAD_DEEP, Some(TEXT));
+    let state = if s.faults > 0 {
+        fixed::<48>(format_args!("{} ERROR{} {SEPARATOR} {word}", s.faults, if s.faults == 1 { "" } else { "S" }))
+    } else {
+        fixed(format_args!("{word}"))
+    };
+    let state_style = if loud || s.faults > 0 { Style { face: Face::Bold, color: BAR_TEXT, ..plain } } else { plain };
+    let mut right = px(r.right());
+    right -= p.right(right, base, &state, state_style) + l.m(22.0);
+    p.right(
+        right,
+        base,
+        &fixed::<32>(format_args!("ELAPSED {}", hms(f.elapsed()))),
+        Style { color: BAR_TEXT, ..plain },
+    );
+}
+
+pub fn tabs(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
+    let s = f.status();
+    let l = *p.l;
+    p.canvas.fill(Rect::new(r.x, r.y, r.w, 1), BAR_RULE);
+    let rule = whole_px(l.m(2.0)).max(1);
+    p.canvas.fill(Rect::new(r.x, r.bottom() - rule, r.w, rule), TAB_ON);
+    let results =
+        if s.faults > 0 { fixed::<24>(format_args!("Results ({})", s.faults)) } else { fixed(format_args!("Results")) };
+    let labels: [&str; 4] = ["Run", &results, "Setup", "Log"];
+    let (pad, gap) = (l.m(18.0), l.m(2.0));
+    let top = r.y + 1;
+    let height = r.h.saturating_sub(1 + rule);
+    let mut x = px(r.x) + l.m(20.0);
+    for (i, label) in labels.into_iter().enumerate() {
+        let on = i == 0;
+        let style = Pen::style(
+            if on { Face::Bold } else { Face::Regular },
+            l.text.base,
+            if on { TAB_ON_INK } else { TAB_TEXT },
+        );
+        let w = p.measure(label, style) + 2.0 * pad;
+        if on {
+            p.canvas.fill(Rect::new(whole_px(x), top, whole_px(w), height), TAB_ON);
+        }
+        let base = p.mid(l.text.base, top, height);
+        p.text(x + pad, base, label, style);
+        x += w + gap;
     }
 }
 
-/// The text band and the bar below it in a progress widget.
-fn split_bar(r: Rect, bar_h: f32, gap: f32) -> (Rect, f32) {
-    let text_h = (px(r.h) - bar_h - gap).max(0.0);
-    let band = Rect::new(r.x, r.y, r.w, whole_px(text_h));
-    (band, px(r.bottom()) - bar_h)
+pub fn system(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
+    let s = f.status();
+    let list = &f.snapshot.history.cpus;
+    let cpu: String<48> = if list.is_empty() {
+        fixed(format_args!("1 logical"))
+    } else {
+        let first_of =
+            |i: usize, same: fn(&CpuInfo, &CpuInfo) -> bool| !list[..i].iter().any(|before| same(before, &list[i]));
+        let cores = (0..list.len()).filter(|&i| first_of(i, |a, b| (a.package, a.core) == (b.package, b.core))).count();
+        fixed(format_args!("{} logical {SEPARATOR} {cores} core{}", list.len(), plural(cores)))
+    };
+    let memory: String<48> = if s.coverage.free > 0 {
+        let (tested, free) =
+            (usize::try_from(s.coverage.tested).unwrap_or(0), usize::try_from(s.coverage.free).unwrap_or(0));
+        fixed(format_args!("{} of {} free ({}%)", format::size(tested), format::size(free), s.coverage.percent()))
+    } else {
+        fixed(format_args!("{} under test", format::size(s.bytes)))
+    };
+    let preset: &str = s.preset.into();
+    p.pairs(
+        r,
+        &[
+            ("CPU", &cpu),
+            ("Memory", &memory),
+            ("Preset", preset),
+            ("Tier", s.tier),
+            ("Modules", NONE),
+            ("Timings", NONE),
+        ],
+    );
 }
 
-fn percent_permille(percent: u16) -> u32 {
+fn permille(percent: u16) -> u32 {
     u32::from(percent.min(100)) * 10
+}
+
+fn fill_of(paused: bool) -> Rgb {
+    if paused { HELD } else { FILL }
 }
 
 pub fn pass(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
     let l = *p.l;
-    let bar_h = l.m(10.0);
-    let (band, bar_y) = split_bar(r, bar_h, l.m(7.0));
-    let title = Pen::style(Face::SemiBold, l.text.title, TEXT);
-    let base = p.mid(title.px, band.y, band.h);
-    let mut x = px(r.x);
-    x += p.text(x, base, &fixed::<32>(format_args!("Pass {}", s.passes + 1)), title) + l.m(10.0);
-    let done = match s.passes {
-        0 => fixed::<32>(format_args!("first pass")),
-        n => fixed(format_args!("{n} complete")),
-    };
-    let small = Pen::style(Face::Regular, l.text.small, MUTED);
-    p.text(x, base, &done, small);
-
-    let mut right = px(r.right());
-    let percent = Pen::style(Face::MonoBold, l.text.title, TEXT);
-    right -= p.right(right, base, &fixed::<8>(format_args!("{}%", s.percent.min(100))), percent) + l.m(14.0);
-    let took = f.pass_elapsed();
-    let mut times = fixed::<64>(format_args!("{}", format::clock(took)));
-    if s.percent >= 2 && s.percent < 100 && !s.paused {
-        let left = took * u32::from(100 - s.percent) / u32::from(s.percent);
-        times = fixed(format_args!("{times} elapsed \u{b7} about {} left", format::clock(left)));
-    } else if s.position.1 > 0 {
-        times.push_str(" elapsed").ok();
-    }
-    p.right(right, base, &times, small);
-
-    let fill = if s.paused { Fill::Solid(WARN) } else { Fill::Across(ACCENT_FROM, ACCENT) };
-    p.bar(px(r.x), bar_y, px(r.w), bar_h, percent_permille(s.percent), fill);
+    let gap = l.m(8.0);
+    let overall = Rect::new(r.x, r.y, r.w, l.row_h);
+    p.bar_row(overall, "Overall", NONE, 0, fill_of(s.paused));
+    let pass = Rect::new(r.x, r.y + l.row_h + whole_px(gap), r.w, l.row_h);
+    let figure = fixed::<32>(format_args!("{}% {SEPARATOR} {}", s.percent.min(100), format::clock(f.pass_elapsed())));
+    let label = fixed::<24>(format_args!("Pass {}", s.passes + 1));
+    p.bar_row(pass, &label, &figure, permille(s.percent), fill_of(s.paused));
 }
 
 pub fn test(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
-    let l = *p.l;
-    let bar_h = l.m(6.0);
-    let (band, bar_y) = split_bar(r, bar_h, l.m(8.0));
-    let base = p.mid(l.text.body, band.y, band.h);
     let (i, n) = s.position;
-    let mut x = px(r.x);
-    let mut right = px(r.right());
-    let small = Pen::style(Face::Regular, l.text.small, MUTED);
     if n == 0 {
-        p.label(x, base, "test", MUTED);
-        p.text(x + l.m(60.0), base, "preparing the buffer", small);
-        p.bar(px(r.x), bar_y, px(r.w), bar_h, 0, Fill::Solid(ACCENT));
+        p.bar_row(r, "Test", NONE, 0, fill_of(s.paused));
         return;
     }
-    x += p.label(x, base, &fixed::<32>(format_args!("test {i}/{n}")), MUTED) + l.m(12.0);
-    let pct = Pen::style(Face::Mono, l.text.body, TEXT);
-    right -= p.right(right, base, &fixed::<8>(format_args!("{}%", s.test_percent.min(100))), pct) + l.m(14.0);
-    let how = match s.mode {
-        Mode::Split => fixed::<48>(format_args!("split over {} cpus", s.cpus)),
-        Mode::Single => fixed(format_args!("single core")),
+    let label = fixed::<24>(format_args!("Test {i}/{n}"));
+    let figure = fixed::<8>(format_args!("{}%", s.test_percent.min(100)));
+    p.bar_row(r, &label, &figure, permille(s.test_percent), fill_of(s.paused));
+}
+
+pub fn detail(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
+    let s = f.status();
+    let total = f.snapshot.history.cpus.len().max(s.cpus).max(1);
+    let threads: String<48> = match s.mode {
+        Mode::Split => fixed(format_args!("{} / {total} parallel", s.cpus.min(total))),
+        Mode::Single => fixed(format_args!("1 / {total} {SEPARATOR} single core")),
     };
-    right -= p.right(right, base, &how, small) + l.m(14.0);
-    p.fit(x, base, s.test, Pen::style(Face::SemiBold, l.text.body, TEXT), right - x);
-    let fill = if s.paused { Fill::Solid(WARN.over(TRACK, 170)) } else { Fill::Solid(ACCENT.over(TRACK, 190)) };
-    p.bar(px(r.x), bar_y, px(r.w), bar_h, percent_permille(s.test_percent), fill);
+    let rate = f
+        .snapshot
+        .history
+        .tests
+        .back()
+        .and_then(TestRecord::rate)
+        .map_or_else(|| fixed(format_args!("{NONE}")), format::rate);
+    p.pairs(r, &[("Range", NONE), ("Threads", &threads), ("Pattern", NONE), ("Last rate", &rate)]);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -286,310 +374,215 @@ pub fn tests(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
     let l = *p.l;
     let current = s.position.0.checked_sub(1).filter(|_| s.position.1 > 0);
-
-    let row_h = l.row_h;
-    let faults_r = px(r.right());
-    let rate_r = faults_r - l.m(70.0);
-    let time_r = rate_r - l.m(96.0);
-    let name_x = px(r.x) + l.m(30.0);
-    let name_max = time_r - l.m(76.0) - name_x;
-
-    let head = p.mid(l.text.label, r.y, row_h);
-    p.label(px(r.x) + l.m(8.0), head, "#", DIM);
-    p.label(name_x, head, "test", DIM);
-    for (right, text) in [(time_r, "time"), (rate_r, "rate"), (faults_r, "faults")] {
-        let w = p.label_width(text);
-        p.label(right - w, head, text, DIM);
-    }
-
-    let visible = ((r.h.saturating_sub(row_h)) / row_h.max(1)) as usize;
+    let cols = TestCols::of(&l, r);
+    let visible = (r.h / l.pitch.max(1)) as usize;
     let start = window(super::test_count(s.preset), visible, current.unwrap_or(0));
-    let mono = Pen::style(Face::Mono, l.text.mono, TEXT);
     for (slot, (i, kind)) in TestKind::sequence(s.preset).enumerate().skip(start).take(visible).enumerate() {
-        let top = r.y + row_h + u32::try_from(slot).unwrap_or(0) * row_h;
+        let top = r.y + u32::try_from(slot).unwrap_or(0) * l.pitch;
         let row = match current {
             Some(c) if i < c => Row::Done,
             Some(c) if i == c => Row::Current,
             _ => Row::Pending,
         };
+        let record = (row == Row::Done)
+            .then(|| f.snapshot.history.tests.iter().rev().find(|rec| rec.test == kind.name()))
+            .flatten();
         if row == Row::Current {
-            p.canvas.round_rect(px(r.x), px(top) + 1.0, px(r.w), px(row_h) - 2.0, l.m(5.0), Fill::Solid(ROW));
-            p.canvas.round_rect(
-                px(r.x),
-                px(top) + l.m(4.0),
-                l.m(3.0),
-                px(row_h) - l.m(8.0),
-                l.m(1.5),
-                Fill::Solid(ACCENT),
-            );
+            p.canvas.fill(Rect::new(r.x, top, r.w, l.pitch), SEL);
         }
-        let base = p.mid(l.text.body, top, row_h);
-        let (ink, sub) = match row {
-            Row::Done => (TEXT, MUTED),
-            Row::Current => (TEXT, ACCENT),
-            Row::Pending => (DIM, DIM),
-        };
-        p.right(name_x - l.m(10.0), base, &num(i + 1), Style { color: sub, ..mono });
-        let face = if row == Row::Current { Face::SemiBold } else { Face::Regular };
-        p.fit(name_x, base, kind.name(), Pen::style(face, l.text.body, ink), name_max);
+        let selected = row == Row::Current;
+        let ink = |color: Rgb| if selected { SEL_INK } else { color };
+        let base = p.mid(l.text.base, top, l.pitch);
+        p.text(cols.num_x, base, &num(i + 1), p.body(ink(DIM)));
+        let name_color = if row == Row::Pending { TEXT } else { STRONG };
+        p.fit(cols.name_x, base, kind.name(), p.body(ink(name_color)), cols.name_max);
 
-        let record = f.snapshot.history.tests.iter().rev().find(|rec| rec.test == kind.name());
-        let values = Style { color: if row == Row::Pending { DIM } else { TEXT }, ..mono };
-        let dash = Style { color: DIM, ..mono };
-        if row == Row::Current {
-            let (word, color) = if s.paused { ("paused", WARN) } else { ("running", ACCENT) };
-            p.right(time_r, base, word, Pen::style(Face::Regular, l.text.small, color));
-        } else {
-            match record {
-                Some(rec) => p.right(time_r, base, &format::took(rec.took), values),
-                None => p.right(time_r, base, "-", dash),
-            };
-        }
-        match record.and_then(TestRecord::rate) {
-            Some(rate) if row != Row::Current => p.right(rate_r, base, &format::rate(rate), values),
-            _ => p.right(rate_r, base, "-", dash),
+        let (status, status_color) = match (row, record) {
+            (Row::Current, _) if s.paused => ("PAUSED", SEL_INK),
+            (Row::Current, _) => ("RUNNING", SEL_INK),
+            (Row::Pending, _) => ("QUEUED", DIM),
+            (Row::Done, Some(rec)) if rec.faults > 0 => ("FAIL", ERR),
+            (Row::Done, Some(_)) => ("PASS", PASS),
+            (Row::Done, None) => ("DONE", DIM),
         };
+        let status_style = Pen::style(Face::SemiBold, l.text.base, status_color);
+        p.text(cols.status_x, base, status, status_style);
+
         match record {
             Some(rec) if rec.faults > 0 => {
-                p.right(faults_r, base, &num(rec.faults), Style { face: Face::MonoBold, color: BAD, ..mono })
+                p.right(cols.errors_r, base, &num(rec.faults), p.body(ERR));
             },
-            Some(_) if row != Row::Current => p.right(faults_r, base, "0", Style { color: DIM, ..mono }),
-            _ => p.right(faults_r, base, "-", dash),
-        };
+            Some(_) => {
+                p.right(cols.errors_r, base, "0", p.body(TEXT));
+            },
+            None => {
+                p.right(cols.errors_r, base, NONE, p.body(ink(TEXT)));
+            },
+        }
+        let took = record.map_or_else(|| fixed(format_args!("{NONE}")), |rec| format::took(rec.took));
+        p.right(cols.time_r, base, &took, p.body(ink(DIM)));
     }
 }
 
-pub fn faults(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
+/// A cell of the memory map: the same two steps for every cell, so a cell changing state redraws
+/// only itself. A ring is the outer step in the ring's colour.
+fn cell(p: &mut Pen<'_>, r: Rect, color: Rgb, ring: Option<(Rgb, u32)>) {
+    if let Some((ring, width)) = ring {
+        p.canvas.fill(r, ring);
+        let inner = Rect::new(r.x + width, r.y + width, r.w.saturating_sub(2 * width), r.h.saturating_sub(2 * width));
+        p.canvas.fill(inner, color);
+    } else {
+        p.canvas.fill(r, color);
+        p.canvas.fill(r, color);
+    }
+}
+
+pub fn map(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
     let l = *p.l;
-    if s.faults == 0 {
-        let d = l.m(30.0).min(px(r.h));
-        let cy = px(r.y) + (px(r.h).min(l.m(56.0))) / 2.0;
-        p.canvas.circle(px(r.x) + d / 2.0, cy, d / 2.0, GOOD);
-        p.canvas.circle(px(r.x) + d / 2.0, cy, d / 2.0 - l.m(3.5), CARD);
-        p.canvas.circle(px(r.x) + d / 2.0, cy, d / 5.0, GOOD);
-        let x = px(r.x) + d + l.m(14.0);
-        let title = Pen::style(Face::SemiBold, l.text.title, TEXT);
-        p.text(x, cy - l.m(3.0), "No faults found", title);
-        let size = format::size(s.bytes);
-        let note: String<128> = match s.passes {
-            0 => fixed(format_args!("first pass running over {size}")),
-            n => fixed(format_args!(
-                "{n} full pass{} over {size}, every word read back as written",
-                if n == 1 { "" } else { "es" }
-            )),
-        };
-        let small = Pen::style(Face::Regular, l.text.small, MUTED);
-        p.fit(x, cy + l.m(16.0), &note, small, px(r.right()) - x);
-        return;
+    let small = Pen::style(Face::Regular, l.text.small, DIM);
+    let base = p.mid(l.text.small, r.y, l.row_h);
+    p.text(px(r.x), base, "0", small);
+    p.right(px(r.right()), base, &format::size(s.bytes), small);
+    let each = fixed::<32>(format_args!("1 cell = {}", format::size(s.bytes / CELLS)));
+    let w = p.measure(&each, small);
+    p.text(px(r.x) + (px(r.w) - w) / 2.0, base, &each, small);
+
+    let (gap, cell_h) = (whole_px(l.m(3.0)), whole_px(l.m(20.0)));
+    let top = r.y + l.row_h + whole_px(l.m(6.0));
+    let active = (s.position.1 > 0).then(|| active_cell(s.test_percent));
+    let ring = whole_px(l.m(2.0)).max(1);
+    for i in 0..CELLS {
+        let (col, row) =
+            (u32::try_from(i % MAP_COLS as usize).unwrap_or(0), u32::try_from(i / MAP_COLS as usize).unwrap_or(0));
+        let x0 = r.x + col * (r.w + gap) / MAP_COLS;
+        let x1 = r.x + (col + 1) * (r.w + gap) / MAP_COLS - gap;
+        let rect = Rect::new(x0, top + row * (cell_h + gap), x1 - x0, cell_h);
+        match active {
+            Some(a) if i == a => cell(p, rect, ACTIVE, Some((ACTIVE_RING, ring))),
+            Some(a) if i < a => cell(p, rect, TESTED, None),
+            _ => cell(p, rect, PENDING, None),
+        }
     }
 
-    let row_h = l.row_h;
-    let mut body = r;
-    let top = body.take_top(row_h + row_h / 2);
-    let base = p.mid(l.text.title, top.y, top.h);
+    let legend = Rect::new(r.x, top + MAP_ROWS * (cell_h + gap) - gap + whole_px(l.m(10.0)), r.w, whole_px(l.m(16.0)));
+    let key = Pen::style(Face::Regular, l.text.label, TEXT);
+    let side = whole_px(l.m(12.0));
     let mut x = px(r.x);
-    let count = fixed::<48>(format_args!("{} faulty word{}", s.faults, plural(s.faults)));
-    x += p.text(x, base, &count, Pen::style(Face::Bold, l.text.title, BAD)) + l.m(12.0);
-    let analysis = fixed::<64>(format_args!("{}", s.analysis));
-    x += p.text(x, base, &analysis, Pen::style(Face::Regular, l.text.body, TEXT)) + l.m(12.0);
-    let first: String<96> =
-        s.first_fault.map_or_else(String::new, |f| fixed(format_args!("first in {} on cpu {}", f.test, f.cpu)));
-    p.fit(x, base, &first, Pen::style(Face::Regular, l.text.small, MUTED), px(r.right()) - x);
-
-    let mono = Pen::style(Face::Mono, l.text.mono, TEXT);
-    let ch = p.measure("0", mono);
-    let gap = l.m(16.0);
-    let addr_x = px(r.x);
-    let exp_x = addr_x + 12.0 * ch + gap;
-    let act_x = exp_x + 16.0 * ch + gap;
-    let xor_x = act_x + 16.0 * ch + gap;
-    let cpu_r = px(r.right());
-    let wide = xor_x + 16.0 * ch + gap + l.m(90.0) + l.m(40.0) <= cpu_r;
-    let test_x = if wide { xor_x + 16.0 * ch + gap } else { xor_x };
-    let test_max = cpu_r - l.m(44.0) - test_x;
-
-    let head = p.mid(l.text.label, body.y, row_h);
-    p.label(addr_x, head, "address", DIM);
-    p.label(exp_x, head, "expected", DIM);
-    p.label(act_x, head, "read", DIM);
-    if wide {
-        p.label(xor_x, head, "flipped", DIM);
-    }
-    p.label(test_x, head, "test", DIM);
-    let w = p.label_width("cpu");
-    p.label(cpu_r - w, head, "cpu", DIM);
-    body.take_top(row_h);
-
-    let rows = (body.h / row_h.max(1)) as usize;
-    let kept = f.snapshot.faults.len();
-    let shown = if kept > rows { rows.saturating_sub(1) } else { kept };
-    for (slot, rec) in f.snapshot.faults.iter().rev().take(shown).enumerate() {
-        let top = body.y + u32::try_from(slot).unwrap_or(0) * row_h;
-        let base = p.mid(mono.px, top, row_h);
-        let fault = rec.fault;
-        p.text(addr_x, base, &fixed::<16>(format_args!("{:012x}", fault.addr.get())), mono);
-        p.text(exp_x, base, &fixed::<16>(format_args!("{:016x}", fault.expected)), Style { color: MUTED, ..mono });
-        hex_diff(p, act_x, base, ch, fault.actual, fault.expected, mono);
-        if wide {
-            let flipped = fault.actual ^ fault.expected;
-            let text = fixed::<16>(format_args!("{flipped:016x}"));
-            for (n, c) in text.chars().enumerate() {
-                let color = if c == '0' { DIM } else { BAD };
-                p.text(
-                    xor_x + px(u32::try_from(n).unwrap_or(0)) * ch,
-                    base,
-                    c.encode_utf8(&mut [0; 4]),
-                    Style { color, ..mono },
-                );
-            }
-        }
-        p.fit(test_x, base, rec.test, Pen::style(Face::Regular, l.text.small, MUTED), test_max);
-        p.right(cpu_r, base, &num(rec.cpu), mono);
-    }
-    if kept > shown {
-        let top = body.y + u32::try_from(shown).unwrap_or(0) * row_h;
-        let base = p.mid(l.text.small, top, row_h);
-        let more = u64::try_from(kept - shown).unwrap_or(0) + s.faults.saturating_sub(u64::try_from(kept).unwrap_or(0));
-        let text = fixed::<128>(format_args!("and {more} more; the boot-volume log has the first of them in full"));
-        p.fit(addr_x, base, &text, Pen::style(Face::Regular, l.text.small, DIM), px(r.w));
+    let swatches = [
+        ("Tested", TESTED, None),
+        ("Active", ACTIVE, Some((ACTIVE_RING, ring))),
+        ("Pending", PENDING, Some((LINE, 1))),
+    ];
+    for (label, color, edge) in swatches {
+        let box_ = Rect::new(whole_px(x), legend.y + (legend.h - side) / 2, side, side);
+        cell(p, box_, color, edge);
+        let base = p.mid(l.text.label, legend.y, legend.h);
+        x += px(side) + l.m(6.0);
+        x += p.text(x, base, label, key) + l.m(14.0);
     }
 }
 
-/// `value` in hex with the digits that differ from `reference` in red.
-fn hex_diff(p: &mut Pen<'_>, x: f32, base: f32, ch: f32, value: u64, reference: u64, style: Style) {
-    let text = fixed::<16>(format_args!("{value:016x}"));
-    let expected = fixed::<16>(format_args!("{reference:016x}"));
-    for (n, (c, e)) in text.chars().zip(expected.chars()).enumerate() {
-        let color = if c == e { TEXT } else { BAD };
-        let face = if c == e { Face::Mono } else { Face::MonoBold };
-        let at = x + px(u32::try_from(n).unwrap_or(0)) * ch;
-        p.text(at, base, c.encode_utf8(&mut [0; 4]), Style { face, color, ..style });
-    }
-}
-
-pub fn net(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
+/// A fault's 64-bit pattern in hex, the digits that differ from `reference` inverted.
+fn hex_diff(p: &mut Pen<'_>, x: f32, top: u32, value: u64, reference: u64) {
     let l = *p.l;
-    let row_h = l.row_h;
-    let mut body = r;
-    let first = body.take_top(row_h);
-    let base = p.mid(l.text.body, first.y, first.h);
-    let body_style = Pen::style(Face::Regular, l.text.body, TEXT);
-    let small = Pen::style(Face::Regular, l.text.small, MUTED);
-    let dot_r = l.m(4.0);
-    let Some(net) = f.net else {
-        p.canvas.circle(px(r.x) + dot_r, base - l.m(4.5), dot_r, BAD);
-        p.text(px(r.x) + l.m(16.0), base, "No network", body_style);
-        let big = body.take_top(row_h + row_h / 2);
-        if let Some(why) = f.net_err {
-            let wired = fixed::<96>(format_args!("wired: {}", why.wired));
-            let b = p.mid(l.text.body, big.y, big.h);
-            p.fit(px(r.x), b, &wired, Pen::style(Face::SemiBold, l.text.body, BAD), px(r.w));
-            let wifi_row = body.take_top(row_h);
-            let wifi = fixed::<96>(format_args!("Wi-Fi: {}", why.wifi));
-            let b = p.mid(l.text.body, wifi_row.y, wifi_row.h);
-            p.fit(px(r.x), b, &wifi, Pen::style(Face::SemiBold, l.text.body, BAD), px(r.w));
+    let style = p.body(TEXT);
+    let text = fixed::<16>(format_args!("{value:016X}"));
+    let expected = fixed::<16>(format_args!("{reference:016X}"));
+    let base = p.mid(l.text.base, top, l.row_h);
+    let mut at = x;
+    for (c, e) in text.chars().zip(expected.chars()) {
+        let mut buf = [0; 4];
+        let glyph = c.encode_utf8(&mut buf);
+        let w = p.measure(glyph, style);
+        if c == e {
+            p.text(at, base, glyph, style);
+        } else {
+            p.canvas.fill(Rect::new(whole_px(at), top, whole_px(w), l.row_h), ERR);
+            p.text(at, base, glyph, Style { face: Face::Bold, color: BG, ..style });
         }
-        let hint = body.take_top(row_h);
-        let b = p.mid(l.text.small, hint.y, hint.h);
-        p.fit(px(r.x), b, "the status page needs a wired NIC or Wi-Fi with an address", small, px(r.w));
+        at += w;
+    }
+}
+
+pub fn errors(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
+    let s = f.status();
+    let l = *p.l;
+    let color = if s.faults > 0 { ERR } else { PASS };
+    let big = Pen::style(Face::Bold, l.text.big, color);
+    let base = px(r.y) + f32::from(l.text.big) * 0.875;
+    let mut x = px(r.x);
+    x += p.text(x, base, &num(s.faults), big) + l.m(14.0);
+    let word = match s.faults {
+        0 => "NO ERRORS",
+        1 => "ERROR",
+        _ => "ERRORS",
+    };
+    let label = Style { px: l.text.base, ..p.label_style(color) };
+    p.text(x, base, word, label);
+
+    let body = Rect::new(
+        r.x,
+        r.y + u32::from(l.text.big) + whole_px(l.m(12.0)),
+        r.w,
+        r.h.saturating_sub(u32::from(l.text.big) + whole_px(l.m(12.0))),
+    );
+    let last: Option<&FaultRecord> = f.snapshot.faults.back().filter(|_| s.faults > 0);
+    let Some(last) = last else {
+        let analysis = fixed::<64>(format_args!("{}", s.analysis));
+        p.line(body, 0, "Analysis", &analysis, TEXT);
+        p.line(body, 1, "Last error", NONE, DIM);
+        let passes = match s.passes {
+            0 => fixed::<32>(format_args!("first pass running")),
+            n => fixed(format_args!("{n} complete")),
+        };
+        p.line(body, 2, "Passes", &passes, TEXT);
         return;
     };
-    match net.ports() {
-        [port] => single_port(p, r, port),
-        ports => port_list(p, r, ports, net.omitted),
+    let fault = last.fault;
+    let key_w = l.m(100.0);
+    let mut row = 0;
+    let (address, expected) = (addr(fault.addr.get() as u64), fixed::<16>(format_args!("{:016X}", fault.expected)));
+    if let Some(top) = slot(&l, body, &mut row) {
+        p.line(body, top, "Address", &address, STRONG);
+    }
+    if let Some(top) = slot(&l, body, &mut row) {
+        p.line(body, top, "Expected", &expected, TEXT);
+    }
+    if let Some(top) = slot(&l, body, &mut row) {
+        let base = p.mid(l.text.base, body.y + top * l.pitch, l.row_h);
+        p.fit(px(r.x), base, "Read", p.body(DIM), key_w);
+        hex_diff(p, px(r.x) + key_w, body.y + top * l.pitch, fault.actual, fault.expected);
+    }
+    if let Some(top) = slot(&l, body, &mut row) {
+        let analysis = fixed::<64>(format_args!("{}", s.analysis));
+        p.line(body, top, "Analysis", &analysis, STRONG);
+    }
+    if let Some(top) = slot(&l, body, &mut row) {
+        let origin =
+            fixed::<96>(format_args!("{} {SEPARATOR} cpu {} {SEPARATOR} pass {}", last.test, last.cpu, last.pass + 1));
+        p.line(body, top, "Found in", &origin, TEXT);
+    }
+    for rec in f.snapshot.faults.iter().rev().skip(1) {
+        let Some(top) = slot(&l, body, &mut row) else { break };
+        let flipped = rec.fault.actual ^ rec.fault.expected;
+        let line = fixed::<96>(format_args!(
+            "{} {SEPARATOR} flipped {flipped:016X} {SEPARATOR} cpu {}",
+            addr(rec.fault.addr.get() as u64),
+            rec.cpu
+        ));
+        let base = p.mid(l.text.base, body.y + top * l.pitch, l.row_h);
+        p.fit(px(r.x), base, &line, p.body(DIM), px(r.w));
     }
 }
 
-/// The one port in full: link, address as the headline, the page to open, and the rest.
-fn single_port(p: &mut Pen<'_>, r: Rect, port: &PortStatus) {
-    let l = *p.l;
-    let row_h = l.row_h;
-    let mut body = r;
-    let first = body.take_top(row_h);
-    let base = p.mid(l.text.body, first.y, first.h);
-    let body_style = Pen::style(Face::Regular, l.text.body, TEXT);
-    let small = Pen::style(Face::Regular, l.text.small, MUTED);
-    let dot_r = l.m(4.0);
-    let link = port.link;
-    let (state, color) = if link.up { ("link up", GOOD) } else { ("link down", BAD) };
-    p.canvas.circle(px(r.x) + dot_r, base - l.m(4.5), dot_r, color);
-    let state = fixed::<32>(format_args!("{} {state}", Titled(link.medium)));
-    p.text(px(r.x) + l.m(16.0), base, &state, body_style);
-    p.right(px(r.right()), base, &num(link.mac), Style { face: Face::Mono, ..small });
-
-    let big = body.take_top(row_h * 2);
-    let url = body.take_top(row_h);
-    let rest = body.take_top(row_h);
-    if let Some(cidr) = link.address {
-        let ip = Pen::style(Face::MonoBold, l.text.big, TEXT);
-        let b = p.mid(ip.px, big.y, big.h);
-        p.text(px(r.x), b, &num(cidr.address()), ip);
-        let b = p.mid(l.text.body, url.y, url.h);
-        let mut x = px(r.x);
-        x += p.label(x, b, "open", DIM) + l.m(10.0);
-        let page = fixed::<32>(format_args!("http://{}/", cidr.address()));
-        p.fit(x, b, &page, Pen::style(Face::Mono, l.text.body, ACCENT), px(r.right()) - x);
-    } else {
-        let b = p.mid(l.text.title, big.y, big.h);
-        p.text(px(r.x), b, "Waiting for DHCP", Pen::style(Face::SemiBold, l.text.title, WARN));
-        let b = p.mid(l.text.small, url.y, url.h);
-        p.text(px(r.x), b, "the status page opens once there is an address", small);
-    }
-    let b = p.mid(l.text.small, rest.y, rest.h);
-    let tail = fixed::<128>(format_args!(
-        "{} \u{b7} gateway {} \u{b7} dns {}",
-        ferrite_net::mdns::HOST,
-        ferrite_net::OptAddr(link.gateway),
-        ferrite_net::OptAddr(link.dns)
-    ));
-    p.fit(px(r.x), b, &tail, Style { color: DIM, ..small }, px(r.w));
-}
-
-/// Several ports, two rows each: medium, link and address, then the page to open.
-fn port_list(p: &mut Pen<'_>, r: Rect, ports: &[PortStatus], omitted: usize) {
-    let l = *p.l;
-    let row_h = l.row_h;
-    let mut body = r;
-    let small = Pen::style(Face::Regular, l.text.small, MUTED);
-    let dot_r = l.m(4.0);
-    let rows = (r.h / row_h) as usize;
-    let shown = if ports.len() * 2 > rows { (rows.saturating_sub(1) / 2).max(1) } else { ports.len() };
-    for port in &ports[..shown.min(ports.len())] {
-        let link = port.link;
-        let head = body.take_top(row_h);
-        let base = p.mid(l.text.body, head.y, head.h);
-        let color = if !link.up {
-            BAD
-        } else if link.address.is_some() {
-            GOOD
-        } else {
-            WARN
-        };
-        p.canvas.circle(px(r.x) + dot_r, base - l.m(4.5), dot_r, color);
-        let x = px(r.x) + l.m(16.0);
-        let title = fixed::<24>(format_args!("{}", Titled(link.medium)));
-        let used = p.text(x, base, &title, Pen::style(Face::SemiBold, l.text.body, TEXT)) + l.m(10.0);
-        let address = match link.address {
-            Some(cidr) => fixed::<32>(format_args!("{}", cidr.address())),
-            None if link.up => fixed::<32>(format_args!("waiting for DHCP")),
-            None => fixed::<32>(format_args!("link down")),
-        };
-        p.fit(x + used, base, &address, Pen::style(Face::MonoBold, l.text.body, TEXT), px(r.right()) - x - used);
-        let detail_row = body.take_top(row_h);
-        let b = p.mid(l.text.small, detail_row.y, detail_row.h);
-        let detail = match link.address {
-            Some(cidr) if link.up => fixed::<96>(format_args!("http://{}/ \u{b7} {}", cidr.address(), link.mac)),
-            _ => fixed::<96>(format_args!("{}", link.mac)),
-        };
-        p.fit(x, b, &detail, Style { color: DIM, ..small }, px(r.right()) - x);
-    }
-    if omitted > 0 || shown < ports.len() {
-        let more = body.take_top(row_h);
-        let b = p.mid(l.text.small, more.y, more.h);
-        let text = fixed::<32>(format_args!("+{} more", ports.len() - shown.min(ports.len()) + omitted));
-        p.text(px(r.x), b, &text, small);
-    }
+/// The next row of `body` when there is room for it.
+fn slot(l: &Layout, body: Rect, row: &mut u32) -> Option<u32> {
+    let this = *row;
+    (body.y + (this + 1) * l.pitch <= body.bottom()).then(|| {
+        *row += 1;
+        this
+    })
 }
 
 /// A medium's name with a capital, for headings.
@@ -604,158 +597,157 @@ impl core::fmt::Display for Titled {
     }
 }
 
-pub fn passes(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
-    let s = f.status();
-    let l = *p.l;
-    let history = f.snapshot.history;
-    let mut body = r;
-    let line = body.take_top(l.row_h);
-    let base = p.mid(l.text.body, line.y, line.h);
-    let small = Pen::style(Face::Regular, l.text.small, MUTED);
-    let mut x = px(r.x);
-    match history.passes.back() {
-        None => {
-            p.text(x, base, "First pass running", Pen::style(Face::SemiBold, l.text.body, TEXT));
-        },
-        Some(last) => {
-            let count = fixed::<32>(format_args!("{} pass{}", s.passes, if s.passes == 1 { "" } else { "es" }));
-            x += p.text(x, base, &count, Pen::style(Face::SemiBold, l.text.body, TEXT)) + l.m(10.0);
-            let best = history.passes.iter().map(|p| p.took).min().unwrap_or_default();
-            let worst = history.passes.iter().map(|p| p.took).max().unwrap_or_default();
-            let summary = fixed::<128>(format_args!(
-                "last {} \u{b7} best {} \u{b7} worst {}",
-                format::took(last.took),
-                format::took(best),
-                format::took(worst)
-            ));
-            p.fit(x, base, &summary, small, px(r.right()) - x);
-        },
-    }
-
-    // Finished passes as bars of their duration, then the running pass growing towards the last
-    // one's height as its percentage climbs.
-    body.take_top(l.pad);
-    let chart = body.take_top(whole_px(l.m(150.0)).min(body.h.saturating_sub(l.row_h)));
-    let labels = body.take_top(l.row_h);
-    let gap = l.m(6.0);
-    let max_slots = whole_px((px(chart.w) + gap) / (l.m(10.0) + gap)).max(2) as usize;
-    let skipped = history.passes.len().saturating_sub(max_slots - 1);
-    let shown = || history.passes.iter().skip(skipped);
-    let slots = px(u32::try_from(shown().len() + 1).unwrap_or(1));
-    let bar_w = ((px(chart.w) + gap) / slots - gap).clamp(l.m(10.0), l.m(36.0));
-    let max = shown().map(|p| p.took.as_secs_f32()).fold(0.0f32, f32::max);
-    let floor = px(chart.bottom());
-    let full_h = px(chart.h);
-    p.canvas.fill(Rect::new(chart.x, chart.bottom(), chart.w, 1), CARD_EDGE);
-    let slot_x = |n: usize| px(chart.x) + px(u32::try_from(n).unwrap_or(0)) * (bar_w + gap);
-    for (n, pass) in shown().enumerate() {
-        let h = (full_h * pass.took.as_secs_f32() / max.max(f32::MIN_POSITIVE)).max(l.m(3.0));
-        let fill = if pass.faults > 0 { Fill::Solid(BAD) } else { Fill::Down(ACCENT, ACCENT_FROM.over(CARD, 140)) };
-        p.canvas.round_rect(slot_x(n), floor - h, bar_w, h, l.m(3.0), fill);
-    }
-    let last_h =
-        shown().next_back().map_or(full_h, |last| full_h * last.took.as_secs_f32() / max.max(f32::MIN_POSITIVE));
-    let now_x = slot_x(shown().len());
-    p.canvas.round_rect(now_x, floor - last_h, bar_w, last_h, l.m(3.0), Fill::Solid(CHIP));
-    let grown = (last_h * f32::from(s.percent.min(100)) / 100.0).max(l.m(3.0));
-    p.canvas.round_rect(now_x, floor - grown, bar_w, grown, l.m(3.0), Fill::Solid(ACCENT.over(CARD, 90)));
-
-    let b = p.mid(l.text.small, labels.y, labels.h);
-    let dim = Style { color: DIM, ..small };
-    let now = num(s.passes + 1);
-    let w = p.measure(&now, dim);
-    p.text(now_x + (bar_w - w) / 2.0, b, &now, Style { color: ACCENT, ..small });
-    if let Some(first) = shown().next() {
-        let text = num(first.pass + 1);
-        let w = p.measure(&text, dim);
-        p.text(slot_x(0) + (bar_w - w) / 2.0, b, &text, dim);
+pub fn net(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
+    let Some(net) = f.net else {
+        p.line(r, 0, "Status", "no network", ERR);
+        if let Some(why) = f.net_err {
+            p.line(r, 1, "Wired", why.wired, ERR);
+            p.line(r, 2, "Wi-Fi", why.wifi, ERR);
+        }
+        let l = *p.l;
+        let base = p.mid(l.text.small, r.y + 3 * l.pitch, l.row_h);
+        p.fit(
+            px(r.x),
+            base,
+            "needs a wired NIC or Wi-Fi with an address",
+            Pen::style(Face::Regular, l.text.small, DIM),
+            px(r.w),
+        );
+        return;
+    };
+    match net.ports() {
+        [port] => single_port(p, r, port),
+        ports => port_list(p, r, ports, net.omitted),
     }
 }
 
-pub fn cpus(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
+/// The one port in full: link, address, the page to open, and the rest.
+fn single_port(p: &mut Pen<'_>, r: Rect, port: &PortStatus) {
+    let l = *p.l;
+    let link = port.link;
+    let (state, color) = if link.up { ("up", PASS) } else { ("down", ERR) };
+    let head = fixed::<32>(format_args!("{} {state}", Titled(link.medium)));
+    let end = p.line(r, 0, "Link", &head, color);
+    let base = p.mid(l.text.base, r.y, l.row_h);
+    p.fit(
+        end + l.m(12.0),
+        base,
+        &fixed::<24>(format_args!("{}", link.mac)),
+        p.body(DIM),
+        px(r.right()) - end - l.m(12.0),
+    );
+    if let Some(cidr) = link.address {
+        p.line(r, 1, "Address", &num(cidr.address()), STRONG);
+        p.line(r, 2, "Open", &fixed::<32>(format_args!("http://{}/", cidr.address())), LABEL);
+    } else {
+        p.line(r, 1, "Address", if link.up { "waiting for DHCP" } else { "none" }, TEXT);
+    }
+    let tail = fixed::<128>(format_args!(
+        "{} {SEPARATOR} gw {} {SEPARATOR} dns {}",
+        ferrite_net::mdns::HOST,
+        ferrite_net::OptAddr(link.gateway),
+        ferrite_net::OptAddr(link.dns)
+    ));
+    p.line(r, 3, "Host", &tail, DIM);
+}
+
+/// Several ports, a row each.
+fn port_list(p: &mut Pen<'_>, r: Rect, ports: &[PortStatus], omitted: usize) {
+    let l = *p.l;
+    let rows = (r.h / l.pitch.max(1)) as usize;
+    let shown = if ports.len() > rows { rows.saturating_sub(1).max(1) } else { ports.len() };
+    for (n, port) in ports.iter().take(shown).enumerate() {
+        let link = port.link;
+        let (text, color) = match link.address {
+            Some(cidr) if link.up => (fixed::<48>(format_args!("{} {SEPARATOR} up", cidr.address())), PASS),
+            None if link.up => (fixed(format_args!("waiting for DHCP")), TEXT),
+            _ => (fixed(format_args!("link down")), ERR),
+        };
+        p.line(r, u32::try_from(n).unwrap_or(0), &fixed::<24>(format_args!("{}", Titled(link.medium))), &text, color);
+    }
+    if omitted > 0 || shown < ports.len() {
+        let more = fixed::<32>(format_args!("+{} more", ports.len() - shown + omitted));
+        let base = p.mid(l.text.small, r.y + u32::try_from(shown).unwrap_or(0) * l.pitch, l.row_h);
+        p.text(px(r.x), base, &more, Pen::style(Face::Regular, l.text.small, DIM));
+    }
+}
+
+pub fn log(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
     let l = *p.l;
-    let list = &f.snapshot.history.cpus;
-    let mut body = r;
-    let line = body.take_top(l.row_h);
-    let base = p.mid(l.text.body, line.y, line.h);
-    let small = Pen::style(Face::Regular, l.text.small, MUTED);
-    if list.is_empty() {
-        p.fit(px(r.x), base, "No MP Services: every test runs on the boot processor", small, px(r.w));
-        return;
+    let base = p.mid(l.text.label, r.y, r.h);
+    let style = Pen::style(Face::Regular, l.text.label, DIM);
+    let mut x = px(r.x) + l.m(20.0);
+    let history = f.snapshot.history;
+    let last_fault = f.snapshot.faults.back().filter(|_| s.faults > 0);
+    if let Some(rec) = last_fault {
+        let text = fixed::<128>(format_args!(
+            "ERROR {} {SEPARATOR} {} {SEPARATOR} cpu {}",
+            rec.test,
+            addr(rec.fault.addr.get() as u64),
+            rec.cpu
+        ));
+        x += p.fit(x, base, &text, Style { color: ERR, ..style }, px(r.right()) / 2.0 - x) + l.m(14.0);
+    } else if let Some(rec) = history.tests.back() {
+        let text = fixed::<128>(format_args!(
+            "pass {} {SEPARATOR} {} finished in {}",
+            rec.pass + 1,
+            rec.test,
+            format::took(rec.took)
+        ));
+        x += p.fit(x, base, &text, style, px(r.right()) / 2.0 - x) + l.m(14.0);
     }
-    let first_of =
-        |i: usize, same: fn(&CpuInfo, &CpuInfo) -> bool| !list[..i].iter().any(|before| same(before, &list[i]));
-    let cores = (0..list.len()).filter(|&i| first_of(i, |a, b| (a.package, a.core) == (b.package, b.core))).count();
-    let packages = (0..list.len()).filter(|&i| first_of(i, |a, b| a.package == b.package)).count();
-    let mut x = px(r.x);
-    let logical = fixed::<32>(format_args!("{} logical", list.len()));
-    x += p.text(x, base, &logical, Pen::style(Face::SemiBold, l.text.body, TEXT)) + l.m(10.0);
-    let shape =
-        fixed::<64>(format_args!("{cores} core{} \u{b7} {packages} package{}", plural(cores), plural(packages)));
-    x += p.text(x, base, &shape, small) + l.m(10.0);
-    let active = match s.mode {
-        Mode::Split => s.cpus.min(list.len()),
-        Mode::Single => 1,
+    let (i, n) = s.position;
+    let line: String<128> = if n == 0 {
+        fixed(format_args!("[{}] preparing the buffer", hms(f.elapsed())))
+    } else {
+        fixed(format_args!(
+            "[{}] pass {} {SEPARATOR} test {i}/{n} {SEPARATOR} {}",
+            hms(f.elapsed()),
+            s.passes + 1,
+            s.test
+        ))
     };
-    let note = match s.mode {
-        Mode::Split => fixed::<48>(format_args!("{active} running this test")),
-        Mode::Single => fixed(format_args!("this test runs on the boot processor")),
-    };
-    let accent = Pen::style(Face::Regular, l.text.small, if s.mode == Mode::Split { ACCENT } else { MUTED });
-    let w = p.measure(&note, accent);
-    if x + w <= px(r.right()) {
-        p.right(px(r.right()), base, &note, accent);
-    }
-
-    body.take_top(l.pad / 2);
-    let gap = whole_px(l.m(5.0)).max(2);
-    let n = u32::try_from(list.len()).unwrap_or(u32::MAX);
-    let largest = whole_px(l.m(30.0));
-    let smallest = whole_px(l.m(10.0)).max(6);
-    let (side, cols) = tile_grid(n, body.w, body.h, gap, largest, smallest);
-    for (i, cpu) in list.iter().enumerate() {
-        let i = u32::try_from(i).unwrap_or(0);
-        let (col, row) = (i % cols, i / cols);
-        let (x, y) = (body.x + col * (side + gap), body.y + row * (side + gap));
-        if y + side > body.bottom() {
-            break;
-        }
-        let on = (i as usize) < active;
-        let fill = if on { Fill::Down(ACCENT.over(CARD, 110), ACCENT.over(CARD, 60)) } else { Fill::Solid(CHIP) };
-        p.canvas.round_rect(px(x), px(y), px(side), px(side), l.m(5.0), fill);
-        if cpu.bsp {
-            p.canvas.circle(px(x + side) - l.m(5.0), px(y) + l.m(5.0), l.m(2.2), if on { TEXT } else { MUTED });
-        }
-        let label_px = u16::try_from(side * 2 / 5).unwrap_or(u16::MAX).clamp(6, l.text.mono);
-        let style = Pen::style(Face::Mono, label_px, if on { TEXT } else { MUTED });
-        let label = num(cpu.number);
-        let w = p.measure(&label, style);
-        let b = p.mid(label_px, y, side);
-        p.text(px(x) + (px(side) - w) / 2.0, b, &label, style);
-    }
+    p.fit(x, base, &line, Style { color: STRONG, ..style }, px(r.right()) - x);
 }
 
 pub fn hints(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
     let l = *p.l;
-    let keys = [("P", if s.paused { "resume" } else { "pause" }), ("R", "restart"), ("Q", "quit")];
-    let cap_style = Pen::style(Face::MonoBold, l.text.small, TEXT);
-    let text_style = Pen::style(Face::Regular, l.text.small, MUTED);
-    let h = l.m(22.0).min(px(r.h));
-    let y = px(r.y) + (px(r.h) - h) / 2.0;
-    let mut x = px(r.x) + l.m(4.0);
-    for (key, what) in keys {
-        let w = h.max(p.measure(key, cap_style) + l.m(12.0));
-        p.canvas.round_rect(x, y, w, h, l.m(5.0), Fill::Solid(CARD_EDGE));
-        p.canvas.round_rect(x + 1.0, y + 1.0, w - 2.0, h - 2.5, l.m(4.0), Fill::Solid(CHIP));
-        let base = p.fonts.centred_baseline(cap_style.px, y, h);
-        let kw = p.measure(key, cap_style);
-        p.text(x + (w - kw) / 2.0, base, key, cap_style);
-        x += w + l.m(8.0);
-        x += p.text(x, base, what, text_style) + l.m(22.0);
-    }
-    let base = p.mid(l.text.small, r.y, r.h);
-    let version = concat!("ferrite-uefi ", env!("CARGO_PKG_VERSION"));
-    p.right(px(r.right()) - l.m(4.0), base, version, Style { color: DIM, ..text_style });
+    p.canvas.fill(Rect::new(r.x, r.y, r.w, 1), BAR_RULE);
+    let pause = if s.paused { "Resume" } else { "Pause" };
+    let left = [("F1", "Help", false)];
+    let right = [
+        ("P", pause, true),
+        ("R", "Restart", true),
+        ("S", "Skip test", false),
+        ("\u{2190} \u{2192}", "Tabs", false),
+        ("F10", "Save report", false),
+        ("Q", "Quit", true),
+    ];
+    let (gap, pad, inner) = (l.m(20.0), l.m(6.0), l.m(7.0));
+    let cap_h = whole_px(l.m(19.0)).min(r.h.saturating_sub(1));
+    let top = r.y + 1 + (r.h.saturating_sub(1 + cap_h)) / 2;
+    let base = p.mid(l.text.label, top, cap_h);
+    let text_style = |on: bool| Pen::style(Face::Regular, l.text.label, if on { BAR_TEXT } else { BAR_DIM });
+    let cap_style = |on: bool| Pen::style(Face::Bold, l.text.label, if on { KEY_INK } else { BAR_DIM });
+    let width = |p: &mut Pen<'_>, items: &[(&str, &str, bool)]| -> f32 {
+        items
+            .iter()
+            .map(|&(key, what, on)| p.measure(key, cap_style(on)) + 2.0 * pad + inner + p.measure(what, text_style(on)))
+            .sum::<f32>()
+            + gap * px(u32::try_from(items.len().saturating_sub(1)).unwrap_or(0))
+    };
+    let total = width(p, &right);
+    let draw = |p: &mut Pen<'_>, mut x: f32, items: &[(&str, &str, bool)]| {
+        for &(key, what, on) in items {
+            let cap_w = p.measure(key, cap_style(on)) + 2.0 * pad;
+            p.canvas.fill(Rect::new(whole_px(x), top, whole_px(cap_w), cap_h), if on { KEY } else { BAR_RULE });
+            p.text(x + pad, base, key, cap_style(on));
+            x += cap_w + inner;
+            x += p.text(x, base, what, text_style(on)) + gap;
+        }
+    };
+    draw(p, px(r.x) + l.m(20.0), &left);
+    draw(p, px(r.right()) - l.m(20.0) - total, &right);
 }

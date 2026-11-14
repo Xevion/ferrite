@@ -1,7 +1,8 @@
 //! The embedded faces, a cache of rasterized glyphs, and text measuring and fitting.
 //!
 //! Every glyph's position is decided in [`Fonts::layout`]; it rounds the pen to whole pixels, since
-//! fontdue rasterizes at integer offsets only.
+//! fontdue rasterizes at integer offsets only. The faces are monospace, and every advance is a whole
+//! number of pixels so columns of text do not jitter between 7 and 8 pixel steps.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -11,14 +12,12 @@ use snafu::Snafu;
 
 use super::canvas::Rgb;
 
-/// Inter for words, `JetBrains Mono` for numbers and addresses so changing digits keep their width.
-/// Both are subset to ASCII plus a few symbols (middle dot, ellipsis, arrows, bullet).
+/// IBM Plex Mono in three weights, subset to ASCII plus a few symbols (middle dot, ellipsis, dashes,
+/// arrows, multiplication sign, bullet).
 const FACES: [&[u8]; Face::COUNT] = [
-    include_bytes!("../../assets/fonts/inter-regular.ttf"),
-    include_bytes!("../../assets/fonts/inter-semibold.ttf"),
-    include_bytes!("../../assets/fonts/inter-bold.ttf"),
-    include_bytes!("../../assets/fonts/jetbrainsmono-regular.ttf"),
-    include_bytes!("../../assets/fonts/jetbrainsmono-bold.ttf"),
+    include_bytes!("../../assets/fonts/plexmono-regular.ttf"),
+    include_bytes!("../../assets/fonts/plexmono-semibold.ttf"),
+    include_bytes!("../../assets/fonts/plexmono-bold.ttf"),
 ];
 
 pub const ELLIPSIS: char = '\u{2026}';
@@ -28,13 +27,11 @@ pub enum Face {
     Regular,
     SemiBold,
     Bold,
-    Mono,
-    MonoBold,
 }
 
 impl Face {
-    const COUNT: usize = 5;
-    const ALL: [Self; Self::COUNT] = [Self::Regular, Self::SemiBold, Self::Bold, Self::Mono, Self::MonoBold];
+    const COUNT: usize = 3;
+    const ALL: [Self; Self::COUNT] = [Self::Regular, Self::SemiBold, Self::Bold];
 }
 
 /// How letters are cased when drawn.
@@ -170,9 +167,9 @@ impl Fonts {
     /// The baseline that centres capitals at `px` in a box from `top` that is `height` tall.
     #[must_use]
     pub fn centred_baseline(&self, px: u16, top: f32, height: f32) -> f32 {
-        // Cap height is about 0.73 em in Inter and JetBrains Mono; centring capitals and digits
-        // looks right where centring the ascent-to-descent box sits text visibly low.
-        let cap = f32::from(px) * 0.73;
+        // Plex Mono's capitals are 0.698 em tall; centring capitals and digits looks right where
+        // centring the ascent-to-descent box sits text visibly low.
+        let cap = f32::from(px) * 0.7;
         top + f32::midpoint(height, cap)
     }
 
@@ -200,7 +197,7 @@ impl Fonts {
             let m = glyph.metrics;
             let top = -(m.ymin + i32::try_from(m.height).unwrap_or(0));
             each(Placement { x: round(pen) + m.xmin, top }, glyph);
-            pen += m.advance_width + style.tracking;
+            pen += whole_advance(m) + style.tracking;
         }
         if text.is_empty() { 0.0 } else { pen - style.tracking }
     }
@@ -223,12 +220,12 @@ impl Fonts {
         if self.measure(text, style) <= max {
             return (text, false);
         }
-        let ellipsis = self.glyph(style.face, style.px, ELLIPSIS).metrics.advance_width;
+        let ellipsis = whole_advance(self.glyph(style.face, style.px, ELLIPSIS).metrics);
         let mut width = 0.0;
         let mut end = 0;
         for (i, c) in text.char_indices() {
             let c = if style.case == Case::Upper { c.to_ascii_uppercase() } else { c };
-            let advance = self.glyph(style.face, style.px, c).metrics.advance_width + style.tracking;
+            let advance = whole_advance(self.glyph(style.face, style.px, c).metrics) + style.tracking;
             if width + advance + ellipsis > max {
                 break;
             }
@@ -237,6 +234,11 @@ impl Fonts {
         }
         (text[..end].trim_end(), true)
     }
+}
+
+/// A glyph's advance in whole pixels.
+fn whole_advance(m: Metrics) -> f32 {
+    f32::from(i16::try_from(round(m.advance_width)).unwrap_or(0))
 }
 
 /// Nearest whole pixel; pens and baselines are never far from zero.

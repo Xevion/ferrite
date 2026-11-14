@@ -3,114 +3,169 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>ferrite</title>
 <style>
-:root{--bg:#0b0e14;--panel:#121722;--line:#1f2633;--text:#d6dbe4;--dim:#7d8799;--ok:#3ecf8e;--warn:#f0b429;--bad:#ff4d5e;--acc:#5aa9ff;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+:root{--bg:#c8ccd4;--line:#7a8396;--text:#1b2a5c;--strong:#0a1238;--dim:#3e4a6b;--label:#1e40af;--bar:#1e3a8a;--bar-text:#fff;--bar-dim:#c7d2fe;--bar-rule:#3b5bb5;--tab-text:#dce3f7;--tab-on:#c8ccd4;--tab-on-ink:#0a1238;--fill:#1e40af;--track:#e6e9ef;--sel:#1e3a8a;--sel-ink:#fff;--pass:#14532d;--err:#991b1b;--err-band:#991b1b;--err-text:#fff;--tested:#3f8f62;--pending:#a7aebd;--reserved:#6e7585;--active:#1e40af;--active-ring:#0a1238;--code:#e6e9ef;--key:#fff;--key-ink:#1e3a8a;--font:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono','Liberation Mono',monospace}
+@media(prefers-color-scheme:dark){:root{--bg:#101826;--line:#33415e;--text:#c9d3e6;--strong:#f1f5fb;--dim:#8c9ab8;--label:#7fa6ff;--tab-on:#101826;--tab-on-ink:#f1f5fb;--fill:#3b6beb;--track:#1a2436;--pass:#6fd38f;--err:#ff6b6b;--err-band:#7f1d1d;--err-text:#ffe4e4;--tested:#2e7a50;--pending:#1e2a40;--reserved:#3a4458;--active:#7fa6ff;--active-ring:#f1f5fb;--code:#1a2436}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:14px 22px;border-bottom:1px solid var(--line);background:#0e121b}
-h1{margin:0;font:600 18px var(--mono);letter-spacing:.5px}
-h1 b{color:var(--acc)}
-.host{color:var(--dim);font-family:var(--mono);font-size:13px}
-.grow{flex:1}
-.pill{padding:3px 10px;border-radius:99px;font-weight:600;font-size:12px;letter-spacing:.6px;text-transform:uppercase;border:1px solid}
-.pill.run{color:var(--ok);border-color:#1f6b4b;background:#0f2a20}
-.pill.paused{color:var(--warn);border-color:#6b5317;background:#2a210b}
-.pill.faults{color:#fff;border-color:var(--bad);background:#7a1520}
-.live{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px}
-.live i{width:8px;height:8px;border-radius:50%;background:var(--dim)}
-.live.live i{background:var(--ok);box-shadow:0 0 6px var(--ok)}
-.live.polling i{background:var(--warn)}
-.live.offline i{background:var(--bad)}
-main{max-width:1180px;margin:0 auto;padding:18px 22px 40px}
-#banner{display:none;margin-bottom:16px;padding:14px 18px;border-radius:10px;background:linear-gradient(90deg,#5c0f18,#3a0b12);border:1px solid var(--bad);box-shadow:0 0 24px #ff4d5e33}
+html{background:var(--bg)}
+body{margin:0;min-height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font:13px/1.45 var(--font)}
+b{font-weight:700}
+.bar{background:var(--bar);color:var(--bar-text)}
+#title{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:4px 22px;min-height:44px;padding:10px 20px}
+.brand{display:flex;align-items:baseline;gap:14px}
+.brand b{font-size:1.23em;letter-spacing:3px}
+.brand span:last-child{color:var(--bar-dim)}
+.hdr{display:flex;align-items:baseline;gap:22px;font-size:.92em;letter-spacing:.5px;color:var(--bar-dim)}
+.hdr .elapsed{color:var(--bar-text)}
+#state.loud{color:var(--bar-text);font-weight:700}
+.live{display:inline-flex;align-items:center;gap:6px}
+.live i{width:8px;height:8px;background:var(--bar-dim)}
+.live.live i{background:#6fd38f}
+.live.polling i{background:#f2c94c}
+.live.offline i{background:#ff6b6b}
+.tabs{display:flex;align-items:flex-end;gap:2px;padding:0 20px;background:var(--bar);border-top:1px solid var(--bar-rule);border-bottom:2px solid var(--tab-on);min-height:34px}
+.tab{padding:6px 18px;color:var(--tab-text);cursor:default}
+.tab.on{background:var(--tab-on);color:var(--tab-on-ink);font-weight:700}
+#banner{display:none;margin:16px 12px 0;padding:10px 16px;background:var(--err-band);color:var(--err-text)}
 #banner.on{display:block}
-#banner strong{font-size:20px;color:#fff;display:block}
-#banner span{font-family:var(--mono);font-size:13px;color:#ffc9cf}
-.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:10px;margin-bottom:16px}
-.tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
-.tile small{display:block;color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.7px}
-.tile div{font:600 18px var(--mono);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tile.bad div{color:var(--bad)}
-.cols{display:grid;grid-template-columns:2fr 1fr;gap:16px}
-.cols>div{min-width:0}
-@media(max-width:860px){.cols{grid-template-columns:1fr}main{padding:12px}}
-section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:16px;overflow-x:auto}
-h2{margin:0 0 10px;font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.8px;font-weight:600}
-.bar{height:8px;background:#0b0f17;border-radius:4px;overflow:hidden;margin:4px 0 10px}
-.bar i{display:block;height:100%;background:linear-gradient(90deg,#2f7de1,var(--acc));transition:width .4s}
-.bar.test i{background:linear-gradient(90deg,#1f9d6c,var(--ok))}
-.row{display:flex;justify-content:space-between;font-size:13px}
-.row span:last-child{font-family:var(--mono);color:var(--dim)}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th{text-align:left;color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.6px;padding:4px 8px;border-bottom:1px solid var(--line)}
-td{padding:5px 8px;border-bottom:1px solid #171d28;font-family:var(--mono);font-size:12.5px}
+#banner strong{display:block;letter-spacing:1px}
+#banner span{font-size:.92em}
+main{flex:1;display:grid;grid-template-columns:minmax(0,1.62fr) minmax(0,1fr);gap:12px;padding:16px 12px 8px;align-items:start}
+.col{display:flex;flex-direction:column;gap:18px;min-width:0}
+section{min-width:0}
+h2{margin:0 0 8px;padding:0 0 4px;font-size:.92em;line-height:1.3;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:var(--label);border-bottom:1px solid var(--line)}
+.kv{display:grid;grid-template-columns:92px minmax(0,1fr) 92px minmax(0,1fr);column-gap:12px;row-gap:2px}
+.kv2{display:grid;grid-template-columns:84px minmax(0,1fr);column-gap:12px;row-gap:2px}
+.kv>*,.kv2>*{min-width:0;overflow-wrap:anywhere}
+.d{color:var(--dim)}
+.s{color:var(--strong)}
+.sm{font-size:.85em}
+.bad{color:var(--err)}
+.ok{color:var(--pass)}
+.row{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.row>.k{width:92px;flex:none;color:var(--dim)}
+.row>.v{width:120px;flex:none;text-align:right;white-space:nowrap}
+.track{flex:1;height:16px;background:var(--track);border:1px solid var(--line)}
+.track i{display:block;height:100%;width:0;background:var(--fill)}
+.paused .track i{background:var(--reserved)}
+.sub{padding-top:8px;border-top:1px dashed var(--line)}
+.chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
+.chip{font-size:.85em;padding:0 6px;border:1px solid var(--line);color:var(--dim)}
+.chip.bsp{color:var(--label);border-color:var(--label)}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-weight:400;font-size:.92em;color:var(--dim);padding:0 14px 3px 0;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:1px 14px 1px 0;white-space:nowrap}
+th:first-child,td:first-child{padding-left:14px}
+th:last-child,td:last-child{padding-right:14px}
 td.n,th.n{text-align:right}
-tr.cur td{background:#14223a}
-tr.bad td,td.bad{color:var(--bad);font-weight:600}
-.empty{color:var(--dim);font-size:13px;padding:6px 0}
-.scroll{max-height:320px;overflow:auto}
-.ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
-button,select,input{font:inherit;color:var(--text);background:#1a2130;border:1px solid #2a3344;border-radius:7px;padding:6px 12px}
+td.nm{width:100%;max-width:0;overflow:hidden;text-overflow:ellipsis}
+tr.cur td{background:var(--sel);color:var(--sel-ink)}
+tr.q td{color:var(--dim)}
+.st{font-weight:600}
+.st.pass{color:var(--pass)}
+.st.fail,td.bad{color:var(--err)}
+tr.cur .st,tr.cur td.bad{color:var(--sel-ink)}
+tr.cur td:first-child{color:var(--sel-ink)}
+.empty{color:var(--dim);padding:2px 0}
+.scroll{max-height:240px;overflow:auto}
+.mapaxis{display:flex;justify-content:space-between;font-size:.85em;color:var(--dim);margin-bottom:6px}
+#map{display:grid;grid-template-columns:repeat(16,minmax(0,1fr));gap:3px}
+#map i{height:20px;background:var(--pending)}
+#map i.t{background:var(--tested)}
+#map i.a{background:var(--active);outline:2px solid var(--active-ring);outline-offset:-2px}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:10px;font-size:.92em}
+.legend span{display:flex;align-items:center;gap:6px}
+.legend i{width:12px;height:12px;display:block;background:var(--pending);outline:1px solid var(--line)}
+.legend i.t{background:var(--tested);outline:0}
+.legend i.a{background:var(--active);outline:2px solid var(--active-ring);outline-offset:-2px}
+.count{display:flex;align-items:baseline;gap:14px}
+.count b{font-size:4.3em;line-height:1}
+.count span{font-weight:600;letter-spacing:2px}
+.x{background:var(--err);color:var(--bg);font-weight:700}
+.ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
+button,select,input{font:inherit;color:var(--strong);background:var(--track);border:1px solid var(--line);border-radius:0;padding:2px 10px}
 button{cursor:pointer;font-weight:600}
-button:hover{border-color:var(--acc)}
-button.go{background:#123456;border-color:#2f6db0}
-button.danger{background:#3a1016;border-color:#7a2430;color:#ffb3bb}
+button:hover:not(:disabled){background:var(--sel);color:var(--sel-ink);border-color:var(--sel)}
+button.go{background:var(--bar);color:var(--bar-text);border-color:var(--bar)}
+button.danger{color:var(--err);border-color:var(--err)}
+button.danger:hover:not(:disabled){background:var(--err);color:var(--err-text);border-color:var(--err)}
 button:disabled{opacity:.5;cursor:default}
 input[type=number]{width:70px}
-#note{min-height:18px;font-size:12px;color:var(--dim)}
-#note.err{color:var(--bad)}
-.chips{display:flex;flex-wrap:wrap;gap:6px}
-.chip{font:12px var(--mono);padding:3px 8px;border-radius:6px;background:#0b0f17;border:1px solid var(--line)}
-.chip.bsp{border-color:var(--acc);color:var(--acc)}
-dl{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0;font-size:13px}
-dt{color:var(--dim)}
-dd{margin:0;font-family:var(--mono);overflow-wrap:anywhere}
-#gone{display:none;position:fixed;inset:0;background:#000c;align-items:center;justify-content:center;font-size:20px}
+:focus-visible{outline:2px solid var(--label);outline-offset:1px}
+#note{min-height:18px;font-size:.85em;color:var(--dim)}
+#note.err{color:var(--err)}
+.logstrip{display:flex;gap:14px;min-height:26px;align-items:center;padding:0 20px;border-top:1px solid var(--line);font-size:.92em;white-space:nowrap;overflow:hidden}
+.logstrip span{overflow:hidden;text-overflow:ellipsis}
+#logline{color:var(--strong)}
+.keys{display:flex;flex-wrap:wrap;align-items:center;gap:4px 20px;min-height:32px;padding:4px 20px;border-top:1px solid var(--bar-rule);font-size:.92em;white-space:nowrap}
+.keys .sp{margin-left:auto}
+.k{display:flex;align-items:center;gap:7px;color:var(--bar-dim)}
+.k kbd{font:inherit;font-weight:700;padding:1px 6px;background:var(--bar-rule);color:var(--bar-dim)}
+.k.on{color:var(--bar-text);cursor:pointer}
+.k.on kbd{background:var(--key);color:var(--key-ink)}
+#gone{display:none;position:fixed;inset:0;background:#000c;color:#fff;align-items:center;justify-content:center;font-size:1.5em}
 #gone.on{display:flex}
+@media(max-width:940px){main{grid-template-columns:minmax(0,1fr)}.keys .sp{margin-left:0}}
+@media(max-width:560px){.kv{grid-template-columns:84px minmax(0,1fr)}.row>.v{width:96px}}
 </style>
 </head>
 <body>
-<header>
-<h1><b>ferrite</b> memtest</h1>
-<span class="host" id="host">-</span>
-<span class="grow"></span>
-<span class="pill run" id="state">-</span>
-<span class="live offline" id="live"><i></i><span id="livetxt">connecting</span></span>
+<header class="bar" id="title">
+<div class="brand"><b>FERRITE</b><span>Memory Diagnostic</span><span id="ver"></span></div>
+<div class="hdr"><span class="elapsed">ELAPSED <span id="elapsed">--:--:--</span></span><span id="state">-</span><span class="live offline" id="live"><i></i><span id="livetxt">connecting</span></span></div>
 </header>
+<nav class="tabs" aria-label="screens"><span class="tab on">Run</span><span class="tab" id="tabres" aria-disabled="true">Results</span><span class="tab" aria-disabled="true">Setup</span><span class="tab" aria-disabled="true">Log</span></nav>
+<div id="banner" role="alert"><strong id="btitle"></strong><span id="bdetail"></span></div>
 <main>
-<div id="banner"><strong id="btitle"></strong><span id="bdetail"></span></div>
-<div class="tiles">
-<div class="tile"><small>Preset</small><div id="preset">-</div></div>
-<div class="tile"><small>Elapsed</small><div id="elapsed">-</div></div>
-<div class="tile"><small>Passes done</small><div id="passes">-</div></div>
-<div class="tile" id="ftile"><small>Faults</small><div id="faults">-</div></div>
-<div class="tile"><small>Tier</small><div id="tier">-</div></div>
-<div class="tile"><small>Mode</small><div id="mode">-</div></div>
-<div class="tile"><small>CPUs</small><div id="cpus">-</div></div>
-<div class="tile"><small>Memory</small><div id="mem">-</div></div>
-</div>
-<div class="cols">
-<div>
+<div class="col">
 <section>
+<h2>System</h2>
+<div class="kv">
+<span class="d">CPU</span><span id="cpu">-</span><span class="d">Memory</span><span id="mem">-</span>
+<span class="d">Preset</span><span id="preset">-</span><span class="d">Tier</span><span id="tier">-</span>
+<span class="d">Mode</span><span id="mode">-</span><span class="d">Clock</span><span class="d">&mdash;</span>
+<span class="d">Modules</span><span class="d">&mdash;</span><span class="d">Timings</span><span class="d">&mdash;</span>
+</div>
+<div class="chips" id="procs"></div>
+</section>
+<section id="progress">
 <h2>Progress</h2>
-<div class="row"><span id="passlbl">Pass</span><span id="passpct">-</span></div>
-<div class="bar"><i id="passbar" style="width:0"></i></div>
-<div class="row"><span id="testlbl">Test</span><span id="testpct">-</span></div>
-<div class="bar test"><i id="testbar" style="width:0"></i></div>
+<div class="row"><span class="k">Overall</span><div class="track"><i></i></div><span class="v d">&mdash;</span></div>
+<div class="row"><span class="k" id="passlbl">Pass</span><div class="track"><i id="passbar"></i></div><span class="v" id="passfig">-</span></div>
+<div class="row"><span class="k" id="testlbl">Test</span><div class="track"><i id="testbar"></i></div><span class="v" id="testpct">-</span></div>
+<div class="kv sub">
+<span class="d">Range</span><span class="d">&mdash;</span><span class="d">Threads</span><span id="threads">-</span>
+<span class="d">Pattern</span><span class="d">&mdash;</span><span class="d">Last rate</span><span id="lrate">-</span>
+<span class="d">Passes</span><span id="passes">-</span><span class="d">History</span><span id="hist">-</span>
+</div>
 </section>
 <section>
-<h2>Tests this run</h2>
-<table><thead><tr><th>Test</th><th>Pass</th><th class="n">CPUs</th><th class="n">Time</th><th class="n">Throughput</th><th class="n">Faults</th></tr></thead><tbody id="tests"></tbody></table>
-<div class="empty" id="tests0">No test has finished yet.</div>
+<h2>Tests</h2>
+<table><thead><tr><th>#</th><th>NAME</th><th>STATUS</th><th class="n">ERRORS</th><th class="n">TIME</th></tr></thead><tbody id="tests"></tbody></table>
 </section>
-<section>
-<h2>Fault log</h2>
-<div class="scroll"><table><thead><tr><th>Pass</th><th>Test</th><th class="n">CPU</th><th>Address</th><th>Expected</th><th>Read</th><th>Flipped</th></tr></thead><tbody id="flog"></tbody></table></div>
-<div class="empty" id="flog0">No faults.</div>
+<section id="flogbox" style="display:none">
+<h2>Error log</h2>
+<div class="scroll"><table><thead><tr><th>PASS</th><th>TEST</th><th class="n">CPU</th><th>ADDRESS</th><th>EXPECTED</th><th>READ</th><th>FLIPPED</th></tr></thead><tbody id="flog"></tbody></table></div>
 </section>
 </div>
-<div>
+<div class="col">
+<section>
+<h2>Memory map</h2>
+<div class="mapaxis"><span>0</span><span id="cell">-</span><span id="msize">-</span></div>
+<div id="map"></div>
+<div class="legend"><span><i class="t"></i>Tested</span><span><i class="a"></i>Active</span><span><i></i>Pending</span></div>
+</section>
+<section>
+<h2>Network</h2>
+<div class="kv2" id="net"></div>
+</section>
+<section>
+<h2>Errors</h2>
+<div class="count"><b id="ecount">0</b><span id="elabel">NO ERRORS</span></div>
+<div class="kv2" id="erows" style="margin-top:12px"></div>
+</section>
 <section>
 <h2>Controls</h2>
 <div class="ctl"><button class="go" id="pause">Pause</button></div>
@@ -119,85 +174,134 @@ dd{margin:0;font-family:var(--mono);overflow-wrap:anywhere}
 <div class="ctl"><button class="danger" id="quit">Quit</button></div>
 <div id="note"></div>
 </section>
-<section>
-<h2>Pass history</h2>
-<div class="scroll"><table><thead><tr><th>Pass</th><th class="n">Time</th><th class="n">Faults</th></tr></thead><tbody id="hist"></tbody></table></div>
-<div class="empty" id="hist0">No pass has finished yet.</div>
-</section>
-<section>
-<h2>Processors</h2>
-<div class="chips" id="procs"></div>
-<div class="empty" id="procs0">Single processor.</div>
-</section>
-<section>
-<h2>Network</h2>
-<dl id="net"></dl>
-</section>
-</div>
 </div>
 </main>
+<div class="logstrip"><span class="d" id="logprev"></span><span id="logline"></span></div>
+<footer class="bar keys">
+<span class="k"><kbd>F1</kbd>Help</span>
+<span class="k on sp" id="kp"><kbd>P</kbd><span id="kplbl">Pause</span></span>
+<span class="k on" id="kr"><kbd>R</kbd>Restart</span>
+<span class="k"><kbd>S</kbd>Skip test</span>
+<span class="k"><kbd>&larr; &rarr;</kbd>Tabs</span>
+<span class="k"><kbd>F10</kbd>Save report</span>
+<span class="k on" id="kq"><kbd>Q</kbd>Quit</span>
+</footer>
 <div id="gone">ferrite has quit.</div>
 <script>
 "use strict";
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]);
-const pad=n=>String(n).padStart(2,"0");
-function dur(ms){if(ms==null)return"-";if(ms<60000)return(ms/1000).toFixed(1)+" s";let s=Math.floor(ms/1000);const h=Math.floor(s/3600),m=Math.floor(s/60)%60;s%=60;return h?h+"h "+pad(m)+"m "+pad(s)+"s":m+"m "+pad(s)+"s"}
-function rate(b){return b==null?"-":b>=1e9?(b/1e9).toFixed(2)+" GB/s":(b/1e6).toFixed(0)+" MB/s"}
-function size(b){return b>=1<<30?(b/(1<<30)).toFixed(b%(1<<30)?1:0)+" GiB":(b/(1<<20)).toFixed(0)+" MiB"}
+const p2=n=>String(n).padStart(2,"0");
+const DASH="\u2014",DOT=" \u00b7 ",CELLS=128;
+function hms(ms){if(ms==null)return"--:--:--";const s=Math.floor(ms/1000);return p2(Math.floor(s/3600))+":"+p2(Math.floor(s/60)%60)+":"+p2(s%60)}
+function clk(ms){if(ms==null)return DASH;const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor(s/60)%60;return h?h+":"+p2(m)+":"+p2(s%60):m+":"+p2(s%60)}
+function took(ms){if(ms==null)return DASH;if(ms<9995)return(ms/1000).toFixed(2)+" s";if(ms<59950)return(ms/1000).toFixed(1)+" s";return clk(Math.round(ms/1000)*1000)}
+function rate(b){return b==null?DASH:b>=999.5e6?(b/1e9).toFixed(b>=9.995e9?1:2)+" GB/s":Math.round(b/1e6)+" MB/s"}
+function size(b){const g=1<<30,m=1<<20;return b>=g&&b%g==0?b/g+" GiB":b<m&&b>=1024?Math.floor(b/1024)+" KiB":Math.floor(b/m)+" MiB"}
+function hx(s){const h=String(s).replace(/^0x/,"").toUpperCase();let o="";for(let i=0;i<h.length;i++){if(i&&(h.length-i)%4==0)o+="_";o+=h[i]}return"0x"+o}
+const h16=s=>String(s).replace(/^0x/,"").toUpperCase().padStart(16,"0");
+function diff(a,e){const A=h16(a),E=h16(e);let o="";for(let i=0;i<A.length;i++)o+=A[i]==E[i]?A[i]:'<b class="x">'+A[i]+"</b>";return o}
 function text(id,v){$(id).textContent=v}
-function rows(id,items,f){$(id).innerHTML=items.map(f).join("");$(id+"0").style.display=items.length?"none":"block"}
-let last=null,first=true,paused=false,curPreset=null,base=null;
+function rows(id,items,f,empty){$(id).innerHTML=items.map(f).join("");if(empty)$(empty).style.display=items.length?"none":"block"}
+const cells=[];
+for(let i=0;i<CELLS;i++){const c=document.createElement("i");$("map").appendChild(c);cells.push(c)}
+let last=null,first=true,paused=false,base=null,mapAt=-2;
 function clock(){
   if(!base)return;
-  const dt=performance.now()-base.at;
-  text("elapsed",dur(base.el==null?null:base.el+dt));
-  text("passlbl","Pass "+(base.pass+1)+(base.pel!=null?" - "+dur(base.pel+dt):""));
-  const u=$("up");if(u)u.textContent=dur(base.up+dt);
+  const dt=performance.now()-base.at,el=base.el==null?null:base.el+dt;
+  text("elapsed",hms(el));
+  text("passfig",base.pct+"%"+DOT+clk(base.pel==null?null:base.pel+dt));
+  text("logline","["+hms(el)+"] "+base.log);
+  const u=$("up");if(u)u.textContent=clk(base.up+dt);
+}
+function renderMap(d){
+  const t=d.test,a=t.count>0?Math.min(CELLS-1,Math.floor(Math.min(t.percent,100)*CELLS/100)):-1;
+  if(a!==mapAt){mapAt=a;cells.forEach((c,i)=>{c.className=a<0?"":i<a?"t":i==a?"a":""})}
+  text("msize",size(d.bytes));
+  text("cell","1 cell = "+size(Math.floor(d.bytes/CELLS)));
+}
+function renderTests(d){
+  const cur=d.pass.number,name=d.test.name,t=d.test,seen=new Set();
+  const list=d.tests.map(r=>{
+    seen.add(r.test);
+    if(r.test==name&&t.count>0)return{n:r.test,s:"run"};
+    if(r.pass==cur)return{n:r.test,s:r.faults?"fail":"pass",e:r.faults,t:r.took_ms};
+    return{n:r.test,s:"q"};
+  });
+  if(t.count>0&&!seen.has(name))list.push({n:name,s:"run"});
+  const more=Math.max(0,t.count-list.length);
+  const word={run:d.paused?"PAUSED":"RUNNING",pass:"PASS",fail:"FAIL",q:"QUEUED"};
+  let h=list.map((r,i)=>'<tr class="'+(r.s=="run"?"cur":r.s=="q"?"q":"")+'"><td>'+(i+1)+'</td><td class="nm">'+esc(r.n)+'</td><td class="st '+r.s+'">'+word[r.s]+'</td><td class="n'+(r.e?" bad":"")+'">'+(r.e==null?DASH:r.e)+'</td><td class="n">'+(r.t==null?DASH:took(r.t))+"</td></tr>").join("");
+  if(more)h+='<tr class="q"><td></td><td colspan="4">'+more+" more queued</td></tr>";
+  if(!list.length&&!more)h='<tr class="q"><td></td><td colspan="4">No test has started yet.</td></tr>';
+  $("tests").innerHTML=h;
 }
 function render(d){
   last=Date.now();
-  const f=d.faults,bad=f.total>0;
-  paused=d.paused;curPreset=d.preset;
+  const f=d.faults,bad=f.total>0,t=d.test,n=d.net;
+  paused=d.paused;
   const st=$("state");
-  st.className="pill "+(bad?"faults":d.paused?"paused":"run");
-  st.textContent=bad?f.total+" faults"+(d.paused?", paused":""):d.paused?"paused":"running";
-  const addrs=d.net.ports.filter(p=>p.address).map(p=>p.address.split("/")[0]);
-  text("host",d.net.hostname+(addrs.length?"  "+addrs.join(", "):""));
-  text("preset",d.preset);
-  text("passes",d.pass.number);
-  text("faults",f.total);
-  $("ftile").className="tile"+(bad?" bad":"");
-  text("tier",d.tier);
-  text("mode",d.mode);
-  text("cpus",d.cpus);
-  text("mem",size(d.bytes));
+  st.className=bad||d.paused?"loud":"";
+  st.textContent=(bad?f.total+" ERROR"+(f.total>1?"S":"")+DOT:"")+(d.paused?"PAUSED":t.count?"RUNNING":"STARTING");
+  if(d.version)text("ver","v"+d.version);
+  text("tabres","Results"+(bad?" ("+f.total+")":""));
+  document.title="ferrite "+(bad?"! ":"")+d.pass.percent+"%";
+  const procs=d.processors||[],cores=new Set(procs.map(c=>c.package+"."+c.core)).size;
+  text("cpu",(procs.length||d.cpus)+" logical"+(procs.length?DOT+cores+" core"+(cores==1?"":"s"):""));
+  var c=d.coverage;
+  text("mem",size(d.bytes)+" under test"+(c&&c.free?" · "+Math.floor(c.tested*100/c.free)+"% of free":""));
+  text("preset",d.preset);text("tier",d.tier);
+  text("mode",d.mode+(d.mode=="split"?" over "+d.cpus+" cpus":""));
+  rows("procs",procs,c=>'<span class="chip'+(c.bsp?" bsp":"")+'" title="package '+c.package+", core "+c.core+", thread "+c.thread+'">cpu'+c.number+" "+c.package+"."+c.core+"."+c.thread+"</span>");
+  const total=Math.max(procs.length,d.cpus,1);
+  text("threads",d.mode=="split"?Math.min(d.cpus,total)+" / "+total+" parallel":"1 / "+total+DOT+"single core");
+  const lt=d.tests.length?d.tests[d.tests.length-1]:null;
+  text("lrate",lt?rate(lt.rate):DASH);
+  const ps=d.passes,ms=ps.map(p=>p.took_ms);
+  text("passes",ps.length?ps.length+" complete":"first pass running");
+  text("hist",ps.length?"last "+took(ms[ms.length-1])+DOT+"best "+took(Math.min(...ms))+DOT+"worst "+took(Math.max(...ms)):DASH);
+  $("progress").className=d.paused?"paused":"";
+  text("passlbl","Pass "+(d.pass.number+1));
+  $("passbar").style.width=Math.min(d.pass.percent,100)+"%";
+  text("testlbl",t.count?"Test "+t.index+"/"+t.count:"Test");
+  text("testpct",t.count?t.percent+"%":DASH);
+  $("testbar").style.width=(t.count?Math.min(t.percent,100):0)+"%";
+  renderMap(d);
+  renderTests(d);
   $("banner").className=bad?"on":"";
   if(bad){
     text("btitle",f.total+" memory fault"+(f.total>1?"s":"")+" found: "+f.analysis.text);
     const x=f.first;
-    text("bdetail",x?"first at "+x.addr+" in "+x.test+" on cpu "+x.cpu+": expected "+x.expected+", read "+x.actual+" (bits "+x.flipped+")":"");
+    text("bdetail",x?"first at "+hx(x.addr)+" in "+x.test+" on cpu "+x.cpu+": expected "+h16(x.expected)+", read "+h16(x.actual)+" (bits "+x.flipped+")":"");
   }
-  base={at:performance.now(),up:d.uptime_ms,el:d.elapsed_ms,pel:d.pass.elapsed_ms,pass:d.pass.number};
-  text("passpct",d.pass.percent+"%");
-  $("passbar").style.width=d.pass.percent+"%";
-  text("testlbl","Test "+d.test.index+"/"+d.test.count+": "+d.test.name);
-  text("testpct",d.test.percent+"%");
-  $("testbar").style.width=d.test.percent+"%";
-  rows("tests",d.tests,t=>'<tr class="'+(t.test==d.test.name?"cur ":"")+(t.faults?"bad":"")+'"><td>'+esc(t.test)+"</td><td>"+t.pass+'</td><td class="n">'+t.cpus+'</td><td class="n">'+dur(t.took_ms)+'</td><td class="n">'+rate(t.rate)+'</td><td class="n">'+t.faults+"</td></tr>");
-  rows("flog",f.log.slice().reverse(),x=>'<tr class="bad"><td>'+x.pass+"</td><td>"+esc(x.test)+'</td><td class="n">'+x.cpu+"</td><td>"+x.addr+"</td><td>"+x.expected+"</td><td>"+x.actual+"</td><td>"+x.flipped+"</td></tr>");
-  rows("hist",d.passes.slice().reverse(),p=>"<tr"+(p.faults?' class="bad"':"")+"><td>"+p.pass+'</td><td class="n">'+dur(p.took_ms)+'</td><td class="n">'+p.faults+"</td></tr>");
-  rows("procs",d.processors,c=>'<span class="chip'+(c.bsp?" bsp":"")+'" title="package '+c.package+", core "+c.core+", thread "+c.thread+'">cpu'+c.number+" "+c.package+"."+c.core+"."+c.thread+"</span>");
-  const n=d.net,item=([a,b],id)=>"<dt>"+a+"</dt><dd"+(id?' id="'+id+'"':"")+">"+esc(b)+"</dd>";
-  let net=item(["host",n.hostname]);
-  if(!n.ports.length)net+=item(["network","no network: no wired NIC driven by the firmware, Wi-Fi not up"]);
+  text("ecount",f.total);
+  $("ecount").className=bad?"bad":"ok";
+  const el=$("elabel");el.className=bad?"bad":"ok";el.textContent=bad?(f.total>1?"ERRORS":"ERROR"):"NO ERRORS";
+  const lg=f.log,lf=lg.length?lg[lg.length-1]:null;
+  const kv=(a,b,c)=>'<span class="d">'+a+"</span><span"+(c?' class="'+c+'"':"")+">"+b+"</span>";
+  $("erows").innerHTML=lf&&bad
+    ?kv("Address",hx(lf.addr),"s")+kv("Expected",h16(lf.expected))+kv("Read",diff(lf.actual,lf.expected))+kv("Analysis",esc(f.analysis.text),"s")+kv("Found in",esc(lf.test)+DOT+"cpu "+lf.cpu+DOT+"pass "+(lf.pass+1))
+    :kv("Analysis",esc(f.analysis.text))+kv("Last error",DASH,"d")+kv("Passes",d.pass.number?d.pass.number+" complete":"first pass running");
+  $("flogbox").style.display=lg.length?"block":"none";
+  rows("flog",lg.slice().reverse(),x=>'<tr><td>'+(x.pass+1)+"</td><td>"+esc(x.test)+'</td><td class="n">'+x.cpu+"</td><td>"+hx(x.addr)+"</td><td>"+h16(x.expected)+"</td><td>"+diff(x.actual,x.expected)+"</td><td>"+h16(x.flipped)+"</td></tr>");
+  const addrs=n.ports.filter(p=>p.address).map(p=>p.address.split("/")[0]);
+  const item=(a,b,id)=>'<span class="d">'+a+"</span><span"+(id?' id="'+id+'"':"")+">"+esc(b)+"</span>";
+  let net=item("Host",n.hostname+(addrs.length?DOT+addrs.join(", "):""));
+  const w=n.wifi;
+  if(w)net+='<span class="d">Wi-Fi</span><span class="'+(w.final?"d":"")+'">'+esc(w.state||"unknown")+esc(w.ssid?DOT+w.ssid:"")+esc(w.retry_in_s!=null?DOT+"retry in "+w.retry_in_s+" s":"")+"</span>";
+  if(!n.ports.length)net+=item("Network","no network: no wired NIC driven by the firmware, Wi-Fi not up");
   n.ports.forEach(p=>{
     const k=p.counters;
-    net+=[["port",p.medium+", "+p.mac+", link "+(p.link_up?"up":"down")],["address",p.address||"-"],["gateway",p.gateway||"-"],["dns",p.dns||"-"],["http",k.http_responses+" responses"],["mdns",k.mdns_queries+" queries, "+k.mdns_replies+" replies"],["frames",k.rx_frames+" rx, "+k.rx_dropped+" rx dropped, "+k.tx_frames+" tx, "+k.tx_dropped+" tx dropped, "+k.tx_errors+" tx err"]].map(r=>item(r)).join("");
+    net+=[["Port",p.medium+", "+p.mac+", link "+(p.link_up?"up":"down")],["Address",p.address||DASH],["Gateway",p.gateway||DASH],["DNS",p.dns||DASH],["HTTP",k.http_responses+" responses"],["mDNS",k.mdns_queries+" queries, "+k.mdns_replies+" replies"],["Frames",k.rx_frames+" rx, "+k.rx_dropped+" rx dropped, "+k.tx_frames+" tx, "+k.tx_dropped+" tx dropped, "+k.tx_errors+" tx err"]].map(r=>item(r[0],r[1])).join("");
   });
-  $("net").innerHTML=net+item(["uptime",dur(d.uptime_ms)],"up");
+  $("net").innerHTML=net+item("Uptime",clk(d.uptime_ms),"up");
+  const prev=bad&&lf?"ERROR "+lf.test+DOT+hx(lf.addr)+DOT+"cpu "+lf.cpu:lt?"pass "+(lt.pass+1)+DOT+lt.test+" finished in "+took(lt.took_ms):"";
+  const lp=$("logprev");lp.textContent=prev;lp.className=bad&&lf?"bad":"d";
+  base={at:performance.now(),up:d.uptime_ms,el:d.elapsed_ms,pel:d.pass.elapsed_ms,pct:Math.min(d.pass.percent,100),
+    log:t.count?"pass "+(d.pass.number+1)+DOT+"test "+t.index+"/"+t.count+DOT+t.name:"preparing the buffer"};
   clock();
-  const pb=$("pause");pb.textContent=d.paused?"Resume":"Pause";
+  text("kplbl",d.paused?"Resume":"Pause");
+  $("pause").textContent=d.paused?"Resume":"Pause";
   if(first){$("preset_sel").value=d.preset;first=false}
 }
 function note(msg,err){const n=$("note");n.textContent=msg;n.className=err?"err":""}
@@ -214,7 +318,15 @@ $("restart").onclick=()=>{const p=$("preset_sel").value;if(confirm("Restart with
 $("cores_sel").onchange=()=>{$("cores_n").hidden=$("cores_sel").value!="count"};
 $("cores").onclick=()=>{const v=$("cores_sel").value;post("cores",{cores:v=="count"?Math.max(1,parseInt($("cores_n").value,10)||1):v})};
 $("quit").onclick=async()=>{if(confirm("Quit ferrite? The memory test stops."))if(await post("quit"))$("gone").className="on"};
-function live(s,t){$("live").className="live "+s;text("livetxt",t||s)}
+$("kp").onclick=()=>$("pause").click();
+$("kr").onclick=()=>$("restart").click();
+$("kq").onclick=()=>$("quit").click();
+addEventListener("keydown",e=>{
+  if(e.ctrlKey||e.metaKey||e.altKey||/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName))return;
+  const k=e.key.toLowerCase();
+  if(k=="p")$("pause").click();else if(k=="r")$("restart").click();else if(k=="q")$("quit").click();
+});
+function live(s,t){$("live").className="live "+s;text("livetxt",(t||s).toUpperCase())}
 let es=null,timer=null;
 function poll(){fetch("/api/status",{cache:"no-store"}).then(r=>r.json()).then(d=>{render(d);live(es?"live":"polling")}).catch(()=>live("offline"))}
 function connect(){

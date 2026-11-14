@@ -1,62 +1,82 @@
-//! Where every card and widget of the dashboard goes, scaled from a 1360x860 design to the screen.
+//! Where every part of the dashboard goes. Measures are given for a 1280x800 screen, or for
+//! 1024x768 below 1200 pixels of width, and scaled up from there.
 
 use crate::gfx::{Rect, px, whole_px};
 
-/// The size the dashboard's measures are given for.
-const DESIGN: (f32, f32) = (1360.0, 860.0);
+/// Screens narrower than this get the compact layout.
+const COMPACT_BELOW: u32 = 1200;
+const WIDE: (f32, f32) = (1280.0, 800.0);
+const COMPACT: (f32, f32) = (1024.0, 768.0);
 
 /// Text sizes in pixels, scaled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Type {
-    /// Small capitals over cards and columns.
+    /// Body text.
+    pub base: u16,
+    /// Section labels and column heads.
     pub label: u16,
-    pub body: u16,
     pub small: u16,
-    pub mono: u16,
     pub title: u16,
+    /// The error count.
     pub big: u16,
 }
 
-/// Every rectangle of one screen size. Cards are the static frames; the other rectangles are
-/// widgets inside them, each redrawn on its own when what it shows changes.
+/// A titled section: the band with its label and rule, and the body below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Section {
+    pub label: Rect,
+    pub body: Rect,
+}
+
+/// Rows of the SYSTEM grid and of the NETWORK list.
+pub const SYSTEM_ROWS: u32 = 3;
+pub const NET_ROWS: u32 = 4;
+/// Columns of the memory map, and its rows.
+pub const MAP_COLS: u32 = 16;
+pub const MAP_ROWS: u32 = 8;
+
+/// Every rectangle of one screen size. The bars and sections are static, drawn on a full redraw;
+/// the other rectangles are widgets, each redrawn on its own when what it shows changes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
     pub scale: f32,
     pub text: Type,
-    pub radius: f32,
-    /// Padding inside a card.
-    pub pad: u32,
-    /// Height of a card's title strip, and of a table row.
-    pub title_h: u32,
+    /// The height of a line of text, and of a table row with its padding.
     pub row_h: u32,
+    pub pitch: u32,
+    /// Width of a label column, and of the right-aligned figure after a progress bar.
+    pub lab: u32,
+    pub pw: u32,
+    /// Widths of the tests table's number, status, errors and time columns.
+    pub cols: [u32; 4],
 
     pub header: Rect,
-    pub brand: Rect,
     pub clock: Rect,
+    pub tabs: Rect,
+    pub log_rule: Rect,
+    pub log: Rect,
+    pub footer: Rect,
 
-    pub progress: Rect,
+    pub system: Section,
+    pub progress: Section,
+    pub tests: Section,
+    pub map: Section,
+    pub net: Section,
+    pub errors: Section,
+
     pub pass: Rect,
     pub test: Rect,
-
-    pub tests_card: Rect,
-    pub tests: Rect,
-    pub faults_card: Rect,
-    pub faults: Rect,
-    pub net_card: Rect,
-    pub net: Rect,
-    pub passes_card: Rect,
-    pub passes: Rect,
-    pub cpus_card: Rect,
-    pub cpus: Rect,
-
-    pub footer: Rect,
+    pub detail_rule: Rect,
+    pub detail: Rect,
+    pub tests_head: Rect,
+    pub tests_rows: Rect,
 }
 
 /// The design-to-screen factor: the smaller of the two axes, so everything fits.
 #[must_use]
 pub fn scale(width: u32, height: u32) -> f32 {
-    let s = (px(width) / DESIGN.0).min(px(height) / DESIGN.1);
-    s.clamp(0.75, 4.0)
+    let (dw, dh) = if width < COMPACT_BELOW { COMPACT } else { WIDE };
+    (px(width) / dw).min(px(height) / dh).clamp(0.75, 4.0)
 }
 
 fn text_px(v: f32) -> u16 {
@@ -64,84 +84,108 @@ fn text_px(v: f32) -> u16 {
 }
 
 impl Layout {
-    /// `test_rows` is how many tests the preset runs; with `faulted` the fault log gets more room.
     #[must_use]
-    pub fn new(width: u32, height: u32, test_rows: usize, faulted: bool) -> Self {
+    pub fn new(width: u32, height: u32) -> Self {
+        let compact = width < COMPACT_BELOW;
         let s = scale(width, height);
-        let m = |v: f32| whole_px(v * s);
-        let (margin, gap, pad) = (m(18.0), m(12.0), m(16.0));
-        let (title_h, row_h) = (m(26.0), m(22.0));
-        let text = Type {
-            label: text_px(10.5 * s),
-            body: text_px(13.5 * s),
-            small: text_px(12.0 * s),
-            mono: text_px(12.5 * s),
+        let m = |v: f32| u32::try_from(crate::gfx::text::round(v * s)).unwrap_or(0);
+        let sizes = Type {
+            base: text_px(13.0 * s),
+            label: text_px(12.0 * s),
+            small: text_px(11.0 * s),
             title: text_px(16.0 * s),
-            big: text_px(26.0 * s),
+            big: text_px(56.0 * s),
+        };
+        let row_h = m(19.0);
+        let pitch = row_h + m(2.0);
+        let (gap, section_gap) = (m(12.0), m(18.0));
+        // The band over a section's body: its label, the rule under it, and the space after.
+        let (label_h, label_to_body) = (m(21.0), m(29.0));
+
+        let mut area = Rect::new(0, 0, width, height);
+        let header = area.take_top(m(44.0));
+        let tabs = area.take_top(m(34.0));
+        let footer = area.take_bottom(m(32.0));
+        let log_strip = area.take_bottom(m(26.0));
+        let log_rule = Rect::new(log_strip.x, log_strip.y, log_strip.w, 1);
+        let log = Rect::new(log_strip.x, log_strip.y + 1, log_strip.w, log_strip.h.saturating_sub(1));
+
+        let (pad_x, pad_top, pad_bottom) = (m(12.0), m(16.0), m(8.0));
+        let main = Rect::new(
+            area.x + pad_x,
+            area.y + pad_top,
+            area.w.saturating_sub(2 * pad_x),
+            area.h.saturating_sub(pad_top + pad_bottom),
+        );
+        let left_w = whole_px(px(main.w.saturating_sub(gap)) * if compact { 0.591 } else { 0.62 });
+        let (left_x, right_x) = (main.x, main.x + left_w + gap);
+        let right_w = main.w.saturating_sub(left_w + gap);
+
+        let section = |x: u32, y: u32, w: u32, body_h: u32| Section {
+            label: Rect::new(x, y, w, label_h),
+            body: Rect::new(x, y + label_to_body, w, body_h),
         };
 
-        let mut area = Rect::new(0, 0, width, height).inset(margin, margin);
-        let header = area.take_top(m(56.0));
-        area.take_top(gap);
-        let footer = area.take_bottom(m(28.0));
-        area.take_bottom(gap / 2);
-        let progress = area.take_top(m(118.0));
-        area.take_top(gap);
+        let system = section(left_x, main.y, left_w, SYSTEM_ROWS * pitch - m(2.0));
+        let (lab, pw) = if compact { (m(84.0), m(104.0)) } else { (m(92.0), m(120.0)) };
 
-        let mut head = header.inset(pad, 0);
-        let clock = head.take_right(head.w / 2);
-        let brand = head;
-
-        let mut bars = progress.inset(pad, pad);
-
-        let left_w = whole_px(px(area.w.saturating_sub(gap)) * 0.6);
-        let mut left = area.take_left(left_w);
-        area.take_left(gap);
-        let mut right = area;
-
-        let body_of = |card: Rect| {
-            let mut body = card.inset(pad, pad);
-            body.take_top(title_h);
-            body
+        let progress_y = system.body.bottom() + section_gap;
+        let bars_y = progress_y + label_to_body;
+        let bar_gap = m(8.0);
+        let pass = Rect::new(left_x, bars_y, left_w, 2 * row_h + bar_gap);
+        let test = Rect::new(left_x, pass.bottom() + bar_gap, left_w, row_h);
+        let detail_rule = Rect::new(left_x, test.bottom() + bar_gap, left_w, 1);
+        let detail = Rect::new(left_x, detail_rule.bottom() + m(8.0), left_w, 2 * row_h + m(2.0));
+        let progress = Section {
+            label: Rect::new(left_x, progress_y, left_w, label_h),
+            body: Rect::new(left_x, bars_y, left_w, detail.bottom() - bars_y),
         };
-        let fault_rows: u32 = if faulted { 6 } else { 2 };
-        let faults_min = 2 * pad + title_h + row_h * (fault_rows + 1);
-        let rows = u32::try_from(test_rows).unwrap_or(u32::MAX);
-        let tests_need = 2 * pad + title_h + row_h * rows.saturating_add(1);
-        let tests_card = left.take_top(tests_need.min(left.h.saturating_sub(faults_min + gap)));
-        left.take_top(gap);
-        let faults_card = left;
 
-        let net_card = right.take_top(m(176.0));
-        right.take_top(gap);
-        let cpus_card = right.take_bottom(m(132.0));
-        right.take_bottom(gap);
-        let passes_card = right;
+        let tests_y = progress.body.bottom() + section_gap;
+        let tests_body_h = main.bottom().saturating_sub(tests_y + label_to_body);
+        let tests = section(left_x, tests_y, left_w, tests_body_h);
+        let head_h = m(21.0).min(tests.body.h);
+        let mut rows = tests.body;
+        let tests_head = rows.take_top(head_h);
+
+        let cell_h = m(20.0);
+        let map_head = row_h + m(6.0);
+        let grid_h = MAP_ROWS * cell_h + (MAP_ROWS - 1) * m(3.0);
+        let map = section(right_x, main.y, right_w, map_head + grid_h + m(10.0) + m(16.0));
+        let net_y = map.body.bottom() + section_gap;
+        let net = section(right_x, net_y, right_w, NET_ROWS * pitch - m(2.0));
+        let errors_y = net.body.bottom() + section_gap;
+        let errors = section(right_x, errors_y, right_w, main.bottom().saturating_sub(errors_y + label_to_body));
+
+        let cols = if compact { [28.0, 84.0, 52.0, 52.0] } else { [36.0, 96.0, 64.0, 72.0] }.map(m);
+        let clock = Rect::new(header.x + header.w / 2, header.y, header.w / 2 - m(20.0), header.h);
 
         Self {
             scale: s,
-            text,
-            radius: 10.0 * s,
-            pad,
-            title_h,
+            text: sizes,
             row_h,
+            pitch,
+            lab,
+            pw,
+            cols,
             header,
-            brand,
             clock,
-            progress,
-            pass: bars.take_top(bars.h / 2),
-            test: bars,
-            tests_card,
-            tests: body_of(tests_card),
-            faults_card,
-            faults: body_of(faults_card),
-            net_card,
-            net: body_of(net_card),
-            passes_card,
-            passes: body_of(passes_card),
-            cpus_card,
-            cpus: body_of(cpus_card),
+            tabs,
+            log_rule,
+            log,
             footer,
+            system,
+            progress,
+            tests,
+            map,
+            net,
+            errors,
+            pass,
+            test,
+            detail_rule,
+            detail,
+            tests_head,
+            tests_rows: rows,
         }
     }
 
@@ -162,29 +206,9 @@ pub fn window(total: usize, visible: usize, current: usize) -> usize {
     current.saturating_sub(visible / 2).min(total - visible)
 }
 
-/// The side of square tiles, and how many go in a row, for `n` tiles in `w` by `h` with `gap`
-/// between them: the largest side up to `max` that fits, down to `min` (rows past `h` then clip).
-#[must_use]
-pub fn tile_grid(n: u32, w: u32, h: u32, gap: u32, max: u32, min: u32) -> (u32, u32) {
-    let n = n.max(1);
-    let fits = |side: u32| {
-        let cols = ((w + gap) / (side + gap)).max(1);
-        let rows = n.div_ceil(cols);
-        (cols, rows * (side + gap) - gap <= h)
-    };
-    let mut side = max.max(min);
-    while side > min {
-        if let (cols, true) = fits(side) {
-            return (side, cols.min(n));
-        }
-        side -= 1;
-    }
-    (side, fits(side).0.min(n))
-}
-
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use rstest::rstest;
 
     use super::*;
@@ -205,44 +229,39 @@ mod tests {
         check!((start..start + visible.min(total)).contains(&current));
     }
 
-    #[test]
-    fn tiles_shrink_until_every_row_fits() {
-        // Eight tiles fit one row at full size.
-        check!(tile_grid(8, 400, 40, 6, 36, 10) == (36, 8));
-        // Sixty-four need three rows of 22 at most in 80 pixels.
-        let (side, cols) = tile_grid(64, 600, 80, 4, 36, 10);
-        assert!(side < 36);
-        let rows = 64u32.div_ceil(cols);
-        check!(rows * (side + 4) - 4 <= 80);
-        check!(cols * (side + 4) - 4 <= 600);
-        // And a little bigger would not have fit.
-        let bigger_cols = (600 + 4) / (side + 1 + 4);
-        check!(64u32.div_ceil(bigger_cols) * (side + 5) - 4 > 80);
-    }
-
-    #[test]
-    fn tiles_stop_at_the_minimum() {
-        check!(tile_grid(1000, 100, 20, 2, 30, 8).0 == 8);
-    }
-
     #[rstest]
+    #[case::minimum(768, 576)]
+    #[case::narrow(1024, 768)]
     #[case::ovmf_default(1280, 800)]
     #[case::full_hd(1920, 1080)]
     #[case::uhd(3840, 2160)]
-    #[case::narrow(1024, 768)]
-    fn cards_stay_on_screen_and_apart(#[case] w: u32, #[case] h: u32) {
-        for faulted in [false, true] {
-            let l = Layout::new(w, h, 16, faulted);
-            let screen = Rect::new(0, 0, w, h);
-            let cards = [l.header, l.progress, l.tests_card, l.faults_card, l.net_card, l.passes_card, l.cpus_card];
-            for (i, a) in cards.iter().enumerate() {
-                check!(a.intersect(screen) == *a);
-                check!(!a.is_empty(), "card {i} is empty at {w}x{h}");
-                for b in &cards[i + 1..] {
-                    check!(a.intersect(*b).is_empty());
-                }
+    fn sections_stay_on_screen_and_apart(#[case] w: u32, #[case] h: u32) {
+        let l = Layout::new(w, h);
+        let screen = Rect::new(0, 0, w, h);
+        let sections = [l.system, l.progress, l.tests, l.map, l.net, l.errors];
+        let parts = [
+            l.header,
+            l.tabs,
+            l.log,
+            l.footer,
+            l.system.body,
+            l.progress.body,
+            l.tests.body,
+            l.map.body,
+            l.net.body,
+            l.errors.body,
+        ];
+        for (i, a) in parts.iter().enumerate() {
+            check!(a.intersect(screen) == *a, "part {i} leaves the screen at {w}x{h}");
+            check!(!a.is_empty(), "part {i} is empty at {w}x{h}");
+            for b in &parts[i + 1..] {
+                check!(a.intersect(*b).is_empty(), "parts overlap at {w}x{h}");
             }
-            check!(l.faults.h >= l.row_h * 3, "fault log too short at {w}x{h}");
         }
+        for s in sections {
+            check!(s.label.bottom() <= s.body.y);
+        }
+        check!(l.tests_rows.h >= 6 * l.pitch, "tests table too short at {w}x{h}");
+        check!(l.errors.body.h >= u32::from(l.text.big) + 4 * l.pitch, "errors too short at {w}x{h}");
     }
 }

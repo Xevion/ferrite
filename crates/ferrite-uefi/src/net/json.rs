@@ -313,11 +313,18 @@ impl ToJson for StatusDoc<'_> {
         let mode: &str = status.mode.into();
         let (index, count) = status.position;
         Object::new(out)
+            .field("version", env!("CARGO_PKG_VERSION"))
             .field("uptime_ms", &Millis(self.now.since_epoch()))
             .field("preset", preset)
             .field("paused", &status.paused)
             .field("elapsed_ms", &history.run_started.map(|start| self.since(start)))
             .field("bytes", &status.bytes)
+            .field(
+                "coverage",
+                &Section(|o: &mut Object<'_>| {
+                    o.field("tested", &status.coverage.tested).field("free", &status.coverage.free);
+                }),
+            )
             .field("tier", status.tier)
             .field("mode", mode)
             .field("cpus", &status.cpus)
@@ -454,7 +461,10 @@ mod tests {
         StatusDoc { snapshot: &snapshot, net: &net, wifi: &wifi, now: at(6_500) }.to_json(&mut out);
         check!(
             out == concat!(
-                r#"{"uptime_ms":6500,"preset":"thorough","paused":true,"elapsed_ms":5500,"bytes":1073741824,"#,
+                r#"{"version":""#,
+                env!("CARGO_PKG_VERSION"),
+                r#"","uptime_ms":6500,"preset":"thorough","paused":true,"elapsed_ms":5500,"bytes":1073741824,"#,
+                r#""coverage":{"tested":0,"free":0},"#,
                 r#""tier":"avx2","mode":"split","cpus":4,"#,
                 r#""pass":{"number":1,"percent":15,"elapsed_ms":2500},"#,
                 r#""test":{"name":"moving-inversions","index":2,"count":9,"percent":40},"#,

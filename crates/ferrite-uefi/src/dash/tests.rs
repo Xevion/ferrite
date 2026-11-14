@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::vec;
 use std::vec::Vec;
 
 use assert2::{assert, check};
@@ -117,14 +118,14 @@ fn steady_frames_redraw_only_the_widgets_that_changed() {
         !rects.is_empty() && rects.iter().all(|r| widgets.iter().any(|w| w.intersect(*r) == *r))
     };
     let area = |rects: &[Rect]| rects.iter().map(|r| r.area()).sum::<u64>();
-    // One percent more moves the bar's end and the figure: a sliver of the widget.
+    // One percent more moves the bar's end and the figure, and the map's active cell.
     let moved = SweepStatus { test_percent: 38, ..status() };
     let rects = render(&mut dash, moved, &history, &faults, 500);
-    check!(inside(&rects, &[l.test]));
+    check!(inside(&rects, &[l.test, l.map.body]));
     check!(area(&rects) * 5 < l.test.area());
-    // A second later the run clock and the pass's times tick; nothing else does.
+    // A second later the run clock, the pass's time and the log line tick; nothing else does.
     let rects = render(&mut dash, moved, &history, &faults, 501);
-    check!(inside(&rects, &[l.clock, l.pass]));
+    check!(inside(&rects, &[l.clock, l.pass, l.log]));
     check!(rects.iter().any(|r| l.clock.intersect(*r) == *r));
 }
 
@@ -146,18 +147,24 @@ fn a_clock_tick_allocates_nothing() {
 }
 
 #[test]
-fn the_first_fault_redraws_everything() {
+fn the_first_fault_shows_in_the_errors_the_tab_and_the_clock() {
     let mut dash = Dashboard::new(1280, 800).expect("dashboard");
     let (history, mut faults) = (history(), VecDeque::new());
     render(&mut dash, status(), &history, &faults, 500);
     let mut status = status();
     faulty(&mut status, &mut faults);
-    check!(render(&mut dash, status, &history, &faults, 500) == [dash.canvas.bounds()]);
-    // The header's ground has turned red.
+    let rects = render(&mut dash, status, &history, &faults, 500);
     let l = dash.layout;
-    let at = ((l.header.y + 3) as usize * 1280 + (l.header.x + l.header.w / 2) as usize) * 4;
-    let [b, g, r, _] = dash.canvas.bgra()[at..at + 4] else { panic!("pixel out of range") };
-    assert!(r > g && r > b, "header pixel {r},{g},{b} is not red");
+    let places = [l.errors.body, l.tabs, l.clock, l.log];
+    check!(!rects.is_empty() && rects.iter().all(|r| places.iter().any(|w| w.intersect(*r) == *r)), "{rects:?}");
+    // The count is drawn in the error colour: some pixel of the errors section is exactly it.
+    let wanted = [theme::ERR.b, theme::ERR.g, theme::ERR.r, 255];
+    let width = l.errors.body.w as usize;
+    let seen = (l.errors.body.y..l.errors.body.bottom()).any(|y| {
+        let row = (y as usize * 1280 + l.errors.body.x as usize) * 4;
+        dash.canvas.bgra()[row..row + width * 4].as_chunks::<4>().0.contains(&wanted)
+    });
+    assert!(seen, "no error coloured pixel in the errors section");
 }
 
 #[test]
@@ -165,11 +172,9 @@ fn too_small_a_screen_is_refused() {
     assert!(let Err(DashError::TooSmall { .. }) = Dashboard::new(800, 400));
 }
 
-/// Writes PPM frames under `FERRITE_DASH_OUT` for looking at; without it only checks they render.
 #[test]
-fn eyeball_frames() {
-    let out = std::env::var_os("FERRITE_DASH_OUT").map(std::path::PathBuf::from);
-    for (w, h) in [(1280, 800), (1920, 1080), (1024, 768)] {
+fn every_size_renders() {
+    for (w, h) in [(768, 576), (1024, 768), (1280, 800), (1920, 1080)] {
         for faulted in [false, true] {
             let mut dash = Dashboard::new(w, h).expect("dashboard");
             let (history, mut faults) = (history(), VecDeque::new());
@@ -177,14 +182,82 @@ fn eyeball_frames() {
             if faulted {
                 faulty(&mut status, &mut faults);
             }
-            render(&mut dash, status, &history, &faults, 523);
-            let Some(dir) = &out else { continue };
-            let mut ppm = std::format!("P6 {w} {h} 255\n").into_bytes();
-            ppm.extend(dash.canvas.bgra().as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]));
-            let name = std::format!("dash-{w}x{h}{}.ppm", if faulted { "-faulted" } else { "" });
-            std::fs::write(dir.join(name), ppm).expect("write frame");
+            check!(render(&mut dash, status, &history, &faults, 523) == [dash.canvas.bounds()]);
         }
     }
+}
+
+/// The frames as PNG files in the directory named by `FERRITE_DASH_OUT`, for looking at.
+/// Run with `cargo nextest run -p ferrite-uefi --lib --run-ignored only dash::tests::png_frames`.
+#[test]
+#[ignore = "writes files; run on demand for a look at the screen"]
+fn png_frames() {
+    let dir =
+        std::path::PathBuf::from(std::env::var_os("FERRITE_DASH_OUT").expect("FERRITE_DASH_OUT names a directory"));
+    std::fs::create_dir_all(&dir).expect("create the output directory");
+    let no_network = Some(NoNetwork { wired: "no wired NIC driven by the firmware", wifi: "scanning" });
+    for (w, h) in [(1920, 1080), (1024, 768)] {
+        for scene in ["running", "fault", "no-network"] {
+            let mut dash = Dashboard::new(w, h).expect("dashboard");
+            let (history, mut faults) = (history(), VecDeque::new());
+            let mut status = status();
+            if scene == "fault" {
+                faulty(&mut status, &mut faults);
+            }
+            let snapshot = Snapshot { status, history: &history, faults: &faults };
+            let (net, net_err) = if scene == "no-network" { (None, no_network) } else { (Some(net()), None) };
+            let at = START + Duration::from_secs(523);
+            dash.render(&Frame { snapshot: &snapshot, net, net_err, now: at });
+            let bytes = png(w, h, dash.canvas.bgra());
+            std::fs::write(dir.join(std::format!("{scene}-{w}x{h}.png")), bytes).expect("write frame");
+        }
+    }
+}
+
+/// An uncompressed RGB PNG of BGRA `pixels`.
+fn png(w: u32, h: u32, pixels: &[u8]) -> Vec<u8> {
+    fn chunk(out: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
+        out.extend((data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend(data);
+        out.extend(&body);
+        let mut crc = !0u32;
+        for byte in body {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 { 0xedb8_8320 ^ (crc >> 1) } else { crc >> 1 };
+            }
+        }
+        out.extend((!crc).to_be_bytes());
+    }
+    let mut raw = Vec::with_capacity((w as usize * 3 + 1) * h as usize);
+    for row in pixels.chunks_exact(w as usize * 4) {
+        raw.push(0);
+        raw.extend(row.as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]));
+    }
+    let mut zlib = vec![0x78, 0x01];
+    let blocks = raw.chunks(65_535).len();
+    for (i, block) in raw.chunks(65_535).enumerate() {
+        zlib.push(u8::from(i + 1 == blocks));
+        zlib.extend((block.len() as u16).to_le_bytes());
+        zlib.extend((!(block.len() as u16)).to_le_bytes());
+        zlib.extend(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw {
+        a = (a + u32::from(byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    zlib.extend(((b << 16) | a).to_be_bytes());
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut header = Vec::new();
+    header.extend(w.to_be_bytes());
+    header.extend(h.to_be_bytes());
+    header.extend([8, 2, 0, 0, 0]);
+    chunk(&mut out, *b"IHDR", &header);
+    chunk(&mut out, *b"IDAT", &zlib);
+    chunk(&mut out, *b"IEND", &[]);
+    out
 }
 
 #[test]
@@ -209,9 +282,9 @@ fn a_port_coming_and_going_redraws_the_network_widget_alone() {
     dash.render(&frame(Some(two), None));
     let l = dash.layout;
     let rects = dash.output().1.to_vec();
-    check!(!rects.is_empty() && rects.iter().all(|r| l.net.intersect(*r) == *r), "{rects:?}");
+    check!(!rects.is_empty() && rects.iter().all(|r| l.net.body.intersect(*r) == *r), "{rects:?}");
 
     dash.render(&frame(None, Some(NoNetwork { wired: "no wired NIC driven by the firmware", wifi: "scanning" })));
     let rects = dash.output().1.to_vec();
-    check!(!rects.is_empty() && rects.iter().all(|r| l.net.intersect(*r) == *r), "{rects:?}");
+    check!(!rects.is_empty() && rects.iter().all(|r| l.net.body.intersect(*r) == *r), "{rects:?}");
 }
