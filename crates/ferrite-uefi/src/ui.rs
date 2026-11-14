@@ -14,7 +14,7 @@ use ferrite_net::{NetStatus, PortStatus};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Gauge, Paragraph};
 
-use ferrite_mem::eta::Position;
+use ferrite_mem::eta::{BasisPoints, Confidence, Position};
 
 use crate::dash::format;
 use crate::net::NoNetwork;
@@ -36,6 +36,8 @@ const PAGE: Style = Style::new().fg(Color::Black).bg(Color::Gray);
 /// The title and key bars: white on blue.
 const BAR: Style = Style::new().fg(Color::White).bg(Color::Blue);
 const LABEL: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD);
+/// A time left that is only a guess, against the page's dark ink.
+const GUESS: Style = Style::new().fg(Color::DarkGray);
 
 pub fn render(frame: &mut Frame<'_>, view: &View) {
     let area = frame.area();
@@ -59,16 +61,14 @@ pub fn render(frame: &mut Frame<'_>, view: &View) {
     frame.render_widget(Paragraph::new(lines), rows);
 
     let sweep = &view.sweep;
-    let permille = sweep.outlook.pass_permille.unwrap_or_else(|| sweep.percent.min(100) * 10);
-    let percent = permille / 10;
-    let left = sweep.outlook.pass.map_or_else(String::new, |eta| format!("  {}", format::left(eta)));
-    let label = format!("pass {}  {percent}%{left}", sweep.passes + 1);
+    let progress = sweep.outlook.pass_progress;
+    let label = format!("pass {}  {progress}", sweep.passes + 1);
     let color = if sweep.paused { Color::DarkGray } else { Color::LightBlue };
     frame.render_widget(
         Gauge::default()
             .gauge_style(Style::new().fg(color).bg(Color::Black))
             .use_unicode(false)
-            .percent(percent.min(100))
+            .ratio(f64::from(progress.get()) / f64::from(BasisPoints::WHOLE))
             .label(label),
         gauge,
     );
@@ -85,16 +85,28 @@ fn key_hints(paused: bool) -> Line<'static> {
     Line::from(spans)
 }
 
+/// A time left in the ink that says how far to trust it.
+fn left_span(eta: ferrite_mem::eta::Eta) -> Span<'static> {
+    match eta.confidence {
+        Confidence::Measured => Span::raw(format::left(eta.remaining).to_string()),
+        Confidence::Estimated => Span::styled(format::left(eta.remaining).to_string(), GUESS),
+    }
+}
+
 fn status_lines(view: &View) -> Vec<Line<'static>> {
     let sweep = &view.sweep;
+    let o = &sweep.outlook;
     let (i, n) = sweep.position;
     let state = if sweep.paused { " (paused)" } else { "" };
-    let percent = sweep.outlook.test_permille.unwrap_or_else(|| sweep.test_percent.min(100) * 10) / 10;
-    let phase = match sweep.outlook.position {
+    let phase = match o.position {
         Position::Wait { nth, waits, left } => format!(", wait {nth} of {waits}, {} left", format::clock(left)),
         Position::Work { .. } => String::new(),
     };
-    let test = format!("{} ({i}/{n}) {percent}%{phase}{state}", sweep.test);
+    let test = format!("{} ({i}/{n}) {}{phase}{state}", sweep.test, o.test_progress);
+    let pass = o.pass.map_or_else(
+        || vec![Span::raw(format!("{}", o.pass_progress))],
+        |eta| vec![Span::raw(format!("{}  ", o.pass_progress)), left_span(eta)],
+    );
     let faults = match sweep.faults {
         0 => Span::styled("none", Style::new().fg(Color::Green)),
         n => Span::styled(
@@ -106,20 +118,31 @@ fn status_lines(view: &View) -> Vec<Line<'static>> {
             Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
     };
-    let rate = match (sweep.outlook.position, sweep.outlook.rate) {
+    let now = match (o.position, o.rate) {
         (Position::Work { .. }, Some(rate)) if !sweep.paused => format::rate(rate).to_string(),
         _ => String::from("-"),
     };
-    let overall = sweep.outlook.overall(core::time::Duration::from_secs(view.elapsed), sweep.percent);
+    let average = match (o.test_avg, o.test_delta) {
+        // The console's character set has no minus sign, so this one is ASCII.
+        (Some(avg), Some(delta)) => format!("{} {:+}%", format::rate(avg), delta.percent()),
+        (Some(avg), None) => format::rate(avg).to_string(),
+        (None, _) => String::from("-"),
+    };
+    let pace = o.pace_percent.map_or_else(|| String::from("-"), |p| format!("{p}%"));
+    let rate = format!("now {now}, test avg {average}, pace {pace}");
+    let overall = o.overall(core::time::Duration::from_secs(view.elapsed));
     let overall = match (overall.fill, overall.left) {
-        (Some(fill), Some(left)) => format!("{}%, {} (goal: {})", fill / 10, format::left(left), sweep.outlook.goal),
-        (Some(fill), None) => format!("{}% (goal: {})", fill / 10, sweep.outlook.goal),
-        (None, _) => format!("no goal, running {}", format::clock(overall.elapsed)),
+        (Some(fill), Some(left)) => {
+            vec![Span::raw(format!("{fill}, ")), left_span(left), Span::raw(format!(" (goal: {})", o.goal))]
+        },
+        (Some(fill), None) => vec![Span::raw(format!("{fill} (goal: {})", o.goal))],
+        (None, _) => vec![Span::raw(format!("no goal, running {}", format::clock(overall.elapsed)))],
     };
     let mut lines = vec![
         row("test", Span::raw(test)),
+        row_of("pass", pass),
         row("rate", Span::raw(rate)),
-        row("overall", Span::raw(overall)),
+        row_of("overall", overall),
         row("faults", faults),
     ];
     if let Some(net) = view.net {
@@ -145,7 +168,12 @@ fn port_span(port: &PortStatus) -> Span<'static> {
 }
 
 fn row(key: &'static str, value: Span<'static>) -> Line<'static> {
-    Line::from(vec![Span::styled(format!("{:<8}  ", key.to_ascii_uppercase()), LABEL), value])
+    row_of(key, vec![value])
+}
+
+fn row_of(key: &'static str, mut value: Vec<Span<'static>>) -> Line<'static> {
+    value.insert(0, Span::styled(format!("{:<8}  ", key.to_ascii_uppercase()), LABEL));
+    Line::from(value)
 }
 
 #[cfg(test)]
@@ -155,7 +183,7 @@ mod tests {
     use core::time::Duration;
 
     use assert2::check;
-    use ferrite_mem::eta::{Confidence, Eta, Position};
+    use ferrite_mem::eta::{BasisPoints, Confidence, Eta, Position};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Cell;
@@ -163,7 +191,7 @@ mod tests {
     use super::*;
     use crate::goal::Goal;
     use crate::net::testing::idle_status;
-    use crate::pace::Outlook;
+    use crate::pace::{Delta, Outlook};
 
     fn screen(sweep: &SweepStatus, elapsed: u64) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 14)).expect("a test terminal");
@@ -190,16 +218,22 @@ mod tests {
             settled: 1,
             position: Position::Wait { nth: 2, waits: 4, left: Duration::from_secs(192) },
             rate: Some(8_000_000_000),
+            test_avg: Some(7_900_000_000),
+            test_delta: Delta::between(7_900_000_000, 8_400_000_000),
             pass: Some(Eta { remaining: Duration::from_mins(10), confidence: Confidence::Estimated }),
-            pass_permille: Some(720),
-            test_permille: Some(450),
+            pass_progress: BasisPoints::new(7234).unwrap(),
+            test_progress: BasisPoints::new(4512).unwrap(),
             cycle: Some(Duration::from_mins(40)),
             cycle_left: Some(Eta { remaining: Duration::from_mins(15), confidence: Confidence::Estimated }),
+            pace_percent: Some(98),
             ..Outlook::NONE
         };
         let shown = screen(&SweepStatus { outlook, ..idle_status() }, 125);
         check!(shown.contains("wait 2 of 4, 3:12 left"), "{shown}");
-        check!(shown.contains("pass 1  72%  ~10 min left"), "{shown}");
+        check!(shown.contains("pass 1  72.34%"), "{shown}");
+        check!(shown.contains("PASS      72.34%  10 min left"), "{shown}");
+        check!(shown.contains("45.12%"), "{shown}");
+        check!(shown.contains("now -, test avg 7.90 GB/s -6%, pace 98%"), "{shown}");
         check!(shown.contains("(goal: 4 passes)"), "{shown}");
     }
 }

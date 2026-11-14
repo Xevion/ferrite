@@ -12,7 +12,7 @@ use core::time::Duration;
 use ferrite_hal::Instant;
 use ferrite_mem::Fault;
 use ferrite_mem::analysis::Classification;
-use ferrite_mem::eta::{Confidence, Eta, Position};
+use ferrite_mem::eta::{BasisPoints, Confidence, Eta, Position};
 
 use ferrite_net::http::JsonEscape;
 use ferrite_net::mdns;
@@ -20,7 +20,7 @@ use ferrite_net::{NetStatus, PortStatus};
 
 use super::wifi::{WifiFacts, WifiView};
 use crate::goal::Goal;
-use crate::pace::Outlook;
+use crate::pace::{Delta, Outlook, Steadiness, TestStat};
 use crate::report::{CpuInfo, FaultRecord, PassRecord, Snapshot, TestRecord};
 use crate::sweep::SweepStatus;
 
@@ -139,17 +139,23 @@ impl ToJson for Position {
     }
 }
 
+/// A fraction as its raw hundredths of a percent, 0 to 10000.
+impl ToJson for BasisPoints {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        self.get().to_json(out);
+    }
+}
+
 /// How the run is going as time, with the run measured against its goal as of `elapsed`.
 struct ProgressDoc<'a> {
     outlook: &'a Outlook,
     elapsed: Duration,
-    percent: u16,
 }
 
 impl ToJson for ProgressDoc<'_> {
     fn to_json(&self, out: &mut dyn fmt::Write) {
         let o = self.outlook;
-        let overall = o.overall(self.elapsed, self.percent);
+        let overall = o.overall(self.elapsed);
         let eta = |e: Option<Eta>| e.map(|e| Section(move |o: &mut Object<'_>| eta_fields(o, e)));
         Object::new(out)
             .field("settled", &o.settled)
@@ -159,18 +165,21 @@ impl ToJson for ProgressDoc<'_> {
             .field(
                 "test",
                 &Section(|s: &mut Object<'_>| {
-                    s.field("left_s", &o.test_left.map(Secs)).field("permille", &o.test_permille);
+                    s.field("left_s", &o.test_left.map(Secs))
+                        .field("basis_points", &o.test_progress)
+                        .field("avg_rate", &o.test_avg)
+                        .field("delta_percent", &o.test_delta.map(Delta::percent));
                 }),
             )
             .field("pass", &eta(o.pass))
-            .field("pass_permille", &o.pass_permille)
+            .field("pass_basis_points", &o.pass_progress)
             .field("cycle_s", &o.cycle.map(Secs))
             .field("cycle_left", &eta(o.cycle_left))
             .field(
                 "overall",
                 &Section(|s: &mut Object<'_>| {
                     s.field("elapsed_ms", &Millis(overall.elapsed))
-                        .field("permille", &overall.fill)
+                        .field("basis_points", &overall.fill)
                         .field("left", &eta(overall.left));
                 }),
             )
@@ -180,6 +189,8 @@ impl ToJson for ProgressDoc<'_> {
                     s.field("known", &o.known.0).field("of", &o.known.1);
                 }),
             )
+            .field("pace_percent", &o.pace_percent)
+            .field("pass_median_ms", &o.pass_median.map(Millis))
             .finish();
     }
 }
@@ -214,7 +225,7 @@ macro_rules! json_integer {
     )*};
 }
 
-json_integer!(u16, u32, u64, u128, usize);
+json_integer!(i16, u16, u32, u64, u128, usize);
 
 impl ToJson for bool {
     fn to_json(&self, out: &mut dyn fmt::Write) {
@@ -255,16 +266,29 @@ impl<T: ToJson> ToJson for VecDeque<T> {
     }
 }
 
-impl ToJson for TestRecord {
+/// A finished test with what the pass measured of it.
+struct TestDoc<'a> {
+    record: &'a TestRecord,
+    stat: Option<&'a TestStat>,
+}
+
+impl ToJson for TestDoc<'_> {
     fn to_json(&self, out: &mut dyn fmt::Write) {
+        let (record, stat) = (self.record, self.stat);
+        let steadiness = stat.and_then(|st| st.steadiness);
         Object::new(out)
-            .field("test", self.test)
-            .field("pass", &self.pass)
-            .field("cpus", &self.cpus)
-            .field("took_ms", &Millis(self.took))
-            .field("bytes", &self.work_bytes)
-            .field("rate", &self.rate())
-            .field("faults", &self.faults)
+            .field("test", record.test)
+            .field("pass", &record.pass)
+            .field("cpus", &record.cpus)
+            .field("took_ms", &Millis(record.took))
+            .field("bytes", &record.work_bytes)
+            .field("rate", &record.rate())
+            .field("work_rate", &stat.and_then(|st| st.rate))
+            .field("delta_percent", &stat.and_then(|st| st.delta).map(Delta::percent))
+            .field("median_rate", &steadiness.map(|st| st.median))
+            .field("spread_basis_points", &steadiness.map(|st| st.spread))
+            .field("unsteady", &steadiness.map(Steadiness::unsteady))
+            .field("faults", &record.faults)
             .finish();
     }
 }
@@ -418,6 +442,7 @@ impl ToJson for StatusDoc<'_> {
                 }),
             )
             .field("tier", status.tier)
+            .field("bandwidth", &status.outlook.bandwidth)
             .field("mode", mode)
             .field("cpus", &status.cpus)
             .field(
@@ -443,7 +468,6 @@ impl ToJson for StatusDoc<'_> {
                 &ProgressDoc {
                     outlook: &status.outlook,
                     elapsed: history.run_started.map_or(Duration::ZERO, |start| self.now - start),
-                    percent: status.percent,
                 },
             )
             .field(
@@ -461,7 +485,14 @@ impl ToJson for StatusDoc<'_> {
                         .field("log", self.snapshot.faults);
                 }),
             )
-            .field("tests", &Each(|| history.latest_tests()))
+            .field(
+                "tests",
+                &Each(|| {
+                    history
+                        .latest_tests()
+                        .map(|record| TestDoc { record, stat: self.snapshot.stats.of(record.test, record.pass) })
+                }),
+            )
             .field("passes", &history.passes)
             .field("processors", history.cpus.as_slice())
             .field("net", &NetDoc { net: self.net, wifi: self.wifi })
@@ -489,11 +520,13 @@ mod tests {
 
     use assert2::check;
     use ferrite_mem::CpuAddr;
+    use ferrite_mem::histogram::Histogram;
     use ferrite_mem::suite::{Mode, Preset};
     use ferrite_net::{Link, MacAddr, Medium, PortStats, ServiceCounters};
     use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
     use super::*;
+    use crate::pace::TestStats;
     use crate::report::History;
 
     fn at(ms: u64) -> Instant {
@@ -509,6 +542,52 @@ mod tests {
         let mut out = String::new();
         Text("a\"b\\c\nd\u{1}\u{e9}").to_json(&mut out);
         check!(out == "\"a\\\"b\\\\c\\nd\\u0001\u{e9}\"");
+    }
+
+    /// The stats of one finished test: `own-address` of pass 0, with six samples at 2.4 GB/s.
+    fn finished_own_address() -> (TestStats, Steadiness) {
+        let mut samples = Histogram::new();
+        for _ in 0..6 {
+            samples.record(2_400_000_000);
+        }
+        let steadiness = Steadiness::of(&samples).unwrap();
+        let mut finished = TestStats::default();
+        finished.reset(9);
+        finished.set(
+            1,
+            TestStat {
+                test: "own-address",
+                pass: 0,
+                rate: Some(2_300_000_000),
+                delta: Delta::between(2_300_000_000, 2_500_000_000),
+                steadiness: Some(steadiness),
+            },
+        );
+        (finished, steadiness)
+    }
+
+    /// A run waiting in the second of bit fade's four waits, towards three passes in two hours.
+    fn live_outlook() -> Outlook {
+        Outlook {
+            goal: Goal { passes: NonZeroU64::new(3), time: Some(Duration::from_hours(2)), stop_on_fault: true },
+            settled: 1,
+            rate: Some(8_000_000_000),
+            test_avg: Some(7_900_000_000),
+            test_delta: Delta::between(7_900_000_000, 8_400_000_000),
+            position: Position::Wait { nth: 2, waits: 4, left: Duration::from_secs(192) },
+            test_left: Some(Duration::from_secs(312)),
+            test_progress: BasisPoints::new(4512).unwrap(),
+            pass: Some(Eta { remaining: Duration::from_mins(10), confidence: Confidence::Estimated }),
+            pass_progress: BasisPoints::new(1537).unwrap(),
+            cycle: Some(Duration::from_mins(40)),
+            cycle_left: Some(Eta { remaining: Duration::from_mins(25), confidence: Confidence::Estimated }),
+            cycle_progress: BasisPoints::new(3750),
+            known: (11, 11),
+            pace_percent: Some(98),
+            bandwidth: Some(18_400_000_000),
+            pass_median: Some(Duration::from_secs(128)),
+            ..Outlook::NONE
+        }
     }
 
     #[test]
@@ -543,22 +622,10 @@ mod tests {
             preset: Preset::Thorough,
             paused: true,
             coverage: crate::sweep::Coverage::NONE,
-            outlook: Outlook {
-                goal: Goal { passes: NonZeroU64::new(3), time: Some(Duration::from_hours(2)), stop_on_fault: true },
-                settled: 1,
-                rate: Some(8_000_000_000),
-                position: Position::Wait { nth: 2, waits: 4, left: Duration::from_secs(192) },
-                test_left: Some(Duration::from_secs(312)),
-                test_permille: Some(450),
-                pass: Some(Eta { remaining: Duration::from_mins(10), confidence: Confidence::Estimated }),
-                pass_permille: Some(150),
-                cycle: Some(Duration::from_mins(40)),
-                cycle_left: Some(Eta { remaining: Duration::from_mins(25), confidence: Confidence::Estimated }),
-                known: (11, 11),
-                ..Outlook::NONE
-            },
+            outlook: live_outlook(),
         };
-        let snapshot = Snapshot { status, history: &history, faults: &faults };
+        let (finished, steadiness) = finished_own_address();
+        let snapshot = Snapshot { status, history: &history, faults: &faults, stats: &finished };
         let mut net = NetStatus::default();
         net.push(PortStatus {
             link: Link {
@@ -575,38 +642,41 @@ mod tests {
         let mut out = String::new();
         let wifi = WifiView::absent("not in this build");
         StatusDoc { snapshot: &snapshot, net: &net, wifi: &wifi, now: at(6_500) }.to_json(&mut out);
-        check!(
-            out == concat!(
-                r#"{"version":""#,
-                env!("CARGO_PKG_VERSION"),
-                r#"","uptime_ms":6500,"preset":"thorough","paused":true,"elapsed_ms":5500,"bytes":1073741824,"#,
-                r#""coverage":{"tested":0,"free":0},"#,
-                r#""tier":"avx2","mode":"split","cpus":4,"#,
-                r#""pass":{"number":1,"percent":15,"elapsed_ms":2500},"#,
-                r#""test":{"name":"moving-inversions","index":2,"count":9,"percent":40},"#,
-                r#""goal":{"passes":3,"time_s":7200,"stop_on_fault":true,"text":"3 passes, 2h, first fault"},"#,
-                r#""progress":{"settled":1,"reserve":false,"rate":8000000000,"#,
-                r#""position":{"kind":"wait","nth":2,"waits":4,"left_s":192},"#,
-                r#""test":{"left_s":312,"permille":450},"pass":{"left_s":600,"confidence":"estimated"},"#,
-                r#""pass_permille":150,"cycle_s":2400,"cycle_left":{"left_s":1500,"confidence":"estimated"},"#,
-                r#""overall":{"elapsed_ms":5500,"permille":458,"left":{"left_s":3900,"confidence":"estimated"}},"#,
-                r#""timings":{"known":11,"of":11}},"#,
-                r#""faults":{"total":1,"analysis":{"kind":"stuck-bits","stuck":"0x10","text":"stuck bits 0x10"},"#,
-                r#""first":{"test":"moving-inversions","cpu":2,"addr":"0x40001008","expected":"0xffffffffffffffff","#,
-                r#""actual":"0xffffffffffffffef","flipped":"0x10"},"#,
-                r#""log":[{"pass":0,"test":"moving-inversions","cpu":2,"addr":"0x40001008","#,
-                r#""expected":"0xffffffffffffffff","actual":"0xffffffffffffffef","flipped":"0x10"}]},"#,
-                r#""tests":[{"test":"own-address","pass":0,"cpus":1,"took_ms":1500,"bytes":3221225472,"#,
-                r#""rate":2147483648,"faults":0}],"#,
-                r#""passes":[{"pass":0,"took_ms":3000,"faults":1}],"#,
-                r#""processors":[{"number":0,"package":0,"core":0,"thread":0,"bsp":true}],"#,
-                r#""net":{"hostname":"ferrite.local","ports":[{"medium":"ethernet","mac":"52:54:00:12:34:56","#,
-                r#""link_up":true,"address":"10.0.2.15/24","gateway":"10.0.2.2","dns":null,"#,
-                r#""counters":{"mdns_queries":0,"mdns_replies":0,"mdns_malformed":0,"http_responses":7,"#,
-                r#""rx_frames":5,"rx_dropped":0,"tx_frames":0,"tx_dropped":0,"tx_errors":0,"tx_reclaimed":0}}],"#,
-                r#""wifi":{"state":"not in this build","ssid":null,"retry_in_s":null,"final":true}}}"#
-            )
-        );
+        let expected = concat!(
+            r#"{"version":""#,
+            env!("CARGO_PKG_VERSION"),
+            r#"","uptime_ms":6500,"preset":"thorough","paused":true,"elapsed_ms":5500,"bytes":1073741824,"#,
+            r#""coverage":{"tested":0,"free":0},"#,
+            r#""tier":"avx2","bandwidth":18400000000,"mode":"split","cpus":4,"#,
+            r#""pass":{"number":1,"percent":15,"elapsed_ms":2500},"#,
+            r#""test":{"name":"moving-inversions","index":2,"count":9,"percent":40},"#,
+            r#""goal":{"passes":3,"time_s":7200,"stop_on_fault":true,"text":"3 passes, 2h, first fault"},"#,
+            r#""progress":{"settled":1,"reserve":false,"rate":8000000000,"#,
+            r#""position":{"kind":"wait","nth":2,"waits":4,"left_s":192},"#,
+            r#""test":{"left_s":312,"basis_points":4512,"avg_rate":7900000000,"delta_percent":-6},"#,
+            r#""pass":{"left_s":600,"confidence":"estimated"},"pass_basis_points":1537,"#,
+            r#""cycle_s":2400,"cycle_left":{"left_s":1500,"confidence":"estimated"},"#,
+            r#""overall":{"elapsed_ms":5500,"basis_points":4583,"left":{"left_s":3900,"confidence":"estimated"}},"#,
+            r#""timings":{"known":11,"of":11},"pace_percent":98,"pass_median_ms":128000},"#,
+            r#""faults":{"total":1,"analysis":{"kind":"stuck-bits","stuck":"0x10","text":"stuck bits 0x10"},"#,
+            r#""first":{"test":"moving-inversions","cpu":2,"addr":"0x40001008","expected":"0xffffffffffffffff","#,
+            r#""actual":"0xffffffffffffffef","flipped":"0x10"},"#,
+            r#""log":[{"pass":0,"test":"moving-inversions","cpu":2,"addr":"0x40001008","#,
+            r#""expected":"0xffffffffffffffff","actual":"0xffffffffffffffef","flipped":"0x10"}]},"#,
+            r#""tests":[{"test":"own-address","pass":0,"cpus":1,"took_ms":1500,"bytes":3221225472,"#,
+            r#""rate":2147483648,"work_rate":2300000000,"delta_percent":-8,"median_rate":"#,
+            "@MEDIAN@",
+            r#","spread_basis_points":0,"unsteady":false,"faults":0}],"#,
+            r#""passes":[{"pass":0,"took_ms":3000,"faults":1}],"#,
+            r#""processors":[{"number":0,"package":0,"core":0,"thread":0,"bsp":true}],"#,
+            r#""net":{"hostname":"ferrite.local","ports":[{"medium":"ethernet","mac":"52:54:00:12:34:56","#,
+            r#""link_up":true,"address":"10.0.2.15/24","gateway":"10.0.2.2","dns":null,"#,
+            r#""counters":{"mdns_queries":0,"mdns_replies":0,"mdns_malformed":0,"http_responses":7,"#,
+            r#""rx_frames":5,"rx_dropped":0,"tx_frames":0,"tx_dropped":0,"tx_errors":0,"tx_reclaimed":0}}],"#,
+            r#""wifi":{"state":"not in this build","ssid":null,"retry_in_s":null,"final":true}}}"#
+        )
+        .replace("@MEDIAN@", &std::format!("{}", steadiness.median));
+        check!(out == expected);
     }
 
     #[test]

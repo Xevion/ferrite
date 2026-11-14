@@ -177,6 +177,7 @@ mod tests {
 
     use super::*;
     use crate::net::testing::idle_status;
+    use crate::pace::TestStats;
     use crate::report::History;
 
     #[rstest]
@@ -237,7 +238,12 @@ mod tests {
         }
 
         fn observe(&mut self, secs: u64) -> Vec<Notification> {
-            let snapshot = Snapshot { status: self.status, history: &self.history, faults: &self.faults };
+            let snapshot = Snapshot {
+                status: self.status,
+                history: &self.history,
+                faults: &self.faults,
+                stats: &TestStats::default(),
+            };
             let mut sent = Vec::new();
             self.watch.observe(at(secs), &snapshot, &mut |n| sent.push(n));
             self.sent.extend(sent.iter().cloned());
@@ -314,7 +320,8 @@ mod tests {
     fn the_end_says_how_the_run_went(mut rig: Rig) {
         rig.status.passes = 4;
         rig.status.faults = 1;
-        let snapshot = Snapshot { status: rig.status, history: &rig.history, faults: &rig.faults };
+        let snapshot =
+            Snapshot { status: rig.status, history: &rig.history, faults: &rig.faults, stats: &TestStats::default() };
         let note = run_ended(at(3 * 3600 + 5), &snapshot);
         check!(note.event == Event::End);
         check!(note.message == "ferrite: run ended on ferrite.local after 4 passes, 1 error, 16.0 GiB, 3:00:05");

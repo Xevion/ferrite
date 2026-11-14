@@ -61,6 +61,8 @@ pub struct Key {
     faults: usize,
     /// The Wi-Fi station's state, which changes without the sweep.
     wifi: WifiKey,
+    /// Moves whenever a finished test's measurements do.
+    stats: u64,
 }
 
 /// The status page, its API and the run's controls.
@@ -103,6 +105,7 @@ impl Site for Console {
             revision: snapshot.history.revision,
             faults: snapshot.faults.len(),
             wifi: self.wifi.key(),
+            stats: snapshot.stats.revision,
         }
     }
 

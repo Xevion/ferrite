@@ -9,6 +9,7 @@ use ferrite_hal::Instant;
 use ferrite_mem::Fault;
 use ferrite_mem::suite::TestKind;
 
+use crate::pace::TestStats;
 use crate::sweep::SweepStatus;
 
 /// Finished tests kept, newest last; enough for several passes of the thorough preset.
@@ -155,4 +156,6 @@ pub struct Snapshot<'a> {
     pub history: &'a History,
     /// The most recent faults kept in full, newest last.
     pub faults: &'a VecDeque<FaultRecord>,
+    /// What the finished tests of the pass measured.
+    pub stats: &'a TestStats,
 }

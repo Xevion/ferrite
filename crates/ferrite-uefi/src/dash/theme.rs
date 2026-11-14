@@ -27,6 +27,8 @@ pub const SEL: Rgb = BAR;
 pub const SEL_INK: Rgb = Rgb::hex(0xffffff);
 pub const PASS: Rgb = Rgb::hex(0x14532d);
 pub const ERR: Rgb = Rgb::hex(0x991b1b);
+/// A figure that is off but not wrong: a test slower than it was, a rate that is not steady.
+pub const WARN: Rgb = Rgb::hex(0x7a4700);
 
 pub const TESTED: Rgb = Rgb::hex(0x3f8f62);
 pub const PENDING: Rgb = Rgb::hex(0xa7aebd);

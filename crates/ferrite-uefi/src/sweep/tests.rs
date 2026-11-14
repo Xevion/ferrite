@@ -574,3 +574,62 @@ fn a_goal_ends_the_run_by_what_the_status_reports() {
     let o = sweep.status().outlook;
     check!(o.goal.met(o.settled, Duration::ZERO, 0).is_some());
 }
+
+/// A clock that moves on by `step` each time it is read.
+struct Ticking {
+    now: core::cell::Cell<Duration>,
+    step: Duration,
+}
+
+impl ferrite_hal::Clock for Ticking {
+    fn now(&self) -> Instant {
+        let now = self.now.get();
+        self.now.set(now + self.step);
+        Instant::from_epoch(now)
+    }
+}
+
+/// Measure a sweep over 2 MiB, working over a 1 MiB window: four chunks to fill it, four to verify.
+fn measured(limits: Calibration, step: Duration) -> (Option<Measured>, Sweep) {
+    let mut sweep = sweep_of_words(256 << 10);
+    let clock = Ticking { now: core::cell::Cell::new(Duration::ZERO), step };
+    let run = sweep.run.as_mut().unwrap();
+    let kernels = run.suite.kernels();
+    let mut sink = |_: Fault| {};
+    let found = measure_bandwidth(run.suite.split().0, kernels, limits, &clock, None, &mut sink);
+    (found, sweep)
+}
+
+const SMALL: Calibration =
+    Calibration { window_bytes: 1 << 20, min_window_bytes: 1 << 20, budget: Duration::from_secs(1) };
+
+#[test]
+#[expect(clippy::used_underscore_binding, reason = "the buffer field only owns memory outside tests")]
+fn bandwidth_is_the_bytes_written_and_read_over_the_time_they_took() {
+    let (found, sweep) = measured(SMALL, Duration::from_millis(10));
+    assert!(let Some(m) = found);
+    check!(m.moved == 2 << 20, "a fill and a verify of the window");
+    check!(m.took == Duration::from_millis(80));
+    // One 256 KiB chunk every 10 ms.
+    check!(m.bytes_per_sec == (256 << 10) * 100);
+    check!(m.faults == 0);
+    let base = sweep.run.as_ref().map(|r| r._buffer.blocks()[0].base().as_ptr()).unwrap();
+    // SAFETY: inside the 2 MiB host block; nothing runs while it is read.
+    let (first, last) = unsafe { (base.read(), base.add((1 << 17) - 1).read()) };
+    check!(first == BANDWIDTH_PATTERN && last == BANDWIDTH_PATTERN, "the window is left holding the pattern");
+}
+
+#[test]
+fn a_slow_machine_is_not_held_up_past_the_budget() {
+    let limits = Calibration { budget: Duration::from_millis(35), ..SMALL };
+    let (found, _) = measured(limits, Duration::from_millis(10));
+    assert!(let Some(m) = found);
+    check!(m.moved == 4 * (256 << 10), "stopped after the fourth chunk, at 40 ms");
+    check!(m.bytes_per_sec == (256 << 10) * 100, "the figure is the same, from less of it");
+}
+
+#[test]
+fn memory_too_small_to_be_past_the_caches_is_not_measured() {
+    let limits = Calibration { min_window_bytes: 4 << 20, ..SMALL };
+    check!(measured(limits, Duration::from_millis(10)).0.is_none());
+}

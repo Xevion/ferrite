@@ -32,6 +32,7 @@ use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 use super::*;
 use crate::gfx::rect::{Plane, changed_bands};
 use crate::pace::Outlook;
+use crate::pace::TestStats;
 use crate::report::{CpuInfo, History, PassRecord, TestRecord};
 use crate::sweep::Coverage;
 use ferrite_net::{Link, MacAddr, Medium, PortStats, PortStatus, ServiceCounters};
@@ -257,7 +258,12 @@ fn profile_full_redraws() {
         scenario.advance();
     }
     let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
-    let snapshot = Snapshot { status: scenario.status, history: &scenario.history, faults: &scenario.faults };
+    let snapshot = Snapshot {
+        status: scenario.status,
+        history: &scenario.history,
+        faults: &scenario.faults,
+        stats: &TestStats::default(),
+    };
     let (net, net_err) = scenario.net();
     let frame = Frame { snapshot: &snapshot, net, net_err, now: scenario.now() };
     dash.render(&frame);
@@ -303,7 +309,12 @@ fn profile_a_sweep() {
         if i > 0 {
             scenario.advance();
         }
-        let snapshot = Snapshot { status: scenario.status, history: &scenario.history, faults: &scenario.faults };
+        let snapshot = Snapshot {
+            status: scenario.status,
+            history: &scenario.history,
+            faults: &scenario.faults,
+            stats: &TestStats::default(),
+        };
         let (net, net_err) = scenario.net();
         let frame = Frame { snapshot: &snapshot, net, net_err, now: scenario.now() };
 

@@ -133,7 +133,7 @@ loopback are covered by unit tests in `crates/ferrite-net/src/http/` and
 
 With a GOP the app switches to the display's native mode (the EDID's preferred
 timing) and draws a dashboard: tiny-skia for shapes, fontdue for text from
-embedded IBM Plex Mono (ASCII subsets), into a BGRA canvas the size of the screen.
+embedded IBM Plex Mono (ASCII subsets plus a few symbols), into a BGRA canvas the size of the screen.
 Each widget redraws only when its inputs change, and only the pixels that differ
 are pushed.
 

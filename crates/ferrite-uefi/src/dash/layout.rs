@@ -19,6 +19,9 @@ pub struct Type {
     pub title: u16,
     /// The error count.
     pub big: u16,
+    /// The tests table's rows: the body size on a wide screen, smaller on a compact one, which has
+    /// less width than the table's columns want.
+    pub table: u16,
 }
 
 /// A titled section: the band with its label and rule, and the body below.
@@ -29,8 +32,10 @@ pub struct Section {
 }
 
 /// Rows of the SYSTEM grid and of the NETWORK list.
-pub const SYSTEM_ROWS: u32 = 3;
+pub const SYSTEM_ROWS: u32 = 4;
 pub const NET_ROWS: u32 = 4;
+/// Rows of the progress section's detail grid.
+pub const DETAIL_ROWS: u32 = 3;
 /// Columns of the memory map, and its rows.
 pub const MAP_COLS: u32 = 16;
 pub const MAP_ROWS: u32 = 8;
@@ -47,8 +52,11 @@ pub struct Layout {
     /// Width of a label column, and of the right-aligned figure after a progress bar.
     pub lab: u32,
     pub pw: u32,
-    /// Widths of the tests table's number, status, errors and time columns.
-    pub cols: [u32; 4],
+    /// Widths of the tests table's number, status, errors, rate, median and time columns.
+    pub cols: [u32; 6],
+    /// Whether the table's median column has the median rate: a compact screen has room for only
+    /// the spread around it.
+    pub median: bool,
 
     pub header: Rect,
     pub clock: Rect,
@@ -95,6 +103,7 @@ impl Layout {
             small: text_px(11.0 * s),
             title: text_px(16.0 * s),
             big: text_px(56.0 * s),
+            table: text_px(if compact { 11.0 } else { 13.0 } * s),
         };
         let row_h = m(19.0);
         let pitch = row_h + m(2.0);
@@ -117,7 +126,7 @@ impl Layout {
             area.w.saturating_sub(2 * pad_x),
             area.h.saturating_sub(pad_top + pad_bottom),
         );
-        let left_w = whole_px(px(main.w.saturating_sub(gap)) * if compact { 0.591 } else { 0.62 });
+        let left_w = whole_px(px(main.w.saturating_sub(gap)) * if compact { 0.6 } else { 0.62 });
         let (left_x, right_x) = (main.x, main.x + left_w + gap);
         let right_w = main.w.saturating_sub(left_w + gap);
 
@@ -127,10 +136,10 @@ impl Layout {
         };
 
         let system = section(left_x, main.y, left_w, SYSTEM_ROWS * pitch - m(2.0));
-        // The figure column holds `100% · ~1 h 35 min left`: 23 characters of the body face, whose
+        // The figure column holds `100.00% · 130 h 05 min left`: 27 characters of the body face, whose
         // advance is 0.6 em at 13 units.
         let lab = if compact { m(84.0) } else { m(92.0) };
-        let pw = m(184.0);
+        let pw = m(212.0);
 
         let progress_y = system.body.bottom() + section_gap;
         let bars_y = progress_y + label_to_body;
@@ -138,7 +147,7 @@ impl Layout {
         let pass = Rect::new(left_x, bars_y, left_w, 2 * row_h + bar_gap);
         let test = Rect::new(left_x, pass.bottom() + bar_gap, left_w, row_h);
         let detail_rule = Rect::new(left_x, test.bottom() + bar_gap, left_w, 1);
-        let detail = Rect::new(left_x, detail_rule.bottom() + m(8.0), left_w, 2 * row_h + m(2.0));
+        let detail = Rect::new(left_x, detail_rule.bottom() + m(8.0), left_w, DETAIL_ROWS * pitch - m(2.0));
         let progress = Section {
             label: Rect::new(left_x, progress_y, left_w, label_h),
             body: Rect::new(left_x, bars_y, left_w, detail.bottom() - bars_y),
@@ -160,7 +169,14 @@ impl Layout {
         let errors_y = net.body.bottom() + section_gap;
         let errors = section(right_x, errors_y, right_w, main.bottom().saturating_sub(errors_y + label_to_body));
 
-        let cols = if compact { [28.0, 84.0, 52.0, 52.0] } else { [36.0, 96.0, 64.0, 72.0] }.map(m);
+        // Each column is as many characters of the table face as its widest text, whose advance is
+        // 0.6 em: a rate is nine, `UNSTEADY` eight, and a rate with its change or spread is the rate,
+        // a space and up to six more.
+        let em = 0.6 * f32::from(sizes.table);
+        let chars = |n: f32| whole_px(em * n);
+        let errors_w = whole_px(0.6 * f32::from(sizes.label) * 6.2);
+        let median_w = if compact { whole_px(0.6 * f32::from(sizes.label) * 6.5) } else { chars(16.0) };
+        let cols = [chars(2.5), chars(8.0), errors_w, chars(15.0), median_w, chars(7.0)];
         let clock = Rect::new(header.x + header.w / 2, header.y, header.w / 2 - m(20.0), header.h);
 
         Self {
@@ -171,6 +187,7 @@ impl Layout {
             lab,
             pw,
             cols,
+            median: !compact,
             header,
             clock,
             tabs,

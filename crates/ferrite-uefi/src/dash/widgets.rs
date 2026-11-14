@@ -6,20 +6,21 @@
     reason = "p, r, f, s and l are the pen, rectangle, frame, status and layout in every widget"
 )]
 
-use ferrite_mem::eta::Position;
+use ferrite_mem::eta::{BasisPoints, Confidence, Position};
 use ferrite_mem::suite::{Mode, TestKind};
 use ferrite_net::{Medium, PortStatus};
 use heapless::String;
 
-use super::format::{self, addr, fixed, hms, num, plural};
+use super::format::{self, Text, addr, fixed, hms, num, plural};
 use super::layout::{Layout, MAP_COLS, MAP_ROWS, Section, window};
 use super::theme::{
     ACTIVE, ACTIVE_RING, BAR, BAR_DIM, BAR_RULE, BAR_TEXT, BG, DIM, ERR, FILL, HELD, KEY, KEY_INK, LABEL, LINE, PASS,
-    PENDING, SEL, SEL_INK, STRONG, TAB_ON, TAB_ON_INK, TAB_TEXT, TESTED, TEXT, TRACK,
+    PENDING, SEL, SEL_INK, STRONG, TAB_ON, TAB_ON_INK, TAB_TEXT, TESTED, TEXT, TRACK, WARN,
 };
 use super::{Frame, State};
 use crate::gfx::text::{Case, Face, Fonts, Style};
 use crate::gfx::{Canvas, Rect, Rgb, px, whole_px};
+use crate::pace::Steadiness;
 use crate::report::{CpuInfo, FaultRecord};
 
 /// The placeholder for what this build cannot read from the machine.
@@ -33,6 +34,22 @@ pub const CELLS: usize = (MAP_COLS * MAP_ROWS) as usize;
 #[must_use]
 pub fn active_cell(percent: u16) -> usize {
     (usize::from(percent.min(100)) * CELLS / 100).min(CELLS - 1)
+}
+
+/// The text after a progress bar: `head` in the plain ink, then `tail` in `ink`.
+#[derive(Clone, Copy)]
+struct Figure<'a> {
+    head: &'a str,
+    tail: &'a str,
+    ink: Rgb,
+}
+
+/// The ink of a time left: plain when measured, dim when it is a guess.
+const fn confidence_ink(confidence: Confidence) -> Rgb {
+    match confidence {
+        Confidence::Measured => TEXT,
+        Confidence::Estimated => DIM,
+    }
 }
 
 pub struct Pen<'d> {
@@ -109,6 +126,11 @@ impl Pen<'_> {
         Self::style(Face::Regular, self.l.text.base, color)
     }
 
+    /// The face of the tests table's cells.
+    fn table(&self, color: Rgb) -> Style {
+        Self::style(Face::Regular, self.l.text.table, color)
+    }
+
     fn label_style(&self, color: Rgb) -> Style {
         let px = self.l.text.label;
         Style { face: Face::SemiBold, px, color, tracking: self.l.m(2.0), case: Case::Upper }
@@ -140,16 +162,17 @@ impl Pen<'_> {
 
     /// A square-ended progress bar: a bordered track and its fill, always the same three steps so
     /// a growing fill redraws only the columns it gained.
-    fn bar(&mut self, r: Rect, permille: u32, fill: Rgb) {
+    fn bar(&mut self, r: Rect, progress: BasisPoints, fill: Rgb) {
         let inner = Rect::new(r.x + 1, r.y + 1, r.w.saturating_sub(2), r.h.saturating_sub(2));
         self.canvas.fill(r, LINE);
         self.canvas.fill(inner, TRACK);
-        let filled = inner.w * permille.min(1000) / 1000;
+        let filled = progress.of_whole(inner.w);
         self.canvas.fill(Rect::new(inner.x, inner.y, filled, inner.h), fill);
     }
 
-    /// One line: a label column, a bar and a right-aligned figure.
-    fn bar_row(&mut self, row: Rect, label: &str, figure: &str, permille: u32, fill: Rgb) {
+    /// One line: a label column, a bar and a right-aligned figure of two parts, such as `41.37% ·`
+    /// and `12:34 left`, the second in its own ink: dim when it is only a guess.
+    fn bar_row(&mut self, row: Rect, label: &str, figure: Figure<'_>, progress: BasisPoints, fill: Rgb) {
         let l = *self.l;
         let gap = whole_px(l.m(12.0));
         let base = self.mid(l.text.base, row.y, row.h);
@@ -157,8 +180,9 @@ impl Pen<'_> {
         let bar_h = whole_px(l.m(16.0)).min(row.h);
         let x = row.x + l.lab + gap;
         let w = row.w.saturating_sub(l.lab + l.pw + 2 * gap);
-        self.bar(Rect::new(x, row.y + (row.h - bar_h) / 2, w, bar_h), permille, fill);
-        self.right(px(row.right()), base, figure, self.body(TEXT));
+        self.bar(Rect::new(x, row.y + (row.h - bar_h) / 2, w, bar_h), progress, fill);
+        let tail = self.right(px(row.right()), base, figure.tail, self.body(figure.ink));
+        self.right(px(row.right()) - tail, base, figure.head, self.body(TEXT));
     }
 
     /// Pairs of a dim label and a value, two pairs to a row, over `rows` rows.
@@ -196,10 +220,13 @@ impl Pen<'_> {
         self.text(cols.num_x, base, "#", style);
         self.text(cols.name_x, base, "NAME", style);
         self.text(cols.status_x, base, "STATUS", style);
-        let w = self.measure("ERRORS", style);
-        self.text(cols.errors_r - w, base, "ERRORS", style);
-        let w = self.measure("TIME", style);
-        self.text(cols.time_r - w, base, "TIME", style);
+        let steady = if l.median { "MEDIAN" } else { "SPREAD" };
+        for (right, title) in
+            [(cols.errors_r, "ERRORS"), (cols.rate_r, "RATE"), (cols.median_r, steady), (cols.time_r, "TIME")]
+        {
+            let w = self.measure(title, style);
+            self.text(right - w, base, title, style);
+        }
         self.canvas.fill(Rect::new(head.x, head.bottom() - 1, head.w, 1), LINE);
     }
 }
@@ -211,19 +238,39 @@ struct TestCols {
     name_max: f32,
     status_x: f32,
     errors_r: f32,
+    rate_r: f32,
+    median_r: f32,
     time_r: f32,
+    /// Widths of the room a rate's change and a median's spread have at the right of their columns.
+    change_w: f32,
+    spread_w: f32,
 }
 
 impl TestCols {
     fn of(l: &Layout, r: Rect) -> Self {
-        let [num_w, status_w, errors_w, time_w] = l.cols.map(px);
-        let (pad, gap) = (l.m(14.0), l.m(8.0));
+        let [num_w, status_w, errors_w, rate_w, median_w, time_w] = l.cols.map(px);
+        let em = 0.6 * f32::from(l.text.table);
+        let compact = l.text.table < l.text.base;
+        let (pad, gap) = (l.m(if compact { 6.0 } else { 14.0 }), l.m(if compact { 6.0 } else { 8.0 }));
         let num_x = px(r.x) + pad;
         let name_x = num_x + num_w + gap;
         let time_r = px(r.right()) - pad;
-        let errors_r = time_r - time_w - gap;
+        let median_r = time_r - time_w - gap;
+        let rate_r = median_r - median_w - gap;
+        let errors_r = rate_r - rate_w - gap;
         let status_x = errors_r - errors_w - gap - status_w;
-        Self { num_x, name_x, name_max: status_x - gap - name_x, status_x, errors_r, time_r }
+        Self {
+            num_x,
+            name_x,
+            name_max: status_x - gap - name_x,
+            status_x,
+            errors_r,
+            rate_r,
+            median_r,
+            time_r,
+            change_w: 5.0 * em,
+            spread_w: 6.0 * em,
+        }
     }
 }
 
@@ -302,6 +349,10 @@ pub fn system(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         fixed(format_args!("{} under test", format::size(s.bytes)))
     };
     let preset: &str = s.preset.into();
+    let bandwidth = s
+        .outlook
+        .bandwidth
+        .map_or_else(|| fixed::<16>(format_args!("{NONE}")), |b| fixed(format_args!("{}", format::rate(b))));
     let timings: String<32> = match s.outlook.known {
         (_, 0) => fixed(format_args!("{NONE}")),
         (0, n) => fixed(format_args!("learning, 0 of {n}")),
@@ -316,12 +367,9 @@ pub fn system(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
             ("Tier", s.tier),
             ("Modules", NONE),
             ("Timings", &timings),
+            ("Bandwidth", &bandwidth),
         ],
     );
-}
-
-fn permille(percent: u16) -> u32 {
-    u32::from(percent.min(100)) * 10
 }
 
 fn fill_of(paused: bool) -> Rgb {
@@ -335,25 +383,27 @@ pub fn pass(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let gap = l.m(8.0);
     let overall = f.overall();
     let rect = Rect::new(r.x, r.y, r.w, l.row_h);
-    let figure: String<40> = match (overall.fill, overall.left) {
-        (Some(fill), Some(left)) => fixed(format_args!("{}% {SEPARATOR} {}", fill / 10, format::left(left))),
-        (Some(fill), None) => fixed(format_args!("{}% {SEPARATOR} {}", fill / 10, format::clock(overall.elapsed))),
-        (None, _)
-            if s.outlook.goal.stop_on_fault && s.outlook.goal.passes.is_none() && s.outlook.goal.time.is_none() =>
-        {
-            fixed(format_args!("first fault {SEPARATOR} {}", format::clock(overall.elapsed)))
+    let stop_on_fault = o.goal.stop_on_fault && o.goal.passes.is_none() && o.goal.time.is_none();
+    let (head, tail, ink): (String<24>, Text, Rgb) = match (overall.fill, overall.left) {
+        (Some(fill), Some(left)) => {
+            (fixed(format_args!("{fill} {SEPARATOR} ")), format::left(left.remaining), confidence_ink(left.confidence))
         },
-        (None, _) => fixed(format_args!("no goal {SEPARATOR} {}", format::clock(overall.elapsed))),
+        (Some(fill), None) => (fixed(format_args!("{fill} {SEPARATOR} ")), format::clock(overall.elapsed), TEXT),
+        (None, _) if stop_on_fault => {
+            (fixed(format_args!("first fault {SEPARATOR} ")), format::clock(overall.elapsed), TEXT)
+        },
+        (None, _) => (fixed(format_args!("no goal {SEPARATOR} ")), format::clock(overall.elapsed), TEXT),
     };
-    p.bar_row(rect, "Overall", &figure, u32::from(overall.fill.unwrap_or(0)), fill_of(s.paused));
+    let fill = overall.fill.unwrap_or(BasisPoints::ZERO);
+    p.bar_row(rect, "Overall", Figure { head: &head, tail: &tail, ink }, fill, fill_of(s.paused));
     let pass = Rect::new(r.x, r.y + l.row_h + whole_px(gap), r.w, l.row_h);
-    let permille = o.pass_permille.map_or_else(|| permille(s.percent), u32::from);
-    let figure: String<40> = o.pass.map_or_else(
-        || fixed(format_args!("{}% {SEPARATOR} {}", permille / 10, format::clock(f.pass_elapsed()))),
-        |eta| fixed(format_args!("{}% {SEPARATOR} {}", permille / 10, format::left(eta))),
+    let head: String<24> = fixed(format_args!("{} {SEPARATOR} ", o.pass_progress));
+    let (tail, ink) = o.pass.map_or_else(
+        || (format::clock(f.pass_elapsed()), TEXT),
+        |eta| (format::left(eta.remaining), confidence_ink(eta.confidence)),
     );
     let label = fixed::<24>(format_args!("Pass {}", s.passes + 1));
-    p.bar_row(pass, &label, &figure, permille, fill_of(s.paused));
+    p.bar_row(pass, &label, Figure { head: &head, tail: &tail, ink }, o.pass_progress, fill_of(s.paused));
 }
 
 pub fn test(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
@@ -361,38 +411,54 @@ pub fn test(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let o = &s.outlook;
     let (i, n) = s.position;
     if n == 0 {
-        p.bar_row(r, "Test", NONE, 0, fill_of(s.paused));
+        p.bar_row(r, "Test", Figure { head: "", tail: NONE, ink: TEXT }, BasisPoints::ZERO, fill_of(s.paused));
         return;
     }
     let label = fixed::<24>(format_args!("Test {i}/{n}"));
-    let permille = o.test_permille.map_or_else(|| permille(s.test_percent), u32::from);
-    let figure: String<40> = match (o.position, o.test_left) {
+    let progress = o.test_progress;
+    let (head, tail): (String<24>, Text) = match (o.position, o.test_left) {
         (Position::Wait { nth, waits, left }, _) => {
-            fixed(format_args!("wait {nth}/{waits} {SEPARATOR} {}", format::clock(left)))
+            (String::new(), fixed(format_args!("wait {nth}/{waits} {SEPARATOR} {}", format::clock(left))))
         },
-        (Position::Work { .. }, Some(left)) => {
-            fixed(format_args!("{}% {SEPARATOR} {}", permille / 10, format::clock(left)))
-        },
-        (Position::Work { .. }, None) => fixed(format_args!("{}%", permille / 10)),
+        (Position::Work { .. }, Some(left)) => (fixed(format_args!("{progress} {SEPARATOR} ")), format::clock(left)),
+        (Position::Work { .. }, None) => (String::new(), fixed(format_args!("{progress}"))),
     };
-    p.bar_row(r, &label, &figure, permille, fill_of(s.paused));
+    p.bar_row(r, &label, Figure { head: &head, tail: &tail, ink: TEXT }, progress, fill_of(s.paused));
 }
 
 pub fn detail(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
+    let o = &s.outlook;
     let total = f.snapshot.history.cpus.len().max(s.cpus).max(1);
     let threads: String<48> = match s.mode {
         Mode::Split => fixed(format_args!("{} / {total} parallel", s.cpus.min(total))),
         Mode::Single => fixed(format_args!("1 / {total} {SEPARATOR} single core")),
     };
-    let rate: String<48> = match (s.outlook.position, s.outlook.rate) {
+    let rate: String<48> = match (o.position, o.rate) {
         (Position::Wait { nth, waits, left }, _) => {
             fixed(format_args!("idle, wait {nth}/{waits} {SEPARATOR} {}", format::clock(left)))
         },
         (Position::Work { .. }, Some(rate)) if !s.paused => format::rate(rate).as_str().try_into().unwrap_or_default(),
         (Position::Work { .. }, _) => fixed(format_args!("{NONE}")),
     };
-    p.pairs(r, &[("Range", NONE), ("Threads", &threads), ("Pattern", NONE), ("Rate", &rate)]);
+    let average: String<48> = match (o.test_avg, o.test_delta) {
+        (Some(avg), Some(delta)) => fixed(format_args!("{} {delta}", format::rate(avg))),
+        (Some(avg), None) => fixed(format_args!("{}", format::rate(avg))),
+        (None, _) => fixed(format_args!("{NONE}")),
+    };
+    let pace: String<16> =
+        o.pace_percent.map_or_else(|| fixed(format_args!("{NONE}")), |p| fixed(format_args!("{p}%")));
+    p.pairs(
+        r,
+        &[
+            ("Range", NONE),
+            ("Threads", &threads),
+            ("Pattern", NONE),
+            ("Rate now", &rate),
+            ("Test avg", &average),
+            ("Pace", &pace),
+        ],
+    );
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -402,8 +468,23 @@ enum Row {
     Pending,
 }
 
+/// A figure and what goes with it at the right of its column: the rate and its change from the
+/// saved one, or the median and its spread, each in its own room so the columns line up.
+struct Pair<'a> {
+    main: &'a str,
+    main_ink: Rgb,
+    extra: &'a str,
+    extra_ink: Rgb,
+}
+
+fn pair_cell(p: &mut Pen<'_>, base: f32, right: f32, room: f32, pair: &Pair<'_>) {
+    p.right(right, base, pair.extra, p.table(pair.extra_ink));
+    p.right(right - room, base, pair.main, p.table(pair.main_ink));
+}
+
 pub fn tests(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
+    let o = &s.outlook;
     let l = *p.l;
     let current = s.position.0.checked_sub(1).filter(|_| s.position.1 > 0);
     let cols = TestCols::of(&l, r);
@@ -419,16 +500,18 @@ pub fn tests(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         let record = (row == Row::Done)
             .then(|| f.snapshot.history.tests.iter().rev().find(|rec| rec.test == kind.name()))
             .flatten();
+        let finished = (row == Row::Done).then(|| f.snapshot.stats.get(i, kind.name())).flatten();
         if row == Row::Current {
             p.canvas.fill(Rect::new(r.x, top, r.w, l.pitch), SEL);
         }
         let selected = row == Row::Current;
         let ink = |color: Rgb| if selected { SEL_INK } else { color };
-        let base = p.mid(l.text.base, top, l.pitch);
-        p.text(cols.num_x, base, &num(i + 1), p.body(ink(DIM)));
+        let base = p.mid(l.text.table, top, l.pitch);
+        p.text(cols.num_x, base, &num(i + 1), p.table(ink(DIM)));
         let name_color = if row == Row::Pending { TEXT } else { STRONG };
-        p.fit(cols.name_x, base, kind.name(), p.body(ink(name_color)), cols.name_max);
+        p.fit(cols.name_x, base, kind.name(), p.table(ink(name_color)), cols.name_max);
 
+        let unsteady = finished.and_then(|st| st.steadiness).is_some_and(Steadiness::unsteady);
         let (status, status_color) = match (row, record) {
             (Row::Current, _) if s.paused => ("PAUSED", SEL_INK),
             (Row::Current, _) => ("RUNNING", SEL_INK),
@@ -437,22 +520,61 @@ pub fn tests(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
             (Row::Done, Some(_)) => ("PASS", PASS),
             (Row::Done, None) => ("DONE", DIM),
         };
-        let status_style = Pen::style(Face::SemiBold, l.text.base, status_color);
+        let status_style = Pen::style(Face::SemiBold, l.text.table, status_color);
         p.text(cols.status_x, base, status, status_style);
 
         match record {
             Some(rec) if rec.faults > 0 => {
-                p.right(cols.errors_r, base, &num(rec.faults), p.body(ERR));
+                p.right(cols.errors_r, base, &num(rec.faults), p.table(ERR));
             },
             Some(_) => {
-                p.right(cols.errors_r, base, "0", p.body(TEXT));
+                p.right(cols.errors_r, base, "0", p.table(TEXT));
             },
             None => {
-                p.right(cols.errors_r, base, NONE, p.body(ink(TEXT)));
+                p.right(cols.errors_r, base, NONE, p.table(ink(TEXT)));
             },
         }
+
+        // The rate: what the test averaged over its work time, or while it runs, how fast it is
+        // going now (its average while it waits), with how it compares with the saved time.
+        let (rate, delta) = match row {
+            Row::Done => (finished.and_then(|st| st.rate), finished.and_then(|st| st.delta)),
+            Row::Current if s.paused => (None, None),
+            Row::Current => (o.rate.or(o.test_avg), o.test_delta),
+            Row::Pending => (None, None),
+        };
+        let delta_ink = match delta {
+            _ if selected => SEL_INK,
+            Some(d) if d.percent() < 0 => WARN,
+            _ => PASS,
+        };
+        let main: Text = rate.map_or_else(|| fixed(format_args!("{NONE}")), format::rate);
+        let extra: String<8> = delta.map_or_else(String::new, |d| fixed(format_args!("{d}")));
+        let main_ink = if rate.is_some() { ink(TEXT) } else { ink(DIM) };
+        pair_cell(
+            p,
+            base,
+            cols.rate_r,
+            cols.change_w,
+            &Pair { main: &main, main_ink, extra: &extra, extra_ink: delta_ink },
+        );
+
+        // The median of the per-second rates and how far they strayed from it.
+        let steadiness = finished.and_then(|st| st.steadiness);
+        let main: Text = steadiness.map_or_else(|| fixed(format_args!("{NONE}")), |st| format::rate(st.median));
+        let extra: Text = steadiness.map_or_else(Text::new, |st| format::spread(st.spread));
+        let main_ink = if steadiness.is_some() { ink(TEXT) } else { ink(DIM) };
+        let extra_ink = if unsteady { WARN } else { ink(DIM) };
+        if l.median {
+            pair_cell(p, base, cols.median_r, cols.spread_w, &Pair { main: &main, main_ink, extra: &extra, extra_ink });
+        } else if steadiness.is_some() {
+            p.right(cols.median_r, base, &extra, p.table(extra_ink));
+        } else {
+            p.right(cols.median_r, base, NONE, p.table(ink(DIM)));
+        }
+
         let took = record.map_or_else(|| fixed(format_args!("{NONE}")), |rec| format::took(rec.took));
-        p.right(cols.time_r, base, &took, p.body(ink(DIM)));
+        p.right(cols.time_r, base, &took, p.table(ink(DIM)));
     }
 }
 

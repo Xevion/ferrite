@@ -25,6 +25,7 @@ mod caps;
 pub mod crew;
 pub mod eta;
 mod fault;
+pub mod histogram;
 mod kernels;
 mod ops;
 mod prsg;

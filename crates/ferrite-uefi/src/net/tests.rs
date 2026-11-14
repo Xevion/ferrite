@@ -21,6 +21,7 @@ use smoltcp::wire::{IpAddress, Ipv4Address, Ipv4Cidr};
 
 use super::testing::{count, idle_status};
 use super::*;
+use crate::pace::TestStats;
 use crate::report::{FaultRecord, History, PassRecord};
 use ferrite_efi::cores::CoreChoice;
 
@@ -87,7 +88,12 @@ impl Rig {
         for _ in 0..ms {
             self.ms += 1;
             let now = Instant::from_epoch(Duration::from_millis(self.ms));
-            let snapshot = Snapshot { status: self.status, history: &self.history, faults: &self.faults };
+            let snapshot = Snapshot {
+                status: self.status,
+                history: &self.history,
+                faults: &self.faults,
+                stats: &TestStats::default(),
+            };
             let (net, commands) = (&mut self.net, &mut self.commands);
             let (_, allocs) = count(|| net.poll(now, &snapshot, &mut |command| commands.push(command)));
             self.allocs += allocs;

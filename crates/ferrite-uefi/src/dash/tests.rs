@@ -11,14 +11,36 @@ use super::*;
 use crate::report::{CpuInfo, History, PassRecord, TestRecord};
 use core::num::NonZeroU64;
 
-use ferrite_mem::eta::{Confidence, Eta, Position};
+use ferrite_mem::eta::{BasisPoints, Confidence, Eta, Position};
+use ferrite_mem::histogram::Histogram;
 
 use crate::goal::Goal;
-use crate::pace::Outlook;
+use crate::pace::{Delta, Outlook, Steadiness, TestStat, TestStats};
 use crate::sweep::Coverage;
 use ferrite_net::{Link, MacAddr, Medium, PortStats, PortStatus, ServiceCounters};
 
 const START: Instant = Instant::from_epoch(Duration::from_secs(5));
+
+fn bp(raw: u16) -> BasisPoints {
+    BasisPoints::new(raw).expect("a fraction")
+}
+
+/// A test running at 8 GB/s, a little slower than it was, in a pass with a guessed time left.
+fn running() -> Outlook {
+    Outlook {
+        rate: Some(7_900_000_000),
+        test_avg: Some(7_950_000_000),
+        test_delta: Delta::between(7_950_000_000, 8_400_000_000),
+        test_left: Some(Duration::from_secs(38)),
+        test_progress: bp(3712),
+        pass: Some(Eta { remaining: Duration::from_mins(34), confidence: Confidence::Estimated }),
+        pass_progress: bp(4137),
+        known: (14, 14),
+        pace_percent: Some(98),
+        bandwidth: Some(18_400_000_000),
+        ..Outlook::NONE
+    }
+}
 
 fn status() -> SweepStatus {
     SweepStatus {
@@ -37,8 +59,37 @@ fn status() -> SweepStatus {
         preset: Preset::Standard,
         paused: false,
         coverage: Coverage::NONE,
-        outlook: Outlook::NONE,
+        outlook: running(),
     }
+}
+
+/// What the four tests that finished in pass 3 measured: one with a rate that changed, one that
+/// swings between two speeds, and a long name's worth of rates in GB/s and in MB/s.
+fn finished_tests() -> TestStats {
+    let rates = |samples: &[u64]| {
+        let mut hist = Histogram::new();
+        for &s in samples {
+            hist.record(s);
+        }
+        Steadiness::of(&hist)
+    };
+    let steady =
+        rates(&[12_000_000_000, 12_100_000_000, 11_900_000_000, 12_050_000_000, 11_950_000_000, 12_000_000_000]);
+    let swinging = rates(&[6_000_000_000, 9_000_000_000, 6_100_000_000, 9_100_000_000, 6_000_000_000, 9_000_000_000]);
+    let slow = rates(&[640_000_000, 650_000_000, 645_000_000, 655_000_000, 635_000_000]);
+    let mut finished = TestStats::default();
+    finished.reset(14);
+    let rows = [
+        (11_800_000_000, 12_300_000_000, steady),
+        (8_000_000_000, 8_050_000_000, swinging),
+        (645_000_000, 600_000_000, slow),
+        (2_500_000_000, 2_500_000_000, None),
+    ];
+    for (i, (kind, (rate, saved, steadiness))) in TestKind::sequence(Preset::Standard).zip(rows).enumerate() {
+        let delta = Delta::between(rate, saved);
+        finished.set(i, TestStat { test: kind.name(), pass: 3, rate: Some(rate), delta, steadiness });
+    }
+    finished
 }
 
 fn history() -> History {
@@ -108,7 +159,8 @@ fn render(
     faults: &VecDeque<FaultRecord>,
     at: u64,
 ) -> Vec<Rect> {
-    let snapshot = Snapshot { status, history, faults };
+    let finished = finished_tests();
+    let snapshot = Snapshot { status, history, faults, stats: &finished };
     let frame = Frame { snapshot: &snapshot, net: Some(net()), net_err: None, now: START + Duration::from_secs(at) };
     dash.render(&frame);
     dash.output().1.to_vec()
@@ -139,6 +191,40 @@ fn steady_frames_redraw_only_the_widgets_that_changed() {
 }
 
 #[test]
+fn a_hundredth_of_a_percent_moves_the_pass_figure_and_bar_alone() {
+    let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
+    let (history, faults) = (history(), VecDeque::new());
+    render(&mut dash, status(), &history, &faults, 500);
+    let mut moved = status();
+    moved.outlook.pass_progress = bp(4138);
+    let rects = render(&mut dash, moved, &history, &faults, 500);
+    let l = dash.layout;
+    check!(!rects.is_empty() && rects.iter().all(|r| l.pass.intersect(*r) == *r), "{rects:?}");
+}
+
+#[test]
+fn the_bar_of_a_short_goal_moves_a_quarter_second_at_a_time_while_the_clocks_wait_for_the_second() {
+    let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
+    let (history, faults, finished) = (history(), VecDeque::new(), finished_tests());
+    let goal = Goal { passes: None, time: Some(Duration::from_mins(10)), stop_on_fault: false };
+    let status = SweepStatus { outlook: Outlook { goal, ..running() }, ..status() };
+    let snapshot = Snapshot { status, history: &history, faults: &faults, stats: &finished };
+    let at = |millis| Frame {
+        snapshot: &snapshot,
+        net: Some(net()),
+        net_err: None,
+        now: START + Duration::from_millis(millis),
+    };
+    dash.render(&at(500_000));
+    dash.render(&at(500_100));
+    check!(dash.output().1.is_empty(), "within the same quarter second nothing is drawn");
+    dash.render(&at(500_300));
+    let l = dash.layout;
+    let rects = dash.output().1.to_vec();
+    check!(!rects.is_empty() && rects.iter().all(|r| l.pass.intersect(*r) == *r), "{rects:?}");
+}
+
+#[test]
 fn a_clock_tick_allocates_nothing() {
     let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
     let (history, faults) = (history(), VecDeque::new());
@@ -146,7 +232,8 @@ fn a_clock_tick_allocates_nothing() {
     for at in 500..560 {
         render(&mut dash, status(), &history, &faults, at);
     }
-    let snapshot = Snapshot { status: status(), history: &history, faults: &faults };
+    let finished = finished_tests();
+    let snapshot = Snapshot { status: status(), history: &history, faults: &faults, stats: &finished };
     let frame = Frame { snapshot: &snapshot, net: Some(net()), net_err: None, now: START + Duration::from_secs(560) };
     let before = bench::allocations().0;
     dash.render(&frame);
@@ -163,13 +250,14 @@ fn with_goal() -> SweepStatus {
         rate: Some(8_000_000_000),
         position: Position::Wait { nth: 2, waits: 4, left: Duration::from_secs(192) },
         test_left: Some(Duration::from_secs(312)),
-        test_permille: Some(450),
+        test_progress: bp(4512),
         pass: Some(Eta { remaining: Duration::from_mins(10), confidence: Confidence::Estimated }),
-        pass_permille: Some(720),
+        pass_progress: bp(7234),
         cycle: Some(Duration::from_mins(40)),
         cycle_left: Some(Eta { remaining: Duration::from_mins(15), confidence: Confidence::Estimated }),
+        cycle_progress: Some(bp(6250)),
         known: (11, 11),
-        ..Outlook::NONE
+        ..running()
     };
     SweepStatus { test: TestKind::BitFade.name(), position: (11, 11), outlook, ..status() }
 }
@@ -242,7 +330,7 @@ fn png_frames() {
         std::path::PathBuf::from(std::env::var_os("FERRITE_DASH_OUT").expect("FERRITE_DASH_OUT names a directory"));
     std::fs::create_dir_all(&dir).expect("create the output directory");
     let no_network = Some(NoNetwork { wired: "no wired NIC driven by the firmware", wifi: "scanning" });
-    for (w, h) in [(1920, 1080), (1024, 768)] {
+    for (w, h) in [(1920, 1080), (1024, 768), (768, 576)] {
         for scene in ["running", "fault", "no-network", "goal"] {
             let mut dash = Dashboard::new(w, h).expect("dashboard");
             let (history, mut faults) = (history(), VecDeque::new());
@@ -250,7 +338,8 @@ fn png_frames() {
             if scene == "fault" {
                 faulty(&mut status, &mut faults);
             }
-            let snapshot = Snapshot { status, history: &history, faults: &faults };
+            let finished = finished_tests();
+            let snapshot = Snapshot { status, history: &history, faults: &faults, stats: &finished };
             let (net, net_err) = if scene == "no-network" { (None, no_network) } else { (Some(net()), None) };
             let at = START + Duration::from_secs(523);
             dash.render(&Frame { snapshot: &snapshot, net, net_err, now: at });
@@ -310,7 +399,7 @@ fn png(w: u32, h: u32, pixels: &[u8]) -> Vec<u8> {
 fn a_port_coming_and_going_redraws_the_network_widget_alone() {
     let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
     let (history, faults) = (history(), VecDeque::new());
-    let snapshot = Snapshot { status: status(), history: &history, faults: &faults };
+    let snapshot = Snapshot { status: status(), history: &history, faults: &faults, stats: &TestStats::default() };
     let frame = |net: Option<NetStatus>, net_err| Frame { snapshot: &snapshot, net, net_err, now: START };
 
     dash.render(&frame(Some(net()), None));

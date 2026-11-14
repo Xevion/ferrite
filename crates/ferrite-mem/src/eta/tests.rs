@@ -94,6 +94,37 @@ fn nothing_is_predicted_before_there_is_anything_to_go_on() {
 }
 
 #[test]
+fn a_calibrated_speed_stands_in_for_a_pace_only_until_a_test_has_run() {
+    // 1000 words are 8000 bytes: at 400 bytes a second a test takes 20 s.
+    let mut est = Estimator::new(plain(3), vec![None; 3]).with_speed(Some(400));
+    let f = est.observe(at(0), 0, 0, None);
+    check!(f.raw == Some(Eta { remaining: secs(60), confidence: Confidence::Estimated }));
+    check!(f.shown.is_none(), "a guess from a benchmark still has to agree with itself first");
+    // The test runs at half that speed: the measurement takes over the rest.
+    let f = est.observe(at(20), 0, 500, None);
+    check!(f.raw.map(|e| e.remaining) == Some(secs(20 + 80)));
+}
+
+#[test]
+fn progress_is_counted_from_words_and_time_not_from_rounded_percents() {
+    let fade = Shape::new([Stage::Work(100), Stage::Wait(secs(100)), Stage::Work(100)]);
+    let shapes = vec![Shape::new([Stage::Work(1000)]), fade];
+    let mut est = Estimator::new(shapes, vec![Some(secs(10)), Some(secs(130))]);
+    est.observe(at(0), 0, 0, None);
+    est.finish(0, at(10), secs(10));
+    // One word into the second test, which has 200 of the pass's 1200.
+    let f = est.observe(at(10), 1, 1, None);
+    check!(f.pass_words.get() == 8341, "1001 of 1200 words, rounded down");
+    check!(f.test_words.get() == 50);
+    // In the wait words stand still, so the test's progress is by time: 45 s gone, 65 to go.
+    est.observe(at(15), 1, 100, None);
+    let f = est.observe(at(55), 1, 100, None);
+    check!(f.test_work == secs(5));
+    check!(f.test_progress.map(BasisPoints::get) == Some(4090));
+    check!(f.pass_progress.map(BasisPoints::get) == Some(4583), "55 of 120 s");
+}
+
+#[test]
 fn an_estimate_is_shown_only_once_a_few_seconds_of_predictions_agree() {
     let mut est = estimator([None, None, None]);
     est.observe(at(0), 0, 0, None);

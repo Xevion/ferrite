@@ -3,7 +3,7 @@
 use core::fmt::{self, Write as _};
 use core::time::Duration;
 
-use ferrite_mem::eta::{Confidence, Eta};
+use ferrite_mem::eta::BasisPoints;
 use heapless::String;
 
 /// What the functions below return.
@@ -38,31 +38,27 @@ pub fn clock(d: Duration) -> Text {
     if h > 0 { fixed(format_args!("{h}:{m:02}:{s:02}")) } else { fixed(format_args!("{m}:{s:02}")) }
 }
 
-/// Time left as the screens print it: to the second when it is measured (`12:34 left`), rounded and
-/// marked when it is a guess (`~34 min left`, `~1 h 25 min left`).
+/// Time left as the screens print it: `m:ss` under ten minutes, then whole minutes (`34 min`,
+/// `1 h 35 min`). How far to trust it is told by the ink, not by the words.
 #[must_use]
-pub fn left(eta: Eta) -> Text {
-    match eta.confidence {
-        Confidence::Measured => fixed(format_args!("{} left", clock(eta.remaining))),
-        Confidence::Estimated => fixed(format_args!("~{} left", approximate(eta.remaining))),
+pub fn left(remaining: Duration) -> Text {
+    let secs = remaining.as_secs();
+    if secs < 600 {
+        return fixed(format_args!("{} left", clock(remaining)));
+    }
+    let minutes = (secs + 30) / 60;
+    match (minutes / 60, minutes % 60) {
+        (0, m) => fixed(format_args!("{m} min left")),
+        (h, 0) => fixed(format_args!("{h} h left")),
+        (h, m) => fixed(format_args!("{h} h {m:02} min left")),
     }
 }
 
-/// A time to the minute, or to five minutes from an hour and a half on.
-fn approximate(d: Duration) -> Text {
-    let secs = d.as_secs();
-    if secs < 90 {
-        return fixed(format_args!("1 min"));
-    }
-    let minutes = (secs + 30) / 60;
-    if minutes < 90 {
-        return fixed(format_args!("{minutes} min"));
-    }
-    let rounded = (minutes + 2) / 5 * 5;
-    match (rounded / 60, rounded % 60) {
-        (h, 0) => fixed(format_args!("{h} h")),
-        (h, m) => fixed(format_args!("{h} h {m:02} min")),
-    }
+/// A spread of rates as `±3%`, rounded up so that a figure over the unsteadiness threshold never
+/// reads as the threshold itself.
+#[must_use]
+pub fn spread(spread: BasisPoints) -> Text {
+    fixed(format_args!("\u{b1}{}%", spread.get().div_ceil(100)))
 }
 
 /// A clock with every field: `hh:mm:ss`.
@@ -103,10 +99,14 @@ pub fn took(d: Duration) -> Text {
     clock(Duration::from_secs(u64::try_from((millis + 500) / 1000).unwrap_or(u64::MAX)))
 }
 
-/// Bytes per second in decimal units, three significant digits.
+/// Bytes per second in decimal units, three significant digits; kilobytes under half a megabyte, as
+/// a test of a few thousand words makes.
 #[must_use]
 pub fn rate(bytes_per_sec: u64) -> Text {
     let mb = (bytes_per_sec + 500_000) / 1_000_000;
+    if mb == 0 {
+        return fixed(format_args!("{} kB/s", (bytes_per_sec + 500) / 1000));
+    }
     if mb < 1000 {
         return fixed(format_args!("{mb} MB/s"));
     }
@@ -153,16 +153,28 @@ mod tests {
     }
 
     #[rstest]
-    #[case::measured_is_exact(754, Confidence::Measured, "12:34 left")]
-    #[case::measured_hours(3_723, Confidence::Measured, "1:02:03 left")]
-    #[case::guess_under_a_minute_and_a_half(89, Confidence::Estimated, "~1 min left")]
-    #[case::guess_to_the_minute(90, Confidence::Estimated, "~2 min left")]
-    #[case::guess_just_under_the_hour_and_a_half(5_369, Confidence::Estimated, "~89 min left")]
-    #[case::guess_to_five_minutes(5_400, Confidence::Estimated, "~1 h 30 min left")]
-    #[case::guess_whole_hours(7_199, Confidence::Estimated, "~2 h left")]
-    #[case::guess_a_long_run(27_000 + 1_000, Confidence::Estimated, "~7 h 45 min left")]
-    fn time_left_is_exact_only_when_measured(#[case] secs: u64, #[case] confidence: Confidence, #[case] want: &str) {
-        check!(left(Eta { remaining: Duration::from_secs(secs), confidence }) == want);
+    #[case::seconds(59, "0:59 left")]
+    #[case::under_ten_minutes(599, "9:59 left")]
+    #[case::ten_minutes(600, "10 min left")]
+    #[case::rounds_to_the_nearest_minute_down(629, "10 min left")]
+    #[case::rounds_to_the_nearest_minute_up(630, "11 min left")]
+    #[case::almost_an_hour(3_569, "59 min left")]
+    #[case::an_hour_by_rounding(3_570, "1 h left")]
+    #[case::hour_and_minutes(5_700, "1 h 35 min left")]
+    #[case::minutes_are_padded(3_900, "1 h 05 min left")]
+    #[case::a_long_run(28_000, "7 h 47 min left")]
+    fn time_left_is_to_the_second_under_ten_minutes_and_to_the_minute_after(#[case] secs: u64, #[case] want: &str) {
+        check!(left(Duration::from_secs(secs)) == want);
+    }
+
+    #[rstest]
+    #[case(0, "\u{b1}0%")]
+    #[case(1, "\u{b1}1%")]
+    #[case(300, "\u{b1}3%")]
+    #[case(1000, "\u{b1}10%")]
+    #[case(1001, "\u{b1}11%")]
+    fn spreads_round_up(#[case] raw: u16, #[case] expected: &str) {
+        check!(spread(BasisPoints::new(raw).unwrap()) == expected);
     }
 
     #[rstest]
@@ -192,6 +204,10 @@ mod tests {
     }
 
     #[rstest]
+    #[case(20_480, "20 kB/s")]
+    #[case(499_499, "499 kB/s")]
+    #[case(499_500, "500 kB/s")]
+    #[case(500_000, "1 MB/s")]
     #[case(999_499_999, "999 MB/s")]
     #[case(999_500_000, "1.00 GB/s")]
     #[case(12_345_000_000, "12.3 GB/s")]

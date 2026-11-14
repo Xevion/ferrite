@@ -6,8 +6,8 @@
 <meta name="color-scheme" content="light dark">
 <title>ferrite</title>
 <style>
-:root{--bg:#c8ccd4;--line:#7a8396;--text:#1b2a5c;--strong:#0a1238;--dim:#3e4a6b;--label:#1e40af;--bar:#1e3a8a;--bar-text:#fff;--bar-dim:#c7d2fe;--bar-rule:#3b5bb5;--tab-text:#dce3f7;--tab-on:#c8ccd4;--tab-on-ink:#0a1238;--fill:#1e40af;--track:#e6e9ef;--sel:#1e3a8a;--sel-ink:#fff;--pass:#14532d;--err:#991b1b;--err-band:#991b1b;--err-text:#fff;--tested:#3f8f62;--pending:#a7aebd;--reserved:#6e7585;--active:#1e40af;--active-ring:#0a1238;--code:#e6e9ef;--key:#fff;--key-ink:#1e3a8a;--font:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono','Liberation Mono',monospace}
-@media(prefers-color-scheme:dark){:root{--bg:#101826;--line:#33415e;--text:#c9d3e6;--strong:#f1f5fb;--dim:#8c9ab8;--label:#7fa6ff;--tab-on:#101826;--tab-on-ink:#f1f5fb;--fill:#3b6beb;--track:#1a2436;--pass:#6fd38f;--err:#ff6b6b;--err-band:#7f1d1d;--err-text:#ffe4e4;--tested:#2e7a50;--pending:#1e2a40;--reserved:#3a4458;--active:#7fa6ff;--active-ring:#f1f5fb;--code:#1a2436}}
+:root{--bg:#c8ccd4;--line:#7a8396;--text:#1b2a5c;--strong:#0a1238;--dim:#3e4a6b;--label:#1e40af;--bar:#1e3a8a;--bar-text:#fff;--bar-dim:#c7d2fe;--bar-rule:#3b5bb5;--tab-text:#dce3f7;--tab-on:#c8ccd4;--tab-on-ink:#0a1238;--fill:#1e40af;--track:#e6e9ef;--sel:#1e3a8a;--sel-ink:#fff;--pass:#14532d;--err:#991b1b;--warn:#7a4700;--err-band:#991b1b;--err-text:#fff;--tested:#3f8f62;--pending:#a7aebd;--reserved:#6e7585;--active:#1e40af;--active-ring:#0a1238;--code:#e6e9ef;--key:#fff;--key-ink:#1e3a8a;--font:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono','Liberation Mono',monospace}
+@media(prefers-color-scheme:dark){:root{--bg:#101826;--line:#33415e;--text:#c9d3e6;--strong:#f1f5fb;--dim:#8c9ab8;--label:#7fa6ff;--tab-on:#101826;--tab-on-ink:#f1f5fb;--fill:#3b6beb;--track:#1a2436;--pass:#6fd38f;--err:#ff6b6b;--warn:#f2c94c;--err-band:#7f1d1d;--err-text:#ffe4e4;--tested:#2e7a50;--pending:#1e2a40;--reserved:#3a4458;--active:#7fa6ff;--active-ring:#f1f5fb;--code:#1a2436}}
 *{box-sizing:border-box}
 html{background:var(--bg)}
 body{margin:0;min-height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font:13px/1.45 var(--font)}
@@ -44,9 +44,10 @@ h2{margin:0 0 8px;padding:0 0 4px;font-size:.92em;line-height:1.3;font-weight:60
 .sm{font-size:.85em}
 .bad{color:var(--err)}
 .ok{color:var(--pass)}
+.warn{color:var(--warn)}
 .row{display:flex;align-items:center;gap:12px;margin-bottom:8px}
 .row>.k{width:92px;flex:none;color:var(--dim)}
-.row>.v{width:176px;flex:none;text-align:right;white-space:nowrap}
+.row>.v{width:216px;flex:none;text-align:right;white-space:nowrap}
 .track{flex:1;height:16px;background:var(--track);border:1px solid var(--line)}
 .track i{display:block;height:100%;width:0;background:var(--fill)}
 .paused .track i{background:var(--reserved)}
@@ -66,6 +67,9 @@ tr.q td{color:var(--dim)}
 .st{font-weight:600}
 .st.pass{color:var(--pass)}
 .st.fail,td.bad{color:var(--err)}
+.dl.up{color:var(--pass)}
+.dl.dn{color:var(--warn)}
+tr.cur .dl,tr.cur .warn{color:inherit}
 tr.cur .st,tr.cur td.bad{color:var(--sel-ink)}
 tr.cur td:first-child{color:var(--sel-ink)}
 .empty{color:var(--dim);padding:2px 0}
@@ -111,7 +115,7 @@ label.d{display:inline-flex;align-items:center;gap:4px}
 #gone{display:none;position:fixed;inset:0;background:#000c;color:#fff;align-items:center;justify-content:center;font-size:1.5em}
 #gone.on{display:flex}
 @media(max-width:940px){main{grid-template-columns:minmax(0,1fr)}.keys .sp{margin-left:0}}
-@media(max-width:560px){.kv{grid-template-columns:84px minmax(0,1fr)}.row>.v{width:128px}}
+@media(max-width:560px){.kv{grid-template-columns:84px minmax(0,1fr)}.row>.v{width:150px}}
 </style>
 </head>
 <body>
@@ -130,23 +134,25 @@ label.d{display:inline-flex;align-items:center;gap:4px}
 <span class="d">Preset</span><span id="preset">-</span><span class="d">Tier</span><span id="tier">-</span>
 <span class="d">Mode</span><span id="mode">-</span><span class="d">Clock</span><span class="d">&mdash;</span>
 <span class="d">Modules</span><span class="d">&mdash;</span><span class="d">Timings</span><span id="timings">&mdash;</span>
+<span class="d">Bandwidth</span><span id="bandwidth">&mdash;</span>
 </div>
 <div class="chips" id="procs"></div>
 </section>
 <section id="progress">
 <h2>Progress</h2>
-<div class="row"><span class="k">Overall</span><div class="track"><i id="allbar"></i></div><span class="v d" id="allfig">&mdash;</span></div>
-<div class="row"><span class="k" id="passlbl">Pass</span><div class="track"><i id="passbar"></i></div><span class="v" id="passfig">-</span></div>
-<div class="row"><span class="k" id="testlbl">Test</span><div class="track"><i id="testbar"></i></div><span class="v" id="testpct">-</span></div>
+<div class="row"><span class="k">Overall</span><div class="track"><i id="allbar"></i></div><span class="v d" id="allfig"><span></span><span>&mdash;</span></span></div>
+<div class="row"><span class="k" id="passlbl">Pass</span><div class="track"><i id="passbar"></i></div><span class="v" id="passfig"><span></span><span>-</span></span></div>
+<div class="row"><span class="k" id="testlbl">Test</span><div class="track"><i id="testbar"></i></div><span class="v" id="testpct"><span></span><span>-</span></span></div>
 <div class="kv sub">
 <span class="d">Range</span><span class="d">&mdash;</span><span class="d">Threads</span><span id="threads">-</span>
-<span class="d">Pattern</span><span class="d">&mdash;</span><span class="d">Rate</span><span id="lrate">-</span>
+<span class="d">Pattern</span><span class="d">&mdash;</span><span class="d">Rate now</span><span id="lrate">-</span>
+<span class="d">Test avg</span><span id="lavg">-</span><span class="d" title="this run's work time against what the same tests took before: 100% is as usual, more is slower">Pace</span><span id="lpace">-</span>
 <span class="d">Passes</span><span id="passes">-</span><span class="d">History</span><span id="hist">-</span>
 </div>
 </section>
 <section>
 <h2>Tests</h2>
-<table><thead><tr><th>#</th><th>NAME</th><th>STATUS</th><th class="n">ERRORS</th><th class="n">TIME</th></tr></thead><tbody id="tests"></tbody></table>
+<table><thead><tr><th>#</th><th>NAME</th><th>STATUS</th><th class="n">ERRORS</th><th class="n">RATE</th><th class="n">MEDIAN</th><th class="n">TIME</th></tr></thead><tbody id="tests"></tbody></table>
 </section>
 <section id="flogbox" style="display:none">
 <h2>Error log</h2>
@@ -200,9 +206,12 @@ const DASH="\u2014",DOT=" \u00b7 ",CELLS=128;
 function hms(ms){if(ms==null)return"--:--:--";const s=Math.floor(ms/1000);return p2(Math.floor(s/3600))+":"+p2(Math.floor(s/60)%60)+":"+p2(s%60)}
 function clk(ms){if(ms==null)return DASH;const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor(s/60)%60;return h?h+":"+p2(m)+":"+p2(s%60):m+":"+p2(s%60)}
 function took(ms){if(ms==null)return DASH;if(ms<9995)return(ms/1000).toFixed(2)+" s";if(ms<59950)return(ms/1000).toFixed(1)+" s";return clk(Math.round(ms/1000)*1000)}
-function rate(b){return b==null?DASH:b>=999.5e6?(b/1e9).toFixed(b>=9.995e9?1:2)+" GB/s":Math.round(b/1e6)+" MB/s"}
-function approx(s){if(s<90)return"1 min";const m=Math.round(s/60);if(m<90)return m+" min";const r=Math.round(m/5)*5,h=Math.floor(r/60),n=r%60;return h+" h"+(n?" "+p2(n)+" min":"")}
-function left(e,ms){if(!e)return null;const s=Math.max(0,Math.round(ms==null?e.left_s:ms/1000));return(e.confidence=="measured"?clk(s*1000):"\u2248 "+approx(s))+" left"}
+function rate(b){return b==null?DASH:b>=999.5e6?(b/1e9).toFixed(b>=9.995e9?1:2)+" GB/s":b<5e5?Math.round(b/1e3)+" kB/s":Math.round(b/1e6)+" MB/s"}
+function left(s){s=Math.max(0,Math.round(s));if(s<600)return clk(s*1000)+" left";const m=Math.round(s/60),h=Math.floor(m/60),n=m%60;return(h?h+" h"+(n?" "+p2(n)+" min":""):n+" min")+" left"}
+function bpct(bp){return(Math.floor(bp)/100).toFixed(2)+"%"}
+const sgn=p=>(p<0?"\u2212":"+")+Math.abs(p)+"%";
+function chg(p){return p==null?"":' <span class="dl '+(p<0?"dn":"up")+'">'+sgn(p)+"</span>"}
+function figure(id,head,tail,guess){const e=$(id).children;e[0].textContent=head;e[1].textContent=tail;e[1].className=guess?"d":""}
 function compact(s){let o="";for(const[n,u]of[[86400,"d"],[3600,"h"],[60,"m"],[1,"s"]]){const k=Math.floor(s/n);s-=k*n;if(k)o+=k+u}return o||"0s"}
 function size(b){const g=1<<30,m=1<<20;return b>=g&&b%g==0?b/g+" GiB":b<m&&b>=1024?Math.floor(b/1024)+" KiB":Math.floor(b/m)+" MiB"}
 function hx(s){const h=String(s).replace(/^0x/,"").toUpperCase();let o="";for(let i=0;i<h.length;i++){if(i&&(h.length-i)%4==0)o+="_";o+=h[i]}return"0x"+o}
@@ -218,9 +227,26 @@ function clock(){
   const dt=performance.now()-base.at,el=base.el==null?null:base.el+dt;
   text("elapsed",hms(el));
   const run=!paused,tick=x=>x==null?null:run?Math.max(0,x-dt):x;
-  text("passfig",base.pct+"%"+DOT+(base.pl?left(base.pl.e,tick(base.pl.ms)):clk(base.pel==null?null:base.pel+dt)));
-  if(base.ov)text("allfig",base.ov.fill==null?(base.ov.nogoal||"no goal")+DOT+clk(el):Math.floor(base.ov.fill/10)+"%"+DOT+(base.ov.left?left(base.ov.left,tick(base.ov.ms)):clk(el)));
-  if(base.wait)text("testpct","wait "+base.wait.nth+"/"+base.wait.waits+DOT+clk(tick(base.wait.ms)));
+  // Between two documents a figure carries on at the pace its own time left implies, so the hundredths keep moving.
+  const grow=(bp,ms)=>ms==null||!run||ms<=0?bp:Math.min(10000,bp+(10000-bp)*dt/ms);
+  const pb=grow(base.pbp,base.pl?base.pl.ms:null),pl=base.pl;
+  figure("passfig",bpct(pb)+DOT,pl?left(tick(pl.ms)/1000):clk(base.pel==null?null:base.pel+dt),pl&&pl.e.confidence!="measured");
+  $("passbar").style.width=pb/100+"%";
+  const ov=base.ov;
+  if(ov){
+    const ob=ov.bp==null?0:grow(ov.bp,ov.left?ov.ms:null);
+    if(ov.bp==null)figure("allfig",(ov.nogoal||"no goal")+DOT,clk(el));
+    else figure("allfig",bpct(ob)+DOT,ov.left?left(tick(ov.ms)/1000):clk(el),ov.left&&ov.left.confidence!="measured");
+    $("allbar").style.width=ob/100+"%";
+  }
+  const t=base.test;
+  if(t){
+    const tb=grow(t.bp,t.ms);
+    if(!t.count)figure("testpct","",DASH);
+    else if(t.wait)figure("testpct","","wait "+t.wait.nth+"/"+t.wait.waits+DOT+clk(tick(t.wait.ms)));
+    else figure("testpct",bpct(tb)+(t.ms!=null?DOT:""),t.ms!=null?clk(tick(t.ms)):"");
+    $("testbar").style.width=(t.count?tb/100:0)+"%";
+  }
   text("logline","["+hms(el)+"] "+base.log);
   const u=$("up");if(u)u.textContent=clk(base.up+dt);
 }
@@ -231,19 +257,22 @@ function renderMap(d){
   text("cell","1 cell = "+size(Math.floor(d.bytes/CELLS)));
 }
 function renderTests(d){
-  const cur=d.pass.number,name=d.test.name,t=d.test,seen=new Set();
+  const cur=d.pass.number,name=d.test.name,t=d.test,seen=new Set(),pr=d.progress;
   const list=d.tests.map(r=>{
     seen.add(r.test);
     if(r.test==name&&t.count>0)return{n:r.test,s:"run"};
-    if(r.pass==cur)return{n:r.test,s:r.faults?"fail":"pass",e:r.faults,t:r.took_ms};
+    if(r.pass==cur)return{n:r.test,s:r.faults?"fail":"pass",e:r.faults,t:r.took_ms,wr:r.work_rate,dp:r.delta_percent,md:r.median_rate,sp:r.spread_basis_points,us:r.unsteady};
     return{n:r.test,s:"q"};
   });
   if(t.count>0&&!seen.has(name))list.push({n:name,s:"run"});
   const more=Math.max(0,t.count-list.length);
   const word={run:d.paused?"PAUSED":"RUNNING",pass:"PASS",fail:"FAIL",q:"QUEUED"};
-  let h=list.map((r,i)=>'<tr class="'+(r.s=="run"?"cur":r.s=="q"?"q":"")+'"><td>'+(i+1)+'</td><td class="nm">'+esc(r.n)+'</td><td class="st '+r.s+'">'+word[r.s]+'</td><td class="n'+(r.e?" bad":"")+'">'+(r.e==null?DASH:r.e)+'</td><td class="n">'+(r.t==null?DASH:took(r.t))+"</td></tr>").join("");
-  if(more)h+='<tr class="q"><td></td><td colspan="4">'+more+" more queued</td></tr>";
-  if(!list.length&&!more)h='<tr class="q"><td></td><td colspan="4">No test has started yet.</td></tr>';
+  const live=d.paused?null:pr.rate!=null?pr.rate:pr.test.avg_rate;
+  const rcell=r=>r.s=="run"?(live==null?DASH:rate(live)+chg(pr.test.delta_percent)):r.wr==null?DASH:rate(r.wr)+chg(r.dp);
+  const mcell=r=>r.md==null?DASH:rate(r.md)+' <span class="'+(r.us?"warn":"d")+'">\u00b1'+Math.ceil(r.sp/100)+"%</span>";
+  let h=list.map((r,i)=>'<tr class="'+(r.s=="run"?"cur":r.s=="q"?"q":"")+'"><td>'+(i+1)+'</td><td class="nm">'+esc(r.n)+'</td><td class="st '+r.s+'">'+word[r.s]+'</td><td class="n'+(r.e?" bad":"")+'">'+(r.e==null?DASH:r.e)+'</td><td class="n">'+rcell(r)+'</td><td class="n">'+mcell(r)+'</td><td class="n">'+(r.t==null?DASH:took(r.t))+"</td></tr>").join("");
+  if(more)h+='<tr class="q"><td></td><td colspan="6">'+more+" more queued</td></tr>";
+  if(!list.length&&!more)h='<tr class="q"><td></td><td colspan="6">No test has started yet.</td></tr>';
   $("tests").innerHTML=h;
 }
 function render(d){
@@ -255,7 +284,7 @@ function render(d){
   st.textContent=(bad?f.total+" ERROR"+(f.total>1?"S":"")+DOT:"")+(d.paused?"PAUSED":t.count?"RUNNING":"STARTING");
   if(d.version)text("ver","v"+d.version);
   text("tabres","Results"+(bad?" ("+f.total+")":""));
-  const ppct=d.progress.pass_permille!=null?Math.floor(d.progress.pass_permille/10):d.pass.percent;
+  const ppct=Math.floor(d.progress.pass_basis_points/100);
   document.title="ferrite "+(bad?"! ":"")+ppct+"%";
   const procs=d.processors||[],cores=new Set(procs.map(c=>c.package+"."+c.core)).size;
   text("cpu",(procs.length||d.cpus)+" logical"+(procs.length?DOT+cores+" core"+(cores==1?"":"s"):""));
@@ -268,20 +297,18 @@ function render(d){
   text("threads",d.mode=="split"?Math.min(d.cpus,total)+" / "+total+" parallel":"1 / "+total+DOT+"single core");
   const lt=d.tests.length?d.tests[d.tests.length-1]:null,pr=d.progress,ps0=pr.position;
   text("lrate",ps0.kind=="wait"?"waiting "+ps0.nth+" of "+ps0.waits+", "+clk(ps0.left_s*1000)+" left":pr.rate!=null&&!d.paused?rate(pr.rate):DASH);
+  text("lavg",pr.test.avg_rate==null?DASH:rate(pr.test.avg_rate)+(pr.test.delta_percent==null?"":" "+sgn(pr.test.delta_percent)));
+  text("lpace",pr.pace_percent==null?DASH:pr.pace_percent+"%");
+  text("bandwidth",d.bandwidth==null?DASH:rate(d.bandwidth));
   text("timings",pr.timings.of?pr.timings.known?pr.timings.known+" of "+pr.timings.of+" known":"learning, 0 of "+pr.timings.of:DASH);
   const ps=d.passes,ms=ps.map(p=>p.took_ms);
   text("passes",ps.length?ps.length+" complete":"first pass running");
-  text("hist",ps.length?"last "+took(ms[ms.length-1])+DOT+"best "+took(Math.min(...ms))+DOT+"worst "+took(Math.max(...ms)):DASH);
+  text("hist",ps.length?"last "+took(ms[ms.length-1])+DOT+"best "+took(Math.min(...ms))+DOT+"worst "+took(Math.max(...ms))+(pr.pass_median_ms==null?"":DOT+"median "+took(pr.pass_median_ms)):DASH);
   $("progress").className=d.paused?"paused":"";
   text("passlbl","Pass "+(d.pass.number+1));
-  $("passbar").style.width=Math.min(ppct,100)+"%";
-  const tpm=pr.test.permille!=null?pr.test.permille/10:t.percent,tl=pr.test.left_s;
   text("testlbl",t.count?"Test "+t.index+"/"+t.count:"Test");
-  text("testpct",!t.count?DASH:ps0.kind=="wait"?"wait "+ps0.nth+"/"+ps0.waits+DOT+clk(ps0.left_s*1000):Math.floor(tpm)+"%"+(tl!=null?DOT+clk(tl*1000):""));
-  $("testbar").style.width=(t.count?Math.min(tpm,100):0)+"%";
   const ov=pr.overall,g=d.goal;
-  $("allbar").style.width=(ov.permille!=null?Math.min(ov.permille/10,100):0)+"%";
-  $("allfig").className="v"+(ov.permille==null?" d":"");
+  $("allfig").className="v"+(ov.basis_points==null?" d":"");
   renderMap(d);
   renderTests(d);
   $("banner").className=bad?"on":"";
@@ -313,10 +340,10 @@ function render(d){
   $("net").innerHTML=net+item("Uptime",clk(d.uptime_ms),"up");
   const prev=bad&&lf?"ERROR "+lf.test+DOT+hx(lf.addr)+DOT+"cpu "+lf.cpu:lt?"pass "+(lt.pass+1)+DOT+lt.test+" finished in "+took(lt.took_ms):"";
   const lp=$("logprev");lp.textContent=prev;lp.className=bad&&lf?"bad":"d";
-  base={at:performance.now(),up:d.uptime_ms,el:d.elapsed_ms,pel:d.pass.elapsed_ms,pct:Math.min(ppct,100),
+  base={at:performance.now(),up:d.uptime_ms,el:d.elapsed_ms,pel:d.pass.elapsed_ms,pbp:pr.pass_basis_points,
     pl:pr.pass?{e:pr.pass,ms:pr.pass.left_s*1000}:null,
-    ov:{fill:ov.permille,left:ov.left,ms:ov.left?ov.left.left_s*1000:null,nogoal:g.stop_on_fault&&g.passes==null&&g.time_s==null?"first fault":"no goal"},
-    wait:ps0.kind=="wait"?{nth:ps0.nth,waits:ps0.waits,ms:ps0.left_s*1000}:null,
+    ov:{bp:ov.basis_points,left:ov.left,ms:ov.left?ov.left.left_s*1000:null,nogoal:g.stop_on_fault&&g.passes==null&&g.time_s==null?"first fault":"no goal"},
+    test:{count:t.count,bp:pr.test.basis_points,ms:pr.test.left_s!=null?pr.test.left_s*1000:null,wait:ps0.kind=="wait"?{nth:ps0.nth,waits:ps0.waits,ms:ps0.left_s*1000}:null},
     log:t.count?"pass "+(d.pass.number+1)+DOT+"test "+t.index+"/"+t.count+DOT+t.name:"preparing the buffer"};
   clock();
   text("kplbl",d.paused?"Resume":"Pause");

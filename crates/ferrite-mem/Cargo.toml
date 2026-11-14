@@ -13,6 +13,8 @@ strum.workspace = true
 
 [dev-dependencies]
 assert2.workspace = true
+rand_chacha.workspace = true
+rand_core.workspace = true
 rstest.workspace = true
 
 [lints]

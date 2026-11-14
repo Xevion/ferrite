@@ -13,7 +13,7 @@ use snafu::Snafu;
 use super::canvas::Rgb;
 
 /// IBM Plex Mono in three weights, subset to ASCII plus a few symbols (middle dot, ellipsis, dashes,
-/// arrows, multiplication sign, bullet).
+/// arrows, multiplication sign, bullet, plus-minus, minus and up and down arrows).
 const FACES: [&[u8]; Face::COUNT] = [
     include_bytes!("../../assets/fonts/plexmono-regular.ttf"),
     include_bytes!("../../assets/fonts/plexmono-semibold.ttf"),

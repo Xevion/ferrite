@@ -1100,6 +1100,8 @@ version = "0.1.0"
 dependencies = [
  "assert2",
  "ferrite-hal",
+ "rand_chacha",
+ "rand_core 0.10.1",
  "rstest 0.28.0",
  "snafu",
  "strum",

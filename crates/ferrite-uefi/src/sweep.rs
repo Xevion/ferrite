@@ -53,6 +53,36 @@ const DISPATCH_BUDGET: Duration = Duration::from_secs(180);
 /// How often the BSP asks the firmware which AP dispatches have ended.
 const CHECK_EVERY: Duration = Duration::from_millis(2);
 
+/// The fill pattern of the bandwidth measurement; any word with both bit values will do.
+const BANDWIDTH_PATTERN: u64 = 0x5555_AAAA_5555_AAAA;
+
+/// How the start-up bandwidth measurement runs.
+#[derive(Clone, Copy, Debug)]
+struct Calibration {
+    /// The memory it writes and reads: big enough to be well past any cache.
+    window_bytes: usize,
+    /// Memory smaller than this is not measured, since a cache-sized window reads as cache speed.
+    min_window_bytes: usize,
+    /// It stops after this long, however little it has moved, so a slow machine is not held up.
+    budget: Duration,
+}
+
+impl Calibration {
+    const DEFAULT: Self =
+        Self { window_bytes: 256 << 20, min_window_bytes: 16 << 20, budget: Duration::from_millis(400) };
+}
+
+/// What a bandwidth measurement found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Measured {
+    /// Bytes written plus bytes read per second.
+    bytes_per_sec: u64,
+    moved: u64,
+    took: Duration,
+    /// Words that read back wrong.
+    faults: u64,
+}
+
 /// What the sweep allocates in one piece when the memory map cannot be had.
 const FALLBACK_BYTES: usize = 1 << 30;
 /// Smallest buffer worth sweeping when the fallback size cannot be allocated.
@@ -414,6 +444,42 @@ impl Sweep {
         self.pace.observe(&look);
     }
 
+    /// Measure the memory's bandwidth over the buffer and show it, before the first test: a fill
+    /// and then a verify of up to 256 MiB with the widest kernels on this core, under 0.4 s.
+    ///
+    /// The figure is bytes written plus bytes read per second over those two streaming passes: what
+    /// one core can push through the memory, which is the speed a test at the same kernels is bound
+    /// by. It also stands in for a pace until the first test has run. A word that reads back wrong is
+    /// a fault like any other and counts as one, in a test called "bandwidth".
+    pub fn measure_bandwidth(&mut self, clock: &impl ferrite_hal::Clock, vector: Option<&VectorState>) -> Option<u64> {
+        let run = self.run.as_mut()?;
+        let kernels = run.suite.kernels();
+        let (regions, _) = run.suite.split();
+        let cpu = self.cores.as_ref().map_or(0, Cores::bsp);
+        let tally = &mut self.tally;
+        let mut sink = |fault: Fault| tally.record(fault, "bandwidth", cpu, 0);
+        let measured = measure_bandwidth(regions, kernels, Calibration::DEFAULT, clock, vector, &mut sink);
+        let Some(m) = measured else {
+            log::info!(
+                "sweep: no bandwidth measured: under {} MiB to measure",
+                Calibration::DEFAULT.min_window_bytes >> 20
+            );
+            return None;
+        };
+        tally.faults = tally.faults.saturating_add(m.faults);
+        if m.faults > 0 {
+            log::warn!("sweep: {} words read back wrong in the bandwidth measurement", m.faults);
+        }
+        log::info!(
+            "sweep: bandwidth {} MB/s: {} MiB written and read in {} ms, {kernels}",
+            m.bytes_per_sec / 1_000_000,
+            m.moved >> 20,
+            m.took.as_millis()
+        );
+        self.pace.set_bandwidth(Some(m.bytes_per_sec));
+        Some(m.bytes_per_sec)
+    }
+
     /// Write out the timings learned since they were last saved.
     pub fn save_timings(&mut self, now: Instant) {
         self.pace.save(now, true);
@@ -552,7 +618,7 @@ impl Sweep {
     /// The status with the history and the latest faults, for the screen and the status page.
     #[must_use]
     pub fn snapshot(&self) -> Snapshot<'_> {
-        Snapshot { status: self.status(), history: &self.history, faults: &self.tally.recent }
+        Snapshot { status: self.status(), history: &self.history, faults: &self.tally.recent, stats: self.pace.stats() }
     }
 }
 
@@ -583,6 +649,54 @@ fn tier_of(k: Kernels) -> &'static str {
     let widest =
         [k.fill, k.verify, k.rmw].into_iter().map(ferrite_mem::Kernel::tier).max().unwrap_or(ferrite_mem::Tier::Scalar);
     widest.into()
+}
+
+/// Fill, then verify, up to `limits.window_bytes` from the start of `regions`, chunk by chunk, and
+/// report the bytes moved per second. `None` when the memory is under `limits.min_window_bytes`.
+fn measure_bandwidth(
+    regions: &mut Regions<'_>,
+    kernels: Kernels,
+    limits: Calibration,
+    clock: &impl ferrite_hal::Clock,
+    vector: Option<&VectorState>,
+    sink: &mut dyn FnMut(Fault),
+) -> Option<Measured> {
+    let window = regions.words().min(limits.window_bytes / WORD);
+    if window * WORD < limits.min_window_bytes.max(WORD) {
+        return None;
+    }
+    let guard = vector.filter(|_| kernels.is_wide());
+    let start = clock.now();
+    let (mut now, mut moved, mut faults) = (start, 0_u64, 0_u64);
+    'passes: for verifying in [false, true] {
+        for (_, mut piece) in regions.sub(0, window) {
+            for mut chunk in piece.chunks(WIDE_CHUNK_BYTES / WORD) {
+                let mut seen = Faults::new(REPORTS_PER_STEP, sink);
+                let mut touch = || {
+                    if verifying {
+                        ferrite_mem::verify(kernels.verify, &chunk, BANDWIDTH_PATTERN, &mut seen);
+                    } else {
+                        ferrite_mem::fill(kernels.fill, &mut chunk, BANDWIDTH_PATTERN);
+                    }
+                };
+                match guard {
+                    Some(v) => v.wide(&mut touch),
+                    None => touch(),
+                }
+                faults = faults.saturating_add(seen.seen());
+                moved += chunk.bytes() as u64;
+                now = clock.now();
+                if now - start >= limits.budget {
+                    break 'passes;
+                }
+            }
+        }
+    }
+    let took = now - start;
+    let words = moved / WORD as u64;
+    let bytes_per_sec =
+        u64::try_from(u128::from(words) * WORD as u128 * 1_000_000_000 / took.as_nanos().max(1)).ok()?;
+    Some(Measured { bytes_per_sec, moved, took, faults })
 }
 
 /// The history the running tests record into: the sweep's own, or a scratch copy while the reserve
@@ -786,7 +900,8 @@ fn dispatch(
             };
             let outlook = pace.observe(&look);
             let status = SweepStatus { outlook, ..live(&round.base, &seats, tally, round.faults_before, round.work) };
-            let tended = duties(now, &Snapshot { status, history, faults: &tally.recent });
+            let measured = pace.stats();
+            let tended = duties(now, &Snapshot { status, history, faults: &tally.recent, stats: measured });
             if let Some(goal) = tended.goal {
                 apply_goal(pace, goal);
             }

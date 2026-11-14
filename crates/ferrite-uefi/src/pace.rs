@@ -14,7 +14,8 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use ferrite_hal::Instant;
-use ferrite_mem::eta::{Confidence, Estimator, Eta, Forecast, Position, RateMeter};
+use ferrite_mem::eta::{BasisPoints, Confidence, Estimator, Eta, Forecast, Position, RateMeter};
+use ferrite_mem::histogram::Histogram;
 use ferrite_mem::suite::{Schedule, TestKind};
 
 use crate::goal::{Compact, Goal};
@@ -22,11 +23,24 @@ use crate::machine::Machine;
 use crate::sweep::Scope;
 use crate::timings::{Disk, Key, Store};
 
+mod stats;
+
+pub use stats::{Delta, Steadiness, TestStat, TestStats};
+
 /// How often the log gets a line of what is predicted.
 const AUDIT_EVERY: Duration = Duration::from_secs(30);
 /// How often the rate on show is replaced: it is measured over seconds, and a figure that changed
 /// with every frame would make the status page render its document as often.
 const RATE_EVERY: Duration = Duration::from_millis(500);
+/// How often the progress on show is replaced. It is shown to a hundredth of a percent, which a
+/// long test moves through in a fraction of a second; a few changes a second keep it visibly alive
+/// without every frame redrawing the progress bars and the status document.
+const PROGRESS_EVERY: Duration = Duration::from_millis(250);
+/// One rate sample per this much work time of a test, for its steadiness.
+const SAMPLE_EVERY: Duration = Duration::from_secs(1);
+/// A running test's average is set against its saved time once it has this much work behind it,
+/// since the first seconds of a test are not yet its pace.
+const DELTA_AFTER: Duration = Duration::from_secs(2);
 
 /// Round `d` to whole seconds, so a figure that is shown to the second changes once a second.
 fn whole(d: Duration) -> Duration {
@@ -47,20 +61,33 @@ pub struct Outlook {
     pub reserve: bool,
     /// Bytes of work per second over the last few seconds, to the megabyte.
     pub rate: Option<u64>,
+    /// Bytes of work per second since the running test began, its waits left out, to the megabyte,
+    /// and how that compares with what the test took on this machine before.
+    pub test_avg: Option<u64>,
+    pub test_delta: Option<Delta>,
     /// Where the running test is: touching memory or in one of its waits, with the time left in it.
     pub position: Position,
-    /// Time left in the running test and how far through it is, per mille.
+    /// Time left in the running test and how far through it is.
     pub test_left: Option<Duration>,
-    pub test_permille: Option<u16>,
+    pub test_progress: BasisPoints,
     /// Time left in the pass (in the reserve's pass, during its rotation), when fit to show.
     pub pass: Option<Eta>,
-    /// How far through the pass it is by time, per mille.
-    pub pass_permille: Option<u16>,
-    /// A whole pass with its reserve rotation, as predicted, and how much of it is left.
+    /// How far through the pass it is: by time once there is a prediction, else by words.
+    pub pass_progress: BasisPoints,
+    /// A whole pass with its reserve rotation, as predicted, how much of it is left and how far
+    /// through it is.
     pub cycle: Option<Duration>,
     pub cycle_left: Option<Eta>,
+    pub cycle_progress: Option<BasisPoints>,
     /// How many of the pass's tests have a time on record, and how many there are.
     pub known: (usize, usize),
+    /// The work time of this run's finished tests against what they took on this machine before, in
+    /// percent: 100 is as usual and more is slower. `None` until a finished test had a time on record.
+    pub pace_percent: Option<u16>,
+    /// Bytes per second the start-up calibration measured.
+    pub bandwidth: Option<u64>,
+    /// The median time of the passes done, once there are some.
+    pub pass_median: Option<Duration>,
 }
 
 impl Outlook {
@@ -69,23 +96,28 @@ impl Outlook {
         settled: 0,
         reserve: false,
         rate: None,
+        test_avg: None,
+        test_delta: None,
         position: Position::NONE,
         test_left: None,
-        test_permille: None,
+        test_progress: BasisPoints::ZERO,
         pass: None,
-        pass_permille: None,
+        pass_progress: BasisPoints::ZERO,
         cycle: None,
         cycle_left: None,
+        cycle_progress: None,
         known: (0, 0),
+        pace_percent: None,
+        bandwidth: None,
+        pass_median: None,
     };
 
-    /// The run measured against its goal, `elapsed` after it started. `pass_percent` is the pass's
-    /// share of its words, which stands in for time until there is a prediction.
+    /// The run measured against its goal, `elapsed` after it started.
     #[must_use]
-    pub fn overall(&self, elapsed: Duration, pass_percent: u16) -> Overall {
-        let mut fill: Option<u32> = None;
+    pub fn overall(&self, elapsed: Duration) -> Overall {
+        let mut fill: Option<BasisPoints> = None;
         let mut left: Option<Eta> = None;
-        let mut take = |f: u32, l: Option<Eta>| {
+        let mut take = |f: BasisPoints, l: Option<Eta>| {
             fill = Some(fill.map_or(f, |old| old.max(f)));
             left = match (left, l) {
                 (Some(a), Some(b)) => Some(if b.remaining < a.remaining { b } else { a }),
@@ -93,29 +125,25 @@ impl Outlook {
             };
         };
         if let Some(budget) = self.goal.time {
-            let f = u32::try_from(elapsed.as_millis() * 1000 / budget.as_millis().max(1)).unwrap_or(1000).min(1000);
-            take(f, Some(Eta { remaining: budget.saturating_sub(elapsed), confidence: Confidence::Measured }));
+            let eta = Eta { remaining: budget.saturating_sub(elapsed), confidence: Confidence::Measured };
+            take(BasisPoints::of_time(elapsed, budget), Some(rounded(eta)));
         }
         if let Some(n) = self.goal.passes.map(core::num::NonZeroU64::get) {
             if self.settled >= n {
-                take(1000, Some(Eta { remaining: Duration::ZERO, confidence: Confidence::Measured }));
+                take(BasisPoints::FULL, Some(Eta { remaining: Duration::ZERO, confidence: Confidence::Measured }));
             } else {
-                let cycle_done = match (self.cycle, self.cycle_left) {
-                    (Some(c), Some(l)) if !c.is_zero() => {
-                        1000 - u64::try_from(l.remaining.as_millis() * 1000 / c.as_millis()).unwrap_or(1000).min(1000)
-                    },
-                    _ => u64::from(pass_percent.min(100)) * 10,
-                };
-                let f = ((self.settled * 1000 + cycle_done) / n).min(1000);
+                let cycle = self.cycle_progress.unwrap_or(self.pass_progress);
+                let f =
+                    BasisPoints::clamped((self.settled * u64::from(BasisPoints::WHOLE) + u64::from(cycle.get())) / n);
                 let rest = u32::try_from(n - self.settled - 1).unwrap_or(u32::MAX);
                 let eta = self.cycle.zip(self.cycle_left).map(|(c, l)| Eta {
                     remaining: l.remaining.saturating_add(c.saturating_mul(rest)),
                     confidence: l.confidence,
                 });
-                take(u32::try_from(f).unwrap_or(1000), eta.map(rounded));
+                take(f, eta.map(rounded));
             }
         }
-        Overall { elapsed, fill: fill.map(|f| u16::try_from(f).unwrap_or(1000)), left }
+        Overall { elapsed, fill, left }
     }
 }
 
@@ -123,9 +151,9 @@ impl Outlook {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Overall {
     pub elapsed: Duration,
-    /// How much of the goal is done, per mille; `None` when the goal has no measure (none set, or
-    /// only to stop at a fault), in which case a bar would be made up.
-    pub fill: Option<u16>,
+    /// How much of the goal is done; `None` when the goal has no measure (none set, or only to stop
+    /// at a fault), in which case a bar would be made up.
+    pub fill: Option<BasisPoints>,
     /// Time to the goal's end by whichever of its parts comes first.
     pub left: Option<Eta>,
 }
@@ -174,16 +202,24 @@ struct Lane {
     spent: Duration,
     forecast: Forecast,
     logged: Option<Instant>,
+    /// Each test's per-second rates this pass, for its steadiness; empty for a lane that is not
+    /// shown test by test.
+    rates: Vec<Histogram>,
+    /// The last rate sample's time and the words done then.
+    sampled: Option<(Instant, u64)>,
 }
 
 impl Lane {
-    fn new(key: Key, schedule: &Schedule, store: &Store) -> Self {
+    /// A lane over `schedule`'s tests; `detailed` keeps their rate samples, and `speed` is the
+    /// calibrated bytes per second to guess untimed tests with.
+    fn new(key: Key, schedule: &Schedule, store: &Store, speed: Option<u64>, detailed: bool) -> Self {
         let names: Vec<&'static str> = TestKind::sequence(schedule.preset()).map(TestKind::name).collect();
         let priors = names.iter().map(|n| store.timings().get(&key, n)).collect();
+        let rates = if detailed { names.iter().map(|_| Histogram::new()).collect() } else { Vec::new() };
         Self {
             key,
             names,
-            estimator: Estimator::new(schedule.shapes().to_vec(), priors),
+            estimator: Estimator::new(schedule.shapes().to_vec(), priors).with_speed(speed),
             meter: RateMeter::new(),
             pass: schedule.passes(),
             seen: None,
@@ -196,7 +232,26 @@ impl Lane {
             spent: Duration::ZERO,
             forecast: Forecast::NONE,
             logged: None,
+            rates,
+            sampled: None,
         }
+    }
+
+    /// Take a rate sample of test `index` once a second of work has gone by, from the words done.
+    /// Work resuming after a wait or a pause starts the sampling over, so a stall is not a sample.
+    fn sample(&mut self, now: Instant, index: usize, done: u64) {
+        let Some((at, words)) = self.sampled.filter(|&(_, words)| done >= words) else {
+            self.sampled = Some((now, done));
+            return;
+        };
+        let span = now - at;
+        if span < SAMPLE_EVERY {
+            return;
+        }
+        if let (Some(hist), Some(rate)) = (self.rates.get_mut(index), bytes_per_sec(done - words, span)) {
+            hist.record(rate);
+        }
+        self.sampled = Some((now, done));
     }
 
     fn label(scope: Scope, pass: u64) -> String {
@@ -205,6 +260,20 @@ impl Lane {
             Scope::Reserve => format!("reserve after pass {pass}"),
         }
     }
+}
+
+/// Bytes of work per second for `words` done in `time`.
+fn bytes_per_sec(words: u64, time: Duration) -> Option<u64> {
+    let nanos = time.as_nanos();
+    if nanos == 0 {
+        return None;
+    }
+    u64::try_from(u128::from(words) * size_of::<u64>() as u128 * 1_000_000_000 / nanos).ok()
+}
+
+/// A rate to the megabyte, which is as fine as anything shows it.
+const fn to_megabytes(rate: u64) -> u64 {
+    rate / 1_000_000 * 1_000_000
 }
 
 /// Predicted and actual as a signed percentage, for the log.
@@ -234,8 +303,21 @@ pub struct Pace {
     main_total: Option<Duration>,
     settled: u64,
     last: Outlook,
+    /// The test the progress and the rate on show were last taken for, and when each was.
+    held_for: Option<(Scope, u64, usize)>,
+    progress_at: Option<Instant>,
     rate_at: Option<Instant>,
     write_failed: bool,
+    /// What the pass's tests measured, by test.
+    stats: TestStats,
+    /// How long each pass took, in milliseconds, and the median of them.
+    pass_times: Histogram,
+    pass_median: Option<Duration>,
+    /// Work time of the tests finished this run that had a saved time, and what those saved times
+    /// say they would take.
+    against_saved: (Duration, Duration),
+    /// Bytes per second the start-up calibration measured.
+    bandwidth: Option<u64>,
 }
 
 impl Pace {
@@ -255,8 +337,15 @@ impl Pace {
             main_total: None,
             settled: 0,
             last: Outlook { goal, ..Outlook::NONE },
+            held_for: None,
+            progress_at: None,
             rate_at: None,
             write_failed: false,
+            stats: TestStats::default(),
+            pass_times: Histogram::new(),
+            pass_median: None,
+            against_saved: (Duration::ZERO, Duration::ZERO),
+            bandwidth: None,
         }
     }
 
@@ -276,6 +365,19 @@ impl Pace {
         self.last.goal = goal;
     }
 
+    /// Bytes per second the start-up calibration measured: shown, and the first guess at how long a
+    /// test without a time on record takes.
+    pub const fn set_bandwidth(&mut self, bytes_per_sec: Option<u64>) {
+        self.bandwidth = bytes_per_sec;
+        self.last.bandwidth = bytes_per_sec;
+    }
+
+    /// What the finished tests of the pass measured.
+    #[must_use]
+    pub const fn stats(&self) -> &TestStats {
+        &self.stats
+    }
+
     /// What the rotation of the reserve covers: the bytes lent for it and the bytes of the sweep's
     /// own memory, which is what scales a pass's time to the rotation's before one has run.
     pub const fn set_rotation_scale(&mut self, lent: u64, main: u64) {
@@ -289,8 +391,14 @@ impl Pace {
         self.rotating_since = None;
         self.main_total = None;
         self.settled = 0;
-        self.last = Outlook { goal: self.goal, ..Outlook::NONE };
+        self.last = Outlook { goal: self.goal, bandwidth: self.bandwidth, ..Outlook::NONE };
+        self.held_for = None;
+        self.progress_at = None;
         self.rate_at = None;
+        self.stats.reset(0);
+        self.pass_times.clear();
+        self.pass_median = None;
+        self.against_saved = (Duration::ZERO, Duration::ZERO);
     }
 
     /// The outlook as of the last observation.
@@ -319,8 +427,11 @@ impl Pace {
                 lane.key = key;
             },
             None => {
-                let lane = Lane::new(key, schedule, &self.store);
+                let lane = Lane::new(key, schedule, &self.store, self.bandwidth, scope == Scope::Main);
                 log::debug!("timings: {} of {} tests known for {}", lane.estimator.known(), lane.names.len(), lane.key);
+                if scope == Scope::Main {
+                    self.stats.reset(lane.names.len());
+                }
                 *slot = Some(lane);
             },
         }
@@ -340,6 +451,7 @@ impl Pace {
                 Position::Work { .. } => lane.estimator.shift(gap),
                 Position::Wait { .. } => lane.disturbed = true,
             }
+            lane.sampled = None;
             return self.last;
         }
         if lane.finished == Some((look.pass, look.index)) {
@@ -347,7 +459,8 @@ impl Pace {
         }
         // A test or pass other than the last one seen means the last one has ended.
         let mut finished = None;
-        if lane.seen != Some((look.pass, look.index)) {
+        let started = lane.seen != Some((look.pass, look.index));
+        if started {
             if let Some((pass, index)) = lane.seen.take() {
                 let took = lane.estimator.finish(index, now, Duration::ZERO);
                 lane.finished = Some((pass, index));
@@ -366,11 +479,24 @@ impl Pace {
             self.begin_pass(look.scope, look.pass);
         }
         let Some(lane) = self.lane_mut(look.scope) else { return self.last };
+        if started {
+            // After the test that ended is recorded: with one test to a pass it is this index again.
+            lane.sampled = None;
+            if let Some(rates) = lane.rates.get_mut(look.index) {
+                rates.clear();
+            }
+        }
         let forecast = lane.estimator.observe(now, look.index, look.done, look.wait_until);
         lane.forecast = forecast;
         match forecast.position {
-            Position::Work { .. } => lane.meter.push(now, look.done),
-            Position::Wait { .. } => lane.meter.reset(),
+            Position::Work { .. } => {
+                lane.meter.push(now, look.done);
+                lane.sample(now, look.index, look.done);
+            },
+            Position::Wait { .. } => {
+                lane.meter.reset();
+                lane.sampled = None;
+            },
         }
         self.note_prediction(look);
         self.refresh(look);
@@ -398,7 +524,7 @@ impl Pace {
         }
     }
 
-    /// Record what test `index` took, and log how the predictions of it came out.
+    /// Record what test `index` took, what it measured, and log how the predictions of it came out.
     fn finish_test(&mut self, scope: Scope, pass: u64, index: usize, took: Duration, predicted: Predicted) {
         let Some(lane) = self.lane_mut(scope) else { return };
         let Some(&name) = lane.names.get(index) else { return };
@@ -418,11 +544,33 @@ impl Pace {
             against(predicted.middle)
         );
         lane.spent += took;
-        if lane.disturbed {
-            lane.disturbed = false;
+        let disturbed = core::mem::take(&mut lane.disturbed);
+        let steadiness = lane.rates.get(index).and_then(Steadiness::of);
+        let (words, waits) = lane.estimator.shapes().get(index).map_or((0, Duration::ZERO), |s| (s.work(), s.waits()));
+        let key = lane.key.clone();
+
+        // What it did, against what the machine took before this one is saved over it.
+        let saved = self.store.timings().get(&key, name);
+        let work_took = took.saturating_sub(waits);
+        let saved_work = saved.map(|s| s.saturating_sub(waits)).filter(|s| !s.is_zero());
+        let rate = bytes_per_sec(words, work_took).filter(|_| !disturbed);
+        let delta = rate.zip(saved_work.and_then(|s| bytes_per_sec(words, s))).and_then(|(r, s)| Delta::between(r, s));
+        log::debug!(
+            "eta: {} {name} worked at {} B/s{}{}",
+            Lane::label(scope, pass),
+            rate.map_or_else(|| String::from("?"), |r| format!("{r}")),
+            delta.map_or_else(String::new, |d| format!(", {d} against the saved time")),
+            steadiness.map_or_else(String::new, |s| format!(", median {} B/s, spread {}", s.median, s.spread)),
+        );
+        if scope == Scope::Main {
+            self.stats.set(index, TestStat { test: name, pass, rate, delta, steadiness });
+        }
+        if disturbed {
             return;
         }
-        let key = lane.key.clone();
+        if let Some(saved_work) = saved_work {
+            self.against_saved = (self.against_saved.0 + work_took, self.against_saved.1 + saved_work);
+        }
         self.store.record(&key, name, took);
     }
 
@@ -445,6 +593,10 @@ impl Pace {
         lane.spent = Duration::ZERO;
         lane.pass_first = None;
         lane.pass_middle = None;
+        if scope == Scope::Main {
+            self.pass_times.record(u64::try_from(took.as_millis()).unwrap_or(u64::MAX));
+            self.pass_median = self.pass_times.quantile(BasisPoints::clamped(5000)).map(Duration::from_millis);
+        }
     }
 
     fn note_prediction(&mut self, look: &Look) {
@@ -461,10 +613,10 @@ impl Pace {
         let Some(left) = f.test_left else { return };
         let point = (f.test_elapsed, f.test_elapsed + left);
         let backed = f.raw.is_some_and(|e| e.confidence == Confidence::Measured);
-        if backed || f.test_permille.is_some_and(|p| p >= 100) {
+        if backed || f.test_progress.is_some_and(|p| p.get() >= 1000) {
             lane.test.first.get_or_insert(point);
         }
-        if f.test_permille.is_some_and(|p| p >= 500) {
+        if f.test_progress.is_some_and(|p| p.get() >= 5000) {
             lane.test.middle.get_or_insert(point);
         }
     }
@@ -482,6 +634,7 @@ impl Pace {
                 if let Some(lane) = self.main.as_mut() {
                     lane.estimator.shift(gone);
                     lane.last_at = None;
+                    lane.sampled = None;
                 }
                 log::info!("eta: the reserve rotation took {}", Compact(whole(gone)));
             },
@@ -501,15 +654,7 @@ impl Pace {
             return;
         };
         let f = lane.forecast;
-        let mut rate_at = self.rate_at;
         let pass = f.shown.map(rounded);
-        let permille = |total: Option<Duration>, left: Option<Duration>| match (total, left) {
-            (Some(t), Some(l)) if !t.is_zero() => {
-                Some(u16::try_from(1000 - (l.as_millis() * 1000 / t.as_millis()).min(1000)).unwrap_or(0))
-            },
-            _ => None,
-        };
-        let pass_permille = permille(f.pass_total, f.raw.map(|e| e.remaining));
         let known = (lane.estimator.known(), lane.names.len());
         let total = f.pass_total;
         let (cycle, cycle_left) = match scope {
@@ -526,36 +671,95 @@ impl Pace {
             },
             Scope::Reserve => (main_total.zip(total).map(|(m, r)| whole(m + r)), pass),
         };
+        // How far through the whole cycle, from the unrounded times: the rounded ones step a second at a time.
+        let cycle_progress = match scope {
+            Scope::Main => {
+                total.zip(rotation).zip(f.raw).map(|((t, r), raw)| (t + r.remaining, raw.remaining + r.remaining))
+            },
+            Scope::Reserve => main_total.zip(total).zip(f.raw).map(|((m, r), raw)| (m + r, raw.remaining)),
+        }
+        .map(|(cycle, left)| BasisPoints::of_time(cycle.saturating_sub(left), cycle));
+
+        let last = self.last;
+        let held = (scope, look.pass, look.index);
+        let retest = self.held_for != Some(held);
+        let progress_due = retest || self.progress_at.is_none_or(|at| now - at >= PROGRESS_EVERY);
+        let rate_due = retest || self.rate_at.is_none_or(|at| now - at >= RATE_EVERY);
+        let (test_progress, pass_progress, cycle_progress) = if progress_due {
+            (f.test_progress.unwrap_or(f.test_words), f.pass_progress.unwrap_or(f.pass_words), cycle_progress)
+        } else {
+            (last.test_progress, last.pass_progress, last.cycle_progress)
+        };
+        let (mut rate, mut test_avg, mut test_delta) = (last.rate, last.test_avg, last.test_delta);
+        if rate_due {
+            rate = lane.meter.bytes_per_sec().map(to_megabytes);
+            (test_avg, test_delta) = self.running_average(lane, look);
+        }
+        if matches!(f.position, Position::Wait { .. }) {
+            rate = None;
+        }
         let outlook = Outlook {
             goal: self.goal,
             settled: self.settled,
             reserve: scope == Scope::Reserve,
-            rate: if matches!(f.position, Position::Wait { .. }) {
-                None
-            } else if self.rate_at.is_none_or(|at| now - at >= RATE_EVERY) {
-                rate_at = Some(now);
-                lane.meter.bytes_per_sec().map(|r| r / 1_000_000 * 1_000_000)
-            } else {
-                self.last.rate
-            },
+            rate,
+            test_avg,
+            test_delta,
             position: match f.position {
                 Position::Wait { nth, waits, left } => Position::Wait { nth, waits, left: whole(left) },
                 work @ Position::Work { .. } => work,
             },
             test_left: f.test_left.map(whole),
-            test_permille: f.test_permille,
+            test_progress,
             pass,
-            pass_permille,
+            pass_progress,
             cycle,
             cycle_left,
+            cycle_progress,
             known,
+            pace_percent: self.pace_percent(),
+            bandwidth: self.bandwidth,
+            pass_median: self.pass_median,
         };
         if scope == Scope::Main {
             self.main_total = total.or(self.main_total);
         }
-        self.rate_at = rate_at;
+        self.held_for = Some(held);
+        if progress_due {
+            self.progress_at = Some(now);
+        }
+        if rate_due {
+            self.rate_at = Some(now);
+        }
         self.last = outlook;
         self.audit(scope, now, look.elapsed);
+    }
+
+    /// The running test's average rate since it began, waits left out, and how it compares with the
+    /// time saved for it; each `None` until there is enough work to say.
+    fn running_average(&self, lane: &Lane, look: &Look) -> (Option<u64>, Option<Delta>) {
+        let f = lane.forecast;
+        let Some(shape) = lane.estimator.shapes().get(look.index) else { return (None, None) };
+        let done = look.done.min(shape.work());
+        let avg = bytes_per_sec(done, f.test_work).filter(|_| f.test_work >= RateMeter::MIN_SPAN);
+        let saved = lane.names.get(look.index).and_then(|name| self.store.timings().get(&lane.key, name));
+        let saved_rate =
+            saved.map(|s| s.saturating_sub(shape.waits())).and_then(|work| bytes_per_sec(shape.work(), work));
+        let delta = avg
+            .filter(|_| f.test_work >= DELTA_AFTER)
+            .zip(saved_rate)
+            .and_then(|(avg, saved)| Delta::between(avg, saved));
+        (avg.map(to_megabytes), delta)
+    }
+
+    /// This run's work time against what the same tests took before, in percent.
+    fn pace_percent(&self) -> Option<u16> {
+        let (actual, saved) = self.against_saved;
+        if saved.is_zero() {
+            return None;
+        }
+        let percent = (actual.as_nanos() * 100 + saved.as_nanos() / 2) / saved.as_nanos();
+        Some(u16::try_from(percent).unwrap_or(u16::MAX))
     }
 
     /// The reserve rotation's time: what the last one took, or this pass's scaled to the reserve's
@@ -600,7 +804,7 @@ impl Pace {
             )
         };
         let test = lane.names.get(lane.seen.map_or(0, |(_, i)| i)).copied().unwrap_or("none");
-        let goal = outlook.overall(elapsed, 0).left;
+        let goal = outlook.overall(elapsed).left;
         let goal_text = if outlook.goal.is_unlimited() {
             String::from("no goal")
         } else {
@@ -831,6 +1035,7 @@ mod tests {
             settled: 1,
             cycle: Some(secs(2400)),
             cycle_left: Some(Eta { remaining: secs(1500), confidence: Confidence::Estimated }),
+            cycle_progress: Some(BasisPoints::of_time(secs(900), secs(2400))),
             ..Outlook::NONE
         }
     }
@@ -841,29 +1046,127 @@ mod tests {
 
     #[rstest]
     #[case::no_goal_no_bar(goal(None, None), 1800, None, None)]
-    #[case::time_budget(goal(None, Some(7200)), 1800, Some(250), Some((5400, Confidence::Measured)))]
-    #[case::passes_by_the_cycle(goal(Some(3), None), 1800, Some(458), Some((3900, Confidence::Estimated)))]
-    #[case::the_nearer_end_wins(goal(Some(3), Some(3600)), 1800, Some(500), Some((1800, Confidence::Measured)))]
-    #[case::past_its_budget(goal(None, Some(600)), 1800, Some(1000), Some((0, Confidence::Measured)))]
+    #[case::time_budget(goal(None, Some(7200)), 1800, Some(2500), Some((5400, Confidence::Measured)))]
+    #[case::passes_by_the_cycle(goal(Some(3), None), 1800, Some(4583), Some((3900, Confidence::Estimated)))]
+    #[case::the_nearer_end_wins(goal(Some(3), Some(3600)), 1800, Some(5000), Some((1800, Confidence::Measured)))]
+    #[case::past_its_budget(goal(None, Some(600)), 1800, Some(10_000), Some((0, Confidence::Measured)))]
     fn the_overall_bar_measures_the_run_against_its_goal(
         #[case] goal: Goal,
         #[case] elapsed: u64,
         #[case] fill: Option<u16>,
         #[case] left: Option<(u64, Confidence)>,
     ) {
-        let overall = outlook(goal).overall(secs(elapsed), 0);
-        check!(overall.fill == fill);
+        let overall = outlook(goal).overall(secs(elapsed));
+        check!(overall.fill.map(BasisPoints::get) == fill);
         check!(overall.left.map(|e| (e.remaining.as_secs(), e.confidence)) == left);
     }
 
     #[test]
     fn a_goal_of_passes_falls_back_on_words_until_there_is_a_forecast_and_ends_when_met() {
-        let mut o = Outlook { goal: goal(Some(4), None), settled: 1, ..Outlook::NONE };
-        let overall = o.overall(secs(100), 50);
-        check!(overall.fill == Some(375) && overall.left.is_none(), "(1 pass + half of one) of 4");
+        let mut o = Outlook {
+            goal: goal(Some(4), None),
+            settled: 1,
+            pass_progress: BasisPoints::new(5000).unwrap(),
+            ..Outlook::NONE
+        };
+        let overall = o.overall(secs(100));
+        check!(
+            overall.fill.map(BasisPoints::get) == Some(3750) && overall.left.is_none(),
+            "(1 pass + half of one) of 4"
+        );
         o.settled = 4;
-        check!(o.overall(secs(100), 0).fill == Some(1000));
+        check!(o.overall(secs(100)).fill == Some(BasisPoints::FULL));
         let only_fault = Outlook { goal: Goal { stop_on_fault: true, ..Goal::UNLIMITED }, ..Outlook::NONE };
-        check!(only_fault.overall(secs(5), 90).fill.is_none(), "stopping at a fault has nothing to fill a bar with");
+        check!(only_fault.overall(secs(5)).fill.is_none(), "stopping at a fault has nothing to fill a bar with");
+    }
+
+    /// A one-second sample of 1000 words a second (8 kB/s) for each second `from..=to`, on the first test.
+    fn run_first_test(pace: &mut Pace, from: u64, to: u64) {
+        for t in from..=to {
+            pace.observe(&look(Scope::Main, t, 0, 0, (t - from) * 100));
+        }
+    }
+
+    #[test]
+    fn a_finished_test_reports_its_rate_over_work_time_only_and_against_its_saved_time() {
+        let schedule = schedule(Preset::Thorough);
+        let tests = schedule.shapes().len();
+        let bit_fade = tests - 1;
+        let fade = schedule.shapes()[bit_fade].clone();
+        // Saved: everything took 16 s, bit fade 16 s of work and its waits.
+        let key = key(Preset::Thorough);
+        let mut timings = Timings::default();
+        for (i, kind) in TestKind::sequence(Preset::Thorough).enumerate() {
+            let saved = if i == bit_fade { secs(16) + fade.waits() } else { secs(16) };
+            timings.record(&key, kind.name(), saved);
+        }
+        let mut pace = Pace::new(Goal::UNLIMITED, Machine::UNKNOWN, Store::new(timings), None);
+        pace.prepare(Scope::Main, &schedule, 1, "scalar");
+        // The first test ran 8 s instead of 16: twice as fast as saved.
+        pace.observe(&look(Scope::Main, 0, 0, 0, 0));
+        pace.observe(&look(Scope::Main, 8, 0, 1, 0));
+        let first = TestKind::sequence(Preset::Thorough).next().unwrap();
+        assert!(let Some(stat) = pace.stats().get(0, first.name()).copied());
+        let words = schedule.shapes()[0].work();
+        check!(stat.rate == Some(words), "8 bytes a word over 8 seconds");
+        check!(stat.delta.map(Delta::percent) == Some(100));
+        check!(pace.observe(&look(Scope::Main, 8, 0, 1, 0)).pace_percent == Some(50));
+    }
+
+    #[test]
+    fn rates_are_sampled_once_a_second_of_work_and_a_wait_does_not_count() {
+        let schedule = schedule(Preset::Thorough);
+        let mut pace = pace_with(&[], None);
+        pace.prepare(Scope::Main, &schedule, 1, "scalar");
+        // Ten seconds at a steady 100 words a second, then the next test shows up.
+        run_first_test(&mut pace, 0, 10);
+        pace.observe(&look(Scope::Main, 10, 0, 1, 0));
+        let first = TestKind::sequence(Preset::Thorough).next().unwrap();
+        assert!(let Some(stat) = pace.stats().get(0, first.name()).copied());
+        assert!(let Some(steadiness) = stat.steadiness);
+        check!(steadiness.median.abs_diff(800) * 64 <= 800, "{}", steadiness.median);
+        check!(!steadiness.unsteady());
+    }
+
+    #[test]
+    fn progress_on_show_changes_a_few_times_a_second_not_with_every_look() {
+        let schedule = schedule(Preset::Thorough);
+        let mut pace = pace_with(&[(Preset::Thorough, 10)], None);
+        pace.prepare(Scope::Main, &schedule, 1, "scalar");
+        let at_ms = |ms: u64, done| {
+            let mut l = look(Scope::Main, 0, 0, 0, done);
+            l.now = Instant::from_epoch(Duration::from_millis(ms));
+            l
+        };
+        let first = pace.observe(&at_ms(0, 0));
+        let soon = pace.observe(&at_ms(100, 200));
+        check!(soon.test_progress == first.test_progress, "100 ms later it is the same figure");
+        let later = pace.observe(&at_ms(250, 500));
+        check!(later.test_progress > first.test_progress);
+        // A new test does not wait for the next turn of the figure.
+        let mut next = at_ms(260, 0);
+        next.index = 1;
+        check!(pace.observe(&next).test_progress.get() == 0);
+    }
+
+    #[test]
+    fn the_running_test_is_set_against_its_saved_time_once_it_has_some_work_behind_it() {
+        let schedule = schedule(Preset::Standard);
+        let words = schedule.shapes()[0].work();
+        // Saved: 10 s for the first test, so `words` in 10 s.
+        let mut pace = pace_with(&[(Preset::Standard, 10)], None);
+        pace.prepare(Scope::Main, &schedule, 1, "scalar");
+        let at_ms = |ms: u64, done| {
+            let mut l = look(Scope::Main, 0, 0, 0, done);
+            l.now = Instant::from_epoch(Duration::from_millis(ms));
+            l
+        };
+        pace.observe(&at_ms(0, 0));
+        // Over a second in, at twice the saved speed: an average but no comparison yet.
+        let early = pace.observe(&at_ms(1_000, words / 5));
+        check!(early.test_avg == Some(words / 5 * 8 / 1_000_000 * 1_000_000));
+        check!(early.test_delta.is_none());
+        let later = pace.observe(&at_ms(3_000, words * 3 / 5));
+        check!(later.test_delta.map(Delta::percent) == Some(100), "{:?}", later.test_delta);
     }
 }

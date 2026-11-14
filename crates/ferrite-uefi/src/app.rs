@@ -212,7 +212,9 @@ impl<'a> App<'a> {
             commands: Commands::default(),
             goal_met: false,
         };
-        Ok(Self { desk, sweep: Sweep::new(caps, cores), chunk_bytes: START_CHUNK_BYTES, vector })
+        let mut sweep = Sweep::new(caps, cores);
+        sweep.measure_bandwidth(&clock, vector);
+        Ok(Self { desk, sweep, chunk_bytes: START_CHUNK_BYTES, vector })
     }
 
     fn now(&self) -> Instant {

@@ -17,7 +17,7 @@ use core::time::Duration;
 
 use ferrite_hal::Instant;
 use ferrite_mem::analysis::Classification;
-use ferrite_mem::eta::{Eta, Position};
+use ferrite_mem::eta::{BasisPoints, Eta, Position};
 use ferrite_mem::suite::{Mode, Preset, TestKind};
 use ferrite_net::NetStatus;
 use snafu::{OptionExt as _, ResultExt as _, Snafu};
@@ -28,7 +28,7 @@ use crate::gfx::text::{FontError, Fonts};
 use crate::gfx::{Canvas, DirtyRects, Recording, Rect};
 use crate::goal::Goal;
 use crate::net::NoNetwork;
-use crate::pace::Overall;
+use crate::pace::{Delta, Overall};
 use crate::report::{FaultRecord, Snapshot};
 use crate::sweep::{Coverage, SweepStatus};
 
@@ -63,10 +63,11 @@ impl Frame<'_> {
         self.snapshot.history.run_started.map_or(Duration::ZERO, |start| self.now - start)
     }
 
-    /// The run against its goal, by the whole second so what it prints changes once a second.
+    /// The run against its goal, by the quarter second: the bar of a short goal moves that often,
+    /// and the clock it prints, in whole seconds, still changes once a second.
     fn overall(&self) -> Overall {
-        let s = self.status();
-        s.outlook.overall(Duration::from_secs(self.elapsed().as_secs()), s.percent)
+        let quarters = self.elapsed().as_millis() / 250;
+        self.status().outlook.overall(Duration::from_millis(u64::try_from(quarters * 250).unwrap_or(u64::MAX)))
     }
 
     fn pass_elapsed(&self) -> Duration {
@@ -99,17 +100,25 @@ struct Setup {
     height: u32,
 }
 
+/// The running test's figures that move: its rate now, its average and the average's change from
+/// the saved time.
+type Live = (Option<u64>, Option<u64>, Option<Delta>);
+type SystemKey = (Preset, &'static str, usize, usize, Mode, usize, Coverage, (usize, usize), Option<u64>);
+type PassKey = (u64, u64, bool, Option<Eta>, BasisPoints, (Option<BasisPoints>, Option<Eta>, u64));
+type DetailKey = (Mode, usize, usize, u64, Live, Position, Option<u16>);
+type TestsKey = (u64, (usize, usize), u64, bool, u64, Live);
+
 /// What each widget shows; a widget is redrawn when its part differs from the last frame's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Keys {
     setup: Setup,
     clock: (State, u64, u64),
     tabs: u64,
-    system: (Preset, &'static str, usize, usize, Mode, usize, Coverage, (usize, usize)),
-    pass: (u64, u16, u64, bool, Option<Eta>, Option<u16>, Overall),
-    test: ((usize, usize), u16, bool, Option<u16>, Position, Option<Duration>),
-    detail: (Mode, usize, usize, u64, Option<u64>, Position),
-    tests: (u64, (usize, usize), u64, bool),
+    system: SystemKey,
+    pass: PassKey,
+    test: ((usize, usize), u16, bool, BasisPoints, Position, Option<Duration>),
+    detail: DetailKey,
+    tests: TestsKey,
     map: ((usize, usize), Option<usize>, usize),
     net: (Option<NetStatus>, Option<NoNetwork>),
     errors: (u64, usize, Option<FaultRecord>, Classification, u64),
@@ -121,30 +130,49 @@ impl Keys {
     fn of(f: &Frame<'_>, (width, height): (u32, u32)) -> Self {
         let s = f.status();
         let history = f.snapshot.history;
+        let overall = f.overall();
+        let live = (s.outlook.rate, s.outlook.test_avg, s.outlook.test_delta);
         Self {
             setup: Setup { width, height },
             clock: (f.state(), s.faults, f.elapsed().as_secs()),
             tabs: s.faults,
-            system: (s.preset, s.tier, s.bytes, history.cpus.len(), s.mode, s.cpus, s.coverage, s.outlook.known),
+            system: (
+                s.preset,
+                s.tier,
+                s.bytes,
+                history.cpus.len(),
+                s.mode,
+                s.cpus,
+                s.coverage,
+                s.outlook.known,
+                s.outlook.bandwidth,
+            ),
             pass: (
                 s.passes,
-                s.percent,
                 f.pass_elapsed().as_secs(),
                 s.paused,
                 s.outlook.pass,
-                s.outlook.pass_permille,
-                f.overall(),
+                s.outlook.pass_progress,
+                (overall.fill, overall.left, overall.elapsed.as_secs()),
             ),
             test: (
                 s.position,
                 s.test_percent,
                 s.paused,
-                s.outlook.test_permille,
+                s.outlook.test_progress,
                 s.outlook.position,
                 s.outlook.test_left,
             ),
-            detail: (s.mode, s.cpus, history.cpus.len(), history.revision, s.outlook.rate, s.outlook.position),
-            tests: (history.revision, s.position, s.passes, s.paused),
+            detail: (
+                s.mode,
+                s.cpus,
+                history.cpus.len(),
+                history.revision,
+                live,
+                s.outlook.position,
+                s.outlook.pace_percent,
+            ),
+            tests: (history.revision, s.position, s.passes, s.paused, f.snapshot.stats.revision, live),
             map: (s.position, (s.position.1 > 0).then(|| widgets::active_cell(s.test_percent)), s.bytes),
             net: (f.net, f.net_err),
             errors: (s.faults, f.snapshot.faults.len(), f.snapshot.faults.back().copied(), s.analysis, s.passes),

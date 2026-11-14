@@ -25,10 +25,12 @@ use ferrite_hal::Instant;
 
 use crate::suite::{Place, Shape, Stage};
 
+mod basis;
 mod rate;
 #[cfg(test)]
 mod tests;
 
+pub use basis::BasisPoints;
 pub use rate::RateMeter;
 
 /// Per mille of a test done at which its own extrapolation has all the weight, and from which it
@@ -87,13 +89,20 @@ pub struct Forecast {
     pub raw: Option<Eta>,
     /// Time left in the running test.
     pub test_left: Option<Duration>,
-    /// How far through the running test it is, per mille: by words for a test that only works, by
-    /// time for one that waits, whose words stand still for minutes at a time.
-    pub test_permille: Option<u16>,
-    /// How long the running test has been going, waits included.
+    /// How far through the running test it is: by words for a test that only works, by time for
+    /// one that waits, whose words stand still for minutes at a time.
+    pub test_progress: Option<BasisPoints>,
+    /// How far through the running test's words it is, whatever it waits for.
+    pub test_words: BasisPoints,
+    /// How long the running test has been going, waits included, and how much of that was work.
     pub test_elapsed: Duration,
+    pub test_work: Duration,
     /// The pass's whole length as predicted now: what has passed plus what is left.
     pub pass_total: Option<Duration>,
+    /// How far through the pass it is by time, once it has a length.
+    pub pass_progress: Option<BasisPoints>,
+    /// How far through the pass's words it is.
+    pub pass_words: BasisPoints,
     pub position: Position,
 }
 
@@ -102,9 +111,13 @@ impl Forecast {
         shown: None,
         raw: None,
         test_left: None,
-        test_permille: None,
+        test_progress: None,
+        test_words: BasisPoints::ZERO,
         test_elapsed: Duration::ZERO,
+        test_work: Duration::ZERO,
         pass_total: None,
+        pass_progress: None,
+        pass_words: BasisPoints::ZERO,
         position: Position::NONE,
     };
 }
@@ -136,6 +149,8 @@ pub struct Estimator {
     /// The end of the pass as predicted at each sample: (when sampled, predicted end).
     samples: VecDeque<(Instant, Instant)>,
     forecast: Forecast,
+    /// Bytes of work per second a calibration measured, to guess with before any test has finished.
+    speed: Option<u64>,
 }
 
 /// `d * num / den`, in nanoseconds so nothing overflows or truncates early.
@@ -169,7 +184,16 @@ impl Estimator {
             next_start: None,
             samples: VecDeque::new(),
             forecast: Forecast::NONE,
+            speed: None,
         }
+    }
+
+    /// Guess the time of a test with no prior at `bytes_per_sec` of work until this pass has
+    /// measured a pace of its own.
+    #[must_use]
+    pub const fn with_speed(mut self, bytes_per_sec: Option<u64>) -> Self {
+        self.speed = bytes_per_sec;
+        self
     }
 
     #[must_use]
@@ -320,7 +344,7 @@ impl Estimator {
         let prior_work = self.priors[index].map(|p| p.saturating_sub(shape.waits()));
         let live = (done > 0 && !work_time.is_zero() && work > 0)
             .then(|| scale(work_time, u128::from(work), u128::from(done)));
-        let pace_guess = (fin_words > 0).then(|| scale(fin_time, u128::from(work), fin_words));
+        let pace_guess = self.guess(fin_time, fin_words, work);
         let base = prior_work.or(pace_guess);
         let frac = if work == 0 { 1000 } else { u128::from(done) * 1000 / u128::from(work) };
         let weight = (frac * 1000 / LIVE_FROM).min(1000);
@@ -342,9 +366,8 @@ impl Estimator {
         let mut later_all_known = true;
         for (k, shape_k) in self.shapes.iter().enumerate().skip(index + 1) {
             later_all_known &= self.priors[k].is_some();
-            let guess = self.priors[k].or_else(|| {
-                (pace_words > 0).then(|| scale(pace_time, u128::from(shape_k.work()), pace_words) + shape_k.waits())
-            });
+            let guess = self.priors[k]
+                .or_else(|| self.guess(pace_time, pace_words, shape_k.work()).map(|work| work + shape_k.waits()));
             later = later.zip(guess).map(|(a, b)| a + b);
         }
 
@@ -359,18 +382,38 @@ impl Estimator {
 
         let before: Option<Duration> = (0..index).map(|k| self.took[k].or(self.priors[k])).sum();
         let pass_total = before.zip(remaining).map(|(b, r)| b + elapsed + r);
-        let test_permille = if shape.wait_count() == 0 {
-            Some(u16::try_from(frac.min(1000)).unwrap_or(1000))
+        let pass_progress = before.zip(pass_total).map(|(b, total)| BasisPoints::of_time(b + elapsed, total));
+        let test_words = BasisPoints::of(done, work);
+        let test_progress = if shape.wait_count() == 0 {
+            Some(test_words)
         } else {
-            test_left.map(|left| {
-                let total = elapsed + left;
-                u16::try_from(
-                    if total.is_zero() { 1000 } else { elapsed.as_nanos() * 1000 / total.as_nanos() }.min(1000),
-                )
-                .unwrap_or(1000)
-            })
+            test_left.map(|left| BasisPoints::of_time(elapsed, elapsed + left))
         };
-        Forecast { shown: None, raw, test_left, test_permille, test_elapsed: elapsed, pass_total, position }
+        let pass_work: u64 = self.shapes.iter().map(Shape::work).sum();
+        let words_before: u64 = self.shapes[..index].iter().map(Shape::work).sum();
+        Forecast {
+            shown: None,
+            raw,
+            test_left,
+            test_progress,
+            test_words,
+            test_elapsed: elapsed,
+            test_work: work_time,
+            pass_total,
+            pass_progress,
+            pass_words: BasisPoints::of(words_before + done, pass_work),
+            position,
+        }
+    }
+
+    /// The time `words` of work take at the pace of `time` for `done` words, or at the calibrated
+    /// speed while nothing has been measured.
+    fn guess(&self, time: Duration, done: u128, words: u64) -> Option<Duration> {
+        if done > 0 {
+            return Some(scale(time, u128::from(words), done));
+        }
+        let bytes_per_sec = u128::from(self.speed.filter(|&s| s > 0)?);
+        Some(scale(Duration::from_secs(1), u128::from(words) * size_of::<u64>() as u128, bytes_per_sec))
     }
 
     /// Record this forecast's end once a second, and give it back if it is fit to show.
