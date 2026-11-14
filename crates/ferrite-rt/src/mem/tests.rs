@@ -42,6 +42,9 @@ fn fill_stores_only_the_range() {
 #[case::bytes_compare_unsigned(b"ab\x80d", b"ab\x01d", 0x7f)]
 #[case::less(b"ab\x01d", b"ab\x80d", -0x7f)]
 #[case::first_difference_wins(b"\x00\xff", b"\x01\x00", -1)]
+#[case::equal_past_a_word(b"0123456789abcdefXY", b"0123456789abcdefXY", 0)]
+#[case::first_difference_in_a_word_wins(b"0123\x80\x00670123", b"0123\x01\xff670123", 0x7f)]
+#[case::difference_in_the_tail(b"01234567ab\x02", b"01234567ab\x05", -3)]
 fn compare_signs(#[case] a: &[u8], #[case] b: &[u8], #[case] want: c_int) {
     let n = a.len().min(b.len());
     // SAFETY: `n` is within both slices.

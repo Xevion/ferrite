@@ -70,16 +70,31 @@ unsafe fn fill(dst: *mut u8, byte: u8, n: usize) {
 }
 
 /// The difference of the first differing bytes, compared as unsigned, or 0 when all `n` match.
+/// Eight bytes at a time: slice equality comes here, and a byte loop runs at a byte per cycle.
 ///
 /// # Safety
 /// `lhs` and `rhs` are readable for `n` bytes.
 unsafe fn compare(lhs: *const u8, rhs: *const u8, n: usize) -> c_int {
-    for i in 0..n {
+    let mut i = 0;
+    while i + 8 <= n {
+        // SAFETY: `i + 8 <= n`, inside both of the caller's ranges; unaligned reads need no alignment.
+        let (l, r) = unsafe { (lhs.add(i).cast::<u64>().read_unaligned(), rhs.add(i).cast::<u64>().read_unaligned()) };
+        if l != r {
+            // Little-endian: the lowest differing bit is in the first differing byte.
+            let at = i + ((l ^ r).trailing_zeros() / 8) as usize;
+            // SAFETY: `at < i + 8 <= n`.
+            let (l, r) = unsafe { (*lhs.add(at), *rhs.add(at)) };
+            return c_int::from(l) - c_int::from(r);
+        }
+        i += 8;
+    }
+    while i < n {
         // SAFETY: `i < n`, inside both of the caller's ranges.
         let (l, r) = unsafe { (*lhs.add(i), *rhs.add(i)) };
         if l != r {
             return c_int::from(l) - c_int::from(r);
         }
+        i += 1;
     }
     0
 }
