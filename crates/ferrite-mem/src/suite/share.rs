@@ -3,14 +3,17 @@
 //! A split test runs [`Test::for_share`](super::Test::for_share) on every share at once, and the
 //! cores meet at each gated phase boundary ([`Test::gated`](super::Test::gated)), as memtest86+'s
 //! parallel mode does with its barriers. Every word then gets the same values and checks as in the
-//! whole-region run, since the sequences continue across shares; what changes is the order in
+//! whole-set run, since the sequences continue across shares; what changes is the order in
 //! which words of different shares are touched within a phase.
 
 use core::num::NonZeroUsize;
 
-use super::plan::{Span, move_window};
+use alloc::vec;
+use alloc::vec::Vec;
+
+use super::plan::{Span, move_windows};
 use super::{Config, TestKind};
-use crate::region::{BLOCK_WORDS, Region};
+use crate::region::{Layout, Regions};
 
 /// How a test runs when several cores are available.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
@@ -41,31 +44,42 @@ impl TestKind {
     }
 }
 
-/// The words every share of `kind` but the last is a whole number of: a block, or for the block
-/// move one window, so no window spans two shares.
-fn unit(kind: TestKind, cfg: &Config) -> usize {
-    match kind {
-        TestKind::BlockMove => move_window(cfg),
-        _ => BLOCK_WORDS,
-    }
-}
-
-/// Words in each share of `kind` over `words` words for at most `parts` cores; the last share may
-/// be shorter, and a single-core test gets one share of everything.
-fn share_words(kind: TestKind, cfg: &Config, words: usize, parts: NonZeroUsize) -> usize {
-    let parts = if kind.mode() == Mode::Single { 1 } else { parts.get() };
-    let unit = unit(kind, cfg);
-    words.div_ceil(unit).div_ceil(parts).max(1) * unit
-}
-
-/// `region` cut into the consecutive shares of `kind` for at most `parts` cores, each with its span
-/// in the whole region.
+/// `regions` cut into the consecutive shares of `kind` for at most `parts` cores, each with its span
+/// of the whole set.
+///
+/// A single-core test gets one share of everything. Otherwise the shares are cut between block-move
+/// windows (see [`move_windows`]) so that none spans two, and the cuts are the same for every
+/// split test, so a run of them can keep each core on its own memory throughout. Each share takes
+/// about its fair share of what is left of the words, so shares differ by less than a window.
 pub fn shares<'r>(
-    region: &'r mut Region<'_>,
+    regions: &'r mut Regions<'_>,
     kind: TestKind,
     cfg: &Config,
     parts: NonZeroUsize,
-) -> impl ExactSizeIterator<Item = (Span, Region<'r>)> {
-    let step = share_words(kind, cfg, region.words(), parts);
-    region.chunks(step).enumerate().map(move |(i, r)| (Span { start: i * step, words: r.words() }, r))
+) -> impl ExactSizeIterator<Item = (Span, Regions<'r>)> {
+    let spans = share_spans(&regions.layout(), kind, cfg, parts);
+    let views = regions.split(&spans);
+    spans.into_iter().zip(views)
+}
+
+/// The spans of `kind`'s shares over `layout` for at most `parts` cores.
+pub(super) fn share_spans(layout: &Layout, kind: TestKind, cfg: &Config, parts: NonZeroUsize) -> Vec<Span> {
+    let words = layout.words();
+    if kind.mode() == Mode::Single {
+        return vec![Span { start: 0, words }];
+    }
+    let mut spans: Vec<Span> = Vec::new();
+    let mut start = 0;
+    for window in move_windows(layout, cfg) {
+        let left = parts.get() - spans.len();
+        let target = (words - start).div_ceil(left);
+        if left > 1 && window.start - start >= target {
+            spans.push(Span { start, words: window.start - start });
+            start = window.start;
+        }
+    }
+    if start < words {
+        spans.push(Span { start, words: words - start });
+    }
+    spans
 }

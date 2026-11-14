@@ -16,6 +16,27 @@ use crate::rotating::Rotating;
 use crate::tests::{Buf, kernels};
 
 const WORDS: usize = 2048;
+/// Memory in separate host buffers, one region each, so addresses jump between regions.
+struct Mem {
+    bufs: Vec<Buf>,
+}
+
+impl Mem {
+    fn new(layout: &[usize]) -> Self {
+        Self { bufs: layout.iter().map(|&words| Buf::new(words)).collect() }
+    }
+
+    fn regions(&mut self) -> Regions<'_> {
+        Regions::new(self.bufs.iter_mut().map(Buf::region))
+    }
+}
+
+/// The same 2048 words as one region and as three of whole move windows each, so a test has the
+/// same phases over both.
+const LAYOUTS: [&[usize]; 2] = [&[WORDS], &[512, 1024, 512]];
+/// Three regions, none a whole number of move windows, so the last window of each is short.
+const RAGGED: &[usize] = &[640, 768, 640];
+const ALL_LAYOUTS: [&[usize]; 3] = [LAYOUTS[0], LAYOUTS[1], RAGGED];
 /// Seven blocks, which divides no span, so every phase ends on a short chunk.
 const CHUNK_BYTES: usize = 7 * 64;
 
@@ -47,7 +68,7 @@ enum Injection {
 
 impl Injection {
     /// Corrupt `region`, returning the fault the next read of the victim must report.
-    fn apply(self, region: &mut Region<'_>) -> Fault {
+    fn apply(self, region: &mut Regions<'_>) -> Fault {
         let (victim, actual) = match self {
             Self::Flip { word, mask } => (word, region.peek(word) ^ mask),
             Self::Couple { aggressor, victim, mask } => (victim, region.peek(victim) ^ (region.peek(aggressor) & mask)),
@@ -65,13 +86,13 @@ impl Injection {
 fn run(
     kind: TestKind,
     kernels: Kernels,
-    buf: &mut Buf,
+    mem: &mut Mem,
     inject: Option<(usize, Injection)>,
 ) -> (Vec<Fault>, Option<Fault>) {
     let mut reported = Vec::new();
     let mut sink = |f| reported.push(f);
     let mut faults = Faults::new(64, &mut sink);
-    let mut region = buf.region();
+    let mut region = mem.regions();
     let mut test = Test::new(kind, CFG, 0, &region);
     let mut now = Instant::default();
     let mut want = None;
@@ -96,10 +117,12 @@ fn run(
 
 #[test]
 fn every_test_passes_clean_memory_on_every_tier() {
-    for &kind in TestKind::ALL {
-        for kernel in kernels() {
-            let (faults, _) = run(kind, Kernels::uniform(kernel), &mut Buf::new(WORDS), None);
-            check!(faults.is_empty(), "{kind:?} on {kernel}");
+    for layout in ALL_LAYOUTS {
+        for &kind in TestKind::ALL {
+            for kernel in kernels() {
+                let (faults, _) = run(kind, Kernels::uniform(kernel), &mut Mem::new(layout), None);
+                check!(faults.is_empty(), "{kind:?} on {kernel} over {layout:?}");
+            }
         }
     }
 }
@@ -108,9 +131,11 @@ fn every_test_passes_clean_memory_on_every_tier() {
 fn every_test_passes_clean_memory_with_the_mixed_kernels() {
     // SAFETY: the flags come from the host's own feature detection.
     let caps = unsafe { Caps::new(std::is_x86_feature_detected!("avx2"), std::is_x86_feature_detected!("avx512f")) };
-    for &kind in TestKind::ALL {
-        let (faults, _) = run(kind, Kernels::for_caps(caps), &mut Buf::new(WORDS), None);
-        check!(faults.is_empty(), "{kind:?}");
+    for layout in ALL_LAYOUTS {
+        for &kind in TestKind::ALL {
+            let (faults, _) = run(kind, Kernels::for_caps(caps), &mut Mem::new(layout), None);
+            check!(faults.is_empty(), "{kind:?} over {layout:?}");
+        }
     }
 }
 
@@ -154,10 +179,13 @@ fn an_injected_fault_is_reported_exactly_on_every_tier(
     #[case] after_phase: usize,
     #[case] injection: Injection,
 ) {
-    for kernel in kernels() {
-        let (faults, want) = run(kind, Kernels::uniform(kernel), &mut Buf::new(WORDS), Some((after_phase, injection)));
-        assert!(let Some(want) = want, "{kind:?}: phase {after_phase} never ended");
-        check!(faults == [want], "{kind:?} on {kernel}");
+    for layout in LAYOUTS {
+        for kernel in kernels() {
+            let (faults, want) =
+                run(kind, Kernels::uniform(kernel), &mut Mem::new(layout), Some((after_phase, injection)));
+            assert!(let Some(want) = want, "{kind:?}: phase {after_phase} never ended");
+            check!(faults == [want], "{kind:?} on {kernel} over {layout:?}");
+        }
     }
 }
 
@@ -266,10 +294,10 @@ fn a_descending_prsg_inversion_reports_faults_top_down() {
 
 #[test]
 fn a_suite_runs_its_preset_in_order_pass_after_pass() {
-    let mut buf = Buf::new(WORDS);
+    let mut mem = Mem::new(RAGGED);
     let mut sink = |_| {};
     let mut faults = Faults::new(0, &mut sink);
-    let mut suite = Suite::new(buf.region(), Kernels::uniform(Kernel::SCALAR), CFG, Preset::Quick);
+    let mut suite = Suite::new(mem.regions(), Kernels::uniform(Kernel::SCALAR), CFG, Preset::Quick);
     let mut seen = Vec::new();
     let mut last_percent = 0;
     while suite.passes() < 2 {
@@ -294,38 +322,56 @@ fn a_suite_runs_its_preset_in_order_pass_after_pass() {
 #[case::two(2)]
 #[case::three(3)]
 #[case::five(5)]
-fn shares_tile_the_region_on_whole_windows(#[case] parts: usize) {
+fn shares_tile_the_set_and_keep_move_windows_whole(#[case] parts: usize) {
     let parts = NonZeroUsize::new(parts).unwrap();
-    let window = plan::move_window(&CFG);
-    for &kind in TestKind::ALL {
-        let mut buf = Buf::new(WORDS);
-        let mut region = buf.region();
-        let base = region.base().get();
-        let got: Vec<(Span, usize, usize)> =
-            shares(&mut region, kind, &CFG, parts).map(|(span, r)| (span, r.base().get() - base, r.words())).collect();
-        let mut next = 0;
-        for &(span, offset, words) in &got {
-            check!(span.start == next, "{kind:?}");
-            check!(offset == 8 * span.start, "{kind:?}");
-            check!(words == span.words && words > 0 && words % BLOCK_WORDS == 0, "{kind:?}");
-            next = span.end();
-        }
-        check!(next == WORDS, "{kind:?}");
-        let want_one = kind.mode() == Mode::Single;
-        check!((got.len() == 1) == want_one, "{kind:?}: {} shares", got.len());
-        if kind == TestKind::BlockMove {
-            check!(got.iter().all(|&(span, ..)| span.start % window == 0), "no window spans two shares");
+    for layout in ALL_LAYOUTS {
+        for &kind in TestKind::ALL {
+            let mut mem = Mem::new(layout);
+            let mut regions = mem.regions();
+            let addrs: Vec<usize> = (0..WORDS).map(|w| regions.addr(w).get()).collect();
+            let whole = regions.layout();
+            let got: Vec<(Span, usize, usize)> =
+                shares(&mut regions, kind, &CFG, parts).map(|(span, r)| (span, r.addr(0).get(), r.words())).collect();
+            let mut next = 0;
+            for &(span, first, words) in &got {
+                check!(span.start == next, "{kind:?} over {layout:?}");
+                check!(first == addrs[span.start], "{kind:?} over {layout:?}");
+                check!(words == span.words && words > 0 && words % BLOCK_WORDS == 0, "{kind:?} over {layout:?}");
+                next = span.end();
+            }
+            check!(next == WORDS, "{kind:?} over {layout:?}");
+            let want_one = kind.mode() == Mode::Single;
+            check!((got.len() == 1) == want_one, "{kind:?}: {} shares", got.len());
+            for window in plan::move_windows(&whole, &CFG) {
+                check!(got.iter().filter(|(s, ..)| s.contains(window)).count() == 1, "{window:?} spans two shares");
+                check!(whole.spans().iter().any(|r| r.contains(window)), "{window:?} spans two regions");
+            }
         }
     }
 }
 
-/// Words of the region behind `shares`, read through them in order.
-fn snapshot(shares: &[(Span, Region<'_>)]) -> Vec<u64> {
+#[rstest]
+#[case::two(2)]
+#[case::three(3)]
+#[case::five(5)]
+fn shares_are_balanced_to_a_window(#[case] parts: usize) {
+    let layout = Layout::new([4096, 2048 + 128, 640]);
+    let window = plan::move_window(&CFG);
+    let cuts = share::share_spans(&layout, TestKind::SolidBits, &CFG, NonZeroUsize::new(parts).unwrap());
+    let sizes: Vec<usize> = cuts.iter().map(|s| s.words).collect();
+    check!(cuts.len() == parts, "{sizes:?}");
+    check!(sizes.iter().sum::<usize>() == layout.words(), "{sizes:?}");
+    let (big, small) = (sizes.iter().max().unwrap(), sizes.iter().min().unwrap());
+    check!(big - small <= 2 * window, "{sizes:?}");
+}
+
+/// Words of the regions behind `shares`, read through them in order.
+fn snapshot(shares: &[(Span, Regions<'_>)]) -> Vec<u64> {
     shares.iter().flat_map(|(_, r)| (0..r.words()).map(|w| r.peek(w))).collect()
 }
 
-/// [`Injection::apply`] on the region behind `shares`, by word of the whole region.
-fn inject_split(injection: Injection, shares: &mut [(Span, Region<'_>)]) {
+/// [`Injection::apply`] on the regions behind `shares`, by word of the whole set.
+fn inject_split(injection: Injection, shares: &mut [(Span, Regions<'_>)]) {
     let find = |w: usize| shares.iter().position(|(s, _)| s.contains(Span { start: w, words: 1 })).unwrap();
     let peek = |w: usize| {
         let (span, region) = &shares[find(w)];
@@ -340,28 +386,33 @@ fn inject_split(injection: Injection, shares: &mut [(Span, Region<'_>)]) {
     region.poke(victim - span.start, actual);
 }
 
-/// A fault by its word index in the region, as single and split runs over different buffers can
+/// A fault by its word index in the set, as single and split runs over different buffers can
 /// only be compared.
 type At = (usize, u64, u64);
 
-/// Run `kind` over the whole region and split `parts` ways, phase by phase in lockstep, injecting
-/// after phase `after` in both. Memory must match after every phase, and the faults must too; the
-/// split run's faults must come from the share holding the word.
-fn split_matches_whole(kind: TestKind, parts: usize, inject: Option<(usize, Injection)>) {
+/// The word of the set at `addr`, given each word's address.
+fn word_at(addrs: &[usize], f: &Fault) -> usize {
+    addrs.iter().position(|&a| a == f.addr.get()).unwrap()
+}
+
+/// Run `kind` over the whole set of regions laid out as `layout` and split `parts` ways, phase by
+/// phase in lockstep, injecting after phase `after` in both. Memory must match after every phase,
+/// and the faults must too; the split run's faults must come from the share holding the word.
+fn split_matches_whole(kind: TestKind, layout: &[usize], parts: usize, inject: Option<(usize, Injection)>) {
     // SAFETY: the flags come from the host's own feature detection.
     let caps = unsafe { Caps::new(std::is_x86_feature_detected!("avx2"), std::is_x86_feature_detected!("avx512f")) };
     let kernels = Kernels::for_caps(caps);
     let mut now = Instant::default();
 
-    let mut whole_buf = Buf::new(WORDS);
-    let mut whole_region = whole_buf.region();
-    let base = whole_region.addr(0).get();
+    let mut whole_mem = Mem::new(layout);
+    let mut whole_region = whole_mem.regions();
+    let addrs: Vec<usize> = (0..WORDS).map(|w| whole_region.addr(w).get()).collect();
     let mut whole = Test::new(kind, CFG, 0, &whole_region);
     let mut whole_faults: Vec<At> = Vec::new();
     let mut whole_memory = Vec::new();
     for p in 0..whole.phases() {
         while whole.phase() == p {
-            let mut sink = |f: Fault| whole_faults.push(((f.addr.get() - base) / 8, f.expected, f.actual));
+            let mut sink = |f: Fault| whole_faults.push((word_at(&addrs, &f), f.expected, f.actual));
             let mut faults = Faults::new(64, &mut sink);
             if let Progress::Waiting { until } = whole.step(&mut whole_region, &kernels, CHUNK_BYTES, now, &mut faults)
             {
@@ -374,19 +425,21 @@ fn split_matches_whole(kind: TestKind, parts: usize, inject: Option<(usize, Inje
         whole_memory.push((0..WORDS).map(|w| whole_region.peek(w)).collect::<Vec<_>>());
     }
 
-    let mut split_buf = Buf::new(WORDS);
-    let mut split_region = split_buf.region();
-    let base = split_region.addr(0).get();
+    let mut split_mem = Mem::new(layout);
+    let mut split_region = split_mem.regions();
+    let addrs: Vec<usize> = (0..WORDS).map(|w| split_region.addr(w).get()).collect();
+    let whole_layout = split_region.layout();
     let parts = NonZeroUsize::new(parts).unwrap();
-    let mut split: Vec<(Span, Region<'_>)> = shares(&mut split_region, kind, &CFG, parts).collect();
-    let mut tests: Vec<Test> = split.iter().map(|&(span, _)| Test::for_share(kind, CFG, 0, WORDS, span)).collect();
+    let mut split: Vec<(Span, Regions<'_>)> = shares(&mut split_region, kind, &CFG, parts).collect();
+    let mut tests: Vec<Test> =
+        split.iter().map(|&(span, _)| Test::for_share(kind, CFG, 0, &whole_layout, span)).collect();
     check!(tests.iter().map(Test::total).sum::<u64>() == whole.total(), "{kind:?}: the shares' work adds up");
     let mut split_faults: Vec<(usize, At)> = Vec::new();
     for (p, want) in whole_memory.iter().enumerate() {
         for (core, (test, (_, region))) in tests.iter_mut().zip(&mut split).enumerate() {
             check!(test.phases() == whole.phases());
             while test.phase() == p {
-                let mut sink = |f: Fault| split_faults.push((core, ((f.addr.get() - base) / 8, f.expected, f.actual)));
+                let mut sink = |f: Fault| split_faults.push((core, (word_at(&addrs, &f), f.expected, f.actual)));
                 let mut faults = Faults::new(64, &mut sink);
                 if let Progress::Waiting { until } = test.step(region, &kernels, CHUNK_BYTES, now, &mut faults) {
                     now = until;
@@ -415,9 +468,11 @@ fn split_matches_whole(kind: TestKind, parts: usize, inject: Option<(usize, Inje
 #[case::two(2)]
 #[case::three(3)]
 #[case::five(5)]
-fn every_split_test_does_what_the_whole_region_run_does(#[case] parts: usize) {
-    for &kind in TestKind::ALL.iter().filter(|k| k.mode() == Mode::Split) {
-        split_matches_whole(kind, parts, None);
+fn every_split_test_does_what_the_whole_set_run_does(#[case] parts: usize) {
+    for layout in ALL_LAYOUTS {
+        for &kind in TestKind::ALL.iter().filter(|k| k.mode() == Mode::Split) {
+            split_matches_whole(kind, layout, parts, None);
+        }
     }
 }
 
@@ -435,7 +490,60 @@ fn an_injected_fault_is_found_split_as_whole(
     #[case] after: usize,
     #[case] injection: Injection,
 ) {
-    for parts in [3, 4] {
-        split_matches_whole(kind, parts, Some((after, injection)));
+    for layout in LAYOUTS {
+        for parts in [3, 4] {
+            split_matches_whole(kind, layout, parts, Some((after, injection)));
+        }
     }
+}
+
+#[test]
+fn the_address_walk_runs_in_every_region() {
+    const UNTOUCHED: u64 = 0x5eed_5eed_5eed_5eed;
+    let mut mem = Mem::new(RAGGED);
+    let mut regions = mem.regions();
+    let layout = regions.layout();
+    (0..WORDS).for_each(|w| regions.poke(w, UNTOUCHED));
+    let walks: Vec<Span> = (0..)
+        .map_while(|i| plan::nth(TestKind::AddressWalk, &CFG, 0, &layout, i))
+        .filter(|p| matches!(p.op, plan::Op::AddressWalk { .. }))
+        .map(|p| p.span)
+        .collect();
+    check!(walks == [layout.spans(), layout.spans()].concat(), "each region once per polarity");
+
+    let mut sink = |_| {};
+    let mut faults = Faults::new(0, &mut sink);
+    let mut test = Test::new(TestKind::AddressWalk, CFG, 0, &regions);
+    while test.step(&mut regions, &Kernels::uniform(Kernel::SCALAR), CHUNK_BYTES, Instant::default(), &mut faults)
+        != Progress::Done
+    {}
+    for span in layout.spans() {
+        check!((span.start..span.end()).any(|w| regions.peek(w) != UNTOUCHED), "{span:?} was walked");
+    }
+}
+
+#[test]
+fn move_windows_stay_inside_their_region() {
+    let layout = Layout::new(RAGGED.iter().copied());
+    let windows: Vec<Span> = plan::move_windows(&layout, &CFG).collect();
+    check!(windows.iter().map(|w| w.words).sum::<usize>() == WORDS, "every word is in a window");
+    for window in &windows {
+        check!(layout.spans().iter().filter(|r| r.contains(*window)).count() == 1, "{window:?}");
+    }
+    check!(windows.iter().any(|w| w.words < plan::move_window(&CFG)), "a region's last window is short");
+}
+
+#[test]
+fn the_memtest86_plus_preset_runs_memtest86_plus_tests_with_its_counts() {
+    let preset = Preset::Memtest86Plus;
+    check!(<&str>::from(preset) == "memtest86-plus");
+    let kinds: Vec<TestKind> = TestKind::sequence(preset).collect();
+    check!(kinds.len() == 11);
+    check!(!kinds.iter().any(|k| matches!(k, TestKind::SolidBits | TestKind::MarchCMinus | TestKind::WalkingOnes)));
+    check!(kinds.contains(&TestKind::BitFade) && kinds.contains(&TestKind::AddressWalk));
+    let config = preset.config();
+    check!((config.random_rounds, config.modulo_rounds, config.fade) == (128, 8, Duration::from_secs(120)));
+    check!((config.fixed_iterations, config.byte_iterations, config.move_iterations) == (6, 3, 81));
+    check!(Preset::Thorough.config() == Config::DEFAULT);
+    check!(TestKind::sequence(Preset::Thorough).count() == TestKind::ALL.len());
 }

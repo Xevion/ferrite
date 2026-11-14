@@ -1,11 +1,13 @@
-//! The memory sweep: the `ferrite-mem` suite run over one buffer, pass after pass.
+//! The memory sweep: the `ferrite-mem` suite run over every free range of memory, pass after pass.
 //!
 //! [`Sweep::step`] runs a bounded chunk of the current test on the BSP so the caller can interleave
-//! other work. A test that splits ([`Mode::Split`]) runs instead through [`Sweep::run_split`] on
-//! every core of [`Cores`] at once, each on its own share, while the BSP keeps its duties through a
-//! callback. The buffer is whole pages from boot services, freed on drop. Steps of the AVX tiers
-//! run inside [`VectorState::wide`], in chunks of at most [`WIDE_CHUNK_BYTES`], since the
-//! firmware's interrupt entry does not save the upper halves of the vector registers.
+//! other work. Tests that split ([`Mode::Split`]) run instead through [`Sweep::run_split`] on every
+//! core of [`Cores`] at once, each on its own share, while the BSP keeps its duties through a
+//! callback; consecutive split tests share one dispatch of the APs. The memory is whole pages from
+//! boot services, one block per free range of the firmware's memory map less a reserve (see
+//! [`ranges`]), freed on drop. Steps of the AVX tiers run inside [`VectorState::wide`], in chunks
+//! of at most [`WIDE_CHUNK_BYTES`], since the firmware's interrupt entry does not save the upper
+//! halves of the vector registers.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -21,12 +23,16 @@ use ferrite_efi::cpu::VectorState;
 use ferrite_efi::mp::{self, ControlRegisters, Mp, Processor, ProcessorNumber, STACK_PROBE};
 use ferrite_hal::{Clock as _, Instant};
 use ferrite_mem::analysis::{Classification, FaultStats};
-use ferrite_mem::suite::{self, Config, Kernels, Mode, Preset, Progress, Span, Suite, Test};
-use ferrite_mem::{Caps, Fault, Faults, Region, WIDE_CHUNK_BYTES};
+use ferrite_mem::suite::{self, Config, Kernels, Mode, Preset, Progress, Schedule, Span, Suite, Test, TestKind};
+use ferrite_mem::{Caps, Fault, Faults, Region, Regions, WIDE_CHUNK_BYTES};
 use uefi::boot::{self, AllocateType, MemoryType};
+use uefi::mem::memory_map::{MemoryAttribute, MemoryMap, MemoryMapOwned};
 
+use self::ranges::Range;
 use crate::crew::{AP_PATIENCE, Crew, Job, Seat, SeatState, Turn};
 use crate::report::{self, CpuInfo, FAULT_LOG, FaultRecord, History, Snapshot, TestRecord};
+
+mod ranges;
 
 const PAGE: usize = 4096;
 const WORD: usize = size_of::<u64>();
@@ -34,15 +40,22 @@ const WORD: usize = size_of::<u64>();
 const REPORTS_PER_STEP: u64 = 256;
 /// The slowest per-core rate an AP's dispatch timeout allows for, in bytes per second.
 const AP_FLOOR_RATE: u64 = 250_000_000;
-/// How long the BSP waits for every AP of a split test to reach the start.
+/// How long the BSP waits for every AP of a split run to reach the start.
 const GATHER_PATIENCE: Duration = Duration::from_secs(2);
 /// Added to every AP's dispatch timeout, for the start and for waiting on slower cores at gates.
 const AP_SLACK: Duration = Duration::from_secs(10);
+/// A dispatch of the APs takes no new test once it has run this long, so the firmware's timeout on
+/// the dispatch (this plus the longest test's) bounds how long a hung AP stalls the sweep.
+const DISPATCH_BUDGET: Duration = Duration::from_secs(180);
 /// How often the BSP asks the firmware which AP dispatches have ended.
 const CHECK_EVERY: Duration = Duration::from_millis(2);
 
-/// Smallest buffer worth sweeping when the requested size cannot be allocated.
+/// What the sweep allocates in one piece when the memory map cannot be had.
+const FALLBACK_BYTES: usize = 1 << 30;
+/// Smallest buffer worth sweeping when the fallback size cannot be allocated.
 pub const MIN_SWEEP_BYTES: usize = 1 << 20;
+/// How many times the sweep reads the memory map for ranges its own allocations disturbed.
+const CLAIM_ROUNDS: usize = 3;
 
 /// Sweep progress for the UI, the status page and the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,8 +215,8 @@ fn choose(processors: &[Processor], choice: CoreChoice) -> Vec<ProcessorNumber> 
     order.into_iter().take(keep).map(|p| p.number).collect()
 }
 
-/// Memory the sweep owns: boot-services pages, or a host vector in tests.
-struct Buffer {
+/// One block of memory the sweep owns: boot-services pages, or a host vector in tests.
+struct Block {
     base: NonNull<u64>,
     words: usize,
     owner: Owner,
@@ -217,11 +230,9 @@ enum Owner {
     },
 }
 
-impl Buffer {
-    fn pages(bytes: usize) -> Option<Self> {
-        let pages = bytes / PAGE;
-        let ptr = boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages).ok()?;
-        Some(Self { base: ptr.cast(), words: pages * PAGE / WORD, owner: Owner::Pages(pages) })
+impl Block {
+    fn pages(base: NonNull<u8>, pages: usize) -> Self {
+        Self { base: base.cast(), words: pages * PAGE / WORD, owner: Owner::Pages(pages) }
     }
 
     #[cfg(test)]
@@ -237,13 +248,13 @@ impl Buffer {
     }
 }
 
-impl Drop for Buffer {
+impl Drop for Block {
     fn drop(&mut self) {
         match self.owner {
             Owner::Pages(pages) => {
-                // SAFETY: allocated with this page count, and the region over it is gone (see `Run`).
+                // SAFETY: allocated with this page count, and the regions over it are gone (see `Run`).
                 if let Err(e) = unsafe { boot::free_pages(self.base.cast(), pages) } {
-                    log::warn!("sweep: freeing {pages} pages failed: {e}");
+                    log::warn!("sweep: freeing {pages} pages at {:#x} failed: {e}", self.base.addr());
                 }
             },
             #[cfg(test)]
@@ -252,20 +263,129 @@ impl Drop for Buffer {
     }
 }
 
-/// The suite over its buffer. Fields drop in order, so the region goes before the memory under it.
+/// The memory the sweep owns, in address order.
+struct Buffer {
+    blocks: Vec<Block>,
+}
+
+impl Buffer {
+    /// One block of up to `bytes` anywhere, for when the memory map cannot be used.
+    fn pages(bytes: usize) -> Option<Self> {
+        let pages = bytes / PAGE;
+        let ptr = boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages).ok()?;
+        Some(Self { blocks: alloc::vec![Block::pages(ptr, pages)] })
+    }
+
+    #[cfg(test)]
+    fn host(words: usize) -> Self {
+        Self::host_blocks(&[words])
+    }
+
+    #[cfg(test)]
+    fn host_blocks(words: &[usize]) -> Self {
+        Self { blocks: words.iter().map(|&w| Block::host(w)).collect() }
+    }
+
+    fn bytes(&self) -> usize {
+        self.blocks.iter().map(Block::bytes).sum()
+    }
+}
+
+/// The free ranges of the memory map that the sweep may use, and the conventional memory it holds
+/// in all.
+struct FreeMemory {
+    ranges: Vec<Range>,
+    conventional: u64,
+}
+
+impl FreeMemory {
+    /// The conventional ranges of `map` that are cacheable and not set aside for a special purpose.
+    fn of(map: &MemoryMapOwned) -> Self {
+        let mut free = Self { ranges: Vec::new(), conventional: 0 };
+        for d in map.entries().filter(|d| d.ty == MemoryType::CONVENTIONAL) {
+            free.conventional += d.page_count * PAGE as u64;
+            let usable =
+                d.att.contains(MemoryAttribute::WRITE_BACK) && !d.att.contains(MemoryAttribute::SPECIAL_PURPOSE);
+            if usable {
+                free.ranges.push(Range::new(d.phys_start, d.page_count as usize));
+            }
+        }
+        free
+    }
+}
+
+/// Every free range of the memory map except a reserve, allocated range by range at their own
+/// addresses, the largest first. Allocating moves the firmware's own pool, so the map is read again
+/// for what a range's allocation could not get; `None` when no range could be taken.
+fn claim_free_memory() -> Option<Buffer> {
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut plan: Option<(u64, u64)> = None;
+    for _ in 0..CLAIM_ROUNDS {
+        let map =
+            boot::memory_map(MemoryType::LOADER_DATA).inspect_err(|e| log::warn!("sweep: no memory map: {e}")).ok()?;
+        let free = FreeMemory::of(&map);
+        drop(map);
+        let (_, reserve) = *plan.get_or_insert_with(|| {
+            let reserve = ranges::reserve_for(ranges::eligible_bytes(&free.ranges));
+            (free.conventional, reserve)
+        });
+        let wanted = ranges::select(&free.ranges, reserve);
+        let before = blocks.len();
+        for range in wanted {
+            match boot::allocate_pages(
+                AllocateType::Address(range.start.get()),
+                MemoryType::LOADER_DATA,
+                range.pages.get(),
+            ) {
+                Ok(ptr) => {
+                    log::info!("sweep: range {range}");
+                    blocks.push(Block::pages(ptr, range.pages.get()));
+                },
+                Err(e) => log::debug!("sweep: range {range} not taken: {e}"),
+            }
+        }
+        if blocks.len() == before {
+            break;
+        }
+    }
+    blocks.sort_by_key(|b| b.base.addr());
+    let buffer = Buffer { blocks };
+    let (conventional, reserve) = plan?;
+    log::info!(
+        "sweep: {} ranges, {} MiB of the {} MiB the memory map reports free; {} MiB reserve, memory below {} MiB untouched",
+        buffer.blocks.len(),
+        buffer.bytes() >> 20,
+        conventional >> 20,
+        reserve >> 20,
+        ranges::LOW_MEMORY >> 20
+    );
+    (!buffer.blocks.is_empty()).then_some(buffer)
+}
+
+/// The suite over its buffer. Fields drop in order, so the regions go before the memory under them.
 struct Run {
     suite: Suite<'static>,
     _buffer: Buffer,
 }
 
 impl Run {
-    /// The suite over `buffer`; `None`, freeing the buffer, when it cannot be a region.
+    /// The suite over `buffer`; `None`, freeing the buffer, when it cannot be regions.
     fn new(buffer: Buffer, kernels: Kernels, config: Config, preset: Preset) -> Option<Self> {
-        // SAFETY: the buffer is ours alone and outlives the suite (field order in `Run`).
-        match unsafe { Region::from_raw(buffer.base.as_ptr(), buffer.words) } {
-            Ok(region) => {
-                log::info!("sweep: {} bytes at {}, kernels {kernels}, {preset:?}", buffer.bytes(), region.base());
-                Some(Self { suite: Suite::new(region, kernels, config, preset), _buffer: buffer })
+        let made: Result<Vec<Region<'static>>, _> = buffer
+            .blocks
+            .iter()
+            // SAFETY: each block is ours alone and outlives the suite (field order in `Run`).
+            .map(|b| unsafe { Region::from_raw(b.base.as_ptr(), b.words) })
+            .collect();
+        match made {
+            Ok(regions) => {
+                let regions = Regions::new(regions);
+                log::info!(
+                    "sweep: {} bytes in {} regions, kernels {kernels}, {preset:?}",
+                    regions.bytes(),
+                    regions.layout().spans().len()
+                );
+                Some(Self { suite: Suite::new(regions, kernels, config, preset), _buffer: buffer })
             },
             Err(e) => {
                 log::error!("sweep: unusable buffer: {e}");
@@ -327,13 +447,15 @@ pub struct Sweep {
 }
 
 impl Sweep {
-    /// Allocate a test buffer of up to `bytes`, halving down to [`MIN_SWEEP_BYTES`] when the pool
-    /// cannot supply it, and run the standard preset over it with the kernels `caps` allows, split
-    /// tests on `cores` when given. With no buffer the sweep has no work.
+    /// Take every free range of memory but a reserve, and run the standard preset over it with the
+    /// kernels `caps` allows, split tests on `cores` when given. Without a usable memory map the
+    /// sweep takes one block of up to [`FALLBACK_BYTES`], halving down to [`MIN_SWEEP_BYTES`].
+    /// With no memory the sweep has no work.
     #[must_use]
-    pub fn new(bytes: usize, caps: Caps, cores: Option<Cores>) -> Self {
-        let buffer = alloc_largest(bytes, MIN_SWEEP_BYTES, Buffer::pages);
-        Self::with_buffer(buffer, Kernels::for_caps(caps), Config::DEFAULT, Preset::Standard, cores)
+    pub fn new(caps: Caps, cores: Option<Cores>) -> Self {
+        let buffer = claim_free_memory().or_else(|| alloc_largest(FALLBACK_BYTES, MIN_SWEEP_BYTES, Buffer::pages));
+        let preset = Preset::Standard;
+        Self::with_buffer(buffer, Kernels::for_caps(caps), preset.config(), preset, cores)
     }
 
     fn with_buffer(
@@ -378,8 +500,8 @@ impl Sweep {
     pub fn restart(&mut self, preset: Preset) {
         log::info!("sweep: restarting with {preset:?} after {}", self.status());
         if let Some(Run { suite, _buffer: buffer }) = self.run.take() {
-            let (kernels, config) = (suite.kernels(), suite.config());
-            self.run = Run::new(buffer, kernels, config, preset);
+            let kernels = suite.kernels();
+            self.run = Run::new(buffer, kernels, preset.config(), preset);
         }
         self.tally = Tally::default();
         self.waiting = None;
@@ -401,7 +523,7 @@ impl Sweep {
     }
 
     /// Logical processors `kind` would run on now.
-    fn cpus_for(&self, kind: suite::TestKind) -> usize {
+    fn cpus_for(&self, kind: TestKind) -> usize {
         match (kind.mode(), &self.cores) {
             (Mode::Split, Some(cores)) => cores.cpus.len().max(1),
             _ => 1,
@@ -428,7 +550,7 @@ impl Sweep {
         }
         self.waiting = None;
         self.history.start(now, self.tally.faults);
-        note(&mut self.current, &mut self.history, self.tally.faults, &run.suite, now);
+        note(&mut self.current, &mut self.history, self.tally.faults, run.suite.schedule(), now);
         let cpu = self.cores.as_ref().map_or(0, Cores::bsp);
         let guard = vector.filter(|_| run.suite.kernels().is_wide());
         let piece = if guard.is_some() { WIDE_CHUNK_BYTES } else { chunk_bytes };
@@ -455,35 +577,25 @@ impl Sweep {
         }
     }
 
-    /// Run the current test split over every core of [`Cores`], calling `duties` with the sweep's
-    /// status whenever the instant it last returned has come. A core that fails is left out and
-    /// the test runs again without it; with only the BSP left, the test is left to [`Sweep::step`].
+    /// Run the current test and the split tests after it, in one dispatch of the cores of [`Cores`],
+    /// calling `duties` with the sweep's status whenever the instant it last returned has come.
+    /// The dispatch takes no new test after [`DISPATCH_BUDGET`], so a longer run takes several. A
+    /// core that fails is left out and the test it was on runs again without it; with only the BSP
+    /// left, the test is left to [`Sweep::step`].
     pub fn run_split(&mut self, vector: Option<&VectorState>, duties: &mut Duties<'_>) -> Flow {
         let Self { run: Some(run), tally, current, cores: Some(cores), history, .. } = self else {
             return Flow::Continue;
         };
         let started = cores.clock.now();
-        let (kind, pass, bytes) = (run.suite.test().kind(), run.suite.passes(), run.suite.region().bytes());
         history.start(started, tally.faults);
-        note(current, history, tally.faults, &run.suite, started);
+        note(current, history, tally.faults, run.suite.schedule(), started);
         *current = None;
-        let faults_at_start = tally.faults;
         loop {
-            match attempt(run, tally, cores, history, vector, duties) {
-                Attempt::Done => {
-                    let now = cores.clock.now();
-                    let took = now - started;
-                    let n = cores.cpus.len();
-                    log::info!("sweep: pass {pass} {kind} took {} ms over {bytes} bytes on {n} cpus", took.as_millis());
-                    let work_bytes = run.suite.test().total().saturating_mul(WORD as u64);
-                    run.suite.finish_test();
-                    let faults = tally.faults - faults_at_start;
-                    let record = TestRecord { pass, test: kind.name(), cpus: n, took, work_bytes, faults };
-                    history.finish_test(record, run.suite.passes(), now, tally.faults);
-                    return Flow::Continue;
-                },
-                Attempt::Stopped => return Flow::Stop,
-                Attempt::Lost(lost) => {
+            match dispatch(run, tally, cores, history, vector, duties) {
+                Dispatch::Finished => return Flow::Continue,
+                Dispatch::Stopped => return Flow::Stop,
+                Dispatch::Lost(lost) => {
+                    let kind = run.suite.test().kind();
                     let before = cores.cpus.len();
                     cores.cpus.retain(|c| !lost.contains(c));
                     if cores.cpus.len() == before {
@@ -513,7 +625,7 @@ impl Sweep {
         let Some(run) = self.run.as_ref() else { return SweepStatus::IDLE };
         let cpus = self.cpus_for(run.suite.test().kind());
         let mode = if cpus > 1 { Mode::Split } else { Mode::Single };
-        SweepStatus { paused: self.paused, ..status_of(&run.suite, &self.tally, mode, cpus) }
+        SweepStatus { paused: self.paused, ..status_of(run.suite.schedule(), &self.tally, mode, cpus) }
     }
 
     /// The status with the history and the latest faults, for the screen and the status page.
@@ -523,44 +635,44 @@ impl Sweep {
     }
 }
 
-/// The status of `suite`'s current test as `suite` and `tally` have it.
-fn status_of(suite: &Suite<'_>, tally: &Tally, mode: Mode, cpus: usize) -> SweepStatus {
-    let k = suite.kernels();
+/// The status of `schedule`'s current test as `schedule` and `tally` have it.
+fn status_of(schedule: &Schedule, tally: &Tally, mode: Mode, cpus: usize) -> SweepStatus {
+    let k = schedule.kernels();
     let widest =
         [k.fill, k.verify, k.rmw].into_iter().map(ferrite_mem::Kernel::tier).max().unwrap_or(ferrite_mem::Tier::Scalar);
     SweepStatus {
-        bytes: suite.region().bytes(),
-        test: suite.test().kind().name(),
-        position: suite.position(),
-        test_percent: suite.test().percent(),
-        percent: suite.percent(),
-        passes: suite.passes(),
+        bytes: schedule.layout().bytes(),
+        test: schedule.test().kind().name(),
+        position: schedule.position(),
+        test_percent: schedule.test().percent(),
+        percent: schedule.percent(),
+        passes: schedule.passes(),
         tier: widest.into(),
         mode,
         cpus,
         faults: tally.faults,
         first_fault: tally.first,
         analysis: tally.stats.classification(),
-        preset: suite.preset(),
+        preset: schedule.preset(),
         paused: false,
     }
 }
 
-/// Log and record the test in `current` once the suite's test is a different one, and start
+/// Log and record the test in `current` once the schedule's test is a different one, and start
 /// timing that.
-fn note(current: &mut Option<Current>, history: &mut History, faults: u64, suite: &Suite<'_>, now: Instant) {
-    let (test, pass) = (suite.test().kind().name(), suite.passes());
+fn note(current: &mut Option<Current>, history: &mut History, faults: u64, schedule: &Schedule, now: Instant) {
+    let (test, pass) = (schedule.test().kind().name(), schedule.passes());
     let start = Current {
         test,
         pass,
         started: now,
-        work_bytes: suite.test().total().saturating_mul(WORD as u64),
+        work_bytes: schedule.test().total().saturating_mul(WORD as u64),
         faults_at_start: faults,
     };
     match *current {
         Some(c) if c.test != test || c.pass != pass => {
             let took = now - c.started;
-            let bytes = suite.region().bytes();
+            let bytes = schedule.layout().bytes();
             log::info!("sweep: pass {} {} took {} ms over {bytes} bytes on 1 cpu", c.pass, c.test, took.as_millis());
             let record = TestRecord {
                 pass: c.pass,
@@ -578,10 +690,12 @@ fn note(current: &mut Option<Current>, history: &mut History, faults: u64, suite
     }
 }
 
-enum Attempt {
-    Done,
+/// How one dispatch of the cores ended.
+enum Dispatch {
+    /// Every test the dispatch took is finished; the suite is at the next.
+    Finished,
     Stopped,
-    /// The cores that failed; the test did not end everywhere.
+    /// The cores that failed; the test they were on did not end everywhere.
     Lost(Vec<ProcessorNumber>),
 }
 
@@ -616,56 +730,92 @@ fn live(base: &SweepStatus, seats: &[Seat], tally: &Tally, faults_before: u64, w
     }
 }
 
-/// One try at the current test on every core of `cores`: shares, jobs and AP dispatches, then the
-/// BSP's own share between its duties, until every core has ended.
+/// The test the cores are on, as the status and the log describe it.
+struct Round {
+    name: &'static str,
+    pass: u64,
+    base: SweepStatus,
+    faults_before: u64,
+    /// Work of the pass before the test, of the whole pass, and of the test.
+    work: (u64, u64, u64),
+    started: Instant,
+}
+
+impl Round {
+    fn of(schedule: &Schedule, tally: &Tally, cpus: usize, test_total: u64, started: Instant) -> Self {
+        let (pass_done, pass_total) = schedule.pass_work();
+        Self {
+            name: schedule.test().kind().name(),
+            pass: schedule.passes(),
+            base: status_of(schedule, tally, Mode::Split, cpus),
+            faults_before: tally.faults,
+            work: (pass_done, pass_total, test_total),
+            started,
+        }
+    }
+}
+
+/// One dispatch of the cores of `cores` over the current test and the split tests after it: shares,
+/// jobs and AP dispatches, then the BSP's own share between its duties. The cores go from test to
+/// test at a gate ([`Crew::begin_round`]) until the run is done or [`DISPATCH_BUDGET`] has passed.
 #[expect(clippy::too_many_lines, reason = "one start, one loop and the reckoning, each needing the others' locals")]
-fn attempt(
+fn dispatch(
     run: &mut Run,
     tally: &mut Tally,
     cores: &mut Cores,
-    history: &History,
+    history: &mut History,
     vector: Option<&VectorState>,
     duties: &mut Duties<'_>,
-) -> Attempt {
-    let Some(parts) = NonZeroUsize::new(cores.cpus.len()) else { return Attempt::Lost(Vec::new()) };
-    let suite = &mut run.suite;
-    let (kind, pass, config, kernels) = (suite.test().kind(), suite.passes(), suite.config(), suite.kernels());
-    let test_name = kind.name();
-    let words = suite.region().words();
-    let (pass_done, pass_total) = suite.pass_work();
-    let base = status_of(suite, tally, Mode::Split, cores.cpus.len());
-    let faults_before = tally.faults;
+) -> Dispatch {
+    let Some(parts) = NonZeroUsize::new(cores.cpus.len()) else { return Dispatch::Lost(Vec::new()) };
+    let (regions, schedule) = run.suite.split();
+    let (first, pass, config, kernels) =
+        (schedule.test().kind(), schedule.passes(), schedule.config(), schedule.kernels());
+    let layout = schedule.layout().clone();
+    let kinds: Vec<TestKind> = TestKind::sequence(schedule.preset())
+        .skip_while(|&k| k != first)
+        .take_while(|k| k.mode() == Mode::Split)
+        .collect();
     let clock = cores.clock;
     let crew = Crew::default();
-    let shares: Vec<(Span, Region<'_>)> = suite::shares(suite.region_mut(), kind, &config, parts).collect();
+    let shares: Vec<(Span, Regions<'_>)> = suite::shares(regions, first, &config, parts).collect();
     let cpus: Vec<ProcessorNumber> = cores.cpus[..shares.len()].to_vec();
     let cpu_ids: Vec<usize> = cpus.iter().map(|c| c.get()).collect();
-    let tests: Vec<Test> = shares.iter().map(|&(span, _)| Test::for_share(kind, config, pass, words, span)).collect();
-    let timeouts: Vec<Duration> = tests.iter().map(ap_timeout).collect();
-    let test_total = tests.iter().map(Test::total).sum();
     let seats: Vec<Seat> = shares.iter().map(|_| Seat::default()).collect();
-    let jobs: Vec<Job<'_, Clock>> = tests
+    let mut totals = vec![0_u64; kinds.len()];
+    let mut longest = Duration::ZERO;
+    let jobs: Vec<Job<'_, Clock>> = shares
         .into_iter()
-        .zip(shares)
         .zip(&seats)
-        .map(|((test, (_, region)), seat)| Job::new(test, region, kernels, WIDE_CHUNK_BYTES, clock, &crew, seat))
+        .map(|((span, share), seat)| {
+            let tests: Vec<Test> = kinds.iter().map(|&k| Test::for_share(k, config, pass, &layout, span)).collect();
+            for (total, test) in totals.iter_mut().zip(&tests) {
+                *total += test.total();
+                longest = longest.max(ap_timeout(test));
+            }
+            Job::new(tests, share, kernels, WIDE_CHUNK_BYTES, clock, &crew, seat)
+        })
         .collect();
+    let timeout = DISPATCH_BUDGET + longest;
+    let dispatched = clock.now();
+    let mut round = Round::of(schedule, tally, cpus.len(), totals[0], dispatched);
     let mut absorbed = vec![0; seats.len()];
     let mut lost: Vec<usize> = Vec::new();
     let mut stop_asked = false;
+    let mut completed = 0;
     let panics = mp::ap_panics();
-    let mut tend = |now: Instant, tally: &mut Tally| {
-        absorb(tally, &seats, &mut absorbed, &cpu_ids, test_name, pass);
-        let status = live(&base, &seats, tally, faults_before, (pass_done, pass_total, test_total));
+    let mut tend = |now: Instant, tally: &mut Tally, history: &History, round: &Round, absorbed: &mut [usize]| {
+        absorb(tally, &seats, absorbed, &cpu_ids, round.name, round.pass);
+        let status = live(&round.base, &seats, tally, round.faults_before, round.work);
         duties(now, &Snapshot { status, history, faults: &tally.recent })
     };
-    let live_seats = cores.mp.scope(|scope| {
+    let (live_seats, closed, timing) = cores.mp.scope(|scope| {
         let mut started = Vec::new();
-        for (i, (job, (&cpu, &timeout))) in jobs.iter().zip(cpus.iter().zip(&timeouts)).enumerate().skip(1) {
+        for (i, (job, &cpu)) in jobs.iter().zip(&cpus).enumerate().skip(1) {
             match scope.start(cpu, job, timeout) {
                 Ok(()) => started.push(i),
                 Err(e) => {
-                    log::warn!("sweep: {test_name}: {e}");
+                    log::warn!("sweep: {}: {e}", round.name);
                     lost.push(i);
                 },
             }
@@ -688,7 +838,7 @@ fn attempt(
                 break false;
             }
             if now >= next_duty {
-                let Some(next) = tend(now, tally) else {
+                let Some(next) = tend(now, tally, history, &round, &mut absorbed) else {
                     stop_asked = true;
                     break false;
                 };
@@ -696,66 +846,112 @@ fn attempt(
             }
             core::hint::spin_loop();
         };
-        if gathered {
-            crew.release();
-        } else {
-            crew.abandon();
-        }
         let mut live = vec![0];
         live.extend(&started);
         let mut own = jobs.first().and_then(Job::claim);
-        let mut own_ended = own.is_none();
-        let mut last_check = clock.now();
+        let mut own_done = own.is_none();
+        let gathered_at = clock.now();
+        if gathered {
+            crew.release();
+            round.started = gathered_at;
+            crew.begin_round();
+            if let Some(worker) = own.as_mut() {
+                worker.begin(crew.round());
+            }
+        } else {
+            crew.abandon();
+        }
+        let (mut closing, mut closed_at, mut last_check) = (false, gathered_at, gathered_at);
         loop {
-            let all_ended = crew.coordinate(live.iter().map(|&i| &seats[i]));
-            if !own_ended && let Some(worker) = own.as_mut() {
-                own_ended = matches!(worker.turn(vector), Turn::Done | Turn::Stopped);
+            let round_done = crew.coordinate(live.iter().map(|&i| &seats[i]));
+            if !own_done && let Some(worker) = own.as_mut() {
+                own_done = matches!(worker.turn(vector), Turn::Done | Turn::Stopped);
             }
             let now = clock.now();
             if now >= next_duty {
-                if let Some(next) = tend(now, tally) {
+                if let Some(next) = tend(now, tally, history, &round, &mut absorbed) {
                     next_duty = next;
                 } else {
                     stop_asked = true;
                     crew.stop();
                 }
             }
-            if all_ended || now - last_check >= CHECK_EVERY {
+            if gathered && round_done && !closing && !crew.stopped() {
+                absorb(tally, &seats, &mut absorbed, &cpu_ids, round.name, round.pass);
+                tally.faults = round.faults_before.saturating_add(seats.iter().map(Seat::faults).sum());
+                let ended = clock.now();
+                let took = ended - round.started;
+                let n = cpus.len();
+                log::info!(
+                    "sweep: pass {} {} took {} ms over {} bytes on {n} cpus",
+                    round.pass,
+                    round.name,
+                    took.as_millis(),
+                    layout.bytes()
+                );
+                let work_bytes = schedule.test().total().saturating_mul(WORD as u64);
+                schedule.finish_test();
+                let faults = tally.faults - round.faults_before;
+                let record = TestRecord { pass: round.pass, test: round.name, cpus: n, took, work_bytes, faults };
+                history.finish_test(record, schedule.passes(), ended, tally.faults);
+                completed += 1;
+                if completed < kinds.len() && ended - dispatched < DISPATCH_BUDGET {
+                    round = Round::of(schedule, tally, n, totals[completed], ended);
+                    absorbed.fill(0);
+                    seats.iter().for_each(Seat::reset);
+                    crew.begin_round();
+                    if let Some(worker) = own.as_mut() {
+                        worker.begin(crew.round());
+                        own_done = false;
+                    }
+                } else {
+                    crew.close();
+                    closing = true;
+                    closed_at = ended;
+                    if let Some(worker) = own.as_ref() {
+                        worker.retire();
+                    }
+                }
+            }
+            let winding_down = closing || crew.stopped();
+            if winding_down || now - last_check >= CHECK_EVERY {
                 last_check = now;
                 let running = scope.running();
                 let finished = started.iter().filter(|&&i| seats[i].state().ended()).count();
                 if !crew.stopped() && (mp::ap_panics() != panics || started.len() - running > finished) {
-                    log::warn!("sweep: {test_name}: an AP stopped answering; stopping the others");
+                    log::warn!("sweep: {}: an AP stopped answering; stopping the others", round.name);
                     crew.stop();
                 }
                 // A reset AP's seat never ends, so the firmware's word decides when no AP is left.
-                if own_ended && running == 0 {
+                if winding_down && own_done && running == 0 {
                     break;
                 }
             }
-            if own_ended {
+            if own_done {
                 core::hint::spin_loop();
             }
         }
-        live
+        (live, closing, (gathered_at - dispatched, closed_at))
     });
-    drop(tend);
-    absorb(tally, &seats, &mut absorbed, &cpu_ids, test_name, pass);
-    tally.faults = faults_before.saturating_add(seats.iter().map(Seat::faults).sum());
+    absorb(tally, &seats, &mut absorbed, &cpu_ids, round.name, round.pass);
+    tally.faults = round.faults_before.saturating_add(seats.iter().map(Seat::faults).sum());
     for seat in &seats[1..] {
         if let Some(bytes) = seat.stack_bytes()
             && bytes > cores.deepest_stack
         {
             cores.deepest_stack = bytes;
             if bytes >= STACK_PROBE {
-                log::warn!("sweep: {test_name}: an AP used all {STACK_PROBE} probed stack bytes");
+                log::warn!("sweep: an AP used all {STACK_PROBE} probed stack bytes in the run from {}", first.name());
             } else {
-                log::debug!("sweep: deepest AP stack {bytes} of {STACK_PROBE} probed bytes, in {test_name}");
+                log::debug!(
+                    "sweep: deepest AP stack {bytes} of {STACK_PROBE} probed bytes, in the run from {}",
+                    first.name()
+                );
             }
         }
     }
     if stop_asked {
-        return Attempt::Stopped;
+        return Dispatch::Stopped;
     }
     lost.extend(
         live_seats.iter().skip(1).filter(|&&i| !matches!(seats[i].state(), SeatState::Done | SeatState::Stopped)),
@@ -763,12 +959,23 @@ fn attempt(
     lost.sort_unstable();
     lost.dedup();
     for &i in &lost {
-        log::error!("sweep: {test_name}: {} {}", cpus[i], seats[i].state());
+        log::error!("sweep: {}: {} {}", round.name, cpus[i], seats[i].state());
     }
-    if lost.is_empty() && live_seats.len() == seats.len() && seats.iter().all(|s| s.state() == SeatState::Done) {
-        Attempt::Done
+    if lost.is_empty()
+        && live_seats.len() == seats.len()
+        && closed
+        && seats.iter().all(|s| s.state() == SeatState::Done)
+    {
+        let (start, closed_at) = timing;
+        log::debug!(
+            "sweep: {completed} tests in one dispatch on {} cpus: {} ms to start, {} ms from the last test to the end",
+            cpus.len(),
+            start.as_millis(),
+            (clock.now() - closed_at).as_millis()
+        );
+        Dispatch::Finished
     } else {
-        Attempt::Lost(lost.iter().map(|&i| cpus[i]).collect())
+        Dispatch::Lost(lost.iter().map(|&i| cpus[i]).collect())
     }
 }
 

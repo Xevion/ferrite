@@ -15,6 +15,7 @@
 
 #![no_std]
 
+extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
@@ -36,7 +37,7 @@ pub use ops::{
     invert_rotating, verify, verify_address, verify_prsg,
 };
 pub use prsg::Prsg;
-pub use region::{BLOCK_BYTES, BLOCK_WORDS, Region, RegionError};
+pub use region::{BLOCK_BYTES, BLOCK_WORDS, Layout, Memory, Region, RegionError, Regions};
 pub use rotating::Rotating;
 
 /// Chunk size for the wide tiers when they run with interrupts off: at a few GB/s it takes tens of

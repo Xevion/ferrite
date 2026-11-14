@@ -5,6 +5,10 @@ use assert2::{assert, check};
 use rstest::rstest;
 
 use super::*;
+use crate::kernels::{Stride, fill_stride, verify_fill_stride, verify_stride};
+use crate::ops::fill_except;
+
+mod bench;
 
 /// Every kernel the host can run; tiers it lacks are skipped.
 pub fn kernels() -> Vec<Kernel> {
@@ -239,4 +243,133 @@ fn a_region_rejects_misaligned_bases_and_partial_blocks() {
     // SAFETY: as above.
     let partial = unsafe { Region::from_raw(base, BLOCK_WORDS + 1) };
     check!(partial.unwrap_err() == RegionError::Length { words: BLOCK_WORDS + 1 });
+}
+
+/// The strides the modulo test and its neighbours use: every offset and chunk phase of a few periods.
+fn strides() -> impl Iterator<Item = Stride> {
+    [8, 9, 16, 20, 24, 37]
+        .into_iter()
+        .flat_map(|n| (0..n).flat_map(move |offset| (0..n).map(move |first| Stride { n, offset, first })))
+}
+
+/// Whether word `w` of the chunk is one `stride` selects.
+fn selected(stride: Stride, w: usize) -> bool {
+    (stride.first + w) % stride.n == stride.offset
+}
+
+fn sentinel(w: usize) -> u64 {
+    0xdead_0000_0000_0000 | (w as u64 * 0x0101)
+}
+
+const STRIDE_VALUE: u64 = 0x0123_4567_89ab_cdef;
+
+#[test]
+fn fill_except_stores_the_value_everywhere_but_the_selected_words() {
+    for kernel in kernels() {
+        for stride in strides() {
+            let mut buf = Buf::new(WORDS);
+            (0..WORDS).for_each(|w| buf.set(w, sentinel(w)));
+            fill_except(kernel, &mut buf.region(), stride, STRIDE_VALUE);
+            let want: Vec<u64> =
+                (0..WORDS).map(|w| if selected(stride, w) { sentinel(w) } else { STRIDE_VALUE }).collect();
+            check!(buf.words() == want.as_slice(), "{kernel} {stride:?}");
+        }
+    }
+}
+
+#[test]
+fn fill_except_in_chunks_matches_one_pass_over_the_region() {
+    for kernel in kernels() {
+        for stride in strides().filter(|s| s.first == 0) {
+            let mut buf = Buf::new(WORDS);
+            (0..WORDS).for_each(|w| buf.set(w, sentinel(w)));
+            let mut region = buf.region();
+            for (i, mut chunk) in region.chunks(3 * BLOCK_WORDS).enumerate() {
+                let first = i * 3 * BLOCK_WORDS % stride.n;
+                fill_except(kernel, &mut chunk, Stride { first, ..stride }, STRIDE_VALUE);
+            }
+            let want: Vec<u64> =
+                (0..WORDS).map(|w| if selected(stride, w) { sentinel(w) } else { STRIDE_VALUE }).collect();
+            check!(buf.words() == want.as_slice(), "{kernel} {stride:?}");
+        }
+    }
+}
+
+#[test]
+fn fill_stride_stores_the_value_in_the_selected_words_only() {
+    for stride in strides() {
+        let mut buf = Buf::new(WORDS);
+        (0..WORDS).for_each(|w| buf.set(w, sentinel(w)));
+        // SAFETY: the buffer's region is ours.
+        unsafe { fill_stride(buf.region().ptr(), WORDS, stride, STRIDE_VALUE) };
+        let want: Vec<u64> = (0..WORDS).map(|w| if selected(stride, w) { STRIDE_VALUE } else { sentinel(w) }).collect();
+        check!(buf.words() == want.as_slice(), "{stride:?}");
+    }
+}
+
+#[test]
+fn verify_stride_reports_the_selected_words_that_differ_in_address_order() {
+    let flips = [0, 1, 7, 8, 19, 20, 40, 41, 100, 159, 160, WORDS - 1];
+    for stride in strides() {
+        let mut buf = Buf::new(WORDS);
+        (0..WORDS).for_each(|w| buf.set(w, if selected(stride, w) { STRIDE_VALUE } else { sentinel(w) }));
+        for &w in &flips {
+            buf.set(w, buf.words()[w] ^ (1 << (w % 64)));
+        }
+        let want: Vec<Fault> = flips
+            .iter()
+            .filter(|&&w| selected(stride, w))
+            .map(|&w| Fault { addr: buf.addr(w), expected: STRIDE_VALUE, actual: STRIDE_VALUE ^ (1 << (w % 64)) })
+            .collect();
+        let mut reported = Vec::new();
+        let mut sink = |f| reported.push(f);
+        let mut faults = Faults::new(64, &mut sink);
+        // SAFETY: the buffer's region is ours.
+        unsafe { verify_stride(buf.region().ptr(), WORDS, stride, STRIDE_VALUE, &mut faults) };
+        let seen = faults.seen();
+        check!(reported == want, "{stride:?}");
+        check!(seen == want.len() as u64, "{stride:?}");
+    }
+}
+
+#[test]
+fn verify_fill_stride_does_what_verify_stride_then_fill_stride_do() {
+    let flips = [0, 5, 7, 8, 19, 20, 21, 40, 41, 100, 159, 160, WORDS - 1];
+    for n in [8, 20, 37] {
+        for first in 0..n {
+            for check in (0..n).step_by(3) {
+                for fill in [check, (check + 1) % n, (check + 7) % n] {
+                    let at = |offset| Stride { n, offset, first };
+                    let setup = |buf: &mut Buf| {
+                        (0..WORDS)
+                            .for_each(|w| buf.set(w, if selected(at(check), w) { STRIDE_VALUE } else { sentinel(w) }));
+                        for &w in &flips {
+                            buf.set(w, buf.words()[w] ^ (1 << (w % 64)));
+                        }
+                    };
+                    let run = |fused: bool| {
+                        let mut buf = Buf::new(WORDS);
+                        setup(&mut buf);
+                        let mut reported = Vec::new();
+                        let mut sink = |f| reported.push(f);
+                        let mut faults = Faults::new(64, &mut sink);
+                        let ptr = buf.region().ptr();
+                        let value = !STRIDE_VALUE;
+                        // SAFETY: the buffer's region is ours.
+                        unsafe {
+                            if fused {
+                                verify_fill_stride(ptr, WORDS, at(check), STRIDE_VALUE, at(fill), value, &mut faults);
+                            } else {
+                                verify_stride(ptr, WORDS, at(check), STRIDE_VALUE, &mut faults);
+                                fill_stride(ptr, WORDS, at(fill), value);
+                            }
+                        }
+                        let seen = faults.seen();
+                        (buf.words().to_vec(), reported, seen)
+                    };
+                    check!(run(true) == run(false), "n {n} first {first} check {check} fill {fill}");
+                }
+            }
+        }
+    }
 }

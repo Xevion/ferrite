@@ -22,10 +22,11 @@ use core::arch::x86_64::{
     __m128i, __m256i, __m512i, _mm_add_epi64, _mm_and_si128, _mm_clflush, _mm_cmpeq_epi8, _mm_cvtsi32_si128,
     _mm_mfence, _mm_movemask_epi8, _mm_or_si128, _mm_set_epi64x, _mm_set1_epi64x, _mm_sll_epi64, _mm_slli_epi64,
     _mm_srl_epi64, _mm_srli_epi64, _mm_stream_si128, _mm_xor_si128, _mm256_add_epi64, _mm256_and_si256,
-    _mm256_cmpeq_epi64, _mm256_movemask_epi8, _mm256_or_si256, _mm256_set_epi64x, _mm256_set1_epi64x, _mm256_sll_epi64,
-    _mm256_slli_epi64, _mm256_srl_epi64, _mm256_srli_epi64, _mm256_stream_si256, _mm256_xor_si256, _mm512_add_epi64,
-    _mm512_cmpneq_epi64_mask, _mm512_or_si512, _mm512_set_epi64, _mm512_set1_epi64, _mm512_sll_epi64,
-    _mm512_slli_epi64, _mm512_srl_epi64, _mm512_srli_epi64, _mm512_stream_si512, _mm512_xor_si512,
+    _mm256_castsi256_si128, _mm256_cmpeq_epi64, _mm256_extracti128_si256, _mm256_movemask_epi8, _mm256_or_si256,
+    _mm256_set_epi64x, _mm256_set1_epi64x, _mm256_sll_epi64, _mm256_slli_epi64, _mm256_srl_epi64, _mm256_srli_epi64,
+    _mm256_stream_si256, _mm256_xor_si256, _mm512_add_epi64, _mm512_cmpneq_epi64_mask, _mm512_or_si512,
+    _mm512_set_epi64, _mm512_set1_epi64, _mm512_sll_epi64, _mm512_slli_epi64, _mm512_srl_epi64, _mm512_srli_epi64,
+    _mm512_stream_si512, _mm512_xor_si512,
 };
 use core::mem::transmute;
 use core::ptr;
@@ -45,6 +46,8 @@ pub trait Block: Copy {
     unsafe fn store(p: *mut u64, v: Self);
     /// A non-temporal store; tiers without one store normally.
     unsafe fn stream(p: *mut u64, v: Self);
+    /// A temporal store of every word but `skip`, which is left untouched; `skip < BLOCK_WORDS`.
+    unsafe fn store_except(p: *mut u64, v: Self, skip: usize);
     unsafe fn same(a: Self, b: Self) -> bool;
     unsafe fn xor(a: Self, b: Self) -> Self;
     unsafe fn add(a: Self, b: Self) -> Self;
@@ -102,6 +105,20 @@ pub unsafe fn write_word(p: *mut u64, v: u64) {
     unsafe { ptr::write_volatile(p, v) };
 }
 
+/// Ask for the line holding `p` to be fetched for reading; never faults, whatever `p` is.
+#[inline(always)]
+pub fn prefetch_read(p: *const u64) {
+    // SAFETY: SSE is the x86-64 baseline, and a prefetch of any address is harmless.
+    unsafe { core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(p.cast()) };
+}
+
+/// Ask for the line holding `p` to be fetched owned, for a store; never faults, whatever `p` is.
+#[inline(always)]
+pub fn prefetch_write(p: *const u64) {
+    // SAFETY: PREFETCHW is a hint that runs as a no-op where unsupported, and never faults.
+    unsafe { asm!("prefetchw [{p}]", p = in(reg) p, options(nostack, preserves_flags)) };
+}
+
 /// Write back and evict the line holding `p`, and wait for that: its next load comes from DRAM.
 ///
 /// # Safety
@@ -152,6 +169,16 @@ impl Block for Scalar {
     unsafe fn stream(p: *mut u64, v: Self) {
         // SAFETY: as `store`.
         unsafe { Self::store(p, v) };
+    }
+
+    #[inline(always)]
+    unsafe fn store_except(p: *mut u64, v: Self, skip: usize) {
+        for (i, w) in v.0.into_iter().enumerate() {
+            if i != skip {
+                // SAFETY: as `store`.
+                unsafe { ptr::write_volatile(p.add(i), w) };
+            }
+        }
     }
 
     #[inline(always)]
@@ -233,6 +260,21 @@ impl Block for Sse2 {
         for (i, x) in v.0.into_iter().enumerate() {
             // SAFETY: as `load`.
             unsafe { _mm_stream_si128(p.add(i), x) };
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn store_except(p: *mut u64, v: Self, skip: usize) {
+        // The quarter holding `skip` keeps its other word as a scalar store.
+        for (i, x) in v.0.into_iter().enumerate() {
+            if i == skip / 2 {
+                let other = skip ^ 1;
+                // SAFETY: as `load`.
+                unsafe { ptr::write_volatile(p.add(other), Self::to_words(v)[other]) };
+            } else {
+                // SAFETY: as `load`.
+                unsafe { store128(p.add(2 * i), x) };
+            }
         }
     }
 
@@ -341,6 +383,22 @@ impl Block for Avx2 {
     }
 
     #[inline(always)]
+    unsafe fn store_except(p: *mut u64, v: Self, skip: usize) {
+        // The untouched half goes whole; in the other, the pair without `skip` is one 128-bit
+        // store and the pair's remaining word one scalar store. Masked stores do the same in one
+        // instruction, but are slow on some cores.
+        let (hole, whole) = (skip / 4, 1 - skip / 4);
+        let (j, x) = (skip % 4, v.0[hole]);
+        // SAFETY: as `load`.
+        unsafe {
+            store256(p.add(4 * whole), v.0[whole]);
+            let pair = if j < 2 { _mm256_extracti128_si256::<1>(x) } else { _mm256_castsi256_si128(x) };
+            store128_vex(p.add(4 * hole + 2 * (1 - j / 2)), pair);
+            ptr::write_volatile(p.add(4 * hole + (j ^ 1)), Self::to_words(v)[4 * hole + (j ^ 1)]);
+        }
+    }
+
+    #[inline(always)]
     unsafe fn same(a: Self, b: Self) -> bool {
         // SAFETY: as `splat`.
         unsafe {
@@ -434,6 +492,12 @@ impl Block for Avx512 {
     }
 
     #[inline(always)]
+    unsafe fn store_except(p: *mut u64, v: Self, skip: usize) {
+        // SAFETY: as `load`.
+        unsafe { maskstore512(p, !(1_u8 << skip), v.0) };
+    }
+
+    #[inline(always)]
     unsafe fn same(a: Self, b: Self) -> bool {
         // SAFETY: as `splat`.
         unsafe { _mm512_cmpneq_epi64_mask(a.0, b.0) == 0 }
@@ -524,6 +588,30 @@ unsafe fn store256(p: *mut u64, v: __m256i) {
     // SAFETY: the caller's contract.
     unsafe {
         asm!("vmovdqa ymmword ptr [{p}], {v}", v = in(ymm_reg) v, p = in(reg) p, options(nostack, preserves_flags));
+    };
+}
+
+/// # Safety
+/// `p` is 16-byte aligned and writable, and AVX state is enabled.
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn store128_vex(p: *mut u64, v: __m128i) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        asm!("vmovdqa xmmword ptr [{p}], {v}", v = in(xmm_reg) v, p = in(reg) p, options(nostack, preserves_flags));
+    };
+}
+
+/// Store the lanes of `v` whose bit is set in `mask`; the others stay untouched.
+///
+/// # Safety
+/// As [`store512`].
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn maskstore512(p: *mut u64, mask: u8, v: __m512i) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        asm!("vmovdqa64 zmmword ptr [{p}] {{{k}}}, {v}", v = in(zmm_reg) v, k = in(kreg) mask, p = in(reg) p, options(nostack, preserves_flags));
     };
 }
 

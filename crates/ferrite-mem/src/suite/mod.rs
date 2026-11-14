@@ -1,5 +1,9 @@
 //! The memory tests, each a steppable state machine, and the suite that runs them pass after pass.
 //!
+//! The memory under test is a set of regions ([`Regions`]), read as one run of words: a test plans
+//! over the whole run, so its sequences continue from one region into the next, and only the tests
+//! that need contiguous memory (the address walk, a block-move window) work region by region.
+//!
 //! A test is a fixed list of phases (a fill, a verify, an inversion, a block move over a window,
 //! a wait), each a walk over the region or part of it. [`Test::step`] does one bounded chunk of one
 //! phase and never crosses a phase boundary, so the caller can interleave its own work between
@@ -18,7 +22,7 @@ use ferrite_hal::Instant;
 
 use crate::caps::{Caps, Kernel, Stores};
 use crate::fault::Faults;
-use crate::region::Region;
+use crate::region::{Layout, Regions};
 
 mod plan;
 mod run;
@@ -30,7 +34,11 @@ pub use plan::Span;
 pub use run::{Progress, Test};
 pub use share::{Mode, shares};
 
-/// Preset tiers, cumulative: a preset runs every test of its tier and the tiers below it.
+/// What a run covers.
+///
+/// The first four are tiers, cumulative: each runs every test of its tier and the tiers below it,
+/// with [`Config::DEFAULT`]. [`Preset::Memtest86Plus`] is memtest86+'s own tests with its default
+/// counts, so a run can be compared with memtest86+ without editing constants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, strum::IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
 pub enum Preset {
@@ -42,6 +50,29 @@ pub enum Preset {
     Thorough,
     /// Tests that may induce faults as a side effect; none exist yet (rowhammer is deferred).
     Destructive,
+    /// The tests memtest86+ v9.00 runs, with its default counts: 128 random rounds, 8 modulo rounds
+    /// and bit fade as 4 waits of 120 s.
+    Memtest86Plus,
+}
+
+impl Preset {
+    /// Whether a run of this preset includes `kind`.
+    #[must_use]
+    pub fn runs(self, kind: TestKind) -> bool {
+        match self {
+            Self::Memtest86Plus => kind.in_memtest86_plus(),
+            tier => kind.preset() <= tier,
+        }
+    }
+
+    /// The repetition counts of a run of this preset.
+    #[must_use]
+    pub const fn config(self) -> Config {
+        match self {
+            Self::Memtest86Plus => Config::MEMTEST86_PLUS,
+            Self::Quick | Self::Standard | Self::Thorough | Self::Destructive => Config::DEFAULT,
+        }
+    }
 }
 
 /// A class of fault a test is designed to find.
@@ -150,9 +181,18 @@ impl TestKind {
         }
     }
 
+    /// Whether memtest86+ has the test; the others are ferrite's own.
+    #[must_use]
+    pub const fn in_memtest86_plus(self) -> bool {
+        !matches!(
+            self,
+            Self::SolidBits | Self::Checkerboard | Self::MarchCMinus | Self::WalkingOnes | Self::WalkingZeros
+        )
+    }
+
     /// The tests `preset` runs, in order.
     pub fn sequence(preset: Preset) -> impl Iterator<Item = Self> + Clone {
-        Self::ALL.iter().copied().filter(move |k| k.preset() <= preset)
+        Self::ALL.iter().copied().filter(move |&k| preset.runs(k))
     }
 }
 
@@ -201,6 +241,9 @@ impl Config {
         address_window_bytes: 2 << 20,
         move_window_bytes: 1 << 20,
     };
+
+    /// memtest86+ v9.00's counts: every count at its default there.
+    pub const MEMTEST86_PLUS: Self = Self { random_rounds: 128, modulo_rounds: 8, ..Self::DEFAULT };
 }
 
 impl Default for Config {
@@ -250,10 +293,11 @@ impl fmt::Display for Kernels {
     }
 }
 
-/// The tests of a preset run in order over one region, pass after pass.
+/// Where a suite is in its preset: which test, which pass, how much of the pass is done. Apart from
+/// the memory, so a test run on several cores can be counted done while the memory is lent out.
 #[derive(Debug)]
-pub struct Suite<'a> {
-    region: Region<'a>,
+pub struct Schedule {
+    layout: Layout,
     kernels: Kernels,
     config: Config,
     preset: Preset,
@@ -264,24 +308,14 @@ pub struct Suite<'a> {
     pass_total: u64,
 }
 
-impl<'a> Suite<'a> {
+impl Schedule {
     #[must_use]
-    pub fn new(region: Region<'a>, kernels: Kernels, config: Config, preset: Preset) -> Self {
+    pub fn new(layout: Layout, kernels: Kernels, config: Config, preset: Preset) -> Self {
         let first = TestKind::sequence(preset).next().unwrap_or(TestKind::AddressWalk);
-        let pass_total = TestKind::sequence(preset).map(|k| Test::new(k, config, 0, &region).total()).sum();
-        let test = Test::new(first, config, 0, &region);
-        Self { region, kernels, config, preset, test, passes: 0, pass_done: 0, pass_total }
-    }
-
-    /// Run one bounded chunk of the current test, moving on to the next test (or pass) at its end.
-    pub fn step(&mut self, budget_bytes: usize, now: Instant, faults: &mut Faults<'_>) -> Progress {
-        match self.test.step(&mut self.region, &self.kernels, budget_bytes, now, faults) {
-            Progress::Done => {
-                self.next_test();
-                Progress::Running
-            },
-            progress => progress,
-        }
+        let pass_total =
+            TestKind::sequence(preset).map(|k| Test::for_share(k, config, 0, &layout, layout.all()).total()).sum();
+        let test = Test::for_share(first, config, 0, &layout, layout.all());
+        Self { layout, kernels, config, preset, test, passes: 0, pass_done: 0, pass_total }
     }
 
     /// Count the current test done and move on, when it was run elsewhere: split into shares over
@@ -300,7 +334,7 @@ impl<'a> Suite<'a> {
             self.pass_done = 0;
             TestKind::sequence(self.preset).next().unwrap_or(kind)
         };
-        self.test = Test::new(next, self.config, self.passes, &self.region);
+        self.test = Test::for_share(next, self.config, self.passes, &self.layout, self.layout.all());
     }
 
     #[must_use]
@@ -335,15 +369,10 @@ impl<'a> Suite<'a> {
         (self.pass_done, self.pass_total)
     }
 
+    /// The regions every test is planned over.
     #[must_use]
-    pub const fn region(&self) -> &Region<'a> {
-        &self.region
-    }
-
-    /// The region, to split the current test over several cores; the suite's own [`Test`] keeps no
-    /// state in it, so such a run must start from the test's first phase.
-    pub const fn region_mut(&mut self) -> &mut Region<'a> {
-        &mut self.region
+    pub const fn layout(&self) -> &Layout {
+        &self.layout
     }
 
     #[must_use]
@@ -359,6 +388,93 @@ impl<'a> Suite<'a> {
     #[must_use]
     pub const fn preset(&self) -> Preset {
         self.preset
+    }
+}
+
+/// The tests of a preset run in order over a set of regions, pass after pass.
+#[derive(Debug)]
+pub struct Suite<'a> {
+    regions: Regions<'a>,
+    schedule: Schedule,
+}
+
+impl<'a> Suite<'a> {
+    #[must_use]
+    pub fn new(regions: Regions<'a>, kernels: Kernels, config: Config, preset: Preset) -> Self {
+        let schedule = Schedule::new(regions.layout(), kernels, config, preset);
+        Self { regions, schedule }
+    }
+
+    /// Run one bounded chunk of the current test, moving on to the next test (or pass) at its end.
+    pub fn step(&mut self, budget_bytes: usize, now: Instant, faults: &mut Faults<'_>) -> Progress {
+        let schedule = &mut self.schedule;
+        match schedule.test.step(&mut self.regions, &schedule.kernels, budget_bytes, now, faults) {
+            Progress::Done => {
+                schedule.next_test();
+                Progress::Running
+            },
+            progress => progress,
+        }
+    }
+
+    /// Count the current test done and move on, when it was run elsewhere.
+    pub fn finish_test(&mut self) {
+        self.schedule.finish_test();
+    }
+
+    /// The memory, to split the current test over several cores, and the schedule, which stays
+    /// usable while the memory is lent out. The suite's own [`Test`] keeps no state in the memory,
+    /// so such a run must start from the test's first phase.
+    pub const fn split(&mut self) -> (&mut Regions<'a>, &mut Schedule) {
+        (&mut self.regions, &mut self.schedule)
+    }
+
+    #[must_use]
+    pub const fn schedule(&self) -> &Schedule {
+        &self.schedule
+    }
+
+    #[must_use]
+    pub const fn test(&self) -> &Test {
+        self.schedule.test()
+    }
+
+    /// Passes completed.
+    #[must_use]
+    pub const fn passes(&self) -> u64 {
+        self.schedule.passes
+    }
+
+    /// The current test's 1-based position in the preset, and how many tests it has.
+    #[must_use]
+    pub fn position(&self) -> (usize, usize) {
+        self.schedule.position()
+    }
+
+    /// Progress through the current pass, 0 to 100.
+    #[must_use]
+    pub fn percent(&self) -> u16 {
+        self.schedule.percent()
+    }
+
+    #[must_use]
+    pub const fn regions(&self) -> &Regions<'a> {
+        &self.regions
+    }
+
+    #[must_use]
+    pub const fn config(&self) -> Config {
+        self.schedule.config
+    }
+
+    #[must_use]
+    pub const fn kernels(&self) -> Kernels {
+        self.schedule.kernels
+    }
+
+    #[must_use]
+    pub const fn preset(&self) -> Preset {
+        self.schedule.preset
     }
 }
 

@@ -6,12 +6,10 @@ use core::time::Duration;
 use super::{Config, TestKind};
 use crate::ops::{Inversion, Order};
 use crate::prsg::{splitmix, xorshift};
-use crate::region::BLOCK_WORDS;
+use crate::region::{BLOCK_WORDS, GROUP_WORDS, Layout};
 
 /// The modulo test's stride.
 pub const MODULO: usize = 20;
-/// A move window is a whole number of block-move groups (16 words, two blocks).
-const GROUP_WORDS: usize = 2 * BLOCK_WORDS;
 
 /// Words `start..start + words` of the region, block aligned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +97,13 @@ pub enum Op {
         offset: usize,
         value: u64,
     },
+    /// [`Op::VerifyStride`] at `check_offset` with `expect`, then [`Op::FillStride`] at `offset`, in one walk.
+    VerifyFillStride {
+        check_offset: usize,
+        expect: u64,
+        offset: usize,
+        value: u64,
+    },
     MoveInit,
     /// The block moves of one window, `iterations` times over.
     Move {
@@ -150,21 +155,24 @@ pub fn move_window(cfg: &Config) -> usize {
     window - window % GROUP_WORDS
 }
 
-/// The phases of `kind` over a region of `words` words, in order, until `emit` breaks.
+/// The phases of `kind` over the regions of `layout`, in order, until `emit` breaks.
 #[expect(clippy::too_many_lines, reason = "one arm per test, each a few lines")]
 pub fn plan(
     kind: TestKind,
     cfg: &Config,
     pass: u64,
-    words: usize,
+    layout: &Layout,
     emit: &mut dyn FnMut(Phase) -> ControlFlow<()>,
 ) -> ControlFlow<()> {
+    let words = layout.words();
     let mut e = Emit { emit, all: Span { start: 0, words } };
     let seed = |round: u64| mix(cfg.seed, kind as u64, pass, round);
     match kind {
         TestKind::AddressWalk => {
             for invert in [0, !0] {
-                e.whole(Op::AddressWalk { invert })?;
+                for &region in layout.spans() {
+                    e.on(region, Op::AddressWalk { invert })?;
+                }
             }
         },
         TestKind::OwnAddress => {
@@ -239,22 +247,32 @@ pub fn plan(
         },
         TestKind::Modulo20 => {
             let mut state = seed(0) | 1;
+            // The stride words written last are checked as the next ones are written.
+            let mut written: Option<(usize, u64)> = None;
             for _ in 0..cfg.modulo_rounds {
                 for offset in 0..MODULO {
                     state = xorshift(state);
                     for value in [state, !state] {
-                        e.whole(Op::FillStride { offset, value })?;
+                        e.whole(match written {
+                            Some((check_offset, expect)) => {
+                                Op::VerifyFillStride { check_offset, expect, offset, value }
+                            },
+                            None => Op::FillStride { offset, value },
+                        })?;
                         for _ in 0..2 {
                             e.whole(Op::FillExcept { offset, value: !value })?;
                         }
-                        e.whole(Op::VerifyStride { offset, value })?;
+                        written = Some((offset, value));
                     }
                 }
+            }
+            if let Some((offset, value)) = written {
+                e.whole(Op::VerifyStride { offset, value })?;
             }
         },
         TestKind::BlockMove => {
             e.whole(Op::MoveInit)?;
-            for span in windows(words, move_window(cfg), GROUP_WORDS) {
+            for span in move_windows(layout, cfg) {
                 e.on(span, Op::Move { iterations: cfg.move_iterations })?;
             }
             e.whole(Op::VerifyPairs)?;
@@ -331,6 +349,15 @@ fn fixed(e: &mut Emit<'_>, p: u64, iterations: u32) -> ControlFlow<()> {
     ControlFlow::Continue(())
 }
 
+/// The block-move windows over the regions of `layout`: consecutive windows in each region, the
+/// last of each shorter, none spanning two regions.
+pub fn move_windows<'l>(layout: &'l Layout, cfg: &Config) -> impl Iterator<Item = Span> + 'l {
+    let window = move_window(cfg);
+    layout.spans().iter().flat_map(move |region| {
+        windows(region.words, window, GROUP_WORDS).map(move |w| Span { start: region.start + w.start, words: w.words })
+    })
+}
+
 /// Consecutive windows of `window` words (rounded down to `unit`), the last one shorter.
 fn windows(words: usize, window: usize, unit: usize) -> impl Iterator<Item = Span> {
     let window = (window - window % unit).max(unit);
@@ -352,9 +379,9 @@ pub struct Measure {
     pub waits: Duration,
 }
 
-pub fn measure(kind: TestKind, cfg: &Config, pass: u64, words: usize, share: Span) -> Measure {
+pub fn measure(kind: TestKind, cfg: &Config, pass: u64, layout: &Layout, share: Span) -> Measure {
     let mut m = Measure { phases: 0, work: 0, waits: Duration::ZERO };
-    let _ = plan(kind, cfg, pass, words, &mut |phase| {
+    let _ = plan(kind, cfg, pass, layout, &mut |phase| {
         m.phases += 1;
         m.work += phase.work_in(share) as u64;
         if let Op::Wait(d) = phase.op {
@@ -366,10 +393,10 @@ pub fn measure(kind: TestKind, cfg: &Config, pass: u64, words: usize, share: Spa
 }
 
 /// Phase `index`, if the test has that many.
-pub fn nth(kind: TestKind, cfg: &Config, pass: u64, words: usize, index: usize) -> Option<Phase> {
+pub fn nth(kind: TestKind, cfg: &Config, pass: u64, layout: &Layout, index: usize) -> Option<Phase> {
     let mut seen = 0;
     let mut found = None;
-    let _ = plan(kind, cfg, pass, words, &mut |phase| {
+    let _ = plan(kind, cfg, pass, layout, &mut |phase| {
         if seen == index {
             found = Some(phase);
             return ControlFlow::Break(());

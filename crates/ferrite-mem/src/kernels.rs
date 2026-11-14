@@ -309,9 +309,8 @@ unsafe fn fill_except<B: Block, const NT: bool>(base: *mut u64, blocks: usize, s
                 put::<B, NT>(p, v);
                 skip -= BLOCK_WORDS;
             } else {
-                for i in (0..BLOCK_WORDS).filter(|&i| i != skip) {
-                    crate::block::write_word(p.add(i), value);
-                }
+                crate::block::prefetch_write(base.wrapping_add(b * BLOCK_WORDS + skip + SPARSE_AHEAD * stride.n));
+                B::store_except(p, v, skip);
                 skip += stride.n - BLOCK_WORDS;
             }
         }
@@ -319,14 +318,21 @@ unsafe fn fill_except<B: Block, const NT: bool>(base: *mut u64, blocks: usize, s
     fence::<NT>();
 }
 
+/// Strides ahead of the walk whose lines the sparse passes ask for, so the loads and stores
+/// overlap their misses instead of taking them one at a time.
+const SPARSE_AHEAD: usize = 24;
+
 /// Store `value` in the words `stride` selects, and only those.
 ///
 /// # Safety
 /// `base` and `words` describe a region.
 pub unsafe fn fill_stride(base: *mut u64, words: usize, stride: Stride, value: u64) {
-    for w in (stride.start()..words).step_by(stride.n) {
+    let mut w = stride.start();
+    while w < words {
+        crate::block::prefetch_write(base.wrapping_add(w + SPARSE_AHEAD * stride.n));
         // SAFETY: `w < words`.
         unsafe { crate::block::write_word(base.add(w), value) };
+        w += stride.n;
     }
 }
 
@@ -335,11 +341,54 @@ pub unsafe fn fill_stride(base: *mut u64, words: usize, stride: Stride, value: u
 /// # Safety
 /// As [`fill_stride`].
 pub unsafe fn verify_stride(base: *mut u64, words: usize, stride: Stride, value: u64, faults: &mut Faults<'_>) {
-    for w in (stride.start()..words).step_by(stride.n) {
+    let mut w = stride.start();
+    while w < words {
+        crate::block::prefetch_read(base.wrapping_add(w + SPARSE_AHEAD * stride.n));
         // SAFETY: `w < words`.
         let (p, actual) = unsafe { (base.add(w), crate::block::read_word(base.add(w))) };
         if actual != value {
             faults.record(Fault { addr: CpuAddr::of(p), expected: value, actual });
+        }
+        w += stride.n;
+    }
+}
+
+/// Check that the words `check` selects hold `expect`, and store `value` in those `fill` selects,
+/// both in address order, a word's check before its store.
+///
+/// The same reads, writes and fault reports as [`verify_stride`] then [`fill_stride`], in one
+/// walk: when both pick the same word, or neighbours in a line, the line is fetched once.
+///
+/// # Safety
+/// As [`fill_stride`].
+pub unsafe fn verify_fill_stride(
+    base: *mut u64,
+    words: usize,
+    check: Stride,
+    expect: u64,
+    fill: Stride,
+    value: u64,
+    faults: &mut Faults<'_>,
+) {
+    let (mut c, mut f) = (check.start(), fill.start());
+    while c < words || f < words {
+        crate::block::prefetch_write(base.wrapping_add(c.min(f) + SPARSE_AHEAD * check.n));
+        if c <= f {
+            // SAFETY: `c <= f` and one of them is below `words`, so `c` is.
+            let (p, actual) = unsafe { (base.add(c), crate::block::read_word(base.add(c))) };
+            if actual != expect {
+                faults.record(Fault { addr: CpuAddr::of(p), expected: expect, actual });
+            }
+            if c == f {
+                // SAFETY: the word just read.
+                unsafe { crate::block::write_word(base.add(f), value) };
+                f += fill.n;
+            }
+            c += check.n;
+        } else {
+            // SAFETY: `f < c`, and `f < words` as the loop runs.
+            unsafe { crate::block::write_word(base.add(f), value) };
+            f += fill.n;
         }
     }
 }

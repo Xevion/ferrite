@@ -1,12 +1,16 @@
-//! One test of the memory suite on several cores at once, each core on its own share of the region.
+//! Consecutive tests of the memory suite on several cores at once, each core on its own share of
+//! the memory throughout.
 //!
-//! The BSP gives each core a [`Job`]: the core's [`Test`] state machine and the region of its share,
-//! so no test state lives on a core's stack. AP jobs start through `ferrite_efi::mp`; the BSP works
-//! its own job a turn at a time between its other duties. The cores meet at the start and at every
-//! gated phase boundary ([`Test::gated`]), where each waits until all have ended the phase: the BSP
-//! opens the gate ([`Crew::coordinate`]). Each core reports through its [`Seat`], which holds only
-//! atomics.
+//! The BSP gives each core a [`Job`]: the core's [`Test`] state machine for each test of the run
+//! and the regions of its share, so no test state lives on a core's stack. AP jobs start through
+//! `ferrite_efi::mp` once for the whole run; the BSP works its own job a turn at a time between its
+//! other duties. The cores meet at the start, at every gated phase boundary ([`Test::gated`]), where
+//! each waits until all have ended the phase, and between tests, where each waits for the BSP to
+//! begin the next round ([`Crew::begin_round`]) or close the crew ([`Crew::close`]), so an AP is
+//! dispatched once rather than once per test. The BSP opens the gates ([`Crew::coordinate`]). Each
+//! core reports through its [`Seat`], which holds only atomics.
 
+use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -16,7 +20,7 @@ use ferrite_efi::cpu::{FpuControl, VectorState};
 use ferrite_efi::mp::{ApTask, StackUse};
 use ferrite_hal::{Clock, Instant};
 use ferrite_mem::suite::{Kernels, Progress, Test};
-use ferrite_mem::{CpuAddr, Fault, Faults, Region};
+use ferrite_mem::{CpuAddr, Fault, Faults, Regions};
 
 use crate::cores::tier_usable;
 
@@ -123,7 +127,9 @@ pub struct Seat {
     /// The phase this core waits at a gate to start; at or below the crew's open gate when it
     /// does not wait.
     gate: AtomicUsize,
-    /// Work done, in the test's units.
+    /// The last round whose test this core has finished.
+    finished: AtomicUsize,
+    /// Work done in the current test, in its units.
     done: AtomicU64,
     faults: AtomicU64,
     /// Cells of `first` filled; a filled cell is never written again.
@@ -170,6 +176,21 @@ impl Seat {
         })
     }
 
+    /// Forget the last test's progress and faults, once every core has finished it and before the
+    /// next round begins.
+    pub fn reset(&self) {
+        self.gate.store(0, Ordering::Release);
+        self.done.store(0, Ordering::Release);
+        self.faults.store(0, Ordering::Release);
+        self.kept.store(0, Ordering::Release);
+    }
+
+    /// Whether the core has finished the test of `round`, or has left its job for good.
+    #[must_use]
+    pub fn settled(&self, round: usize) -> bool {
+        self.state().ended() || self.finished.load(Ordering::Acquire) >= round
+    }
+
     /// Bytes of AP stack the job used below its dispatch entry; `None` on the BSP.
     #[must_use]
     pub fn stack_bytes(&self) -> Option<usize> {
@@ -202,13 +223,26 @@ enum Start {
     TimedOut,
 }
 
-/// What the cores of one test share: the start, the gates and the stop.
+/// What an AP waiting between tests found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Next {
+    /// The round to work on.
+    Round(usize),
+    Closed,
+    Stopped,
+}
+
+/// What the cores of one run of tests share: the start, the rounds, the gates and the stop.
 #[derive(Debug, Default)]
 pub struct Crew {
     arrived: AtomicU32,
     start: AtomicU8,
     stop: AtomicBool,
-    /// The phase of the last gate opened; every core may start phases up to it.
+    /// The last round begun: round `n` is the `n`-th test of the run, from 1.
+    round: AtomicUsize,
+    /// No round will begin again.
+    closed: AtomicBool,
+    /// The phase of the last gate opened in this round; every core may start phases up to it.
     open: AtomicUsize,
 }
 
@@ -228,6 +262,24 @@ impl Crew {
     pub fn abandon(&self) {
         self.start.store(START_ABANDONED, Ordering::Release);
         self.stop();
+    }
+
+    /// Let every core go on to the next test, once all have finished the last and the seats are
+    /// [reset](Seat::reset).
+    pub fn begin_round(&self) {
+        self.open.store(0, Ordering::Release);
+        self.round.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// The last round begun, 0 before the first.
+    #[must_use]
+    pub fn round(&self) -> usize {
+        self.round.load(Ordering::Acquire)
+    }
+
+    /// No round follows the last: every core ends its job once it has finished it.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
     }
 
     /// Every core ends its job at its next turn.
@@ -256,13 +308,31 @@ impl Crew {
         }
     }
 
+    /// Wait for a round after `seen`, the close or the stop.
+    fn next_round(&self, seen: usize) -> Next {
+        loop {
+            if self.stopped() {
+                return Next::Stopped;
+            }
+            let round = self.round();
+            if round > seen {
+                return Next::Round(round);
+            }
+            if self.closed.load(Ordering::Acquire) {
+                return Next::Closed;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
     /// Open the gate that every seat still working waits at, once all of them wait there. Returns
-    /// whether every seat has ended.
+    /// whether every seat has finished the round's test or ended.
     pub fn coordinate<'s>(&self, seats: impl IntoIterator<Item = &'s Seat>) -> bool {
+        let round = self.round();
         let open = self.open.load(Ordering::Acquire);
         let mut at = None;
         for seat in seats {
-            if seat.state().ended() {
+            if seat.settled(round) {
                 continue;
             }
             let gate = seat.gate.load(Ordering::Acquire);
@@ -278,10 +348,12 @@ impl Crew {
     }
 }
 
-/// One core's job for one test: its test state and share, the shared crew and its own seat.
+/// One core's job for a run of tests: its test state for each, the regions of its share, the shared
+/// crew and its own seat.
 pub struct Job<'a, C> {
-    test: UnsafeCell<Test>,
-    region: UnsafeCell<Region<'a>>,
+    /// The core's share of each test of the run, in order; test `n` is round `n + 1`.
+    tests: Vec<UnsafeCell<Test>>,
+    regions: UnsafeCell<Regions<'a>>,
     kernels: Kernels,
     budget_bytes: usize,
     clock: C,
@@ -290,8 +362,8 @@ pub struct Job<'a, C> {
     taken: AtomicBool,
 }
 
-// SAFETY: the test and region are touched only through the one Worker that wins `taken`; everything
-// else is read-only or atomic.
+// SAFETY: the tests and regions are touched only through the one Worker that wins `taken`;
+// everything else is read-only or atomic.
 unsafe impl<C: Sync> Sync for Job<'_, C> {}
 
 impl<C> fmt::Debug for Job<'_, C> {
@@ -301,10 +373,10 @@ impl<C> fmt::Debug for Job<'_, C> {
 }
 
 impl<'a, C: Clock> Job<'a, C> {
-    /// `test` must be the test of `region`'s share ([`Test::for_share`]).
-    pub const fn new(
-        test: Test,
-        region: Region<'a>,
+    /// `tests` must be the tests of `regions`' share ([`Test::for_share`]), one per round.
+    pub fn new(
+        tests: Vec<Test>,
+        regions: Regions<'a>,
         kernels: Kernels,
         budget_bytes: usize,
         clock: C,
@@ -312,8 +384,8 @@ impl<'a, C: Clock> Job<'a, C> {
         seat: &'a Seat,
     ) -> Self {
         Self {
-            test: UnsafeCell::new(test),
-            region: UnsafeCell::new(region),
+            tests: tests.into_iter().map(UnsafeCell::new).collect(),
+            regions: UnsafeCell::new(regions),
             kernels,
             budget_bytes,
             clock,
@@ -324,7 +396,7 @@ impl<'a, C: Clock> Job<'a, C> {
     }
 
     fn take(&self) -> Option<Worker<'_, 'a, C>> {
-        (!self.taken.swap(true, Ordering::AcqRel)).then_some(Worker { job: self, gate: None, until: None })
+        (!self.taken.swap(true, Ordering::AcqRel)).then_some(Worker { job: self, round: 0, gate: None, until: None })
     }
 
     /// Take the job on the calling core, once the start is released; `None` if already taken.
@@ -343,6 +415,7 @@ pub enum Turn {
     Gate,
     /// Nothing to do before this: a bit-fade wait or a bus-stress pause.
     Wait(Instant),
+    /// The round's test is finished on this core.
     Done,
     Stopped,
 }
@@ -350,12 +423,26 @@ pub enum Turn {
 /// The one handle that works a job; it stays on the core that took it.
 pub struct Worker<'j, 'a, C> {
     job: &'j Job<'a, C>,
+    /// The round being worked, 0 before the first.
+    round: usize,
     /// The phase this core waits to start.
     gate: Option<usize>,
     until: Option<Instant>,
 }
 
 impl<C: Clock> Worker<'_, '_, C> {
+    /// Start working the test of `round`.
+    pub const fn begin(&mut self, round: usize) {
+        self.round = round;
+        self.gate = None;
+        self.until = None;
+    }
+
+    /// Leave the job for good: the crew is closed and the last test is finished.
+    pub fn retire(&self) {
+        self.job.seat.set(SeatState::Done);
+    }
+
     /// One bounded step of the job, or a quick look at the gate or the clock while waiting. Wide
     /// kernels run inside `vector`'s guard.
     pub fn turn(&mut self, vector: Option<&VectorState>) -> Turn {
@@ -378,13 +465,16 @@ impl<C: Clock> Worker<'_, '_, C> {
             }
             self.until = None;
         }
+        let Some(cell) = self.round.checked_sub(1).and_then(|i| job.tests.get(i)) else {
+            return Turn::Done;
+        };
         // SAFETY: this worker is the job's only one (`take`), and it is not shared.
-        let (test, region) = unsafe { (&mut *job.test.get(), &mut *job.region.get()) };
+        let (test, regions) = unsafe { (&mut *cell.get(), &mut *job.regions.get()) };
         let phase = test.phase();
         let mut sink = |f: Fault| seat.record(f);
         let mut faults = Faults::new(seat.room(), &mut sink);
         let kernels = &job.kernels;
-        let mut step = || test.step(region, kernels, job.budget_bytes, now, &mut faults);
+        let mut step = || test.step(regions, kernels, job.budget_bytes, now, &mut faults);
         let progress = match vector {
             Some(v) if kernels.is_wide() => v.wide(step),
             _ => step(),
@@ -396,7 +486,7 @@ impl<C: Clock> Worker<'_, '_, C> {
         seat.done.store(test.done(), Ordering::Release);
         match progress {
             Progress::Done => {
-                seat.set(SeatState::Done);
+                seat.finished.store(self.round, Ordering::Release);
                 Turn::Done
             },
             Progress::Waiting { until } => {
@@ -411,11 +501,40 @@ impl<C: Clock> Worker<'_, '_, C> {
             Progress::Running => Turn::Worked,
         }
     }
+
+    /// Work every round the crew begins, spinning between turns that have nothing to do, until it
+    /// is closed or stopped; how the core left its job, which the seat then says too.
+    pub fn serve(&mut self, vector: Option<&VectorState>) -> SeatState {
+        let end = self.rounds(vector);
+        self.job.seat.set(end);
+        end
+    }
+
+    fn rounds(&mut self, vector: Option<&VectorState>) -> SeatState {
+        let crew = self.job.crew;
+        let mut seen = 0;
+        loop {
+            match crew.next_round(seen) {
+                Next::Round(round) => seen = round,
+                Next::Closed => return SeatState::Done,
+                Next::Stopped => return SeatState::Stopped,
+            }
+            self.begin(seen);
+            loop {
+                match self.turn(vector) {
+                    Turn::Worked => {},
+                    Turn::Gate | Turn::Wait(_) => core::hint::spin_loop(),
+                    Turn::Done => break,
+                    Turn::Stopped => return SeatState::Stopped,
+                }
+            }
+        }
+    }
 }
 
 // SAFETY: the AP path runs ferrite-mem kernels on its own share, reads CPUID, CR4, XCR0 and the TSC,
 // writes CR4 and XCR0 through VectorState (restored before return) and stores to atomics. No EFI
-// call, allocation, logging or lock; the test's state lives in the job, so the frames stay small.
+// call, allocation, logging or lock; the tests' state lives in the job, so the frames stay small.
 unsafe impl<C: Clock + Sync> ApTask for Job<'_, C> {
     fn run(&self) {
         if !FpuControl::read().sse_ready() {
@@ -436,13 +555,7 @@ unsafe impl<C: Clock + Sync> ApTask for Job<'_, C> {
             Start::TimedOut => return self.seat.set(SeatState::Failed(Failure::StartLine)),
         }
         self.seat.set(SeatState::Running);
-        loop {
-            match worker.turn(vector.as_ref()) {
-                Turn::Worked => {},
-                Turn::Gate | Turn::Wait(_) => core::hint::spin_loop(),
-                Turn::Done | Turn::Stopped => break,
-            }
-        }
+        worker.serve(vector.as_ref());
         drop(vector);
     }
 

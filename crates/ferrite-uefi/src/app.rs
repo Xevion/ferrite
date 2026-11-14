@@ -29,7 +29,6 @@ use crate::report::Snapshot;
 use crate::sweep::{CoreChoice, Cores, Flow, Sweep, SweepStatus};
 use crate::ui::{self, View};
 
-const SWEEP_BYTES: usize = 1 << 30;
 /// The processors split tests run on. Every logical processor: verify-heavy kernels scale up to
 /// all eight threads on the laptop, while fills saturate at two cores either way.
 const CORES: CoreChoice = CoreChoice::All;
@@ -210,7 +209,7 @@ impl<'a> App<'a> {
             watchdog,
             commands: Commands::default(),
         };
-        Ok(Self { desk, sweep: Sweep::new(SWEEP_BYTES, caps, cores), chunk_bytes: START_CHUNK_BYTES, vector })
+        Ok(Self { desk, sweep: Sweep::new(caps, cores), chunk_bytes: START_CHUNK_BYTES, vector })
     }
 
     fn now(&self) -> Instant {
