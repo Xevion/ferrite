@@ -46,7 +46,8 @@ impl Diag {
             && let Some(first) = sweep.first_fault
         {
             self.fault_logged = true;
-            milestone(&alloc::format!(
+            // Error level saves the log at once, and reaches the loader's link too.
+            log::error!(
                 "sweep: FAULT at {}: expected {:#018x}, read {:#018x} ({} on cpu{}, pass {})",
                 first.fault.addr,
                 first.fault.expected,
@@ -54,7 +55,7 @@ impl Diag {
                 first.test,
                 first.cpu,
                 sweep.passes
-            ));
+            );
         }
         if now - self.last_alive >= ALIVE_INTERVAL {
             self.last_alive = now;
@@ -74,7 +75,7 @@ impl Diag {
         let was_up = previous.is_some_and(|p| p.up);
         let had_address = previous.and_then(|p| p.address);
         if link.address.is_some() && link.address != had_address {
-            milestone(&alloc::format!("net: up, {link}"));
+            log::info!("net: up, {link}");
         } else if was_up && !link.up {
             log::warn!("net: link lost, {link}");
         } else if had_address.is_some() && link.address.is_none() {

@@ -5,7 +5,6 @@
 //! from inside it.
 
 use alloc::boxed::Box;
-use alloc::format;
 use alloc::string::ToString as _;
 use core::time::Duration;
 
@@ -23,7 +22,7 @@ use uefi::proto::console::text::{Input, Key, Output, ScanCode};
 use crate::backend::{BackendError, UefiBackend};
 use crate::control::{Command, Commands};
 use crate::dash::{Dashboard, Frame};
-use crate::diag::{self, Diag};
+use crate::diag::Diag;
 use crate::gop::Display;
 use crate::net::{Net, NetStatus};
 use crate::report::Snapshot;
@@ -187,7 +186,7 @@ impl<'a> App<'a> {
                 (Some(net), None)
             },
             Err(e) => {
-                diag::milestone(&format!("net: setup failed: {e}"));
+                log::warn!("net: no network: {e}");
                 (None, Some(e.reason()))
             },
         };

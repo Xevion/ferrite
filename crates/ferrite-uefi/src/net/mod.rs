@@ -143,7 +143,7 @@ impl fmt::Display for NetStatus {
 pub enum NetError {
     #[snafu(display("locating SNP handles: {source}"))]
     Locate { source: uefi::Error },
-    #[snafu(display("no SNP handle"))]
+    #[snafu(display("the firmware drives no NIC (no Simple Network Protocol handle)"))]
     NoNic,
     #[snafu(display("opening SNP {handle:?} exclusively: {source}"))]
     Open { handle: Handle, source: uefi::Error },
@@ -159,7 +159,7 @@ impl NetError {
     /// A short reason for the UI.
     pub fn reason(&self) -> &'static str {
         let status = match self {
-            Self::NoNic => return "no SNP device (no NIC / OVMF lacks net stack)",
+            Self::NoNic => return "no wired NIC that the firmware drives",
             Self::Locate { source }
             | Self::Open { source, .. }
             | Self::Start { source, .. }
@@ -167,7 +167,7 @@ impl NetError {
             | Self::Filter { source, .. } => source.status(),
         };
         match (self, status) {
-            (_, Status::NOT_FOUND) => "no SNP device (no NIC / OVMF lacks net stack)",
+            (_, Status::NOT_FOUND) => "no wired NIC that the firmware drives",
             (_, Status::ACCESS_DENIED) => "SNP busy (held by firmware net stack)",
             (_, Status::UNSUPPORTED) => "SNP unsupported by firmware",
             (Self::Filter { .. }, _) => "NIC refused receive filters",
@@ -400,7 +400,10 @@ fn smol_instant(now: Instant) -> smoltcp::time::Instant {
 
 /// The first SNP handle with media present, else the first one.
 fn pick_nic() -> Result<Handle, NetError> {
-    let handles = boot::find_handles::<SimpleNetwork>().context(LocateSnafu)?;
+    let handles = match boot::find_handles::<SimpleNetwork>() {
+        Err(e) if e.status() == Status::NOT_FOUND => return Err(NetError::NoNic),
+        found => found.context(LocateSnafu)?,
+    };
     let present = handles.iter().copied().find(|&h| media_present(h));
     let chosen = present.or_else(|| handles.first().copied()).context(NoNicSnafu)?;
     log::debug!("net: {} SNP handles, media present on chosen one: {}", handles.len(), present.is_some());

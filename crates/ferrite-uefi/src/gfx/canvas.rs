@@ -492,6 +492,10 @@ impl Painter<'_, '_> {
     }
 
     fn round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, fill: Fill) {
+        // An empty bar (0%) has no area; tiny-skia would refuse it with a warning.
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
         let shader = match fill {
             Fill::Solid(c) => Shader::SolidColor(c.color()),
             Fill::Across(from, to) => self.gradient(Point::from_xy(x, y), Point::from_xy(x + w, y), from, to),
@@ -501,6 +505,9 @@ impl Painter<'_, '_> {
     }
 
     fn circle(&mut self, cx: f32, cy: f32, r: f32, color: Rgb) {
+        if r <= 0.0 {
+            return;
+        }
         self.paint(|pb| pb.push_circle(cx, cy, r), Shader::SolidColor(color.color()));
     }
 

@@ -484,7 +484,7 @@ pub fn net(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         p.fit(px(r.x), b, reason, Pen::style(Face::SemiBold, l.text.body, BAD), px(r.w));
         let hint = body.take_top(row_h);
         let b = p.mid(l.text.small, hint.y, hint.h);
-        p.fit(px(r.x), b, "the status page needs a NIC the firmware drives", small, px(r.w));
+        p.fit(px(r.x), b, "Wi-Fi is not in this app yet; the status page needs Ethernet", small, px(r.w));
         return;
     };
     let link = net.link;

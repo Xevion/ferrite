@@ -34,8 +34,12 @@ impl Command {
 pub struct Commands(Vec<Command>);
 
 impl Commands {
+    /// Queue `command`, unless it repeats the last one queued: a stop the loader keeps asserting is
+    /// one request, while pause, resume, pause still toggles three times.
     pub fn push(&mut self, command: Command) {
-        self.0.push(command);
+        if self.0.last() != Some(&command) {
+            self.0.push(command);
+        }
     }
 
     #[must_use]
