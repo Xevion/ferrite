@@ -14,6 +14,7 @@ use ferrite_efi::config;
 use ferrite_efi::cores::{CoreChoice, Cores};
 use ferrite_efi::cpu::VectorState;
 use ferrite_efi::link::Link as LoaderLink;
+use ferrite_efi::perf::Plan;
 use ferrite_efi::sensors::Sensors;
 use ferrite_efi::{rtc, watchdog::Keepalive};
 use ferrite_hal::{Clock as _, Instant, UnixTime, WallClock};
@@ -233,6 +234,9 @@ impl<'a> App<'a> {
         let loader = LoaderLink::locate();
         let watchdog = loader.map(|_| Keepalive::new(WATCHDOG, WATCHDOG_REARM, clock.now()));
         let cores = Cores::locate(CORES, clock);
+        if let Some(plan) = Plan::probe() {
+            plan.raise(cores.as_ref().map(Cores::mp));
+        }
         let desk = Desk {
             input,
             screen,

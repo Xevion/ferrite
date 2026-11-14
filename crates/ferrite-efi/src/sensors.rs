@@ -365,9 +365,7 @@ impl Sensors {
         log::info!(
             "cpu: TSC {} MHz measured, base {} by CPUID 0x16, APERF/MPERF {}",
             tsc_hz / 1_000_000,
-            features
-                .base_mhz
-                .map_or_else(|| String::from("not given"), |mhz| alloc::format!("{mhz} MHz")),
+            features.base_mhz.map_or_else(|| String::from("not given"), |mhz| alloc::format!("{mhz} MHz")),
             if features.aperf_mperf && !features.hypervisor { "read" } else { "not read" },
         );
         let thermal = match plan(identity.vendor, identity.signature, &features) {

@@ -23,6 +23,7 @@ pub mod memory;
 pub mod mp;
 pub mod paging;
 pub mod pci;
+pub mod perf;
 pub mod rtc;
 pub mod sensors;
 pub mod session;

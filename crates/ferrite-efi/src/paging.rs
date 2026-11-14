@@ -650,7 +650,7 @@ pub(crate) unsafe fn read_msr(msr: u32) -> u64 {
 
 /// # Safety
 /// The MSR exists and `v` is valid for it.
-unsafe fn write_msr(msr: u32, v: u64) {
+pub(crate) unsafe fn write_msr(msr: u32, v: u64) {
     // SAFETY: the caller's; CPL 0.
     unsafe {
         core::arch::asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32, options(nostack));
