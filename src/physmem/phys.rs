@@ -331,11 +331,10 @@ pub(crate) fn read_pfns(pagemap: &File, base: usize, page_count: usize) -> io::R
     pread_exact(pagemap, &mut buf, file_offset)?;
 
     Ok(buf
-        .chunks_exact(8)
-        .map(|chunk| {
-            let entry = chunk.try_into().map_or(0, u64::from_le_bytes);
-            parse_pagemap_entry(entry).unwrap_or(0)
-        })
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| parse_pagemap_entry(u64::from_le_bytes(*chunk)).unwrap_or(0))
         .collect())
 }
 

@@ -98,9 +98,8 @@ pub(crate) fn read_batch(fd: &File, range: PfnRange, scratch: &mut [u8], out: &m
     if pread_exact(fd, &mut scratch[..len], offset).is_err() {
         return false;
     }
-    for (slot, chunk) in out.iter_mut().zip(scratch[..len].chunks_exact(8)) {
-        // chunks_exact(8) guarantees the conversion; 0 is unreachable.
-        *slot = chunk.try_into().map_or(0, u64::from_le_bytes);
+    for (slot, chunk) in out.iter_mut().zip(scratch[..len].as_chunks::<8>().0) {
+        *slot = u64::from_le_bytes(*chunk);
     }
     true
 }

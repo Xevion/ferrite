@@ -270,8 +270,8 @@ pub fn resolve_mappings(
 #[must_use]
 pub fn probe_bytes(bytes: &[u8]) -> ProbeStats {
     let mut stats = ProbeStats::default();
-    for chunk in bytes.chunks_exact(8) {
-        let word = u64::from_le_bytes(chunk.try_into().unwrap_or([0; 8]));
+    for chunk in bytes.as_chunks::<8>().0 {
+        let word = u64::from_le_bytes(*chunk);
         stats.words_read += 1;
         if word != 0 {
             stats.nonzero_words += 1;
