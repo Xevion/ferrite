@@ -11,6 +11,7 @@ corosensei.workspace = true
 ferrite-hal.workspace = true
 ferrite-lkpi.workspace = true
 ferrite-net.workspace = true
+ferrite-wifi.workspace = true
 ferrite-wifi-start.workspace = true
 ferrite-wifi-sys.workspace = true
 libc.workspace = true

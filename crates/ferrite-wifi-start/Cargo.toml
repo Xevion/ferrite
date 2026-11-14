@@ -16,6 +16,7 @@ ferrite-hal.workspace = true
 ferrite-lkpi.workspace = true
 ferrite-net.workspace = true
 ferrite-nl80211.workspace = true
+ferrite-wifi.workspace = true
 ferrite-wifi-sys.workspace = true
 ferrite-wpa = { workspace = true, features = ["authenticator"] }
 log.workspace = true

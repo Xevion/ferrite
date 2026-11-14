@@ -17,7 +17,9 @@ ferrite-hal.workspace = true
 ferrite-lkpi.workspace = true
 ferrite-rt.workspace = true
 ferrite-net.workspace = true
+ferrite-wifi.workspace = true
 ferrite-wifi-start.workspace = true
+ferrite-wpa.workspace = true
 log.workspace = true
 snafu.workspace = true
 uefi = { workspace = true, features = ["global_allocator"] }

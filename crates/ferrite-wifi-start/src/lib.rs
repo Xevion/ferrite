@@ -14,6 +14,7 @@ mod connect;
 mod lab_ap;
 pub mod net;
 mod scan;
+pub mod station;
 
 use alloc::boxed::Box;
 use core::ffi::{CStr, c_char, c_int, c_uint, c_ulong, c_void};
@@ -205,12 +206,7 @@ fn run(start_up: &StartUp) -> bool {
         },
     }
     enter(c"initcalls (PCI probes run here)");
-    for call in initcalls() {
-        log::info!("initcall level {} {}", call.level().to_string_lossy(), call.name().to_string_lossy());
-        // SAFETY: init is the only caller, runs the calls one at a time, and the program links the shim.
-        let code = unsafe { call.call() };
-        log::info!("initcall {} returned {code}", call.name().to_string_lossy());
-    }
+    run_initcalls(log::Level::Info);
     enter(c"firmware check");
     match firmware_round_trip(start_up.firmware_reference, REGDB) {
         Ok(size) => {
@@ -231,18 +227,35 @@ fn run(start_up: &StartUp) -> bool {
     }
     let wifi = pci_wifi(&clock, start_up);
     enter(c"exitcalls (driver removal)");
-    let mut ran = 0_usize;
-    for call in exitcalls() {
-        log::info!("exitcall {}", call.name().to_string_lossy());
-        // SAFETY: as above; every initcall returned, so each module is set up.
-        unsafe { call.call() };
-        ran += 1;
-    }
-    log::info!("exitcalls done: {ran} ran");
+    run_exitcalls(log::Level::Info);
     let (polls, unhandled) = irq_counts();
     log::info!("polled IRQs: {polls} handler runs, {unhandled} answered IRQ_NONE");
     enter(c"done");
     wifi
+}
+
+/// Run every initcall in table order from the init task, logging each at `level`; a nonzero return is
+/// logged as a warning.
+fn run_initcalls(level: log::Level) {
+    for call in initcalls() {
+        log::log!(level, "initcall level {} {}", call.level().to_string_lossy(), call.name().to_string_lossy());
+        // SAFETY: the init task is the only caller, runs the calls one at a time, and the program links the shim.
+        let code = unsafe { call.call() };
+        let level = if code == 0 { level } else { log::Level::Warn };
+        log::log!(level, "initcall {} returned {code}", call.name().to_string_lossy());
+    }
+}
+
+/// Run every exitcall, so each driver is removed, and log how many ran.
+fn run_exitcalls(level: log::Level) {
+    let mut ran = 0_usize;
+    for call in exitcalls() {
+        log::log!(level, "exitcall {}", call.name().to_string_lossy());
+        // SAFETY: as in `run_initcalls`; every initcall returned, so each module is set up.
+        unsafe { call.call() };
+        ran += 1;
+    }
+    log::log!(level, "exitcalls done: {ran} ran");
 }
 
 const ENODEV: c_int = 19;
@@ -279,12 +292,34 @@ fn driver_of(index: usize) -> Option<alloc::string::String> {
 /// the driver. With no card, the simulated radios run the same scan instead. True when every step
 /// passed; each step is logged.
 fn pci_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
-    let (limit, scan_limit) = (start_up.wifi_limit, start_up.scan_limit);
-    let count = ferrite_lkpi::pci::device_count();
-    if count == 0 {
+    let scan_limit = start_up.scan_limit;
+    if ferrite_lkpi::pci::device_count() == 0 {
         log::info!("no PCI Wi-Fi card was handed to the drivers");
         return simulated_wifi(clock, start_up);
     }
+    let Some(name) = bring_card_up(clock, start_up.wifi_limit) else { return false };
+    enter(c"scanning through nl80211");
+    let scanned = match scan::connect().and_then(|mut client| {
+        let report = scan::scan(&mut client, &name, &[], scan_limit, &|| false, log::Level::Info, clock)?;
+        Ok((client, report))
+    }) {
+        Ok((mut client, report)) => join_from_credentials(&mut client, &name, &report.bsses, start_up, clock),
+        Err(error) => {
+            log::error!("nl80211 scan failed: {error}");
+            false
+        },
+    };
+    enter(c"bringing the wireless interface down");
+    let (_, code) = wireless(WirelessOp::Down, 0);
+    log::info!("{name} down ({code})");
+    scanned && code == 0
+}
+
+/// Every PCI Wi-Fi card the platform gave the drivers must be bound after the initcalls, and the first
+/// must register a wireless interface and come up, within `limit`. The interface's name, or `None` with
+/// the failing step logged.
+fn bring_card_up(clock: &dyn Fn() -> Instant, limit: Duration) -> Option<alloc::string::String> {
+    let count = ferrite_lkpi::pci::device_count();
     let bound: alloc::vec::Vec<Option<alloc::string::String>> = (0..count).map(driver_of).collect();
     for (index, driver) in bound.iter().enumerate() {
         match driver {
@@ -297,7 +332,7 @@ fn pci_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
         }
     }
     if bound.iter().any(Option::is_none) {
-        return false;
+        return None;
     }
     enter(c"waiting for the wireless interface (firmware load, INIT image, NVM)");
     let start = clock();
@@ -308,18 +343,18 @@ fn pci_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
         }
         if code != -ENODEV {
             log::error!("looking for the wireless interface failed: {code}");
-            return false;
+            return None;
         }
         if driver_of(0).is_none() {
             log::error!(
                 "PCI device 0: the driver unbound after {} ms (firmware load or start failed)",
                 (clock() - start).as_millis()
             );
-            return false;
+            return None;
         }
         if clock() - start >= limit {
             log::error!("no wireless interface after {} ms; the driver is still bound", (clock() - start).as_millis());
-            return false;
+            return None;
         }
         // SAFETY: on a task after the time bring-up.
         unsafe { msleep(WIFI_POLL_MS) };
@@ -336,28 +371,23 @@ fn pci_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
             "dev_open({name}) returned {code} after {} ms: the RUNTIME firmware did not come up",
             (clock() - up_start).as_millis()
         );
-        return false;
+        return None;
     }
     log::info!("{name} is up after {} ms: the RUNTIME firmware is alive", (clock() - up_start).as_millis());
-    enter(c"scanning through nl80211");
-    let scanned = match scan::connect().and_then(|mut client| {
-        let report = scan::scan(&mut client, &name, &[], scan_limit, clock)?;
-        Ok((client, report))
-    }) {
-        Ok((mut client, report)) => join_from_credentials(&mut client, &name, &report.bsses, start_up, clock),
-        Err(error) => {
-            log::error!("nl80211 scan failed: {error}");
-            false
-        },
-    };
-    enter(c"bringing the wireless interface down");
-    let (_, code) = wireless(WirelessOp::Down, 0);
-    log::info!("{name} down ({code})");
-    scanned && code == 0
+    Some(name)
 }
 
 /// The file on the firmware volume with the network to join, in `.env` lines.
-const CREDENTIALS_FILE: &str = "wifi.env";
+pub const CREDENTIALS_FILE: &str = "wifi.env";
+
+/// The strongest BSS of the network `ssid` that offers WPA2 (RSN).
+fn best_bss<'a>(bsses: &'a [ferrite_nl80211::nl80211::Bss], ssid: &[u8]) -> Option<&'a ferrite_nl80211::nl80211::Bss> {
+    use ferrite_nl80211::nl80211::Security;
+    bsses
+        .iter()
+        .filter(|bss| bss.ssid == ssid && bss.security == Security::Rsn)
+        .max_by_key(|bss| bss.signal.map_or(i32::MIN, |s| s.0))
+}
 
 /// Join the network `wifi.env` names, if the scan found it, hand the link to the main loop's IP stack,
 /// and leave it again. Without the file the connect is skipped and that counts as passing; with it, any
@@ -369,7 +399,7 @@ fn join_from_credentials(
     start_up: &StartUp,
     clock: &dyn Fn() -> Instant,
 ) -> bool {
-    use ferrite_nl80211::nl80211::{Security, SsidDisplay};
+    use ferrite_nl80211::nl80211::SsidDisplay;
     let text = match start_up.firmware_reference.load(CREDENTIALS_FILE) {
         Ok(text) => text,
         Err(error) => {
@@ -386,11 +416,7 @@ fn join_from_credentials(
     };
     let ssid = credentials.ssid.as_bytes();
     log::info!("credentials for \"{}\": passphrase of {} characters", SsidDisplay(ssid), credentials.passphrase.len());
-    let Some(bss) = bsses
-        .iter()
-        .filter(|bss| bss.ssid == ssid && bss.security == Security::Rsn)
-        .max_by_key(|bss| bss.signal.map_or(i32::MIN, |s| s.0))
-    else {
+    let Some(bss) = best_bss(bsses, ssid) else {
         log::error!("the scan found no RSN BSS named \"{}\"; the connect is skipped", SsidDisplay(ssid));
         return false;
     };
@@ -532,8 +558,8 @@ fn attach_links(
 }
 
 /// The SSID and passphrase of the lab's WPA2-PSK network, which the second simulated radio serves.
-const LAB_SSID: &[u8] = b"ferrite-lab";
-const LAB_PASSPHRASE: &[u8] = b"ferrite lab passphrase";
+pub(crate) const LAB_SSID: &[u8] = b"ferrite-lab";
+pub(crate) const LAB_PASSPHRASE: &[u8] = b"ferrite lab passphrase";
 
 /// The wireless interfaces present without a PCI card: none on a real machine, the lab's two
 /// `mac80211_hwsim` radios otherwise. The second becomes a WPA2-PSK AP run by [`lab_ap`] on its own
@@ -584,7 +610,8 @@ fn simulated_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
     }
     let channel_1 = [ferrite_nl80211::nl80211::Frequency(2412)];
     let result = scan::connect().and_then(|mut client| {
-        let report = scan::scan(&mut client, &first, &channel_1, start_up.scan_limit, clock)?;
+        let report =
+            scan::scan(&mut client, &first, &channel_1, start_up.scan_limit, &|| false, log::Level::Info, clock)?;
         Ok((client, report))
     });
     let passed = match result {

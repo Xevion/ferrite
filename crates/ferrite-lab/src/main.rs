@@ -11,6 +11,7 @@ mod fence;
 mod host;
 mod logger;
 mod net;
+mod station;
 
 use std::backtrace::Backtrace;
 use std::ffi::CStr;
@@ -150,6 +151,9 @@ fn main() -> ExitCode {
     if let Err(code) = ferrite_wifi_start::start_kthreadd() {
         log::error!("starting kthreadd failed: {code}");
         return ExitCode::FAILURE;
+    }
+    if std::env::args().nth(1).as_deref() == Some("station") {
+        return station::run(&mut sched);
     }
     let start_up = StartUp {
         sched: sched.handle(),

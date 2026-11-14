@@ -8,7 +8,7 @@
 | `ferrite-hal` | `no_std` | Platform traits (MMIO, PCI config, DMA, clock, delay) and the address, unit and index types every driver shares |
 | `ferrite-xhci` | `no_std` + `alloc` | xHCI Debug Capability driver, written only against `ferrite-hal` |
 | `ferrite-efi` | `no_std` + `uefi` | UEFI backends for the HAL traits, the boot-volume log and file reads, the `log` sink, unattended exit, the firmware watchdog, firmware RNG and RTC, the link protocol the loader shares with its apps |
-| `ferrite-mem` | `no_std` | Memory-test building blocks (fills, verifies, own-address, PRSG and shifting patterns, moving-inversion steps, block copies) at the scalar, `rep` string, SSE2, AVX2 and AVX-512 tiers, over a typed `Region`; the test suite built from them (memtest86+'s tests and ferrite's patterns as steppable state machines) and stuck-bit versus coupling analysis |
+| `ferrite-mem` | `no_std` + `alloc` | Memory-test building blocks (fills, verifies, own-address, PRSG and shifting patterns, moving-inversion steps, block copies) at the scalar, `rep` string, SSE2, AVX2 and AVX-512 tiers, over a typed `Region` and sets of them (`Regions`, read as one run of words); the test suite built from them (memtest86+'s tests and ferrite's patterns as steppable state machines) and stuck-bit versus coupling analysis |
 | `ferrite-testing` | std | Host-only test doubles: mock HAL, simulated DbC register file |
 | `ferrite-uefi` | `no_std`, UEFI app built as ELF | Memory sweep (the `ferrite-mem` suite) on every core, framebuffer dashboard (ratatui on text-only consoles), SNP + smoltcp networking, mDNS, picoserve status page and API; `membench`, the throughput of every `ferrite-mem` block per tier |
 | `ferrite-recon` | `no_std`, UEFI apps | `pciscan`, `xhciscan`, `dbcping`, `dbcbench` |
@@ -19,8 +19,9 @@
 | `ferrite-nl80211` | `no_std` + `alloc` | Generic netlink and nl80211 messages, and a client over any netlink socket: scan, connect, keys, stations, frames and the control port |
 | `ferrite-wpa` | `no_std` + `alloc` | WPA2-PSK: PMK and PTK derivation, EAPOL-Key frames, the supplicant's 4-way and group key handshakes, credentials from `.env` lines; the `authenticator` feature adds the AP side |
 | `ferrite-netif` | `no_std` + `alloc` | Ethernet frames between a kernel netdev and smoltcp: bounded queues with drop counters, the smoltcp `Device`, DHCP client, ping and a minimal HTTP responder |
-| `ferrite-wifi-start` | `no_std` | The Wi-Fi C's kernel entry points and the init thread (seam checks, initcalls, exitcalls) that the lab and `wifitrace` share, and the frame seam that hands an open link to the main loop |
-| `ferrite-wifi-efi` | `no_std`, UEFI app built as ELF | The shim's platform pieces from firmware services (arena, guarded task stacks, firmware files, clock, PCI I/O devices, the DMA protection probe), and `wifitrace`, which runs the Wi-Fi C on them |
+| `ferrite-wifi` | `no_std` + `alloc` | The Wi-Fi station as the rest of the program sees it: its typed state, the reconnect backoff and supervisor, and the hand-off of its network port (`Rc<QueuePort>`) to the main loop |
+| `ferrite-wifi-start` | `no_std` | The Wi-Fi C's kernel entry points, the init thread that the lab and `wifitrace` share (seam checks, initcalls, exitcalls), the station service (join, hold, reconnect with backoff, offer a port), and the frame seam from a netdev to a `QueuePort` |
+| `ferrite-wifi-efi` | `no_std`, UEFI app built as ELF | The shim under UEFI: its platform pieces from firmware services (arena, guarded task stacks, firmware files, clock, PCI I/O devices, the DMA protection probe), `runtime` that brings it up and keeps it polled for an app, `WifiStation` (the Wi-Fi station an app owns), and `wifitrace`, which runs the test script on them |
 | `ferrite-lab` | std | The Wi-Fi C run as a Linux process on the desktop: logger, halt hook with a backtrace, the data fence, the host platform pieces |
 | `ferrite-dev` | std | Desktop tool: `log` (DbC capture), `bench` (dbcbench peer), `run` (one-shot cycle on the laptop), `push` and `loader` (client of the resident loader), `build` (an app's `.efi`, converting ELF-built apps), `vendor` (Linux snapshot), `stubs` (generates the kernel-symbol stubs) |
 
@@ -28,7 +29,6 @@ Planned, created when their milestone starts:
 
 | Crate | Mode | Contents |
 | --- | --- | --- |
-| `ferrite-wifi` | `no_std` + `alloc` | The station state machine (roaming, reconnects); WPA2-PSK is `ferrite-wpa` |
 | `ferrite-hal-vfio` | std | HAL backend over Linux VFIO |
 
 ### The `no_std` line

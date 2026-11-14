@@ -43,6 +43,13 @@ const POLL: Duration = Duration::from_millis(100);
 /// Set by the AP thread as the handshake lands, for the init task's checks.
 pub static PORT_OPEN: AtomicBool = AtomicBool::new(false);
 pub static GROUP_KEY_INSTALLED: AtomicBool = AtomicBool::new(false);
+/// Set by a test to make the AP deauthenticate its station at its next look.
+static DEAUTH_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Ask the lab AP to deauthenticate its station, as an access point that drops a client would.
+pub fn request_deauth() {
+    DEAUTH_REQUESTED.store(true, Ordering::Release);
+}
 
 struct Ap {
     client: Client<KernelSocket>,
@@ -121,6 +128,11 @@ unsafe extern "C" fn thread(arg: *mut c_void) -> c_int {
     let mut ap = unsafe { Box::from_raw(arg.cast::<Ap>()) };
     // SAFETY: runs on a kthread.
     while !unsafe { crate::kthread_should_stop() } {
+        if DEAUTH_REQUESTED.swap(false, Ordering::AcqRel)
+            && let Err(error) = ap.deauth()
+        {
+            log::error!("lab AP: {error}");
+        }
         let sched = ap.sched.clone();
         let clock = || sched.now();
         match ap.client.next_event(clock() + POLL, &clock) {
@@ -130,7 +142,12 @@ unsafe extern "C" fn thread(arg: *mut c_void) -> c_int {
                 }
             },
             Ok(_) => {},
-            Err(error) => log::error!("lab AP: {error}"),
+            Err(error) => {
+                // SAFETY: runs on a kthread.
+                if !unsafe { crate::kthread_should_stop() } {
+                    log::error!("lab AP: {error}");
+                }
+            },
         }
     }
     0
@@ -147,7 +164,19 @@ fn header(fc: u16, da: MacAddr, ap: MacAddr) -> Vec<u8> {
     frame
 }
 
+/// Reason code 2: the previous authentication is no longer valid.
+const REASON_PREV_AUTH_INVALID: u16 = 2;
+
 impl Ap {
+    fn deauth(&mut self) -> Result<(), ferrite_nl80211::client::ClientError> {
+        let Some(station) = self.station.take() else { return Ok(()) };
+        let mut frame = header(FC_DEAUTH, station.mac, self.mac);
+        frame.extend_from_slice(&REASON_PREV_AUTH_INVALID.to_le_bytes());
+        self.client.send_frame(self.ifindex, &frame)?;
+        log::info!("lab AP: deauthenticated {}", station.mac);
+        Ok(())
+    }
+
     fn event(&mut self, event: Event) -> Result<(), ferrite_nl80211::client::ClientError> {
         match event {
             Event::Frame { frame, .. } if frame.len() >= HEADER_LEN => {

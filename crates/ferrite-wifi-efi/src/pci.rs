@@ -15,8 +15,18 @@ use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtoco
 use uefi::proto::unsafe_protocol;
 use uefi::{Handle, Status, StatusExt as _};
 
-/// The devices handed to the drivers, by vendor and device ID.
-pub const WANTED: [(u16, u16, &str); 1] = [(0x8086, 0x24fd, "Intel Wireless 8265")];
+/// A card the drivers are given, by vendor and device ID.
+pub struct Wanted {
+    pub vendor: u16,
+    pub device: u16,
+    pub name: &'static str,
+    /// The firmware file its driver loads at probe, under its Linux name.
+    pub firmware: &'static str,
+}
+
+/// The devices handed to the drivers.
+pub const WANTED: [Wanted; 1] =
+    [Wanted { vendor: 0x8086, device: 0x24fd, name: "Intel Wireless 8265", firmware: "iwlwifi-8265-36.ucode" }];
 
 /// `EFI_PCI_IO_PROTOCOL_WIDTH`.
 const WIDTH_U8: u32 = 0;
@@ -213,7 +223,9 @@ impl UefiPci {
             let Some(io) = open(*handle) else { continue };
             let Ok(ids) = io.config_read(0, Width::U32) else { continue };
             let (vendor, device) = (ids as u16, (ids >> 16) as u16);
-            let Some((_, _, name)) = WANTED.iter().find(|(v, d, _)| *v == vendor && *d == device) else { continue };
+            let Some(Wanted { name, .. }) = WANTED.iter().find(|w| w.vendor == vendor && w.device == device) else {
+                continue;
+            };
             match describe(&io, vendor, device) {
                 Ok(described) => {
                     log::info!("found {name}: {described}");
@@ -224,7 +236,8 @@ impl UefiPci {
             }
         }
         if found.is_empty() {
-            let wanted: Vec<String> = WANTED.iter().map(|(v, d, n)| format!("{n} {v:04x}:{d:04x}")).collect();
+            let wanted: Vec<String> =
+                WANTED.iter().map(|w| format!("{} {:04x}:{:04x}", w.name, w.vendor, w.device)).collect();
             log::info!("no 8265 present: none of {} among {} PCI I/O handles", wanted.join(", "), handles.len());
         }
         let devices = found.iter().map(|f| f.device.clone()).collect();
@@ -235,6 +248,12 @@ impl UefiPci {
     /// the C runs.
     pub fn withhold(&self) {
         self.withheld.set(true);
+    }
+
+    /// The firmware files the cards found need, for a check before any driver runs.
+    pub fn firmware(&self) -> Vec<&'static str> {
+        let wanted = |d: &PciDevice| WANTED.iter().find(|w| w.vendor == d.vendor && w.device == d.device);
+        self.found.iter().filter_map(|f| wanted(&f.device)).map(|w| w.firmware).collect()
     }
 
     /// The PCI I/O protocol of device `index`, for mapping DMA memory through it.

@@ -985,6 +985,7 @@ dependencies = [
  "ferrite-hal",
  "ferrite-lkpi",
  "ferrite-net",
+ "ferrite-wifi",
  "ferrite-wifi-start",
  "ferrite-wifi-sys",
  "libc",
@@ -1106,6 +1107,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-wifi"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "ferrite-hal",
+ "ferrite-net",
+ "rstest 0.28.0",
+]
+
+[[package]]
 name = "ferrite-wifi-efi"
 version = "0.1.0"
 dependencies = [
@@ -1115,7 +1126,9 @@ dependencies = [
  "ferrite-lkpi",
  "ferrite-net",
  "ferrite-rt",
+ "ferrite-wifi",
  "ferrite-wifi-start",
+ "ferrite-wpa",
  "log",
  "snafu",
  "uefi",
@@ -1129,6 +1142,7 @@ dependencies = [
  "ferrite-lkpi",
  "ferrite-net",
  "ferrite-nl80211",
+ "ferrite-wifi",
  "ferrite-wifi-sys",
  "ferrite-wpa",
  "log",

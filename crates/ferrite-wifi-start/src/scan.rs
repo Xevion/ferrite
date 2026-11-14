@@ -88,6 +88,8 @@ pub enum ScanError {
     Aborted { name: String, waited: Duration },
     #[snafu(display("the scan on {name} did not end within {} ms", limit.as_millis()))]
     Expired { name: String, limit: Duration },
+    #[snafu(display("the scan on {name} was cancelled"))]
+    Cancelled { name: String },
     #[snafu(display("creating a kthread failed: {code}"))]
     Thread { code: isize },
 }
@@ -110,20 +112,36 @@ pub struct ScanReport {
     pub took: Duration,
 }
 
+/// How often a waiting scan looks at its cancel flag.
+const CANCEL_SLICE: Duration = Duration::from_millis(100);
+
 /// Trigger a scan of `name` (which must be up), wait for its end on the scan group for at most
-/// `limit`, then dump and log every BSS.
+/// `limit` (or until `cancel` says so, checked every `CANCEL_SLICE`), then dump every BSS and log each
+/// at `bss_level`.
 pub fn scan(
     client: &mut Client<KernelSocket>,
     name: &str,
     frequencies: &[Frequency],
     limit: Duration,
+    cancel: &dyn Fn() -> bool,
+    bss_level: log::Level,
     clock: &dyn Fn() -> Instant,
 ) -> Result<ScanReport, ScanError> {
     let interface = find(client, name)?;
     let start = clock();
     client.trigger_scan(interface.ifindex, frequencies)?;
     log::info!("nl80211: scan triggered on {name} (ifindex {}, wiphy {})", interface.ifindex, interface.wiphy);
-    match client.wait_scan(interface.ifindex, start + limit, clock)? {
+    let deadline = start + limit;
+    let end = loop {
+        let slice = (clock() + CANCEL_SLICE).min(deadline);
+        match client.wait_scan(interface.ifindex, slice, clock)? {
+            Some(end) => break Some(end),
+            None if cancel() => return Err(ScanError::Cancelled { name: name.into() }),
+            None if clock() >= deadline => break None,
+            None => {},
+        }
+    };
+    match end {
         Some(ScanEnd::Done) => {},
         Some(ScanEnd::Aborted) => return Err(ScanError::Aborted { name: name.into(), waited: clock() - start }),
         None => return Err(ScanError::Expired { name: name.into(), limit }),
@@ -132,7 +150,8 @@ pub fn scan(
     let bsses = client.scan_results(interface.ifindex)?;
     for bss in &bsses {
         let signal = bss.signal.map_or_else(|| String::from("?"), |s| alloc::format!("{s}"));
-        log::info!(
+        log::log!(
+            bss_level,
             "  BSS {} {} MHz {signal} {} \"{}\"",
             bss.bssid,
             bss.frequency.0,

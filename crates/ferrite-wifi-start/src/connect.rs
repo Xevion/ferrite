@@ -224,9 +224,29 @@ impl Connection {
         done: &dyn Fn() -> bool,
         clock: &dyn Fn() -> Instant,
     ) -> Result<(), ConnectError> {
-        let until = clock() + hold;
-        while !done() && clock() < until {
-            let slice = (clock() + HOLD_SLICE).min(until);
+        self.serve(client, Some(clock() + hold), done, clock)
+    }
+
+    /// Keep the connection until `done` says so, answering group rekeys; an error when the link drops.
+    pub fn watch(
+        &mut self,
+        client: &mut Client<KernelSocket>,
+        done: &dyn Fn() -> bool,
+        clock: &dyn Fn() -> Instant,
+    ) -> Result<(), ConnectError> {
+        self.serve(client, None, done, clock)
+    }
+
+    fn serve(
+        &mut self,
+        client: &mut Client<KernelSocket>,
+        until: Option<Instant>,
+        done: &dyn Fn() -> bool,
+        clock: &dyn Fn() -> Instant,
+    ) -> Result<(), ConnectError> {
+        while !done() && until.is_none_or(|until| clock() < until) {
+            let slice = clock() + HOLD_SLICE;
+            let slice = until.map_or(slice, |until| slice.min(until));
             while let Some(event) = client.next_event(slice, clock).map_err(step("holding the connection"))? {
                 match event {
                     Event::ControlPortFrame { ifindex, ethertype: ETH_P_PAE, frame, .. } if ifindex == self.ifindex => {
