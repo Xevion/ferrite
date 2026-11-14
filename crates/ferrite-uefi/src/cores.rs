@@ -3,25 +3,24 @@
 //! The BSP cuts the region into disjoint block-aligned slices with [`with_split`], gives each core a
 //! [`CoreJob`], starts the AP jobs through `ferrite_efi::mp`, runs its own, and reads the per-core
 //! [`Slot`]s, which hold only atomics. Every core starts at one [`StartLine`], so the time from its
-//! release to the last core's end is what the whole region took.
+//! release to the last core's end is what the whole region took. The start line, the checks an AP
+//! makes before its job, and the seat each core reports through are `ferrite_mem::crew`'s, shared
+//! with the memory sweep.
 
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::fmt;
 use core::num::NonZeroUsize;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::time::Duration;
 
-use ferrite_efi::cpu::{FpuControl, VectorState};
-use ferrite_efi::crew::tier_usable;
+use ferrite_efi::crew::ThisCore;
 use ferrite_efi::mp::{ApTask, StackUse};
 use ferrite_hal::{Clock, Instant};
-use ferrite_mem::{CpuAddr, Fault, Faults, Inversion, Kernel, Order, Prsg, Region};
+use ferrite_mem::crew::{Failure, Seat, SeatState, StartLine, WideGuard, enter_ap, guarded};
+use ferrite_mem::{Fault, Faults, Inversion, Kernel, Order, Prsg, Region};
 
 /// The first faults each core keeps with their addresses; the rest are only counted.
 pub const SLOT_FAULTS: usize = 4;
-/// How long an AP waits at the start line for the BSP's release before giving up.
-pub const AP_PATIENCE: Duration = Duration::from_secs(5);
 
 /// What every core does to its slice, once per pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,148 +109,30 @@ fn step_words(blocks: usize, parts: NonZeroUsize) -> usize {
     blocks.div_ceil(parts.get()).max(1) * ferrite_mem::BLOCK_WORDS
 }
 
-/// Why a core did not run its passes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Failure {
-    /// The firmware left SSE off on this AP.
-    NoSse,
-    /// The kernel's tier does not run on this core.
-    Tier,
-    /// The BSP's release did not come in time, or the BSP gave up on this round.
-    StartLine,
-    /// The job was already taken by another core.
-    Taken,
-    /// Source and destination differ in length.
-    Copy,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CoreState {
-    Idle,
-    Waiting,
-    Running,
-    Done,
-    Failed(Failure),
-    Unknown(u8),
-}
-
-impl CoreState {
-    const fn raw(self) -> u8 {
-        match self {
-            Self::Idle => 0,
-            Self::Waiting => 1,
-            Self::Running => 2,
-            Self::Done => 3,
-            Self::Failed(Failure::NoSse) => 0x10,
-            Self::Failed(Failure::Tier) => 0x11,
-            Self::Failed(Failure::StartLine) => 0x12,
-            Self::Failed(Failure::Taken) => 0x13,
-            Self::Failed(Failure::Copy) => 0x14,
-            Self::Unknown(raw) => raw,
-        }
-    }
-
-    const fn from_raw(raw: u8) -> Self {
-        match raw {
-            0 => Self::Idle,
-            1 => Self::Waiting,
-            2 => Self::Running,
-            3 => Self::Done,
-            0x10 => Self::Failed(Failure::NoSse),
-            0x11 => Self::Failed(Failure::Tier),
-            0x12 => Self::Failed(Failure::StartLine),
-            0x13 => Self::Failed(Failure::Taken),
-            0x14 => Self::Failed(Failure::Copy),
-            raw => Self::Unknown(raw),
-        }
-    }
-}
-
-impl fmt::Display for CoreState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Idle => f.write_str("never started"),
-            Self::Waiting => f.write_str("stopped before its first pass (timed out or panicked)"),
-            Self::Running => f.write_str("stopped mid-run (timed out or panicked)"),
-            Self::Done => f.write_str("done"),
-            Self::Failed(Failure::NoSse) => f.write_str("failed: SSE disabled"),
-            Self::Failed(Failure::Tier) => f.write_str("failed: tier unusable on this core"),
-            Self::Failed(Failure::StartLine) => f.write_str("failed: no release at the start line"),
-            Self::Failed(Failure::Taken) => f.write_str("failed: job already taken"),
-            Self::Failed(Failure::Copy) => f.write_str("failed: copy lengths differ"),
-            Self::Unknown(raw) => write!(f, "unknown state {raw:#x}"),
-        }
-    }
-}
-
-#[derive(Default)]
-struct FaultCell {
-    addr: AtomicUsize,
-    expected: AtomicU64,
-    actual: AtomicU64,
-}
-
 /// One core's results, written only by that core and read by the BSP after the dispatch ended.
-/// A cache line of its own, so no two cores share one.
-#[derive(Default)]
-#[repr(align(64))]
+/// The seat holds its state, the bytes covered, the faults and the stack; the rest is the benchmark's.
+#[derive(Debug, Default)]
 pub struct Slot {
-    state: AtomicU8,
+    seat: Seat,
     passes: AtomicU32,
-    bytes: AtomicU64,
-    faults: AtomicU64,
     ended_ns: AtomicU64,
-    stack_bytes: AtomicUsize,
-    stack_measured: AtomicBool,
-    first: [FaultCell; SLOT_FAULTS],
-}
-
-impl fmt::Debug for Slot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Slot")
-            .field("state", &CoreState::from_raw(self.state.load(Ordering::Relaxed)))
-            .finish_non_exhaustive()
-    }
 }
 
 impl Slot {
-    fn set(&self, state: CoreState) {
-        self.state.store(state.raw(), Ordering::Release);
-    }
-
-    fn record(&self, index: usize, fault: Fault) {
-        if let Some(cell) = self.first.get(index) {
-            cell.addr.store(fault.addr.get(), Ordering::Relaxed);
-            cell.expected.store(fault.expected, Ordering::Relaxed);
-            cell.actual.store(fault.actual, Ordering::Relaxed);
-        }
-    }
-
     #[must_use]
     pub fn report(&self) -> CoreReport {
-        let state = CoreState::from_raw(self.state.load(Ordering::Acquire));
-        let faults = self.faults.load(Ordering::Relaxed);
-        let kept = usize::try_from(faults).unwrap_or(usize::MAX).min(SLOT_FAULTS);
-        let first = self.first[..kept]
-            .iter()
-            .map(|c| Fault {
-                addr: CpuAddr::of(core::ptr::without_provenance::<u64>(c.addr.load(Ordering::Relaxed))),
-                expected: c.expected.load(Ordering::Relaxed),
-                actual: c.actual.load(Ordering::Relaxed),
-            })
-            .collect();
         let ended = match self.ended_ns.load(Ordering::Relaxed) {
             0 => None,
             ns => Some(Instant::from_epoch(Duration::from_nanos(ns))),
         };
         CoreReport {
-            state,
+            state: self.seat.state(),
             passes: self.passes.load(Ordering::Relaxed),
-            bytes: self.bytes.load(Ordering::Relaxed),
-            faults,
+            bytes: self.seat.done(),
+            faults: self.seat.faults(),
             ended,
-            stack_bytes: self.stack_measured.load(Ordering::Acquire).then(|| self.stack_bytes.load(Ordering::Relaxed)),
-            first,
+            stack_bytes: self.seat.stack_bytes(),
+            first: self.seat.kept_from(0).collect(),
         }
     }
 }
@@ -259,7 +140,7 @@ impl Slot {
 /// What a [`Slot`] held when the BSP read it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreReport {
-    pub state: CoreState,
+    pub state: SeatState,
     pub passes: u32,
     /// Bytes covered over every pass.
     pub bytes: u64,
@@ -291,7 +172,7 @@ impl Summary {
         let last = reports.iter().filter_map(|r| r.ended).max().unwrap_or(released);
         Self {
             cores: reports.len(),
-            done: reports.iter().filter(|r| r.state == CoreState::Done).count(),
+            done: reports.iter().filter(|r| r.state == SeatState::Done).count(),
             bytes: reports.iter().map(|r| r.bytes).sum(),
             faults: reports.iter().map(|r| r.faults).sum(),
             span: last - released,
@@ -312,59 +193,6 @@ impl Summary {
     )]
     pub fn rate(&self) -> f64 {
         self.bytes as f64 / self.span.as_nanos().max(1) as f64
-    }
-}
-
-const LINE_WAITING: u8 = 0;
-const LINE_GO: u8 = 1;
-const LINE_ABANDONED: u8 = 2;
-
-/// Where the cores of one round wait for each other, so they all start together.
-#[derive(Debug, Default)]
-pub struct StartLine {
-    arrived: AtomicU32,
-    signal: AtomicU8,
-}
-
-impl StartLine {
-    /// AP side: report arrival, then wait for the release; false if abandoned or out of patience.
-    fn arrive_and_wait(&self, clock: &impl Clock, patience: Duration) -> bool {
-        self.arrived.fetch_add(1, Ordering::AcqRel);
-        let deadline = clock.now().checked_add(patience);
-        loop {
-            match self.signal.load(Ordering::Acquire) {
-                LINE_WAITING => {},
-                LINE_GO => return true,
-                _ => return false,
-            }
-            if deadline.is_none_or(|d| clock.now() > d) {
-                return false;
-            }
-            core::hint::spin_loop();
-        }
-    }
-
-    /// BSP side: wait up to `patience` for `aps` arrivals, running `duties` meanwhile, then release
-    /// them. Returns the release time, or `None` (and abandons the round) if some never arrived.
-    pub fn gather(
-        &self,
-        aps: u32,
-        clock: &impl Clock,
-        patience: Duration,
-        duties: &mut dyn FnMut(),
-    ) -> Option<Instant> {
-        let deadline = clock.now().checked_add(patience);
-        while self.arrived.load(Ordering::Acquire) < aps {
-            if deadline.is_none_or(|d| clock.now() > d) {
-                self.signal.store(LINE_ABANDONED, Ordering::Release);
-                return None;
-            }
-            duties();
-            core::hint::spin_loop();
-        }
-        let now = clock.now();
-        self.signal.store(LINE_GO, Ordering::Release);
-        Some(now)
     }
 }
 
@@ -397,9 +225,9 @@ impl<'a, C: Clock> CoreJob<'a, C> {
     }
 
     /// Run on the calling core, which releases the start line itself: `duties` runs after each chunk.
-    pub fn run_here(&self, vector: Option<&VectorState>, duties: &mut dyn FnMut()) {
+    pub fn run_here(&self, vector: Option<&dyn WideGuard>, duties: &mut dyn FnMut()) {
         if self.taken.swap(true, Ordering::AcqRel) {
-            self.slot.set(CoreState::Failed(Failure::Taken));
+            self.slot.seat.set(SeatState::Failed(Failure::Taken));
             return;
         }
         // SAFETY: `taken` makes this core the slice's only user.
@@ -407,35 +235,31 @@ impl<'a, C: Clock> CoreJob<'a, C> {
         self.work(slice, vector, duties);
     }
 
-    fn work(&self, slice: &mut Slice<'a>, vector: Option<&VectorState>, between: &mut dyn FnMut()) {
+    fn work(&self, slice: &mut Slice<'a>, vector: Option<&dyn WideGuard>, between: &mut dyn FnMut()) {
         let Spec { kernel, work, passes, chunk_words, ref clock } = self.spec;
-        let slot = self.slot;
-        slot.set(CoreState::Running);
-        let mut kept = 0;
-        let mut sink = |f: Fault| {
-            slot.record(kept, f);
-            kept = kept.saturating_add(1);
-        };
+        let (slot, seat) = (self.slot, &self.slot.seat);
+        seat.set(SeatState::Running);
+        let mut sink = |f: Fault| seat.record(f);
         let mut faults = Faults::new(SLOT_FAULTS as u64, &mut sink);
         let mut bytes = 0_u64;
         for pass in 0..passes {
             let mut progress = |chunk: usize, faults: &Faults<'_>| {
                 bytes = bytes.wrapping_add(chunk as u64);
-                slot.bytes.store(bytes, Ordering::Relaxed);
-                slot.faults.store(faults.seen(), Ordering::Relaxed);
+                seat.set_done(bytes);
+                seat.set_faults(faults.seen());
                 between();
             };
             match work {
                 Work::Copy => {
                     let Slice { region, source: Some(source), .. } = slice else {
-                        slot.set(CoreState::Failed(Failure::Copy));
+                        seat.set(SeatState::Failed(Failure::Share));
                         return;
                     };
                     for (s, mut d) in source.chunks(chunk_words).zip(region.chunks(chunk_words)) {
                         let mut copied = Ok(());
-                        guarded(vector, kernel, || copied = ferrite_mem::copy(kernel, &s, &mut d));
+                        under(vector, kernel, || copied = ferrite_mem::copy(kernel, &s, &mut d));
                         if copied.is_err() {
-                            slot.set(CoreState::Failed(Failure::Copy));
+                            seat.set(SeatState::Failed(Failure::Share));
                             return;
                         }
                         progress(s.bytes() + d.bytes(), &faults);
@@ -443,27 +267,27 @@ impl<'a, C: Clock> CoreJob<'a, C> {
                 },
                 Work::Fill { value } => {
                     for mut c in slice.region.chunks(chunk_words) {
-                        guarded(vector, kernel, || ferrite_mem::fill(kernel, &mut c, value));
+                        under(vector, kernel, || ferrite_mem::fill(kernel, &mut c, value));
                         progress(c.bytes(), &faults);
                     }
                 },
                 Work::Verify { value } => {
                     for c in slice.region.chunks(chunk_words) {
-                        guarded(vector, kernel, || ferrite_mem::verify(kernel, &c, value, &mut faults));
+                        under(vector, kernel, || ferrite_mem::verify(kernel, &c, value, &mut faults));
                         progress(c.bytes(), &faults);
                     }
                 },
                 Work::FillPrsg { seed } => {
                     let mut prsg = Prsg::at(seed, slice.block);
                     for mut c in slice.region.chunks(chunk_words) {
-                        guarded(vector, kernel, || ferrite_mem::fill_prsg(kernel, &mut c, &mut prsg, 0));
+                        under(vector, kernel, || ferrite_mem::fill_prsg(kernel, &mut c, &mut prsg, 0));
                         progress(c.bytes(), &faults);
                     }
                 },
                 Work::VerifyPrsg { seed } => {
                     let mut prsg = Prsg::at(seed, slice.block);
                     for c in slice.region.chunks(chunk_words) {
-                        guarded(vector, kernel, || ferrite_mem::verify_prsg(kernel, &c, &mut prsg, 0, &mut faults));
+                        under(vector, kernel, || ferrite_mem::verify_prsg(kernel, &c, &mut prsg, 0, &mut faults));
                         progress(c.bytes(), &faults);
                     }
                 },
@@ -471,7 +295,7 @@ impl<'a, C: Clock> CoreJob<'a, C> {
                     let (expect, write) = if pass % 2 == 0 { (pattern, !pattern) } else { (!pattern, pattern) };
                     let step = Inversion { expect, write, order: Order::Ascending };
                     for mut c in slice.region.chunks(chunk_words) {
-                        guarded(vector, kernel, || ferrite_mem::invert(kernel, &mut c, step, &mut faults));
+                        under(vector, kernel, || ferrite_mem::invert(kernel, &mut c, step, &mut faults));
                         progress(c.bytes(), &faults);
                     }
                 },
@@ -480,20 +304,19 @@ impl<'a, C: Clock> CoreJob<'a, C> {
         }
         let ended = u64::try_from(clock.now().since_epoch().as_nanos()).unwrap_or(u64::MAX).max(1);
         slot.ended_ns.store(ended, Ordering::Relaxed);
-        slot.faults.store(faults.seen(), Ordering::Relaxed);
-        slot.set(CoreState::Done);
-    }
-
-    fn fail(&self, failure: Failure) {
-        self.slot.set(CoreState::Failed(failure));
+        seat.set_faults(faults.seen());
+        seat.set(SeatState::Done);
     }
 }
 
-fn guarded(vector: Option<&VectorState>, kernel: Kernel, f: impl FnOnce()) {
-    match vector {
-        Some(v) if kernel.tier().is_wide() => v.wide(f),
-        _ => f(),
-    }
+/// Run `f` under the vector guard when the kernel is wide.
+fn under(vector: Option<&dyn WideGuard>, kernel: Kernel, f: impl FnOnce()) {
+    let mut f = Some(f);
+    guarded(vector, kernel.tier().is_wide(), &mut || {
+        if let Some(f) = f.take() {
+            f();
+        }
+    });
 }
 
 // SAFETY: the AP path runs ferrite-mem kernels on its own slice, reads CPUID, CR4, XCR0 and the TSC,
@@ -501,30 +324,18 @@ fn guarded(vector: Option<&VectorState>, kernel: Kernel, f: impl FnOnce()) {
 // call, allocation, logging or lock; the frames are a few hundred bytes deep.
 unsafe impl<C: Clock + Sync> ApTask for CoreJob<'_, C> {
     fn run(&self) {
-        if !FpuControl::read().sse_ready() {
-            return self.fail(Failure::NoSse);
-        }
-        if self.taken.swap(true, Ordering::AcqRel) {
-            return self.fail(Failure::Taken);
-        }
-        let tier = self.spec.kernel.tier();
-        let vector = if tier.is_wide() { VectorState::enable().ok() } else { None };
-        if !tier_usable(tier) {
-            return self.fail(Failure::Tier);
-        }
-        self.slot.set(CoreState::Waiting);
-        if !self.line.arrive_and_wait(&self.spec.clock, AP_PATIENCE) {
-            return self.fail(Failure::StartLine);
-        }
+        let kernels = [self.spec.kernel];
+        let Some(entered) = enter_ap(&ThisCore, &self.slot.seat, &self.taken, &kernels, self.line, &self.spec.clock)
+        else {
+            return;
+        };
         // SAFETY: `taken` makes this AP the slice's only user.
         let slice = unsafe { &mut *self.slice.get() };
-        self.work(slice, vector.as_ref(), &mut || {});
-        drop(vector);
+        self.work(slice, entered.guard(), &mut || {});
     }
 
     fn finish(&self, stack: StackUse) {
-        self.slot.stack_bytes.store(stack.bytes(), Ordering::Relaxed);
-        self.slot.stack_measured.store(true, Ordering::Release);
+        self.slot.seat.record_stack(stack.bytes());
     }
 }
 

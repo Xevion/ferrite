@@ -57,6 +57,28 @@ pub struct Bus {
     pub gaps: bool,
 }
 
+/// The words a moving-inversions round writes: one word everywhere, a PRSG sequence or the
+/// shifting pattern, each XOR a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seq {
+    Word(u64),
+    Prsg { seed: u64 },
+    Rotating { pattern: u64 },
+}
+
+impl Seq {
+    /// Whether a pass checking `self` XOR `step.expect` and writing `to` XOR `step.write` would
+    /// write back the words it read.
+    fn leaves(self, step: Inversion, to: Self) -> bool {
+        match (self, to) {
+            (Self::Word(a), Self::Word(b)) => a ^ step.expect == b ^ step.write,
+            (Self::Prsg { seed: a }, Self::Prsg { seed: b })
+            | (Self::Rotating { pattern: a }, Self::Rotating { pattern: b }) => a == b && step.expect == step.write,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     Fill(u64),
@@ -82,6 +104,13 @@ pub enum Op {
     },
     InvertRotating {
         pattern: u64,
+        step: Inversion,
+    },
+    /// Check `from` XOR `step.expect` and write `to` XOR `step.write`: a round's last inversion and
+    /// the next round's fill in one pass.
+    Replace {
+        from: Seq,
+        to: Seq,
         step: Inversion,
     },
     /// Write `value` to every [`MODULO`]-th word, the ones at `offset`.
@@ -138,7 +167,10 @@ impl Phase {
 
     pub const fn order(&self) -> Order {
         match self.op {
-            Op::Invert(step) | Op::InvertPrsg { step, .. } | Op::InvertRotating { step, .. } => step.order,
+            Op::Invert(step)
+            | Op::InvertPrsg { step, .. }
+            | Op::InvertRotating { step, .. }
+            | Op::Replace { step, .. } => step.order,
             _ => Order::Ascending,
         }
     }
@@ -201,49 +233,31 @@ pub fn plan(
             e.whole(Op::Verify(0))?;
         },
         TestKind::MovingInversions => {
-            for p in [0, !0] {
-                fixed(&mut e, p, cfg.fixed_iterations)?;
-            }
+            let iterations = cfg.fixed_iterations;
+            inversions(&mut e, [0, !0].map(|p| Round { seq: Seq::Word(p), key: 0, iterations }))?;
         },
         TestKind::MovingInversions8Bit => {
-            for shift in 0..8 {
+            let iterations = cfg.byte_iterations;
+            let patterns = (0..8).flat_map(|shift| {
                 let p = 0x8080_8080_8080_8080_u64 >> shift;
-                for p in [p, !p] {
-                    fixed(&mut e, p, cfg.byte_iterations)?;
-                }
-            }
+                [p, !p]
+            });
+            inversions(&mut e, patterns.map(|p| Round { seq: Seq::Word(p), key: 0, iterations }))?;
         },
         TestKind::MovingInversionsRandom => {
-            for round in 0..u64::from(cfg.random_rounds) {
+            let rounds = (0..u64::from(cfg.random_rounds)).map(|round| {
                 let seed = seed(round);
-                if round % 4 == 3 {
-                    fixed(&mut e, xorshift(seed | 1), 1)?;
-                } else {
-                    e.whole(Op::FillPrsg { seed, key: 0 })?;
-                    e.whole(Op::InvertPrsg {
-                        seed,
-                        step: Inversion { expect: 0, write: !0, order: Order::Ascending },
-                    })?;
-                    e.whole(Op::InvertPrsg {
-                        seed,
-                        step: Inversion { expect: !0, write: 0, order: Order::Descending },
-                    })?;
-                }
-            }
+                let seq = if round % 4 == 3 { Seq::Word(xorshift(seed | 1)) } else { Seq::Prsg { seed } };
+                Round { seq, key: 0, iterations: 1 }
+            });
+            inversions(&mut e, rounds)?;
         },
         TestKind::MovingInversions64Bit => {
-            for offset in 0..64 {
-                let pattern = 1 << offset;
-                for key in [0, !0] {
-                    e.whole(Op::FillRotating { pattern, key })?;
-                    for _ in 0..cfg.shifting_iterations {
-                        let up = Inversion { expect: key, write: !key, order: Order::Ascending };
-                        e.whole(Op::InvertRotating { pattern, step: up })?;
-                        let down = Inversion { expect: !key, write: key, order: Order::Descending };
-                        e.whole(Op::InvertRotating { pattern, step: down })?;
-                    }
-                }
-            }
+            let iterations = cfg.shifting_iterations;
+            let rounds = (0..64).flat_map(|offset| {
+                [0, !0].map(|key| Round { seq: Seq::Rotating { pattern: 1 << offset }, key, iterations })
+            });
+            inversions(&mut e, rounds)?;
         },
         TestKind::Modulo20 => {
             let mut state = seed(0) | 1;
@@ -259,9 +273,7 @@ pub fn plan(
                             },
                             None => Op::FillStride { offset, value },
                         })?;
-                        for _ in 0..2 {
-                            e.whole(Op::FillExcept { offset, value: !value })?;
-                        }
+                        e.whole(Op::FillExcept { offset, value: !value })?;
                         written = Some((offset, value));
                     }
                 }
@@ -338,15 +350,69 @@ fn solid(e: &mut Emit<'_>, values: impl IntoIterator<Item = u64>) -> ControlFlow
     ControlFlow::Continue(())
 }
 
-/// memtest86+'s fixed-pattern moving inversions: fill `p`, then up checking `p` writing `!p` and down
-/// checking `!p` writing `p`, `iterations` times.
-fn fixed(e: &mut Emit<'_>, p: u64, iterations: u32) -> ControlFlow<()> {
-    e.whole(Op::Fill(p))?;
-    for _ in 0..iterations {
-        e.whole(Op::Invert(Inversion { expect: p, write: !p, order: Order::Ascending }))?;
-        e.whole(Op::Invert(Inversion { expect: !p, write: p, order: Order::Descending }))?;
+/// One moving-inversions round: `seq` XOR `key` is written, then `iterations` times every word is
+/// checked and inverted going up and checked and restored going down.
+#[derive(Clone, Copy, Debug)]
+struct Round {
+    seq: Seq,
+    key: u64,
+    iterations: u32,
+}
+
+impl Round {
+    fn fill(self) -> Op {
+        match self.seq {
+            Seq::Word(word) => Op::Fill(word ^ self.key),
+            Seq::Prsg { seed } => Op::FillPrsg { seed, key: self.key },
+            Seq::Rotating { pattern } => Op::FillRotating { pattern, key: self.key },
+        }
     }
-    ControlFlow::Continue(())
+
+    /// The pass that checks `expect` and writes `write` over the round's sequence.
+    fn invert(self, expect: u64, write: u64, order: Order) -> Op {
+        let step = Inversion { expect, write, order };
+        match self.seq {
+            Seq::Word(word) => Op::Invert(Inversion { expect: word ^ expect, write: word ^ write, order }),
+            Seq::Prsg { seed } => Op::InvertPrsg { seed, step },
+            Seq::Rotating { pattern } => Op::InvertRotating { pattern, step },
+        }
+    }
+
+    fn up(self) -> Op {
+        self.invert(self.key, !self.key, Order::Ascending)
+    }
+
+    fn down(self) -> Op {
+        self.invert(!self.key, self.key, Order::Descending)
+    }
+}
+
+/// Moving inversions over consecutive rounds. Each round but the last ends with its restoring
+/// downward pass; that pass, which only checks and writes what the next round's fill is about to
+/// overwrite, is merged with the fill into one [`Op::Replace`]. When the next round writes the very
+/// words the pass would leave behind (a pattern after its complement) the pass is dropped, since
+/// the upward pass after it reads the same words.
+fn inversions(e: &mut Emit<'_>, rounds: impl IntoIterator<Item = Round>) -> ControlFlow<()> {
+    let mut left: Option<Round> = None;
+    for round in rounds {
+        match left.take() {
+            Some(prev) => {
+                let step = Inversion { expect: !prev.key, write: round.key, order: Order::Descending };
+                if !prev.seq.leaves(step, round.seq) {
+                    e.whole(Op::Replace { from: prev.seq, to: round.seq, step })?;
+                }
+            },
+            None => e.whole(round.fill())?,
+        }
+        let Some(rest) = round.iterations.checked_sub(1) else { continue };
+        for _ in 0..rest {
+            e.whole(round.up())?;
+            e.whole(round.down())?;
+        }
+        e.whole(round.up())?;
+        left = Some(round);
+    }
+    left.map_or(ControlFlow::Continue(()), |round| e.whole(round.down()))
 }
 
 /// The block-move windows over the regions of `layout`: consecutive windows in each region, the

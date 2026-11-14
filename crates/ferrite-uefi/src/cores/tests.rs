@@ -180,9 +180,9 @@ fn a_job_runs_once() {
     with_split(&mut region, parts(1), false, |slices| {
         let job = CoreJob::new(spec, slices.into_iter().next().unwrap(), &line, &slot);
         job.run_here(None, &mut || {});
-        check!(slot.report().state == CoreState::Done);
+        check!(slot.report().state == SeatState::Done);
         job.run_here(None, &mut || {});
-        check!(slot.report().state == CoreState::Failed(Failure::Taken));
+        check!(slot.report().state == SeatState::Failed(Failure::Taken));
     });
 }
 
@@ -199,9 +199,9 @@ fn the_summary_spans_to_the_last_core_and_counts_failures() {
         first: Vec::new(),
     };
     let reports = [
-        report(CoreState::Done, 100, 0, at(30), None),
-        report(CoreState::Done, 100, 3, at(50), Some(900)),
-        report(CoreState::Running, 40, 1, None, Some(1200)),
+        report(SeatState::Done, 100, 0, at(30), None),
+        report(SeatState::Done, 100, 3, at(50), Some(900)),
+        report(SeatState::Running, 40, 1, None, Some(1200)),
     ];
     let summary = Summary::of(Instant::from_epoch(Duration::from_millis(10)), &reports);
     check!(summary.span == Duration::from_millis(40));

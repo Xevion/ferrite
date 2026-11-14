@@ -187,6 +187,8 @@ pub enum SeqKind {
     Prsg,
     /// A rotation by one block's worth of words (8 bits).
     Rotate,
+    /// The same words in every block.
+    Hold,
 }
 
 /// One block's step of a sequence, both ways.
@@ -224,6 +226,20 @@ impl<B: Block> Walk<B> for Rotate {
     unsafe fn prev(s: B) -> B {
         // SAFETY: as `next`.
         unsafe { B::rotr(s, BLOCK_WORDS as u32) }
+    }
+}
+
+struct Hold;
+
+impl<B: Block> Walk<B> for Hold {
+    #[inline(always)]
+    unsafe fn next(s: B) -> B {
+        s
+    }
+
+    #[inline(always)]
+    unsafe fn prev(s: B) -> B {
+        s
     }
 }
 
@@ -276,6 +292,47 @@ unsafe fn invert_seq<B: Block, G: Walk<B>, const NT: bool>(
             },
         }
         *lanes = s.to_words();
+    }
+    fence::<NT>();
+}
+
+/// Check each block against the sequence `A` XOR `step.expect` and rewrite it with the sequence `C`
+/// XOR `step.write`, in `step.order`. Each sequence's lanes start and end as in [`invert_seq`].
+#[inline(always)]
+unsafe fn replace_seq<B: Block, A: Walk<B>, C: Walk<B>, const NT: bool>(
+    base: *mut u64,
+    blocks: usize,
+    from: &mut Words,
+    to: &mut Words,
+    step: Inversion,
+    faults: &mut Faults<'_>,
+) {
+    // SAFETY: as `fill_const`.
+    unsafe {
+        let (expect, write) = (B::splat(step.expect), B::splat(step.write));
+        let (mut old, mut new) = (B::from_words(*from), B::from_words(*to));
+        match step.order {
+            Order::Ascending => {
+                for i in 0..blocks {
+                    let p = base.add(i * BLOCK_WORDS);
+                    check(p, B::xor(old, expect), faults);
+                    put::<B, NT>(p, B::xor(new, write));
+                    old = A::next(old);
+                    new = C::next(new);
+                }
+            },
+            Order::Descending => {
+                for i in (0..blocks).rev() {
+                    old = A::prev(old);
+                    new = C::prev(new);
+                    let p = base.add(i * BLOCK_WORDS);
+                    check(p, B::xor(old, expect), faults);
+                    put::<B, NT>(p, B::xor(new, write));
+                }
+            },
+        }
+        *from = old.to_words();
+        *to = new.to_words();
     }
     fence::<NT>();
 }
@@ -516,6 +573,26 @@ pub unsafe fn rep_copy(src: *mut u64, dst: *mut u64, blocks: usize) {
     }
 }
 
+/// Evaluates `$body` with the type `$walk` standing for the [`Walk`] of `$kind`.
+macro_rules! by_kind {
+    ($kind:expr, $walk:ident => $body:expr) => {
+        match $kind {
+            SeqKind::Prsg => {
+                type $walk = XorShift;
+                $body
+            },
+            SeqKind::Rotate => {
+                type $walk = Rotate;
+                $body
+            },
+            SeqKind::Hold => {
+                type $walk = Hold;
+                $body
+            },
+        }
+    };
+}
+
 /// Monomorphic wrappers for one tier, compiled with its target features.
 macro_rules! tier {
     ($name:ident, $block:ty, $feature:literal) => {
@@ -595,6 +672,7 @@ macro_rules! tier {
                     match kind {
                         SeqKind::Prsg => super::fill_seq::<$block, XorShift, NT>(base, blocks, lanes, key),
                         SeqKind::Rotate => super::fill_seq::<$block, Rotate, NT>(base, blocks, lanes, key),
+                        SeqKind::Hold => super::fill_seq::<$block, Hold, NT>(base, blocks, lanes, key),
                     }
                 }
             }
@@ -613,7 +691,24 @@ macro_rules! tier {
                     match kind {
                         SeqKind::Prsg => super::invert_seq::<$block, XorShift, NT>(base, blocks, lanes, step, faults),
                         SeqKind::Rotate => super::invert_seq::<$block, Rotate, NT>(base, blocks, lanes, step, faults),
+                        SeqKind::Hold => super::invert_seq::<$block, Hold, NT>(base, blocks, lanes, step, faults),
                     }
+                }
+            }
+
+            #[target_feature(enable = $feature)]
+            pub unsafe fn replace_seq<const NT: bool>(
+                base: *mut u64,
+                blocks: usize,
+                (from_kind, from): (SeqKind, &mut Words),
+                (to_kind, to): (SeqKind, &mut Words),
+                step: Inversion,
+                faults: &mut Faults<'_>,
+            ) {
+                // SAFETY: as `fill_const`.
+                unsafe {
+                    by_kind!(from_kind, A => by_kind!(to_kind, C =>
+                        super::replace_seq::<$block, A, C, NT>(base, blocks, from, to, step, faults)))
                 }
             }
 

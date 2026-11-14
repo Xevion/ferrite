@@ -320,6 +320,15 @@ impl Schedule {
         Self { layout, kernels, config, preset, test, passes: 0, pass_done: 0, pass_total }
     }
 
+    /// A schedule whose first pass is `pass`, so a rebuilt one carries on with the patterns that follow.
+    #[must_use]
+    pub fn starting_at(layout: Layout, kernels: Kernels, config: Config, preset: Preset, pass: u64) -> Self {
+        let mut schedule = Self::new(layout, kernels, config, preset);
+        schedule.passes = pass;
+        schedule.test = Test::for_share(schedule.test.kind(), config, pass, &schedule.layout, schedule.layout.all());
+        schedule
+    }
+
     /// Count the current test done and move on, when it was run elsewhere: split into shares over
     /// several cores, each with its own [`Test::for_share`].
     pub fn finish_test(&mut self) {
@@ -404,6 +413,13 @@ impl<'a> Suite<'a> {
     #[must_use]
     pub fn new(regions: Regions<'a>, kernels: Kernels, config: Config, preset: Preset) -> Self {
         let schedule = Schedule::new(regions.layout(), kernels, config, preset);
+        Self { regions, schedule }
+    }
+
+    /// A suite whose first pass is `pass`.
+    #[must_use]
+    pub fn starting_at(regions: Regions<'a>, kernels: Kernels, config: Config, preset: Preset, pass: u64) -> Self {
+        let schedule = Schedule::starting_at(regions.layout(), kernels, config, preset, pass);
         Self { regions, schedule }
     }
 

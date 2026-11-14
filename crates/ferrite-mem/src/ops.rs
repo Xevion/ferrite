@@ -2,11 +2,12 @@
 
 use snafu::Snafu;
 
+use crate::block::Words;
 use crate::caps::{Kernel, Stores, Tier};
 use crate::fault::Faults;
 use crate::kernels::{self, SeqKind, Stride, avx2, avx512, scalar, sse2};
 use crate::prsg::Prsg;
-use crate::region::Region;
+use crate::region::{BLOCK_WORDS, Region};
 use crate::rotating::Rotating;
 
 /// Calls `$op` of the kernel's tier, with `NT` from its store kind where the op stores.
@@ -122,6 +123,48 @@ pub fn invert_rotating(
 ) {
     let lanes = &mut rot.lanes;
     dispatch!(kernel, invert_seq, stores, (region.ptr(), region.blocks(), SeqKind::Rotate, lanes, step, faults));
+}
+
+/// A sequence of words that a [`replace`] pass walks.
+#[derive(Debug)]
+pub enum Source<'a> {
+    /// The same word everywhere.
+    Word(u64),
+    Prsg(&'a mut Prsg),
+    Rotating(&'a mut Rotating),
+}
+
+impl Source<'_> {
+    /// The kernel's name for the sequence, and its lanes; `scratch` holds them for a word.
+    fn lanes<'s>(&'s mut self, scratch: &'s mut Words) -> (SeqKind, &'s mut Words) {
+        match self {
+            Self::Word(word) => {
+                *scratch = [*word; BLOCK_WORDS];
+                (SeqKind::Hold, scratch)
+            },
+            Self::Prsg(prsg) => (SeqKind::Prsg, &mut prsg.lanes),
+            Self::Rotating(rot) => (SeqKind::Rotate, &mut rot.lanes),
+        }
+    }
+}
+
+/// One pass over two sequences, in `step.order`.
+///
+/// Each block is checked against `from` XOR `step.expect`, then overwritten with `to` XOR
+/// `step.write`: what [`invert_prsg`] then [`fill_prsg`] do in two walks, for sequences that
+/// differ. Lanes start and end as in [`invert_prsg`] for the pass's order.
+pub fn replace(
+    kernel: Kernel,
+    region: &mut Region<'_>,
+    mut from: Source<'_>,
+    mut to: Source<'_>,
+    step: Inversion,
+    faults: &mut Faults<'_>,
+) {
+    let (mut from_scratch, mut to_scratch) = ([0; BLOCK_WORDS], [0; BLOCK_WORDS]);
+    let from = from.lanes(&mut from_scratch);
+    let to = to.lanes(&mut to_scratch);
+    dispatch!(kernel, replace_seq, stores, (region.ptr(), region.blocks(), from, to, step, faults));
 }
 
 /// Store `value` in every word but those `stride` selects.

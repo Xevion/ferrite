@@ -224,3 +224,158 @@ fn a_stop_in_the_middle_of_a_test_ends_every_core_before_it_finishes() {
     check!(ends == [SeatState::Stopped, SeatState::Stopped]);
     check!(seats.iter().all(|s| !s.settled(1) || s.state() == SeatState::Stopped));
 }
+
+#[test]
+fn own_address_is_checked_only_once_every_core_has_written() {
+    let (mut backing, offset) = buffer();
+    // SAFETY: the buffer is ours; the test writes through `ptr` only while every worker waits at a gate.
+    let ptr = unsafe { backing.as_mut_ptr().add(offset) };
+    // SAFETY: as above.
+    let region = unsafe { Region::from_raw(ptr, WORDS) }.unwrap();
+    let mut regions = Regions::from(region);
+    let (crew, seats) = (Crew::default(), [Seat::default(), Seat::default()]);
+    let jobs = run_of(&[TestKind::OwnAddress], &mut regions, &crew, &seats);
+    let mut workers: Vec<_> = jobs.iter().map(|j| j.claim().unwrap()).collect();
+    crew.begin_round();
+    for w in &mut workers {
+        w.begin(crew.round());
+    }
+
+    // Both cores have written every address of their share and wait to check them.
+    for w in &mut workers {
+        check!(until_stopped(w) == Turn::Gate);
+    }
+    check!(seats.iter().all(|s| s.faults() == 0), "nothing is checked before every core has written");
+    // A write meant for word 1500, in the second share, also landed on word 300, in the first.
+    let (victim, source) = (300, 1500);
+    // SAFETY: both words are in the buffer and no worker is running.
+    let (expected, actual) = unsafe { (ptr.add(victim).read(), ptr.add(source).read()) };
+    // SAFETY: as above.
+    unsafe { ptr.add(victim).write(actual) };
+    check!(!crew.coordinate(&seats), "the gate opens once both cores are there");
+    for w in &mut workers {
+        check!(until_stopped(w) == Turn::Gate, "both check their shares, then wait to write the complement");
+    }
+    let kept: Vec<Fault> = seats[0].kept_from(0).collect();
+    let addr = CpuAddr::of(ptr.wrapping_add(victim));
+    check!(kept == [Fault { addr, expected, actual }]);
+    check!(seats[1].faults() == 0);
+}
+
+#[test]
+fn split_own_address_and_march_run_clean_across_threads() {
+    let (mut backing, offset) = buffer();
+    // SAFETY: the buffer is ours, and is read below only while every core waits for the next round.
+    let ptr = unsafe { backing.as_mut_ptr().add(offset) };
+    // SAFETY: as above.
+    let region = unsafe { Region::from_raw(ptr, WORDS) }.unwrap();
+    let mut regions = Regions::from(region);
+    let (crew, seats) = (Crew::default(), [Seat::default(), Seat::default(), Seat::default()]);
+    let kinds = [TestKind::OwnAddress, TestKind::MarchCMinus];
+    let jobs = run_of(&kinds, &mut regions, &crew, &seats);
+    let ends = std::thread::scope(|scope| {
+        let aps: Vec<_> = jobs[1..].iter().map(|j| scope.spawn(|| j.claim().unwrap().serve(None))).collect();
+        let mut own = jobs[0].claim().unwrap();
+        for round in 1..=kinds.len() {
+            if round > 1 {
+                seats.iter().for_each(Seat::reset);
+            }
+            crew.begin_round();
+            own.begin(crew.round());
+            finish_round(&crew, &seats, &mut own);
+            check!(seats.iter().all(|s| s.faults() == 0), "round {round}");
+        }
+        // SAFETY: every core waits for a round that never comes.
+        check!((0..WORDS).all(|w| unsafe { ptr.add(w).read() } == 0), "march c- leaves zeros");
+        crew.close();
+        own.retire();
+        aps.into_iter().map(|ap| ap.join().unwrap()).collect::<Vec<_>>()
+    });
+    check!(ends == [SeatState::Done, SeatState::Done]);
+}
+
+/// A clock that follows the host's.
+struct Wall(std::time::Instant);
+
+impl Clock for Wall {
+    fn now(&self) -> Instant {
+        Instant::from_epoch(self.0.elapsed())
+    }
+}
+
+#[test]
+fn the_start_line_releases_cores_once_all_have_arrived_and_abandons_if_one_never_does() {
+    let clock = Wall(std::time::Instant::now());
+    let patience = Duration::from_secs(5);
+    let line = StartLine::default();
+    let go = std::thread::scope(|scope| {
+        let aps: Vec<_> = (0..2).map(|_| scope.spawn(|| line.arrive_and_wait(&clock, patience))).collect();
+        check!(line.gather(2, &clock, patience, &mut || {}).is_some());
+        aps.into_iter().map(|ap| ap.join().unwrap()).collect::<Vec<_>>()
+    });
+    check!(go == [Start::Go, Start::Go]);
+
+    let line = StartLine::default();
+    let gone = std::thread::scope(|scope| {
+        let ap = scope.spawn(|| line.arrive_and_wait(&clock, patience));
+        check!(line.gather(2, &clock, Duration::from_millis(20), &mut || {}).is_none(), "one core never arrives");
+        ap.join().unwrap()
+    });
+    check!(gone == Start::Abandoned);
+    check!(line.arrive_and_wait(&clock, patience) == Start::Abandoned, "a late core is sent home too");
+}
+
+/// A core whose features the test sets.
+struct Core {
+    sse: bool,
+    wide: bool,
+}
+
+impl WideGuard for () {
+    fn wide(&self, f: &mut dyn FnMut()) {
+        f();
+    }
+}
+
+impl Platform for Core {
+    type Wide = ();
+
+    fn sse_ready(&self) -> bool {
+        self.sse
+    }
+
+    fn enable_wide(&self) -> Option<()> {
+        Some(())
+    }
+
+    fn tier_usable(&self, tier: Tier) -> bool {
+        self.wide || !tier.is_wide()
+    }
+}
+
+#[test]
+fn an_ap_enters_its_job_only_if_the_core_can_run_it() {
+    let clock = Wall(std::time::Instant::now());
+    let narrow = [Kernel::SCALAR];
+    let enter = |core: &Core, kernels: &[Kernel], line: &StartLine| {
+        let (seat, taken) = (Seat::default(), AtomicBool::new(false));
+        let entered = enter_ap(core, &seat, &taken, kernels, line, &clock).is_some();
+        (entered, seat.state())
+    };
+    let released = StartLine::default();
+    released.release();
+    check!(enter(&Core { sse: true, wide: false }, &narrow, &released) == (true, SeatState::Running));
+    check!(enter(&Core { sse: false, wide: true }, &narrow, &released) == (false, SeatState::Failed(Failure::NoSse)));
+    if let Some(wide) = crate::tests::kernels().into_iter().find(|k| k.tier().is_wide()) {
+        let core = Core { sse: true, wide: false };
+        check!(enter(&core, &[wide], &released) == (false, SeatState::Failed(Failure::Tier)));
+    }
+    let line = StartLine::default();
+    line.abandon();
+    check!(enter(&Core { sse: true, wide: true }, &narrow, &line) == (false, SeatState::Stopped));
+
+    let (seat, taken) = (Seat::default(), AtomicBool::new(true));
+    let core = Core { sse: true, wide: true };
+    check!(enter_ap(&core, &seat, &taken, &narrow, &released, &clock).is_none());
+    check!(seat.state() == SeatState::Failed(Failure::Taken));
+}

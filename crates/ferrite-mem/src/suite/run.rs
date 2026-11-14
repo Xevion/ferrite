@@ -4,11 +4,11 @@ use core::time::Duration;
 
 use ferrite_hal::Instant;
 
-use super::plan::{self, Bus, MODULO, Op, Phase, Span, move_half};
+use super::plan::{self, Bus, MODULO, Op, Phase, Seq, Span, move_half};
 use super::{Config, Kernels, TestKind, percent};
 use crate::fault::Faults;
 use crate::kernels::{self, Dram, Stride};
-use crate::ops::{self, Order};
+use crate::ops::{self, Order, Source};
 use crate::prsg::Prsg;
 use crate::region::{BLOCK_WORDS, GROUP_WORDS, Layout, Memory, Region};
 use crate::rotating::Rotating;
@@ -84,7 +84,9 @@ impl Test {
     }
 
     /// Whether the phase the next step starts may only begin once every share has ended the one
-    /// before. Only consecutive block-move windows go without, since each lies inside one share.
+    /// before. Consecutive block-move windows go without, since each lies inside one share, and so
+    /// do the windows of own address in windows, which each core fills and checks over its own part
+    /// of the window.
     #[must_use]
     pub const fn gated(&self) -> bool {
         self.gated
@@ -171,7 +173,8 @@ impl Test {
             return Progress::Done;
         }
         self.next = plan::nth(self.kind, &self.config, self.pass, &self.layout, self.phase);
-        self.gated = !(windowed && self.next.is_some_and(|p| matches!(p.op, Op::Move { .. })));
+        self.gated = !(self.kind == TestKind::OwnAddressWindow
+            || windowed && self.next.is_some_and(|p| matches!(p.op, Op::Move { .. })));
         Progress::Running
     }
 }
@@ -188,14 +191,47 @@ struct Active {
     base: usize,
     work: usize,
     cursor: usize,
-    prsg: Prsg,
+    seqs: Seqs,
     /// The bus-stress verify stream.
     check: Prsg,
-    rot: Rotating,
     /// Words done of the bus-stress fill and verify streams.
     bus: [usize; 2],
     since_gap: usize,
     until: Option<Instant>,
+}
+
+/// The sequence states a phase carries from chunk to chunk.
+#[derive(Debug)]
+struct Seqs {
+    prsg: Prsg,
+    rot: Rotating,
+    /// The sequences a replace pass checks and writes.
+    replace: [Walker; 2],
+}
+
+#[derive(Debug)]
+enum Walker {
+    Word(u64),
+    Prsg(Prsg),
+    Rotating(Rotating),
+}
+
+impl Walker {
+    fn at(seq: Seq, block: u64) -> Self {
+        match seq {
+            Seq::Word(word) => Self::Word(word),
+            Seq::Prsg { seed } => Self::Prsg(Prsg::at(seed, block)),
+            Seq::Rotating { pattern } => Self::Rotating(Rotating::at(pattern, block)),
+        }
+    }
+
+    fn source(&mut self) -> Source<'_> {
+        match self {
+            Self::Word(word) => Source::Word(*word),
+            Self::Prsg(prsg) => Source::Prsg(prsg),
+            Self::Rotating(rot) => Source::Rotating(rot),
+        }
+    }
 }
 
 impl Active {
@@ -207,17 +243,23 @@ impl Active {
             let word = if phase.order() == Order::Descending { part.end() } else { part.start };
             ((word - of.start) / BLOCK_WORDS) as u64
         };
-        let (mut prsg, mut check, mut rot) = (Prsg::new(0), Prsg::new(0), Rotating::at(0, 0));
+        let mut seqs =
+            Seqs { prsg: Prsg::new(0), rot: Rotating::at(0, 0), replace: [Walker::Word(0), Walker::Word(0)] };
+        let mut check = Prsg::new(0);
         match phase.op {
             Op::FillPrsg { seed, .. } | Op::VerifyPrsg { seed, .. } | Op::InvertPrsg { seed, .. } => {
-                prsg = Prsg::at(seed, entry(span, phase.span));
+                seqs.prsg = Prsg::at(seed, entry(span, phase.span));
             },
             Op::FillRotating { pattern, .. } | Op::InvertRotating { pattern, .. } => {
-                rot = Rotating::at(pattern, entry(span, phase.span));
+                seqs.rot = Rotating::at(pattern, entry(span, phase.span));
+            },
+            Op::Replace { from, to, .. } => {
+                let block = entry(span, phase.span);
+                seqs.replace = [Walker::at(from, block), Walker::at(to, block)];
             },
             Op::Bus(bus) => {
                 span = bus.fill.span.clip(share);
-                prsg = Prsg::at(bus.fill.seed, entry(span, bus.fill.span));
+                seqs.prsg = Prsg::at(bus.fill.seed, entry(span, bus.fill.span));
                 if let Some(c) = bus.check {
                     check_span = c.span.clip(share);
                     check = Prsg::at(c.seed, entry(check_span, c.span));
@@ -232,9 +274,8 @@ impl Active {
             base: share.start,
             work: phase.work_in(share),
             cursor: 0,
-            prsg,
+            seqs,
             check,
-            rot,
             bus: [0; 2],
             since_gap: 0,
             until: None,
@@ -305,8 +346,8 @@ impl Active {
         let (start, n) = self.next_chunk(budget);
         let pieces = regions.pieces(start - self.base, n);
         let base = self.base;
-        let (prsg, rot) = (&mut self.prsg, &mut self.rot);
-        let mut chunk = |at: usize, mut c: Region<'_>| linear_chunk(op, k, &mut c, base + at, prsg, rot, faults);
+        let seqs = &mut self.seqs;
+        let mut chunk = |at: usize, mut c: Region<'_>| linear_chunk(op, k, &mut c, base + at, seqs, faults);
         if self.phase.order() == Order::Descending {
             pieces.rev().for_each(|(at, c)| chunk(at, c));
         } else {
@@ -362,7 +403,7 @@ impl Active {
             let fill = burst.min(fill_span.words - self.bus[0]);
             if fill > 0 {
                 for (_, mut chunk) in regions.pieces(fill_span.start + self.bus[0] - self.base, fill) {
-                    ops::fill_prsg(k.fill, &mut chunk, &mut self.prsg, 0);
+                    ops::fill_prsg(k.fill, &mut chunk, &mut self.seqs.prsg, 0);
                 }
                 self.bus[0] += fill;
             }
@@ -386,15 +427,8 @@ impl Active {
 }
 
 /// One piece of a linear phase's chunk, `start` being its first word of the whole set.
-fn linear_chunk(
-    op: Op,
-    k: Kernels,
-    c: &mut Region<'_>,
-    start: usize,
-    prsg: &mut Prsg,
-    rot: &mut Rotating,
-    faults: &mut Faults<'_>,
-) {
+fn linear_chunk(op: Op, k: Kernels, c: &mut Region<'_>, start: usize, seqs: &mut Seqs, faults: &mut Faults<'_>) {
+    let Seqs { prsg, rot, replace: [from, to] } = seqs;
     let stride = |offset| Stride { n: MODULO, offset, first: start % MODULO };
     match op {
         Op::Fill(v) => ops::fill(k.fill, c, v),
@@ -407,6 +441,7 @@ fn linear_chunk(
         Op::InvertPrsg { step, .. } => ops::invert_prsg(k.rmw, c, prsg, step, faults),
         Op::FillRotating { key, .. } => ops::fill_rotating(k.fill, c, rot, key),
         Op::InvertRotating { step, .. } => ops::invert_rotating(k.rmw, c, rot, step, faults),
+        Op::Replace { step, .. } => ops::replace(k.rmw, c, from.source(), to.source(), step, faults),
         Op::FillExcept { offset, value } => ops::fill_except(k.fill, c, stride(offset), value),
         // SAFETY: the chunk is a region, so its words are ours.
         Op::FillStride { offset, value } => unsafe {

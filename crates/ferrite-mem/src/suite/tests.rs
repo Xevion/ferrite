@@ -157,17 +157,26 @@ use Injection::{Alias, Couple, Flip};
 #[case::inversions_stuck(TestKind::MovingInversions, 0, Flip { word: 17, mask: 1 << 1 })]
 #[case::inversions_transition(TestKind::MovingInversions, 1, Flip { word: 1500, mask: !0 })]
 #[case::inversions_coupling(TestKind::MovingInversions, 1, Couple { aggressor: 50, victim: 51, mask: 1 << 7 })]
+#[case::inversions_stuck_in_the_last_pass(TestKind::MovingInversions, 2, Flip { word: 900, mask: 1 << 44 })]
 #[case::byte_inversions_stuck(TestKind::MovingInversions8Bit, 3, Flip { word: 2001, mask: 1 << 6 })]
 #[case::byte_inversions_transition(TestKind::MovingInversions8Bit, 4, Flip { word: 2001, mask: !0 })]
 #[case::random_inversions_stuck(TestKind::MovingInversionsRandom, 0, Flip { word: 333, mask: 1 << 50 })]
 #[case::random_inversions_transition(TestKind::MovingInversionsRandom, 1, Flip { word: 1024, mask: !0 })]
-#[case::random_inversions_splat_round(TestKind::MovingInversionsRandom, 9, Flip { word: 5, mask: 1 << 12 })]
+#[case::random_inversions_splat_round(TestKind::MovingInversionsRandom, 6, Flip { word: 5, mask: 1 << 12 })]
+#[case::random_inversions_stuck_before_the_merged_pass(TestKind::MovingInversionsRandom, 1, Flip { word: 700, mask: 1 << 9 })]
+#[case::random_inversions_stuck_after_the_merged_pass(TestKind::MovingInversionsRandom, 2, Flip { word: 800, mask: 1 << 31 })]
+#[case::random_inversions_alias_before_the_merged_pass(TestKind::MovingInversionsRandom, 1, Alias { from: 100, to: 1900 })]
+#[case::random_inversions_alias_after_the_merged_pass(TestKind::MovingInversionsRandom, 2, Alias { from: 100, to: 1900 })]
+#[case::byte_inversions_stuck_after_the_merged_pass(TestKind::MovingInversions8Bit, 3, Flip { word: 1234, mask: 1 << 2 })]
 #[case::shifting_inversions_stuck(TestKind::MovingInversions64Bit, 0, Flip { word: 63, mask: 1 })]
 #[case::shifting_inversions_transition(TestKind::MovingInversions64Bit, 4, Flip { word: 1999, mask: !0 })]
 #[case::shifting_inversions_coupling(TestKind::MovingInversions64Bit, 1, Couple { aggressor: 2, victim: 1, mask: !0 })]
+#[case::shifting_inversions_stuck_after_the_merged_pass(TestKind::MovingInversions64Bit, 3, Flip { word: 77, mask: 1 << 20 })]
+#[case::shifting_inversions_alias_after_the_merged_pass(TestKind::MovingInversions64Bit, 3, Alias { from: 8, to: 1500 })]
 #[case::modulo_stuck(TestKind::Modulo20, 0, Flip { word: 40, mask: 1 << 33 })]
-#[case::modulo_coupling(TestKind::Modulo20, 5, Couple { aggressor: 21, victim: 20, mask: !0 })]
-#[case::modulo_alias(TestKind::Modulo20, 2, Alias { from: 21, to: 20 })]
+#[case::modulo_stuck_after_the_single_fill_except(TestKind::Modulo20, 1, Flip { word: 40, mask: 1 << 33 })]
+#[case::modulo_coupling(TestKind::Modulo20, 3, Couple { aggressor: 21, victim: 20, mask: !0 })]
+#[case::modulo_alias(TestKind::Modulo20, 1, Alias { from: 21, to: 20 })]
 #[case::block_move_stuck(TestKind::BlockMove, 4, Flip { word: 77, mask: 1 << 5 })]
 #[case::block_move_coupling(TestKind::BlockMove, 4, Couple { aggressor: 600, victim: 1601, mask: !0 })]
 #[case::bus_stress_low_half(TestKind::BusStress, 0, Flip { word: 500, mask: 1 << 20 })]
@@ -397,15 +406,16 @@ fn word_at(addrs: &[usize], f: &Fault) -> usize {
 
 /// Run `kind` over the whole set of regions laid out as `layout` and split `parts` ways, phase by
 /// phase in lockstep, injecting after phase `after` in both. Memory must match after every phase,
-/// and the faults must too; the split run's faults must come from the share holding the word.
+/// and the faults must too; the split run's faults must come from the share holding the word. Both
+/// runs use the same memory, one after the other.
 fn split_matches_whole(kind: TestKind, layout: &[usize], parts: usize, inject: Option<(usize, Injection)>) {
     // SAFETY: the flags come from the host's own feature detection.
     let caps = unsafe { Caps::new(std::is_x86_feature_detected!("avx2"), std::is_x86_feature_detected!("avx512f")) };
     let kernels = Kernels::for_caps(caps);
     let mut now = Instant::default();
 
-    let mut whole_mem = Mem::new(layout);
-    let mut whole_region = whole_mem.regions();
+    let mut mem = Mem::new(layout);
+    let mut whole_region = mem.regions();
     let addrs: Vec<usize> = (0..WORDS).map(|w| whole_region.addr(w).get()).collect();
     let mut whole = Test::new(kind, CFG, 0, &whole_region);
     let mut whole_faults: Vec<At> = Vec::new();
@@ -425,8 +435,9 @@ fn split_matches_whole(kind: TestKind, layout: &[usize], parts: usize, inject: O
         whole_memory.push((0..WORDS).map(|w| whole_region.peek(w)).collect::<Vec<_>>());
     }
 
-    let mut split_mem = Mem::new(layout);
-    let mut split_region = split_mem.regions();
+    // The same memory, cleared: the address tests write the addresses themselves.
+    let mut split_region = mem.regions();
+    (0..WORDS).for_each(|w| split_region.poke(w, 0));
     let addrs: Vec<usize> = (0..WORDS).map(|w| split_region.addr(w).get()).collect();
     let whole_layout = split_region.layout();
     let parts = NonZeroUsize::new(parts).unwrap();
@@ -478,9 +489,16 @@ fn every_split_test_does_what_the_whole_set_run_does(#[case] parts: usize) {
 
 #[rstest]
 #[case::modulo_stride_in_a_later_share(TestKind::Modulo20, 0, Flip { word: 700, mask: 1 << 33 })]
-#[case::modulo_coupling_at_a_share_edge(TestKind::Modulo20, 5, Couple { aggressor: 1024, victim: 1020, mask: !0 })]
+#[case::modulo_coupling_at_a_share_edge(TestKind::Modulo20, 3, Couple { aggressor: 1024, victim: 1020, mask: !0 })]
 #[case::random_inversions_past_the_first_share(TestKind::MovingInversionsRandom, 1, Flip { word: 1400, mask: !0 })]
-#[case::shifting_inversions_descending(TestKind::MovingInversions64Bit, 1, Flip { word: 1999, mask: 1 << 3 })]
+#[case::shifting_inversions_descending(TestKind::MovingInversions64Bit, 2, Flip { word: 1999, mask: 1 << 3 })]
+#[case::own_address_alias_across_shares(TestKind::OwnAddress, 0, Alias { from: 1000, to: 300 })]
+#[case::own_address_complement_alias_across_shares(TestKind::OwnAddress, 2, Alias { from: 8, to: 2040 })]
+#[case::own_address_window_alias(TestKind::OwnAddressWindow, 2, Alias { from: 512, to: 600 })]
+#[case::march_stuck_in_a_later_share(TestKind::MarchCMinus, 0, Flip { word: 1513, mask: 1 << 3 })]
+#[case::march_transition_in_a_descending_element(TestKind::MarchCMinus, 2, Flip { word: 64, mask: !0 })]
+#[case::march_coupling_at_a_share_edge(TestKind::MarchCMinus, 3, Couple { aggressor: 1024, victim: 1020, mask: 1 << 5 })]
+#[case::random_inversions_alias_in_the_merged_pass(TestKind::MovingInversionsRandom, 2, Alias { from: 100, to: 1900 })]
 #[case::bus_stress_high_half(TestKind::BusStress, 1, Flip { word: 1500, mask: 1 << 21 })]
 #[case::bus_stress_last_verify(TestKind::BusStress, 5, Flip { word: 2000, mask: 1 })]
 #[case::block_move_window(TestKind::BlockMove, 4, Couple { aggressor: 600, victim: 1601, mask: !0 })]
@@ -495,6 +513,46 @@ fn an_injected_fault_is_found_split_as_whole(
             split_matches_whole(kind, layout, parts, Some((after, injection)));
         }
     }
+}
+
+/// Every phase of `kind` over `layout` as planned with `cfg`.
+fn phases(kind: TestKind, cfg: &Config, layout: &Layout) -> Vec<plan::Phase> {
+    (0..).map_while(|i| plan::nth(kind, cfg, 0, layout, i)).collect()
+}
+
+#[rstest]
+#[case::ones_and_zeros(TestKind::MovingInversions)]
+#[case::bytes(TestKind::MovingInversions8Bit)]
+#[case::random(TestKind::MovingInversionsRandom)]
+#[case::shifting(TestKind::MovingInversions64Bit)]
+fn a_moving_inversions_round_ends_in_the_next_rounds_fill(#[case] kind: TestKind) {
+    let cfg = Config { fixed_iterations: 2, byte_iterations: 2, shifting_iterations: 2, ..CFG };
+    let layout = Layout::new([WORDS]);
+    let ops: Vec<plan::Op> = phases(kind, &cfg, &layout).into_iter().map(|p| p.op).collect();
+    let fills =
+        |op: &plan::Op| matches!(op, plan::Op::Fill(_) | plan::Op::FillPrsg { .. } | plan::Op::FillRotating { .. });
+    check!(ops.iter().filter(|op| fills(op)).count() == 1, "{kind:?}: only the first round fills");
+    check!(fills(&ops[0]));
+    // A pattern followed by its complement leaves the words as they are, so no pass is left.
+    let merged = ops.iter().any(|op| matches!(op, plan::Op::Replace { .. }));
+    check!(merged != (kind == TestKind::MovingInversions), "{kind:?}");
+    let restores = |op: &&plan::Op| match op {
+        plan::Op::Invert(step) | plan::Op::InvertPrsg { step, .. } | plan::Op::InvertRotating { step, .. } => {
+            step.order == Order::Descending
+        },
+        _ => false,
+    };
+    let last = ops.last().unwrap();
+    check!(restores(&last), "{kind:?}: the last round still restores its pattern");
+}
+
+#[test]
+fn modulo_fills_the_rest_once_per_stride_offset_and_value() {
+    let layout = Layout::new([WORDS]);
+    let ops: Vec<plan::Op> = phases(TestKind::Modulo20, &CFG, &layout).into_iter().map(|p| p.op).collect();
+    let except = ops.iter().filter(|op| matches!(op, plan::Op::FillExcept { .. })).count();
+    check!(except == 2 * plan::MODULO * CFG.modulo_rounds as usize);
+    check!(ops.windows(2).all(|w| !matches!(w, [plan::Op::FillExcept { .. }, plan::Op::FillExcept { .. }])));
 }
 
 #[test]

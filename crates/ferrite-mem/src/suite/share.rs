@@ -28,17 +28,26 @@ pub enum Mode {
 impl TestKind {
     /// How the test runs when several cores are available.
     ///
-    /// The address tests and March C- stay on one core: the faults they target (a decoder that
-    /// maps one address onto another, a cell disturbed by one far away) show only through the
-    /// order of accesses across the whole region, which split shares would interleave. The
-    /// address walk's coverage also depends on the span it walks. They are quick, so this costs
-    /// about a second a pass. Every other test splits, with its sequences continued across
-    /// shares, block-move windows kept whole and bus stress keeping its two halves of the whole
-    /// region (each core fills and checks the parts of them in its share).
+    /// Only the address walk stays on one core: its coverage depends on the one aligned span it
+    /// walks, and it does a few hundred accesses a region.
+    ///
+    /// Every other test splits, with its sequences continued across shares, block-move windows
+    /// kept whole and bus stress keeping its two halves of the whole region (each core fills and
+    /// checks the parts of them in its share). Own address fills every share, meets at the gate,
+    /// then every core checks its share, so an address that aliases one in another share is caught
+    /// as in the whole run: whichever write lands last, one of the two cells disagrees. March C-
+    /// meets at a gate between its elements and each core sweeps its share in the element's
+    /// direction. A cell and a far-away one in another share are then touched concurrently within
+    /// an element rather than in address order, so a coupling or decoder fault across a share
+    /// edge is no longer caught deterministically by this test (own address still covers
+    /// aliasing); faults inside a share, and between neighbours, are unaffected. Own address in
+    /// windows needs no meeting at all: each core fills and checks its part of every window in turn.
+    /// A window that straddles two shares is then checked in two parts, so an alias between the
+    /// parts is no longer caught, which touches only the few windows at a cut.
     #[must_use]
     pub const fn mode(self) -> Mode {
         match self {
-            Self::AddressWalk | Self::OwnAddress | Self::OwnAddressWindow | Self::MarchCMinus => Mode::Single,
+            Self::AddressWalk => Mode::Single,
             _ => Mode::Split,
         }
     }

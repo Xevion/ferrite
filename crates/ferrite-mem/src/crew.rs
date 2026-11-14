@@ -9,6 +9,10 @@
 //! begin the next round ([`Crew::begin_round`]) or close the crew ([`Crew::close`]), so an AP is
 //! dispatched once rather than once per test. The BSP opens the gates ([`Crew::coordinate`]). Each
 //! core reports through its [`Seat`], which holds only atomics.
+//!
+//! The pieces a core needs whatever it runs (the [`StartLine`] where cores begin together, the
+//! checks an AP makes before its job in [`enter_ap`], the [`Seat`] it reports through) are public
+//! so other harnesses on the cores, such as a throughput benchmark, share them.
 
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
@@ -19,7 +23,7 @@ use core::time::Duration;
 use ferrite_hal::{Clock, Instant};
 
 use crate::suite::{Kernels, Progress, Test};
-use crate::{CpuAddr, Fault, Faults, Regions, Tier};
+use crate::{CpuAddr, Fault, Faults, Kernel, Regions, Tier};
 
 /// The first faults each core keeps per test with their addresses; the rest are only counted.
 pub const SEAT_FAULTS: usize = 16;
@@ -30,6 +34,14 @@ pub const AP_PATIENCE: Duration = Duration::from_secs(5);
 pub trait WideGuard {
     /// Run `f` under the platform's protection for wide-register work.
     fn wide(&self, f: &mut dyn FnMut());
+}
+
+/// Run `f`, inside `vector`'s guard when a wide kernel is in play and there is one.
+pub fn guarded(vector: Option<&dyn WideGuard>, wide: bool, f: &mut dyn FnMut()) {
+    match vector {
+        Some(v) if wide => v.wide(f),
+        _ => f(),
+    }
 }
 
 /// What a core says about itself before it works an AP job.
@@ -57,6 +69,8 @@ pub enum Failure {
     StartLine,
     /// The job was already taken by another core.
     Taken,
+    /// The core's memory does not fit its work.
+    Share,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +99,7 @@ impl SeatState {
             Self::Failed(Failure::Tier) => 0x11,
             Self::Failed(Failure::StartLine) => 0x12,
             Self::Failed(Failure::Taken) => 0x13,
+            Self::Failed(Failure::Share) => 0x14,
             Self::Unknown(raw) => raw,
         }
     }
@@ -100,6 +115,7 @@ impl SeatState {
             0x11 => Self::Failed(Failure::Tier),
             0x12 => Self::Failed(Failure::StartLine),
             0x13 => Self::Failed(Failure::Taken),
+            0x14 => Self::Failed(Failure::Share),
             raw => Self::Unknown(raw),
         }
     }
@@ -123,6 +139,7 @@ impl fmt::Display for SeatState {
             Self::Failed(Failure::Tier) => f.write_str("failed: kernel tier unusable on this core"),
             Self::Failed(Failure::StartLine) => f.write_str("failed: no release at the start"),
             Self::Failed(Failure::Taken) => f.write_str("failed: job already taken"),
+            Self::Failed(Failure::Share) => f.write_str("failed: memory does not fit the work"),
             Self::Unknown(raw) => write!(f, "unknown state {raw:#x}"),
         }
     }
@@ -168,7 +185,8 @@ impl Seat {
         SeatState::from_raw(self.state.load(Ordering::Acquire))
     }
 
-    fn set(&self, state: SeatState) {
+    /// Record the core's state; only the core that runs the job calls this.
+    pub fn set(&self, state: SeatState) {
         self.state.store(state.raw(), Ordering::Release);
     }
 
@@ -208,13 +226,30 @@ impl Seat {
         self.state().ended() || self.finished.load(Ordering::Acquire) >= round
     }
 
+    /// Record how deep the AP's stack went, once its run has ended.
+    pub fn record_stack(&self, bytes: usize) {
+        self.stack_bytes.store(bytes, Ordering::Relaxed);
+        self.stack_measured.store(true, Ordering::Release);
+    }
+
     /// Bytes of AP stack the job used below its dispatch entry; `None` on the BSP.
     #[must_use]
     pub fn stack_bytes(&self) -> Option<usize> {
         self.stack_measured.load(Ordering::Acquire).then(|| self.stack_bytes.load(Ordering::Relaxed))
     }
 
-    fn record(&self, fault: Fault) {
+    /// Store the work done so far, in the units the harness chooses; only the job's core calls this.
+    pub fn set_done(&self, done: u64) {
+        self.done.store(done, Ordering::Release);
+    }
+
+    /// Store the mismatched words seen so far, kept or not; only the job's core calls this.
+    pub fn set_faults(&self, faults: u64) {
+        self.faults.store(faults, Ordering::Release);
+    }
+
+    /// Keep `fault` with its address, if there is room; only the job's core calls this.
+    pub fn record(&self, fault: Fault) {
         let i = self.kept.load(Ordering::Relaxed);
         if let Some(cell) = self.first.get(i) {
             cell.addr.store(fault.addr.get(), Ordering::Relaxed);
@@ -224,20 +259,88 @@ impl Seat {
         }
     }
 
-    fn room(&self) -> u64 {
+    /// How many more faults [`Seat::record`] keeps.
+    #[must_use]
+    pub fn room(&self) -> u64 {
         SEAT_FAULTS.saturating_sub(self.kept.load(Ordering::Relaxed)) as u64
     }
 }
 
-const START_WAITING: u8 = 0;
-const START_GO: u8 = 1;
-const START_ABANDONED: u8 = 2;
+const LINE_WAITING: u8 = 0;
+const LINE_GO: u8 = 1;
+const LINE_ABANDONED: u8 = 2;
 
-/// How an AP's wait at the start ended.
-enum Start {
+/// How an AP's wait at the start line ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Start {
     Go,
     Abandoned,
     TimedOut,
+}
+
+/// Where the cores of a run wait for each other, so they all start together.
+#[derive(Debug, Default)]
+pub struct StartLine {
+    arrived: AtomicU32,
+    signal: AtomicU8,
+}
+
+impl StartLine {
+    /// APs waiting.
+    #[must_use]
+    pub fn arrived(&self) -> u32 {
+        self.arrived.load(Ordering::Acquire)
+    }
+
+    /// Let the waiting APs go.
+    pub fn release(&self) {
+        self.signal.store(LINE_GO, Ordering::Release);
+    }
+
+    /// Send the waiting APs home, and any that arrive later.
+    pub fn abandon(&self) {
+        self.signal.store(LINE_ABANDONED, Ordering::Release);
+    }
+
+    /// AP side: report arrival, then wait for the release for up to `patience`.
+    pub fn arrive_and_wait(&self, clock: &impl Clock, patience: Duration) -> Start {
+        self.arrived.fetch_add(1, Ordering::AcqRel);
+        let deadline = clock.now().checked_add(patience);
+        loop {
+            match self.signal.load(Ordering::Acquire) {
+                LINE_WAITING => {},
+                LINE_GO => return Start::Go,
+                _ => return Start::Abandoned,
+            }
+            if deadline.is_none_or(|d| clock.now() > d) {
+                return Start::TimedOut;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// BSP side: wait up to `patience` for `aps` arrivals, running `duties` meanwhile, then release
+    /// them. Returns the release time, or `None` (and abandons the line) if some never arrived.
+    pub fn gather(
+        &self,
+        aps: u32,
+        clock: &impl Clock,
+        patience: Duration,
+        duties: &mut dyn FnMut(),
+    ) -> Option<Instant> {
+        let deadline = clock.now().checked_add(patience);
+        while self.arrived() < aps {
+            if deadline.is_none_or(|d| clock.now() > d) {
+                self.abandon();
+                return None;
+            }
+            duties();
+            core::hint::spin_loop();
+        }
+        let now = clock.now();
+        self.release();
+        Some(now)
+    }
 }
 
 /// What an AP waiting between tests found.
@@ -252,8 +355,7 @@ pub enum Next {
 /// What the cores of one run of tests share: the start, the rounds, the gates and the stop.
 #[derive(Debug, Default)]
 pub struct Crew {
-    arrived: AtomicU32,
-    start: AtomicU8,
+    line: StartLine,
     stop: AtomicBool,
     /// The last round begun: round `n` is the `n`-th test of the run, from 1.
     round: AtomicUsize,
@@ -264,20 +366,26 @@ pub struct Crew {
 }
 
 impl Crew {
+    /// The line the APs wait at before the first round.
+    #[must_use]
+    pub const fn line(&self) -> &StartLine {
+        &self.line
+    }
+
     /// APs waiting at the start.
     #[must_use]
     pub fn arrived(&self) -> u32 {
-        self.arrived.load(Ordering::Acquire)
+        self.line.arrived()
     }
 
     /// Let the waiting APs go.
     pub fn release(&self) {
-        self.start.store(START_GO, Ordering::Release);
+        self.line.release();
     }
 
     /// Send the waiting APs home, and any that arrive later.
     pub fn abandon(&self) {
-        self.start.store(START_ABANDONED, Ordering::Release);
+        self.line.abandon();
         self.stop();
     }
 
@@ -307,22 +415,6 @@ impl Crew {
     #[must_use]
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::Acquire)
-    }
-
-    fn arrive_and_wait(&self, clock: &impl Clock, patience: Duration) -> Start {
-        self.arrived.fetch_add(1, Ordering::AcqRel);
-        let deadline = clock.now().checked_add(patience);
-        loop {
-            match self.start.load(Ordering::Acquire) {
-                START_WAITING => {},
-                START_GO => return Start::Go,
-                _ => return Start::Abandoned,
-            }
-            if deadline.is_none_or(|d| clock.now() > d) {
-                return Start::TimedOut;
-            }
-            core::hint::spin_loop();
-        }
     }
 
     /// Wait for a round after `seen`, the close or the stop.
@@ -363,6 +455,62 @@ impl Crew {
         }
         at.is_none()
     }
+}
+
+/// An AP that passed [`enter_ap`], holding the wide vector state it turned on, if any.
+#[derive(Debug)]
+pub struct Entered<W> {
+    wide: Option<W>,
+}
+
+impl<W: WideGuard> Entered<W> {
+    /// The guard to work wide kernels under, if the core has one.
+    #[must_use]
+    pub fn guard(&self) -> Option<&dyn WideGuard> {
+        self.wide.as_ref().map(|w| w as &dyn WideGuard)
+    }
+}
+
+/// What an AP does before its job, with the seat saying how it went.
+///
+/// In order: check SSE, take the job (`taken` is its flag), turn the wide state on if a kernel is
+/// wide, check that every kernel's tier runs, then wait at `line` for the release. On success the
+/// seat is running and the entry is returned. Allocates nothing and takes no lock.
+pub fn enter_ap<P: Platform>(
+    platform: &P,
+    seat: &Seat,
+    taken: &AtomicBool,
+    kernels: &[Kernel],
+    line: &StartLine,
+    clock: &impl Clock,
+) -> Option<Entered<P::Wide>> {
+    if !platform.sse_ready() {
+        seat.set(SeatState::Failed(Failure::NoSse));
+        return None;
+    }
+    if taken.swap(true, Ordering::AcqRel) {
+        seat.set(SeatState::Failed(Failure::Taken));
+        return None;
+    }
+    let wide = if kernels.iter().any(|k| k.tier().is_wide()) { platform.enable_wide() } else { None };
+    if !kernels.iter().all(|k| platform.tier_usable(k.tier())) {
+        seat.set(SeatState::Failed(Failure::Tier));
+        return None;
+    }
+    seat.set(SeatState::Ready);
+    match line.arrive_and_wait(clock, AP_PATIENCE) {
+        Start::Go => {},
+        Start::Abandoned => {
+            seat.set(SeatState::Stopped);
+            return None;
+        },
+        Start::TimedOut => {
+            seat.set(SeatState::Failed(Failure::StartLine));
+            return None;
+        },
+    }
+    seat.set(SeatState::Running);
+    Some(Entered { wide })
 }
 
 /// One core's job for a run of tests: its test state for each, the regions of its share, the shared
@@ -412,8 +560,12 @@ impl<'a, C: Clock> Job<'a, C> {
         }
     }
 
+    const fn worker(&self) -> Worker<'_, 'a, C> {
+        Worker { job: self, round: 0, gate: None, until: None }
+    }
+
     fn take(&self) -> Option<Worker<'_, 'a, C>> {
-        (!self.taken.swap(true, Ordering::AcqRel)).then_some(Worker { job: self, round: 0, gate: None, until: None })
+        (!self.taken.swap(true, Ordering::AcqRel)).then(|| self.worker())
     }
 
     /// Take the job on the calling core, once the start is released; `None` if already taken.
@@ -493,10 +645,7 @@ impl<C: Clock> Worker<'_, '_, C> {
         let kernels = &job.kernels;
         let mut progress = Progress::Running;
         let mut step = || progress = test.step(regions, kernels, job.budget_bytes, now, &mut faults);
-        match vector {
-            Some(v) if kernels.is_wide() => v.wide(&mut step),
-            _ => step(),
-        }
+        guarded(vector, kernels.is_wide(), &mut step);
         let seen = faults.seen();
         if seen > 0 {
             seat.faults.fetch_add(seen, Ordering::AcqRel);
@@ -555,32 +704,17 @@ impl<C: Clock> Job<'_, C> {
     /// [serve](Worker::serve) every round until the crew closes or stops. How it ended is in the
     /// seat. Allocates nothing and takes no lock, so it may run where only the core's own state is safe.
     pub fn run_ap<P: Platform>(&self, platform: &P) {
-        if !platform.sse_ready() {
-            return self.seat.set(SeatState::Failed(Failure::NoSse));
-        }
-        let Some(mut worker) = self.take() else {
-            return self.seat.set(SeatState::Failed(Failure::Taken));
-        };
         let k = self.kernels;
-        let vector = if k.is_wide() { platform.enable_wide() } else { None };
-        if ![k.fill, k.verify, k.rmw].iter().all(|k| platform.tier_usable(k.tier())) {
-            return self.seat.set(SeatState::Failed(Failure::Tier));
-        }
-        self.seat.set(SeatState::Ready);
-        match self.crew.arrive_and_wait(&self.clock, AP_PATIENCE) {
-            Start::Go => {},
-            Start::Abandoned => return self.seat.set(SeatState::Stopped),
-            Start::TimedOut => return self.seat.set(SeatState::Failed(Failure::StartLine)),
-        }
-        self.seat.set(SeatState::Running);
-        worker.serve(vector.as_ref().map(|v| v as &dyn WideGuard));
-        drop(vector);
+        let kernels = [k.fill, k.verify, k.rmw];
+        let Some(entered) = enter_ap(platform, self.seat, &self.taken, &kernels, &self.crew.line, &self.clock) else {
+            return;
+        };
+        self.worker().serve(entered.guard());
     }
 
     /// Record how deep the AP's stack went, once its run has ended.
     pub fn record_stack(&self, bytes: usize) {
-        self.seat.stack_bytes.store(bytes, Ordering::Relaxed);
-        self.seat.stack_measured.store(true, Ordering::Release);
+        self.seat.record_stack(bytes);
     }
 }
 

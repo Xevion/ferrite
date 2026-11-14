@@ -217,6 +217,91 @@ fn an_inversion_step_checks_then_rewrites_in_order(#[case] order: Order) {
     }
 }
 
+/// A sequence a replace pass walks, with the lanes to walk it.
+#[derive(Clone, Copy, Debug)]
+enum Seq {
+    Word(u64),
+    Prsg(u64),
+    Rotating(u64),
+}
+
+impl Seq {
+    const ALL: [Self; 3] = [Self::Word(0x1234_5678_9abc_def0), Self::Prsg(5), Self::Rotating(1 << 9)];
+
+    fn word(self, w: usize) -> u64 {
+        match self {
+            Self::Word(v) => v,
+            Self::Prsg(seed) => Prsg::word(seed, w as u64),
+            Self::Rotating(pattern) => Rotating::word(pattern, w as u64),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Walk {
+    seq: Seq,
+    prsg: Prsg,
+    rot: Rotating,
+}
+
+impl Walk {
+    fn at(seq: Seq, block: u64) -> Self {
+        let seed = if let Seq::Prsg(seed) = seq { seed } else { 0 };
+        let pattern = if let Seq::Rotating(pattern) = seq { pattern } else { 0 };
+        Self { seq, prsg: Prsg::at(seed, block), rot: Rotating::at(pattern, block) }
+    }
+
+    fn source(&mut self) -> Source<'_> {
+        match self.seq {
+            Seq::Word(v) => Source::Word(v),
+            Seq::Prsg(_) => Source::Prsg(&mut self.prsg),
+            Seq::Rotating(_) => Source::Rotating(&mut self.rot),
+        }
+    }
+}
+
+#[rstest]
+#[case::ascending(Order::Ascending)]
+#[case::descending(Order::Descending)]
+fn a_replace_pass_checks_one_sequence_and_writes_another(#[case] order: Order) {
+    let (expect, write) = (0x0ff0_0ff0_0ff0_0ff0, !0);
+    let blocks = (WORDS / BLOCK_WORDS) as u64;
+    let bad = BLOCK_WORDS + 3;
+    let (entry, exit) = if order == Order::Descending { (blocks, 0) } else { (0, blocks) };
+    for kernel in kernels() {
+        for from in Seq::ALL {
+            for to in Seq::ALL {
+                let mut buf = Buf::new(WORDS);
+                (0..WORDS).for_each(|w| buf.set(w, from.word(w) ^ expect));
+                buf.set(bad, 0);
+                let mut reported = Vec::new();
+                let mut sink = |f: Fault| reported.push(f);
+                let mut faults = Faults::new(8, &mut sink);
+                let (mut a, mut b) = (Walk::at(from, entry), Walk::at(to, entry));
+                let mut region = buf.region();
+                let mut chunks: Vec<Region<'_>> = region.chunks(CHUNK).collect();
+                if order == Order::Descending {
+                    chunks.reverse();
+                }
+                let step = Inversion { expect, write, order };
+                for chunk in &mut chunks {
+                    replace(kernel, chunk, a.source(), b.source(), step, &mut faults);
+                }
+                let want = Fault { addr: buf.addr(bad), expected: from.word(bad) ^ expect, actual: 0 };
+                let case = std::format!("{kernel} {from:?} to {to:?} {order:?}");
+                check!(reported == [want], "{case}");
+                check!((0..WORDS).all(|w| buf.words()[w] == to.word(w) ^ write), "{case}");
+                let lanes = |walk: &Walk| match walk.seq {
+                    Seq::Word(_) => true,
+                    Seq::Prsg(seed) => walk.prsg == Prsg::at(seed, exit),
+                    Seq::Rotating(pattern) => walk.rot == Rotating::at(pattern, exit),
+                };
+                check!(lanes(&a) && lanes(&b), "{case}: lanes end at block {exit}");
+            }
+        }
+    }
+}
+
 #[test]
 fn every_tier_copies_a_region() {
     for kernel in kernels() {

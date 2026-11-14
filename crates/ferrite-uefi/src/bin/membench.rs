@@ -27,10 +27,11 @@ use ferrite_efi::mp::{self, ControlRegisters, Mp, Processor, ProcessorNumber, ST
 use ferrite_efi::watchdog::Keepalive;
 use ferrite_efi::{logger, session};
 use ferrite_hal::{Clock as _, Instant};
+use ferrite_mem::crew::{AP_PATIENCE, SeatState, StartLine, WideGuard};
 use ferrite_mem::{Caps, Fault, Faults, Inversion, Kernel, Order, Prsg, Region, Stores, Tier, WIDE_CHUNK_BYTES};
 #[cfg(ferrite_app)]
 use ferrite_rt as _;
-use ferrite_uefi::cores::{self, CoreJob, CoreReport, CoreState, Slot, Spec, StartLine, Summary, Work};
+use ferrite_uefi::cores::{self, CoreJob, CoreReport, Slot, Spec, Summary, Work};
 use log::LevelFilter;
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::prelude::*;
@@ -357,7 +358,7 @@ impl<'v> Bench<'v> {
         let line = StartLine::default();
         let slots: Vec<Slot> = cpus.iter().map(|_| Slot::default()).collect();
         let share = (region.bytes() / cpus.len()) as u64 * u64::from(MP_PASSES);
-        let timeout = Duration::from_secs(share / AP_FLOOR_RATE + 1) + cores::AP_PATIENCE + GATHER_PATIENCE;
+        let timeout = Duration::from_secs(share / AP_FLOOR_RATE + 1) + AP_PATIENCE + GATHER_PATIENCE;
         let (vector, clock) = (self.vector, self.clock);
         let released = cores::with_split(region, parts, op == Op::Copy, |slices| {
             let jobs: Vec<CoreJob<'_, Clock>> =
@@ -372,7 +373,7 @@ impl<'v> Bench<'v> {
                 }
                 let released = line.gather(started, &clock, GATHER_PATIENCE, &mut || self.tend());
                 if let (Some(_), Some(own)) = (released, jobs.first()) {
-                    own.run_here(vector, &mut || self.tend());
+                    own.run_here(vector.map(|v| v as &dyn WideGuard), &mut || self.tend());
                 }
                 while scope.running() > 0 {
                     self.tend();
@@ -383,7 +384,7 @@ impl<'v> Bench<'v> {
         });
         let reports: Vec<CoreReport> = slots.iter().map(Slot::report).collect();
         for (cpu, report) in cpus.iter().zip(&reports) {
-            if report.state != CoreState::Done {
+            if report.state != SeatState::Done {
                 log::warn!("membench: scaling {} {kernel} on {} cpus: {cpu} {}", op.name(), cpus.len(), report.state);
             }
             for f in &report.first {

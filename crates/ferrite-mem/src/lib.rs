@@ -34,8 +34,8 @@ pub mod suite;
 pub use caps::{Caps, Kernel, Stores, Tier};
 pub use fault::{CpuAddr, Fault, Faults};
 pub use ops::{
-    CopyError, Inversion, Order, copy, fill, fill_address, fill_prsg, fill_rotating, invert, invert_prsg,
-    invert_rotating, verify, verify_address, verify_prsg,
+    CopyError, Inversion, Order, Source, copy, fill, fill_address, fill_prsg, fill_rotating, invert, invert_prsg,
+    invert_rotating, replace, verify, verify_address, verify_prsg,
 };
 pub use prsg::Prsg;
 pub use region::{BLOCK_BYTES, BLOCK_WORDS, Layout, Memory, Region, RegionError, Regions};
