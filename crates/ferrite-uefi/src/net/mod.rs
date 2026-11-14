@@ -36,6 +36,7 @@ use self::wifi::{Wifi, WifiKey, WifiView};
 use crate::control::{Command, Commands};
 use crate::hardware::{Hardware, Vitals};
 use crate::report::Snapshot;
+use crate::runreport::{Report, VERSION, Why};
 use crate::sweep::SweepStatus;
 use crate::wall::Wall;
 
@@ -130,6 +131,11 @@ impl Site for Console {
 
     fn render(&self, snapshot: &Snapshot<'_>, net: &NetStatus, now: Instant, out: &mut String) {
         StatusDoc { snapshot, net, wifi: &self.wifi, now, wall: &self.wall, hardware: &self.hardware }.to_json(out);
+    }
+
+    fn render_text(&self, snapshot: &Snapshot<'_>, _net: &NetStatus, now: Instant, out: &mut String) {
+        Report { snapshot, hardware: &self.hardware, wall: &self.wall, now, why: Why::Requested, version: VERSION }
+            .render_into(out);
     }
 }
 

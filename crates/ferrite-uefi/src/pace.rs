@@ -371,6 +371,12 @@ impl Pace {
         self.last.goal = goal;
     }
 
+    /// The machine the timings are kept for.
+    #[must_use]
+    pub const fn machine(&self) -> Machine {
+        self.machine
+    }
+
     /// Bytes per second the start-up calibration measured: shown, and the first guess at how long a
     /// test without a time on record takes.
     pub const fn set_bandwidth(&mut self, bytes_per_sec: Option<u64>) {

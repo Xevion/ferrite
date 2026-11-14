@@ -84,6 +84,7 @@ impl Site for Toy {
             "/" => (Route::Page, "GET"),
             "/doc" => (Route::Document, "GET"),
             "/events" => (Route::Events, "GET"),
+            "/text" => (Route::Text, "GET"),
             "/pause" => (Route::Control(Control::Pause), "POST"),
             "/echo" | "/quit" => (Route::Control(Control::Echo), "POST"),
             _ => return Err(Rejection::NotFound),
@@ -107,6 +108,10 @@ impl Site for Toy {
 
     fn key(&self, state: &State) -> u64 {
         state.revision
+    }
+
+    fn render_text(&self, state: &State, _net: &NetStatus, _now: Instant, out: &mut String) {
+        let _ = write!(out, "report of revision {}", state.revision);
     }
 
     fn render(&self, state: &State, net: &NetStatus, now: Instant, out: &mut String) {
@@ -232,6 +237,11 @@ impl Rig {
 #[rstest]
 #[case::page("GET / HTTP/1.1\r\nHost: ferrite.local\r\n\r\n", "HTTP/1.1 200 \r\n", PAGE)]
 #[case::document("GET /doc HTTP/1.1\r\nHost: ferrite.local\r\n\r\n", "HTTP/1.1 200 \r\n", "\"revision\":0,\"ports\":1")]
+#[case::text(
+    "GET /text HTTP/1.1\r\nHost: ferrite.local\r\n\r\n",
+    "HTTP/1.1 200 \r\n",
+    "Content-Type: text/plain; charset=utf-8\r\n"
+)]
 #[case::not_found("GET /favicon.ico HTTP/1.1\r\nHost: ferrite.local\r\n\r\n", "HTTP/1.1 404 \r\n", "no such resource")]
 #[case::wrong_method("GET /pause HTTP/1.1\r\nHost: ferrite.local\r\n\r\n", "HTTP/1.1 405 \r\n", "Allow: POST\r\n")]
 #[case::form_post(

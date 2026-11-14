@@ -490,7 +490,11 @@ impl Rig {
         self.net.set_time_pivot(utc(NOW));
         self.net.poll(now, &State { revision: 0 }, &mut |_| {});
         let mut render = |_: &mut String| {};
-        self.server.poll(now, &mut PollCtx { render: &mut render, clock: None, notify: None, sntp: None });
+        let mut render_text = |_: &mut String| {};
+        self.server.poll(
+            now,
+            &mut PollCtx { render: &mut render, render_text: &mut render_text, clock: None, notify: None, sntp: None },
+        );
         self.serve_ntp();
         self.serve_dns();
         for (from, to) in [(&self.client_link, &self.server_link), (&self.server_link, &self.client_link)] {

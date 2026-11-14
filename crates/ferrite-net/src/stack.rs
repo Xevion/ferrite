@@ -60,6 +60,8 @@ impl StackConfig {
 pub struct PollCtx<'a> {
     /// Writes the site's document when a connection needs a current one.
     pub render: &'a mut dyn FnMut(&mut String),
+    /// Writes the site's text report when a connection asks for one.
+    pub render_text: &'a mut dyn FnMut(&mut String),
     /// Times the HTTP poll, for the periodic summary; without one the timings read zero.
     pub clock: Option<&'a dyn Clock>,
     /// The notifier whose queue this stack carries, when it is the port notifications go out on.
@@ -151,7 +153,7 @@ impl Stack {
 
         let busy = self.http.as_mut().is_some_and(|server| {
             let started = ctx.clock.map(Clock::now);
-            let served = server.poll(&mut self.sockets, now, &mut *ctx.render);
+            let served = server.poll(&mut self.sockets, now, &mut *ctx.render, &mut *ctx.render_text);
             let took = ctx.clock.zip(started).map_or(Duration::ZERO, |(clock, started)| clock.now() - started);
             self.http_stats.record(now, took, &served);
             self.services.http_responses = self.services.http_responses.wrapping_add(served.responses);

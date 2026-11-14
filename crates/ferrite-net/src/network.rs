@@ -178,6 +178,7 @@ impl<S: Site> Network<S> {
 
         let site = web.site();
         let mut render = |out: &mut alloc::string::String| site.render(state, &status, now, out);
+        let mut render_text = |out: &mut alloc::string::String| site.render_text(state, &status, now, out);
         let leased = status.ports().iter().any(|port| port.link.address.is_some());
         if let Some(sync) = &mut self.sync {
             sync.observe(now, leased);
@@ -195,7 +196,13 @@ impl<S: Site> Network<S> {
         for (id, stack) in &mut self.stacks {
             let notify = if Some(*id) == carrier { self.notifier.as_mut() } else { None };
             let sntp = if Some(*id) == timekeeper { self.sync.as_mut() } else { None };
-            let mut ctx = PollCtx { render: &mut render, clock: self.clock.as_deref(), notify, sntp };
+            let mut ctx = PollCtx {
+                render: &mut render,
+                render_text: &mut render_text,
+                clock: self.clock.as_deref(),
+                notify,
+                sntp,
+            };
             wait = wait.min(stack.poll(now, &mut ctx));
         }
         web.drain_commands(commands);

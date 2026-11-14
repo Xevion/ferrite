@@ -38,6 +38,8 @@ pub enum Route<C> {
     Document,
     /// The cached document as server-sent events.
     Events,
+    /// The site's text report, rendered on request.
+    Text,
     /// A control request, with its body to be read and parsed.
     Control(C),
 }

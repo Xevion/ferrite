@@ -220,6 +220,12 @@ impl Wall {
         Some(self.clock.get()?.at(now.checked_add(left)?).as_millis())
     }
 
+    /// The date and time of day in the zone at `at`, when the clock has a source.
+    #[must_use]
+    pub fn local_time(&self, at: Instant) -> Option<DateTime> {
+        self.local(self.now(at)?)
+    }
+
     fn local(&self, utc: UnixTime) -> Option<DateTime> {
         let since = utc.since_epoch();
         let at =

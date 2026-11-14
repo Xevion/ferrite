@@ -21,6 +21,8 @@ pub enum Command {
     Cores(CoreChoice),
     /// End the run by this goal from now on; the run's progress is untouched.
     Goal(Goal),
+    /// Write the end-of-run report to the boot volume now.
+    SaveReport,
     /// End the app.
     Quit,
 }
@@ -29,7 +31,7 @@ impl Command {
     /// Whether a split test in progress has to be cut short for this command to take effect.
     #[must_use]
     pub const fn interrupts(self) -> bool {
-        !matches!(self, Self::Resume | Self::Goal(_))
+        !matches!(self, Self::Resume | Self::Goal(_) | Self::SaveReport)
     }
 }
 
@@ -53,6 +55,14 @@ impl Commands {
 
     pub fn drain(&mut self) -> impl Iterator<Item = Command> + '_ {
         self.0.drain(..)
+    }
+
+    /// Take the queued report requests out of the queue; whether there were any. A report is built
+    /// from the run as it stands, so it is written at once rather than after the split test.
+    pub fn take_report(&mut self) -> bool {
+        let before = self.0.len();
+        self.0.retain(|c| *c != Command::SaveReport);
+        self.0.len() != before
     }
 
     /// Take the queued goal changes out of the queue; the last one is the goal now wanted.
@@ -91,10 +101,22 @@ mod tests {
     }
 
     #[test]
-    fn only_a_resume_or_a_new_goal_leaves_a_split_test_running() {
+    fn a_report_request_is_taken_out_and_the_rest_stay_in_order() {
+        let mut commands = Commands::default();
+        commands.push(Command::Pause);
+        commands.push(Command::SaveReport);
+        commands.push(Command::Resume);
+        check!(commands.take_report());
+        check!(!commands.take_report());
+        check!(commands.drain().collect::<Vec<_>>() == [Command::Pause, Command::Resume]);
+    }
+
+    #[test]
+    fn only_a_resume_a_new_goal_or_a_report_leaves_a_split_test_running() {
         let mut commands = Commands::default();
         commands.push(Command::Goal(Goal::UNLIMITED));
         commands.push(Command::Resume);
+        commands.push(Command::SaveReport);
         check!(!commands.interrupting());
         commands.push(Command::Pause);
         check!(commands.interrupting());

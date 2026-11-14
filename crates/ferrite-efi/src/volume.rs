@@ -1,6 +1,6 @@
 //! The volume this image was loaded from: opening it shared, and reading files below a directory on it.
 
-use alloc::string::String;
+use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 use core::mem::ManuallyDrop;
 
@@ -83,6 +83,30 @@ pub fn read_file(path: &str) -> Result<Vec<u8>, ReadError> {
     }
     bytes.truncate(filled);
     Ok(bytes)
+}
+
+/// The names of the regular files directly in the directory at `path` (`\`-separated, from the root)
+/// on the boot volume.
+pub fn list_files(path: &str) -> Result<Vec<String>, ReadError> {
+    let fail = |source: uefi::Error| {
+        if source.status() == Status::NOT_FOUND {
+            ReadError::NotFound { path: path.into() }
+        } else {
+            ReadError::Read { path: path.into(), source }
+        }
+    };
+    let name = CString16::try_from(path).map_err(|_| fail(Status::INVALID_PARAMETER.into()))?;
+    let mut volume = image_volume().map_err(fail)?;
+    let mut root = volume.open_volume().map_err(fail)?;
+    let handle = root.open(&name, FileMode::Read, FileAttribute::empty()).map_err(fail)?;
+    let mut dir = handle.into_directory().ok_or_else(|| fail(Status::UNSUPPORTED.into()))?;
+    let mut names = Vec::new();
+    while let Some(info) = dir.read_entry_boxed().map_err(fail)? {
+        if !info.is_directory() {
+            names.push(info.file_name().to_string());
+        }
+    }
+    Ok(names)
 }
 
 #[cfg(test)]

@@ -110,6 +110,11 @@ pub trait Site: 'static {
         "application/json"
     }
 
+    /// The `Content-Type` of the text served for [`Route::Text`].
+    fn text_type(&self) -> &'static str {
+        "text/plain; charset=utf-8"
+    }
+
     /// The name of the event the document is sent as on a stream.
     fn event_name(&self) -> &'static str {
         "status"
@@ -134,23 +139,32 @@ pub trait Site: 'static {
 
     /// Write the document as of `now` into `out`, which is empty.
     fn render(&self, state: &Self::State<'_>, net: &NetStatus, now: Instant, out: &mut String);
+
+    /// Write the text for [`Route::Text`] as of `now` into `out`, which is empty. It is rendered only
+    /// when a request for it finds no copy from the last [`MAX_AGE`].
+    fn render_text(&self, _state: &Self::State<'_>, _net: &NetStatus, _now: Instant, _out: &mut String) {}
 }
 
 /// What the servers of every stack share besides the site: the document and who the machine is.
 pub struct Hub {
     doc: RefCell<Doc>,
+    /// The site's text, rendered only for a request that asks for it.
+    text: RefCell<Doc>,
     /// Every stack's address, for the `Host` check.
     addresses: RefCell<heapless::Vec<Ipv4Address, MAX_ADDRESSES>>,
     /// Set by a connection that parked for a current document, until the poll renders one.
     wanted: Cell<bool>,
+    wanted_text: Cell<bool>,
 }
 
 impl Hub {
-    fn new(document_type: &'static str) -> Self {
+    fn new(document_type: &'static str, text_type: &'static str) -> Self {
         Self {
             doc: RefCell::new(Doc::new(document_type)),
+            text: RefCell::new(Doc::new(text_type)),
             addresses: RefCell::new(heapless::Vec::new()),
             wanted: Cell::new(false),
+            wanted_text: Cell::new(false),
         }
     }
 
@@ -178,7 +192,7 @@ pub struct Web<S: Site> {
 
 impl<S: Site> Web<S> {
     pub fn new(site: S) -> Rc<Self> {
-        let hub = Rc::new(Hub::new(site.document_type()));
+        let hub = Rc::new(Hub::new(site.document_type(), site.text_type()));
         Rc::new(Self { site, hub, commands: RefCell::new(Vec::new()) })
     }
 
@@ -219,6 +233,18 @@ impl Shared {
                 self.hub.wanted.set(true);
             }
             document.map_or(Poll::Pending, Poll::Ready)
+        })
+        .await
+    }
+
+    /// The site's text, once one that is current exists; the poll renders it on request.
+    async fn text(&self) -> Document {
+        poll_fn(|_| {
+            let text = self.hub.text.borrow().get(self.now());
+            if text.is_none() {
+                self.hub.wanted_text.set(true);
+            }
+            text.map_or(Poll::Pending, Poll::Ready)
         })
         .await
     }
@@ -317,23 +343,30 @@ impl Server {
         Self { shared, handles, connections }
     }
 
-    /// Advance every connection by what its socket allows. `render` writes the document when a
-    /// connection needs a current one.
+    /// Advance every connection by what its socket allows. `render` writes the document, and
+    /// `render_text` the text report, when a connection needs a current one.
     pub fn poll(
         &mut self,
         sockets: &mut SocketSet<'static>,
         now: Instant,
         render: &mut dyn FnMut(&mut String),
+        render_text: &mut dyn FnMut(&mut String),
     ) -> Served {
         let shared = &*self.shared;
         shared.now.set(now);
         core::mem::swap(&mut *shared.sockets.borrow_mut(), sockets);
         poll_all(&mut self.connections);
-        let renders = u32::from(shared.hub.wanted.take());
+        let (document, text) = (shared.hub.wanted.take(), shared.hub.wanted_text.take());
+        let renders = u32::from(document) + u32::from(text);
         if renders > 0 {
             // Connections that parked for a document get it, and the rest of what they were doing,
             // in the same poll.
-            shared.hub.doc.borrow_mut().render(now, render);
+            if document {
+                shared.hub.doc.borrow_mut().render(now, render);
+            }
+            if text {
+                shared.hub.text.borrow_mut().render(now, render_text);
+            }
             poll_all(&mut self.connections);
         }
         core::mem::swap(&mut *shared.sockets.borrow_mut(), sockets);
@@ -466,6 +499,11 @@ impl<S: Site> Api<'_, S> {
                 let document = self.shared.document().await;
                 let content_type = document.content_type();
                 send(conn, writer, StatusCode::OK, document, content_type, None).await
+            },
+            Route::Text => {
+                let text = self.shared.text().await;
+                let content_type = text.content_type();
+                send(conn, writer, StatusCode::OK, text, content_type, None).await
             },
             Route::Events => match StreamSlot::claim(self.shared) {
                 Some(slot) => {

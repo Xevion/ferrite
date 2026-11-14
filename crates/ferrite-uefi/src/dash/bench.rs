@@ -236,7 +236,7 @@ fn timed_render(dash: &mut Dashboard, f: &Frame<'_>, prof: &mut Profile) {
             continue;
         }
         let rect = widget.rect(&l);
-        let mut pen = Pen { canvas: &mut dash.canvas, fonts: &mut dash.fonts, l: &l };
+        let mut pen = Pen { canvas: &mut dash.canvas, fonts: &mut dash.fonts, l: &l, notice: None };
         let t = Clock::now();
         pen.begin(rect);
         widget.draw()(&mut pen, rect, f);

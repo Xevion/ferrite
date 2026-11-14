@@ -23,6 +23,7 @@ pub enum Control {
     Restart,
     Cores,
     Goal,
+    Report,
     Quit,
 }
 
@@ -34,6 +35,7 @@ impl From<Control> for &'static str {
             Control::Restart => "restart",
             Control::Cores => "cores",
             Control::Goal => "goal",
+            Control::Report => "report",
             Control::Quit => "quit",
         }
     }
@@ -68,6 +70,14 @@ pub enum BodyError {
 
 /// The route for `method` on `path` (without the query).
 pub fn resolve(method: &str, path: &str) -> Result<Route<Control>, Rejection> {
+    if path == "/api/report" {
+        // The one path with two methods: GET reads the report, POST writes it to the boot volume.
+        return match method {
+            "GET" => Ok(Route::Text),
+            "POST" => Ok(Route::Control(Control::Report)),
+            _ => Err(Rejection::MethodNotAllowed { allow: "GET, POST" }),
+        };
+    }
     let (route, allow) = match path {
         "/" | "/index.html" => (Route::Page, "GET"),
         "/api/status" => (Route::Document, "GET"),
@@ -85,7 +95,7 @@ pub fn resolve(method: &str, path: &str) -> Result<Route<Control>, Rejection> {
 
 /// The command a control request's body asks for.
 ///
-/// Pause, resume and quit take an empty body or any flat object; restart takes
+/// Pause, resume, report and quit take an empty body or any flat object; restart takes
 /// `{"preset": "quick"}`, cores `{"cores": "all"}`, `{"cores": "physical"}` or `{"cores": 4}`, and goal
 /// `{"passes": 3, "time": "2h", "stop_on_fault": true}` with every field optional (`{}` is no goal)
 /// and no other field allowed.
@@ -95,13 +105,14 @@ pub fn command(control: Control, body: &[u8]) -> Result<Command, BodyError> {
         flat_field(body, field)?.ok_or(BodyError::Missing { field })
     };
     match control {
-        Control::Pause | Control::Resume | Control::Quit => {
+        Control::Pause | Control::Resume | Control::Report | Control::Quit => {
             if !body.is_empty() {
                 flat_field(body, "")?;
             }
             Ok(match control {
                 Control::Pause => Command::Pause,
                 Control::Resume => Command::Resume,
+                Control::Report => Command::SaveReport,
                 _ => Command::Quit,
             })
         },
@@ -307,6 +318,9 @@ mod tests {
     #[case::pause("POST", "/api/pause", Ok(Route::Control(Control::Pause)))]
     #[case::quit("POST", "/api/quit", Ok(Route::Control(Control::Quit)))]
     #[case::goal("POST", "/api/goal", Ok(Route::Control(Control::Goal)))]
+    #[case::report_read("GET", "/api/report", Ok(Route::Text))]
+    #[case::report_write("POST", "/api/report", Ok(Route::Control(Control::Report)))]
+    #[case::report_other("PUT", "/api/report", Err(Rejection::MethodNotAllowed { allow: "GET, POST" }))]
     #[case::get_control("GET", "/api/pause", Err(Rejection::MethodNotAllowed { allow: "POST" }))]
     #[case::post_page("POST", "/", Err(Rejection::MethodNotAllowed { allow: "GET" }))]
     #[case::preflight("OPTIONS", "/api/quit", Err(Rejection::MethodNotAllowed { allow: "POST" }))]
@@ -319,6 +333,7 @@ mod tests {
     #[rstest]
     #[case::pause_empty(Control::Pause, "", Command::Pause)]
     #[case::resume_object(Control::Resume, "{}", Command::Resume)]
+    #[case::report_empty(Control::Report, "", Command::SaveReport)]
     #[case::quit_ignores_fields(Control::Quit, r#"{"confirm": true}"#, Command::Quit)]
     #[case::restart(Control::Restart, r#"{"preset":"quick"}"#, Command::Restart(Preset::Quick))]
     #[case::restart_spaced(

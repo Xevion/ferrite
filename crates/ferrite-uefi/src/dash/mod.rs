@@ -36,6 +36,26 @@ use crate::report::{FaultRecord, Snapshot};
 use crate::sweep::{Coverage, MapView, SweepStatus};
 use crate::wall::{Ends, TimeLine, TimeOfDay};
 
+/// How long a notice stays on the log line.
+const NOTICE_FOR: Duration = Duration::from_secs(20);
+
+/// One line the log line shows in place of the latest test for a while: what an action of the
+/// operator did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub text: heapless::String<96>,
+    /// The action did not do what was asked, so the line is drawn as a warning.
+    pub failed: bool,
+}
+
+/// A notice and the span of the run it is on show for.
+struct Shown {
+    notice: Notice,
+    /// Told apart from the one before, even when the text repeats.
+    id: u64,
+    until: Instant,
+}
+
 /// Below this the layout has no room for its tables: three quarters of the 1024x768 design.
 pub const MIN_SIZE: (u32, u32) = (768, 576);
 
@@ -131,6 +151,8 @@ struct Keys {
     net: (Option<NetStatus>, Option<NoNetwork>),
     errors: (u64, usize, Option<FaultRecord>, Classification, u64),
     log: (u64, &'static str, (usize, usize), u64, u64, u64, Goal),
+    /// The notice on show, by its id.
+    notice: Option<u64>,
     hints: bool,
 }
 
@@ -186,6 +208,7 @@ impl Keys {
             net: (f.net, f.net_err),
             errors: (s.faults, f.snapshot.faults.len(), f.snapshot.faults.back().copied(), s.analysis, s.passes),
             log: (f.elapsed().as_secs(), s.test, s.position, s.passes, s.faults, history.revision, s.outlook.goal),
+            notice: None,
             hints: s.paused,
         }
     }
@@ -203,7 +226,7 @@ impl Keys {
             Widget::Map => last.map != self.map,
             Widget::Net => last.net != self.net,
             Widget::Errors => last.errors != self.errors,
-            Widget::Log => last.log != self.log,
+            Widget::Log => last.log != self.log || last.notice != self.notice,
             Widget::Hints => last.hints != self.hints,
         })
     }
@@ -289,6 +312,8 @@ pub struct Dashboard {
     fonts: Fonts,
     layout: Layout,
     last: Option<Keys>,
+    notice: Option<Shown>,
+    next_notice: u64,
     dirty: DirtyRects,
     /// What each widget drew last, by [`Widget`].
     drawn: [Recording; Widget::ALL.len()],
@@ -307,6 +332,8 @@ impl Dashboard {
             fonts,
             layout: Layout::new(width, height),
             last: None,
+            notice: None,
+            next_notice: 0,
             dirty: DirtyRects::new(bounds),
             drawn: core::array::from_fn(|_| Recording::roomy()),
         };
@@ -315,14 +342,28 @@ impl Dashboard {
     }
 
     fn pen(&mut self) -> Pen<'_> {
-        Pen { canvas: &mut self.canvas, fonts: &mut self.fonts, l: &self.layout }
+        Pen {
+            canvas: &mut self.canvas,
+            fonts: &mut self.fonts,
+            l: &self.layout,
+            notice: self.notice.as_ref().map(|shown| &shown.notice),
+        }
+    }
+
+    /// Show `notice` on the log line for a while from `now`.
+    pub fn notify(&mut self, notice: Notice, now: Instant) {
+        self.next_notice += 1;
+        self.notice = Some(Shown { notice, id: self.next_notice, until: now + NOTICE_FOR });
     }
 
     /// Draw what changed since the last frame; [`Dashboard::output`] then has the rectangles to push.
     pub fn render(&mut self, f: &Frame<'_>) {
         self.dirty.clear();
         let bounds = self.canvas.bounds();
-        let keys = Keys::of(f, (bounds.w, bounds.h));
+        if self.notice.as_ref().is_some_and(|shown| f.now >= shown.until) {
+            self.notice = None;
+        }
+        let keys = Keys { notice: self.notice.as_ref().map(|shown| shown.id), ..Keys::of(f, (bounds.w, bounds.h)) };
         let last = self.last.filter(|last| last.setup == keys.setup);
         let full = last.is_none();
         if full {
@@ -337,7 +378,8 @@ impl Dashboard {
                 continue;
             }
             let rect = widget.rect(&l);
-            let mut pen = Pen { canvas: &mut self.canvas, fonts: &mut self.fonts, l: &l };
+            let notice = self.notice.as_ref().map(|shown| &shown.notice);
+            let mut pen = Pen { canvas: &mut self.canvas, fonts: &mut self.fonts, l: &l, notice };
             pen.begin(rect);
             widget.draw()(&mut pen, rect, f);
             self.canvas.finish(&mut self.fonts, &mut self.drawn[widget as usize], full, &mut self.dirty, band);

@@ -208,6 +208,23 @@ fn steady_frames_redraw_only_the_widgets_that_changed() {
 }
 
 #[test]
+fn a_notice_takes_the_log_line_for_a_while_and_redraws_it_alone() {
+    let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
+    let (history, faults) = (history(), VecDeque::new());
+    render(&mut dash, status(), &history, &faults, 500);
+    let notice =
+        Notice { text: format::fixed(format_args!("report saved: \\EFI\\ferrite\\reports\\x.txt")), failed: false };
+    dash.notify(notice, START + Duration::from_secs(500));
+    let rects = render(&mut dash, status(), &history, &faults, 500);
+    let l = dash.layout;
+    check!(!rects.is_empty() && rects.iter().all(|r| l.log.intersect(*r) == *r), "{rects:?}");
+    check!(render(&mut dash, status(), &history, &faults, 500).is_empty());
+
+    render(&mut dash, status(), &history, &faults, 521);
+    check!(dash.notice.is_none(), "it goes after twenty seconds");
+}
+
+#[test]
 fn a_core_moving_on_to_the_next_cell_redraws_the_memory_map_alone() {
     let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
     let (history, faults) = (history(), VecDeque::new());

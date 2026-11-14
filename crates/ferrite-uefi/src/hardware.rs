@@ -14,7 +14,7 @@ use core::fmt::{self, Write as _};
 
 use ferrite_efi::sensors::{Identity, Reading, TempSource};
 
-use crate::machine;
+use crate::machine::{self, Machine};
 use crate::memmap::Extent;
 use crate::smbios::{ErrorCorrection, Memory, MemoryDevice, Size};
 
@@ -71,7 +71,7 @@ impl Layout {
 }
 
 /// A module's slot as its firmware names it.
-fn slot_name(device: &MemoryDevice) -> String {
+pub fn slot_name(device: &MemoryDevice) -> String {
     device.locator.clone().or_else(|| device.bank.clone()).unwrap_or_else(|| format!("slot {:#x}", device.handle.0))
 }
 
@@ -278,12 +278,20 @@ impl Vitals {
 pub struct Hardware {
     pub facts: Facts,
     vitals: Cell<Vitals>,
+    /// The highest temperature any sample has read, in whole degrees Celsius.
+    peak_celsius: Cell<Option<i16>>,
+    machine: Cell<Machine>,
 }
 
 impl Hardware {
     #[must_use]
     pub const fn new(facts: Facts) -> Self {
-        Self { facts, vitals: Cell::new(Vitals { mhz: None, measured: false, celsius: None, source: None }) }
+        Self {
+            facts,
+            vitals: Cell::new(Vitals { mhz: None, measured: false, celsius: None, source: None }),
+            peak_celsius: Cell::new(None),
+            machine: Cell::new(Machine::UNKNOWN),
+        }
     }
 
     #[must_use]
@@ -293,6 +301,23 @@ impl Hardware {
 
     pub fn set_vitals(&self, vitals: Vitals) {
         self.vitals.set(vitals);
+        self.peak_celsius.set(self.peak_celsius.get().max(vitals.celsius));
+    }
+
+    /// The highest temperature read since start, if any sample had one.
+    #[must_use]
+    pub fn peak_celsius(&self) -> Option<i16> {
+        self.peak_celsius.get()
+    }
+
+    /// Which machine this is, as the timings are keyed.
+    #[must_use]
+    pub fn machine(&self) -> Machine {
+        self.machine.get()
+    }
+
+    pub fn set_machine(&self, machine: Machine) {
+        self.machine.set(machine);
     }
 }
 

@@ -186,6 +186,7 @@ label.d{display:inline-flex;align-items:center;gap:4px}
 <div class="ctl"><select id="preset_sel"><option>quick</option><option>standard</option><option>thorough</option><option>destructive</option><option>memtest86-plus</option></select><button id="restart">Restart</button></div>
 <div class="ctl"><select id="cores_sel"><option value="all">all threads</option><option value="physical">physical cores</option><option value="count">count</option></select><input type="number" id="cores_n" min="1" value="1" hidden><button id="cores">Apply</button></div>
 <div class="ctl"><input type="number" id="goal_passes" min="1" placeholder="passes" title="stop after this many passes"><input type="text" id="goal_time" placeholder="time" title="stop after this long, such as 90m, 2h or 1h30m"><label class="d"><input type="checkbox" id="goal_fault">at first fault</label><button id="goal">Set goal</button></div>
+<div class="ctl"><button id="report" title="write the report to the boot volume">Save report</button><button id="reportview" title="open the report as text">View report</button></div>
 <div class="ctl"><button class="danger" id="quit">Quit</button></div>
 <div id="note"></div>
 </section>
@@ -198,7 +199,7 @@ label.d{display:inline-flex;align-items:center;gap:4px}
 <span class="k on" id="kr"><kbd>R</kbd>Restart</span>
 <span class="k"><kbd>S</kbd>Skip test</span>
 <span class="k"><kbd>&larr; &rarr;</kbd>Tabs</span>
-<span class="k"><kbd>F10</kbd>Save report</span>
+<span class="k on" id="kf"><kbd>F10</kbd>Save report</span>
 <span class="k on" id="kq"><kbd>Q</kbd>Quit</span>
 </footer>
 <div id="gone">ferrite has quit.</div>
@@ -392,6 +393,9 @@ $("cores_sel").onchange=()=>{$("cores_n").hidden=$("cores_sel").value!="count"};
 $("cores").onclick=()=>{const v=$("cores_sel").value;post("cores",{cores:v=="count"?Math.max(1,parseInt($("cores_n").value,10)||1):v})};
 $("goal").onclick=()=>{const n=parseInt($("goal_passes").value,10),t=$("goal_time").value.trim();post("goal",{passes:n>0?n:null,time:t||null,stop_on_fault:$("goal_fault").checked})};
 $("quit").onclick=async()=>{if(confirm("Quit ferrite? The memory test stops."))if(await post("quit"))$("gone").className="on"};
+$("report").onclick=()=>post("report");
+$("reportview").onclick=()=>window.open("/api/report","_blank");
+$("kf").onclick=()=>$("report").click();
 $("kp").onclick=()=>$("pause").click();
 $("kr").onclick=()=>$("restart").click();
 $("kq").onclick=()=>$("quit").click();

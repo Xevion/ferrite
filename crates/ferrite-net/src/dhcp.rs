@@ -154,7 +154,17 @@ mod tests {
             self.ms += 1;
             let now = Instant::from_epoch(Duration::from_millis(self.ms));
             let mut render = |_: &mut alloc::string::String| {};
-            self.stack.poll(now, &mut PollCtx { render: &mut render, clock: None, notify: None, sntp: None });
+            let mut render_text = |_: &mut alloc::string::String| {};
+            self.stack.poll(
+                now,
+                &mut PollCtx {
+                    render: &mut render,
+                    render_text: &mut render_text,
+                    clock: None,
+                    notify: None,
+                    sntp: None,
+                },
+            );
             while let Some(frame) = self.link.next_tx() {
                 self.link.transmitted(true);
                 if let Some(reply) = self.answer(&frame) {

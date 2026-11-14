@@ -448,6 +448,12 @@ impl Sweep {
         self.pace.restart();
     }
 
+    /// The machine this sweep runs on, as its timings are keyed.
+    #[must_use]
+    pub const fn machine(&self) -> Machine {
+        self.pace.machine()
+    }
+
     /// Replace the run's goal; the run's own progress is untouched.
     pub fn set_goal(&mut self, goal: Goal) {
         apply_goal(&mut self.pace, goal);
@@ -603,7 +609,8 @@ impl Sweep {
         let Self { run: Some(run), tally, current, cores: Some(cores), history, rotation, pace, map, .. } = self else {
             return Flow::Continue;
         };
-        let surface = Surface { map, aside: rotation.aside() };
+        let surface =
+            Surface { map, aside: rotation.aside(), coverage: rotation.coverage(), passes: rotation.passes_done() };
         let history = history_of(rotation, history);
         let started = cores.clock().now();
         history.start(started, tally.faults);
@@ -874,6 +881,9 @@ struct Surface<'a> {
     map: &'a MemMap<{ CELLS }>,
     /// The sweep's memory outside the run, while the reserve is under test.
     aside: Vec<Extent>,
+    coverage: Coverage,
+    /// The sweep's passes completed while the run is the reserve's, whose own count is one less.
+    passes: Option<u64>,
 }
 
 /// The test the cores are on, as the status and the log describe it.
@@ -890,13 +900,21 @@ struct Round {
 }
 
 impl Round {
-    fn of(schedule: &Schedule, tally: &Tally, cpus: usize, test_total: u64, started: Instant) -> Self {
+    fn of(
+        schedule: &Schedule,
+        tally: &Tally,
+        surface: &Surface<'_>,
+        cpus: usize,
+        test_total: u64,
+        started: Instant,
+    ) -> Self {
         let (pass_done, pass_total) = schedule.pass_work();
+        let base = status_of(schedule, tally, Mode::Split, cpus);
         Self {
             name: schedule.test().kind().name(),
             pass: schedule.passes(),
             index: schedule.index(),
-            base: status_of(schedule, tally, Mode::Split, cpus),
+            base: SweepStatus { coverage: surface.coverage, passes: surface.passes.unwrap_or(base.passes), ..base },
             faults_before: tally.faults,
             work: (pass_done, pass_total, test_total),
             started,
@@ -954,7 +972,7 @@ fn dispatch(
     let timeout = DISPATCH_BUDGET + longest;
     pace.prepare(covers, schedule, cpus.len().max(1), tier_of(kernels));
     let dispatched = clock.now();
-    let mut round = Round::of(schedule, tally, cpus.len(), totals[0], dispatched);
+    let mut round = Round::of(schedule, tally, surface, cpus.len(), totals[0], dispatched);
     let mut absorbed = vec![0; seats.len()];
     let mut lost: Vec<usize> = Vec::new();
     let mut called_off: Vec<usize> = Vec::new();
@@ -1089,7 +1107,7 @@ fn dispatch(
                 history.finish_test(record, schedule.passes(), ended, tally.faults);
                 completed += 1;
                 if completed < kinds.len() && ended - dispatched < DISPATCH_BUDGET {
-                    round = Round::of(schedule, tally, n, totals[completed], ended);
+                    round = Round::of(schedule, tally, surface, n, totals[completed], ended);
                     absorbed.fill(0);
                     seats.iter().for_each(Seat::reset);
                     crew.begin_round();

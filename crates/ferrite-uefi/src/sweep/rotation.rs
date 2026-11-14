@@ -89,6 +89,8 @@ struct Window {
     preset: Preset,
     /// Where the reserve's tests record, so the sweep's own history keeps its passes.
     history: History,
+    /// The tests the sweep's history had finished when the window opened.
+    tests_before: u64,
     opened: Instant,
     free: Free,
 }
@@ -240,6 +242,7 @@ impl Sweep {
                 config,
                 preset,
                 history: history.clone(),
+                tests_before: history.finished(),
                 opened: now,
                 free: Free { start: free, lowest: free },
             });
@@ -254,10 +257,22 @@ impl Sweep {
     /// when the sweep is being reset, which has no use for the history's clock.
     pub(super) fn close_window(&mut self, now: Option<Instant>) {
         let Self { run, rotation, history, current, waiting, cores, .. } = self;
-        let Some(Window { mut main, lent, pass, kernels, config, preset, opened, free, .. }) = rotation.window.take()
+        let Some(Window {
+            mut main,
+            lent,
+            pass,
+            kernels,
+            config,
+            preset,
+            history: scratch,
+            tests_before,
+            opened,
+            free,
+        }) = rotation.window.take()
         else {
             return;
         };
+        history.keep_reserve(&scratch, tests_before);
         let finished = run.as_ref().is_some_and(|r| r.suite.passes() > pass);
         let reserve = match run.take() {
             Some(Run { suite, _buffer: reserve, .. }) => {

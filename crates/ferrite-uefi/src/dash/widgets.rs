@@ -17,7 +17,7 @@ use super::theme::{
     ACTIVE, ACTIVE_RING, BAR, BAR_DIM, BAR_RULE, BAR_TEXT, BG, DIM, ERR, FAULT, FILL, FIRMWARE, HELD, HOLDING, KEY,
     KEY_INK, LABEL, LINE, PASS, PENDING, SEL, SEL_INK, STRONG, TAB_ON, TAB_ON_INK, TAB_TEXT, TESTED, TEXT, TRACK, WARN,
 };
-use super::{Frame, State};
+use super::{Frame, Notice, State};
 use crate::gfx::text::{Case, Face, Fonts, Style};
 use crate::gfx::{Canvas, Rect, Rgb, px, whole_px};
 use crate::memmap::CellState;
@@ -51,6 +51,8 @@ pub struct Pen<'d> {
     pub canvas: &'d mut Canvas,
     pub fonts: &'d mut Fonts,
     pub l: &'d Layout,
+    /// What the log line says in place of the latest test, while it is on show.
+    pub notice: Option<&'d Notice>,
 }
 
 impl Pen<'_> {
@@ -947,7 +949,10 @@ pub fn log(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let mut x = px(r.x) + l.m(20.0);
     let history = f.snapshot.history;
     let last_fault = f.snapshot.faults.back().filter(|_| s.faults > 0);
-    if let Some(rec) = last_fault {
+    if let Some(notice) = p.notice {
+        let ink = if notice.failed { WARN } else { PASS };
+        x += p.fit(x, base, &notice.text, Style { color: ink, ..style }, px(r.right()) / 2.0 - x) + l.m(14.0);
+    } else if let Some(rec) = last_fault {
         let text = fixed::<128>(format_args!(
             "ERROR {} {SEPARATOR} {} {SEPARATOR} cpu {}",
             rec.test,
@@ -994,7 +999,7 @@ pub fn hints(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         ("R", "Restart", true),
         ("S", "Skip test", false),
         ("\u{2190} \u{2192}", "Tabs", false),
-        ("F10", "Save report", false),
+        ("F10", "Save report", true),
         ("Q", "Quit", true),
     ];
     let (gap, pad, inner) = (l.m(20.0), l.m(6.0), l.m(7.0));

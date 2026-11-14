@@ -26,14 +26,17 @@ use uefi::proto::console::text::{Input, Key, Output, ScanCode};
 
 use crate::backend::{BackendError, UefiBackend};
 use crate::control::{Command, Commands};
-use crate::dash::{Dashboard, Frame};
+use crate::dash::format;
+use crate::dash::{Dashboard, Frame, Notice};
 use crate::diag::Diag;
-use crate::goal::Goal;
+use crate::goal::{Goal, Met};
 use crate::gop::Display;
 use crate::hardware::{Facts, Hardware, Vitals};
 use crate::net::Net;
 use crate::net::notify::{self, Watch};
 use crate::report::Snapshot;
+use crate::runreport::store::{ReportsDir, Saver};
+use crate::runreport::{Report, VERSION, Why};
 use crate::sweep::{Flow, Sweep, SweepStatus, Tended};
 use crate::ui::{self, View};
 use crate::wall::Wall;
@@ -197,8 +200,10 @@ struct Desk<'a> {
     watchdog: Option<Keepalive>,
     /// Requests from the console, the loader's link and the status page, not yet applied.
     commands: Commands,
-    /// The goal was met and the run is being ended for it.
-    goal_met: bool,
+    /// The goal part that was met, when the run is being ended for it.
+    goal_met: Option<Met>,
+    /// Writes the run's report to the boot volume.
+    reports: Saver,
     /// What the machine is, and its clock and temperature as `sensors` last read them.
     hardware: Rc<Hardware>,
     sensors: Sensors,
@@ -244,12 +249,14 @@ impl<'a> App<'a> {
             loader,
             watchdog,
             commands: Commands::default(),
-            goal_met: false,
+            goal_met: None,
+            reports: Saver::new(Box::new(ReportsDir)),
             hardware,
             sensors,
             next_sensor_read: Instant::default(),
         };
         let mut sweep = Sweep::new(caps, cores, goal);
+        desk.hardware.set_machine(sweep.machine());
         sweep.measure_bandwidth(&clock, vector);
         Ok(Self { desk, sweep, chunk_bytes: START_CHUNK_BYTES, vector })
     }
@@ -294,6 +301,8 @@ impl<'a> App<'a> {
         );
         self.sweep.check_cores();
         self.sweep.save_timings(self.now());
+        let why = self.desk.goal_met.map_or(Why::Quit, Why::GoalMet);
+        self.desk.save_report(self.now(), &self.sweep.snapshot(), why);
         self.desk.announce_end(&self.sweep.snapshot());
         self.desk.net.shutdown();
     }
@@ -309,6 +318,8 @@ impl<'a> App<'a> {
                 Command::Restart(preset) => self.sweep.restart(preset),
                 Command::Cores(choice) => self.sweep.set_cores(choice),
                 Command::Goal(goal) => self.sweep.set_goal(goal),
+                // Taken out of the queue by the duties, which have the snapshot it is built from.
+                Command::SaveReport => {},
                 Command::Quit => flow = Flow::Stop,
             }
         }
@@ -372,6 +383,9 @@ impl Desk<'_> {
         if self.desktop_stop_requested() {
             self.commands.push(Command::Quit);
         }
+        if self.commands.take_report() {
+            self.save_report(now, snapshot, Why::Requested);
+        }
         self.check_goal(now, snapshot);
         let sweep = &snapshot.status;
         let status = self.net.status();
@@ -391,13 +405,43 @@ impl Desk<'_> {
         let status = &snapshot.status;
         let outlook = &status.outlook;
         let elapsed = snapshot.history.run_started.map_or(Duration::ZERO, |start| now - start);
-        if self.goal_met || snapshot.history.run_started.is_none() {
+        if self.goal_met.is_some() || snapshot.history.run_started.is_none() {
             return;
         }
         if let Some(met) = outlook.goal.met(outlook.settled, elapsed, status.faults) {
-            self.goal_met = true;
+            self.goal_met = Some(met);
             log::info!("run: goal met ({met}) after {}s, ending the run", elapsed.as_secs());
             self.commands.push(Command::Quit);
+        }
+    }
+
+    /// Write the report of the run as it stands to its file on the boot volume, and say where on the
+    /// log line. A volume that cannot be written is a warning and a note on screen, never the run's end.
+    fn save_report(&mut self, now: Instant, snapshot: &Snapshot<'_>, why: Why) {
+        let report = Report { snapshot, hardware: &self.hardware, wall: &self.wall, now, why, version: VERSION };
+        let text = report.render();
+        let run = snapshot.history.run_started;
+        let stamp = self
+            .wall
+            .is_synced()
+            .then(|| self.wall.local_time(run.unwrap_or(now)))
+            .flatten()
+            .map(crate::runreport::store::file_stamp);
+        let notice = match self.reports.save(run, stamp.as_deref(), &text) {
+            Ok(saved) => {
+                log::info!("report: wrote {} ({} bytes)", saved.path, saved.bytes);
+                Notice {
+                    text: format::fixed(format_args!("report saved: {} ({} bytes)", saved.path, saved.bytes)),
+                    failed: false,
+                }
+            },
+            Err(e) => {
+                log::warn!("report: not saved: {e}");
+                Notice { text: format::fixed(format_args!("report not saved: {e}")), failed: true }
+            },
+        };
+        if let Screen::Pixels { dash, .. } = &mut self.screen {
+            dash.notify(notice, now);
         }
     }
 
@@ -430,11 +474,12 @@ impl Desk<'_> {
     }
 
     /// Queue what the console's keys ask for: `q` or `Esc` quits, `p` pauses or resumes, `r`
-    /// restarts with the current preset.
+    /// restarts with the current preset, `F10` saves the report.
     fn read_keys(&mut self, status: &SweepStatus) {
         while let Ok(Some(key)) = self.input.read_key() {
             let command = match key {
                 Key::Special(ScanCode::ESCAPE) => Command::Quit,
+                Key::Special(ScanCode::FUNCTION_10) => Command::SaveReport,
                 Key::Special(_) => continue,
                 Key::Printable(c) => match char::from(c).to_ascii_lowercase() {
                     'q' => Command::Quit,

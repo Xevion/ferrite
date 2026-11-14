@@ -144,3 +144,15 @@ fn the_facts_of_a_machine_with_ecc_memory() {
     check!(facts.ecc_claim().map(|c| c.to_string()).as_deref() == Some("single-bit ECC"));
     check!(Facts::new(facts.cpu, Memory::default()).corrects_errors() == None);
 }
+
+#[test]
+fn the_highest_temperature_is_kept_while_the_latest_one_moves() {
+    let hardware = Hardware::default();
+    check!(hardware.peak_celsius() == None);
+    let reading = |celsius| Vitals { celsius, ..Vitals::default() };
+    for celsius in [Some(61), Some(74), None, Some(63)] {
+        hardware.set_vitals(reading(celsius));
+    }
+    check!(hardware.vitals().celsius == Some(63));
+    check!(hardware.peak_celsius() == Some(74));
+}

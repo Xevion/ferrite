@@ -82,10 +82,14 @@ pub struct History {
     pub pass_started: Option<Instant>,
     pub tests: VecDeque<TestRecord>,
     pub passes: VecDeque<PassRecord>,
+    /// The tests of the reserve rotations, each under the pass it followed, newest last.
+    pub reserve: VecDeque<TestRecord>,
     /// The processors split tests use now, the BSP first; empty without MP Services.
     pub cpus: Vec<CpuInfo>,
     /// Faults counted when the current pass started.
     pass_faults_start: u64,
+    /// Tests finished since the run (re)started, kept or not.
+    finished: u64,
 }
 
 impl History {
@@ -105,6 +109,7 @@ impl History {
     /// Record a finished test; when `next_pass` is past its pass, that pass ended at `now` too.
     pub fn finish_test(&mut self, record: TestRecord, next_pass: u64, now: Instant, faults: u64) {
         push_bounded(&mut self.tests, record, TEST_LOG);
+        self.finished += 1;
         if next_pass > record.pass {
             let took = self.pass_started.map_or(Duration::ZERO, |s| now - s);
             let pass = PassRecord { pass: record.pass, took, faults: faults - self.pass_faults_start };
@@ -113,6 +118,25 @@ impl History {
             self.pass_faults_start = faults;
         }
         self.revision += 1;
+    }
+
+    /// How many tests have finished, for [`History::keep_reserve`] to tell which are new.
+    #[must_use]
+    pub const fn finished(&self) -> u64 {
+        self.finished
+    }
+
+    /// Keep as the reserve's the tests `scratch` (a copy of this history the rotation recorded into)
+    /// finished after it had `already` finished.
+    pub fn keep_reserve(&mut self, scratch: &Self, already: u64) {
+        let new = usize::try_from(scratch.finished.saturating_sub(already)).unwrap_or(usize::MAX);
+        let kept = new.min(scratch.tests.len());
+        for record in scratch.tests.iter().skip(scratch.tests.len() - kept) {
+            push_bounded(&mut self.reserve, *record, TEST_LOG);
+        }
+        if kept > 0 {
+            self.revision += 1;
+        }
     }
 
     pub fn set_cpus(&mut self, cpus: Vec<CpuInfo>) {
@@ -158,4 +182,46 @@ pub struct Snapshot<'a> {
     pub faults: &'a VecDeque<FaultRecord>,
     /// What the finished tests of the pass measured.
     pub stats: &'a TestStats,
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::*;
+
+    fn record(pass: u64, test: &'static str) -> TestRecord {
+        TestRecord { pass, test, cpus: 1, took: Duration::from_secs(1), work_bytes: 1, faults: 0 }
+    }
+
+    #[test]
+    fn only_the_tests_a_rotation_finished_are_kept_as_the_reserves() {
+        let mut history = History::default();
+        let now = Instant::default();
+        history.finish_test(record(0, "main"), 1, now, 0);
+        let before = history.finished();
+        // The rotation records into a copy, which already holds the pass it follows.
+        let mut scratch = history.clone();
+        scratch.finish_test(record(0, "reserve a"), 0, now, 0);
+        scratch.finish_test(record(0, "reserve b"), 1, now, 0);
+        let revision = history.revision;
+        history.keep_reserve(&scratch, before);
+        check!(history.reserve.iter().map(|r| r.test).collect::<Vec<_>>() == ["reserve a", "reserve b"]);
+        check!(history.tests.len() == 1 && history.revision != revision);
+
+        history.keep_reserve(&scratch, scratch.finished());
+        check!(history.reserve.len() == 2, "nothing new is nothing kept");
+    }
+
+    #[test]
+    fn a_full_test_log_still_tells_which_tests_are_new() {
+        let mut scratch = History::default();
+        let now = Instant::default();
+        for n in 0..(TEST_LOG as u64 + 10) {
+            scratch.finish_test(record(0, "t"), 0, now, n);
+        }
+        let mut history = History::default();
+        history.keep_reserve(&scratch, scratch.finished() - 3);
+        check!(history.reserve.len() == 3);
+    }
 }

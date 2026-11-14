@@ -101,6 +101,7 @@ impl Backing {
         let mut root = volume.open_volume()?;
         ensure_dir(&mut root, cstr16!("\\EFI"))?;
         ensure_dir(&mut root, cstr16!("\\EFI\\ferrite"))?;
+        ensure_parents(&mut root, path)?;
         let name = CString16::try_from(path).map_err(|_| uefi::Error::from(Status::INVALID_PARAMETER))?;
         if let Ok(old) = root.open(&name, FileMode::ReadWrite, FileAttribute::empty())
             && let Err(err) = old.delete()
@@ -130,13 +131,25 @@ impl Backing {
 
 /// Replace the file at `path` with exactly `bytes`, creating the directories.
 ///
-/// `path` is `\`-separated from the volume's root, in `\EFI\ferrite` or below it. This is for small
+/// `path` is `\`-separated from the volume's root, in `\EFI\ferrite` or below it, at any depth. This is for small
 /// state kept between runs; a failure part way leaves the old file deleted or short, so readers
 /// must tolerate that.
 pub fn replace_file(path: &str, bytes: &[u8]) -> uefi::Result {
     let mut backing = Backing::create(path, Echo::Silent)?;
     backing.file.write(bytes).map_err(|e| e.to_err_without_payload())?;
     backing.file.flush()
+}
+
+/// Create the directories of `path` below `\EFI\ferrite`, whose own parent is already there.
+fn ensure_parents(root: &mut Directory, path: &str) -> uefi::Result {
+    const BASE: &str = "\\EFI\\ferrite\\";
+    let Some(below) = path.strip_prefix(BASE) else { return Ok(()) };
+    for (at, _) in below.match_indices('\\') {
+        let dir =
+            CString16::try_from(&path[..BASE.len() + at]).map_err(|_| uefi::Error::from(Status::INVALID_PARAMETER))?;
+        ensure_dir(root, &dir)?;
+    }
+    Ok(())
 }
 
 fn ensure_dir(root: &mut Directory, path: &CStr16) -> uefi::Result {

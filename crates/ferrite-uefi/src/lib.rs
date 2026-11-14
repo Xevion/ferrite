@@ -23,6 +23,7 @@ pub mod memmap;
 pub mod net;
 pub mod pace;
 pub mod report;
+pub mod runreport;
 pub mod smbios;
 pub mod sweep;
 #[cfg(test)]
