@@ -30,6 +30,7 @@ use crate::error::{
 use crate::regs::{Code, CompletionCode, DB_IN, DB_OUT, DcCtrl, DcSt, ErstSz, PortSc, TrbType, dbc, host_portsc};
 use crate::ring::{ByteRing, EventRing, ProducerRing, RING_BYTES, RING_TRBS};
 use crate::stats::{RegSnapshot, Stats, Timings};
+use crate::trace::{Diagnostics, InEvent, InTrace};
 use crate::trb::{Context, ErstEntry, MAX_PACKET, StringTable, Trb, ddi1, ddi2};
 use crate::watch::LinkWatch;
 use crate::{host, pci};
@@ -215,6 +216,8 @@ pub struct Dbc<H: Mmio, C: Clock + Delay, R: DmaRegion> {
     /// Landing space for one received IN TRB, reused across events.
     rx_scratch: Vec<u8>,
     stats: Stats,
+    /// The last receive events, and any event that matched nothing.
+    in_trace: InTrace,
     timings: Timings,
     watch: LinkWatch,
     seen: Seen,
@@ -270,6 +273,7 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
             in_next_slot: 0,
             rx_scratch: vec![0; cfg.in_trb.bytes()],
             stats: Stats::default(),
+            in_trace: InTrace::default(),
             timings: Timings::default(),
             watch: LinkWatch::new(),
             seen: Seen {
@@ -348,6 +352,24 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
 
     pub fn snapshot(&mut self) -> RegSnapshot {
         RegSnapshot::read(&mut self.hal, self.regs)
+    }
+
+    /// Registers, ring positions and the last receive events, for a link that delivers late.
+    pub fn diagnostics(&mut self) -> Diagnostics {
+        let (event_dequeue, event_cycle) = self.evt.position();
+        Diagnostics {
+            at: self.clock.now(),
+            regs: self.snapshot(),
+            in_ring: self.in_ep.ring.position(),
+            out_ring: self.out_ep.ring.position(),
+            event_dequeue,
+            event_cycle,
+            in_done: self.stats.in_done,
+            in_empty: self.stats.in_empty,
+            unknown_events: self.stats.unknown_transfer_events,
+            bytes_received: self.stats.bytes_received,
+            trace: self.in_trace.clone(),
+        }
     }
 
     /// Root port the DbC owns, once a host has connected and the controller says which.
@@ -742,23 +764,43 @@ impl<H: Mmio, C: Clock + Delay, R: DmaRegion> Dbc<H, C, R> {
         }
 
         let mut slot = None;
-        if self.in_ep.ring.complete_to(ptr, |s| slot = Some(s)).is_some() {
+        let mut trace = InEvent {
+            at: self.clock.now(),
+            endpoint: event.control().endpoint_id().value(),
+            index: self.in_ep.ring.index_of(ptr).and_then(|i| u16::try_from(i).ok()),
+            completion: status.completion_code_raw(),
+            residual: status.residual().value(),
+            retired: 0,
+            delivered: 0,
+        };
+        if let Some(retired) = self.in_ep.ring.complete_to(ptr, |s| slot = Some(s)) {
             self.stats.in_done += 1;
-            if ok && let Some(slot) = slot {
-                let got = self.in_trb.bytes().saturating_sub(status.residual().value() as usize);
-                self.stats.bytes_received += got as u64;
-                if got > 0 {
-                    let (window, off) = self.in_slot(usize::from(slot));
-                    let mut buf = core::mem::take(&mut self.rx_scratch);
-                    window.copy_to(off, &mut buf[..got]);
-                    rx(&buf[..got]);
-                    self.rx_scratch = buf;
-                }
+            trace.retired = u16::try_from(retired).unwrap_or(u16::MAX);
+            let got = match (ok, slot) {
+                (true, Some(slot)) => {
+                    let got = self.in_trb.bytes().saturating_sub(status.residual().value() as usize);
+                    self.stats.bytes_received += got as u64;
+                    if got > 0 {
+                        let (window, off) = self.in_slot(usize::from(slot));
+                        let mut buf = core::mem::take(&mut self.rx_scratch);
+                        window.copy_to(off, &mut buf[..got]);
+                        rx(&buf[..got]);
+                        self.rx_scratch = buf;
+                    }
+                    got
+                },
+                _ => 0,
+            };
+            if got == 0 {
+                self.stats.in_empty += 1;
             }
+            trace.delivered = u32::try_from(got).unwrap_or(u32::MAX);
+            self.in_trace.record(trace);
             return;
         }
 
         self.stats.unknown_transfer_events += 1;
+        self.in_trace.record(trace);
         log::debug!("t={}ms transfer event for {ptr:#x} matches no in-flight TRB", ms(self.clock.now()));
     }
 

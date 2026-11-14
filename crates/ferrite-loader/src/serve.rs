@@ -26,6 +26,8 @@ const HANDOVER_FLUSH: Duration = Duration::from_millis(500);
 const IDLE_WATCHDOG: Duration = Duration::from_secs(60);
 /// How often the idle watchdog is re-armed; well inside [`IDLE_WATCHDOG`].
 const IDLE_REARM: Duration = Duration::from_secs(5);
+/// Fewest seconds between two link reports set off by a desktop's `Hello`s.
+const HELLO_REPORT_GAP: Duration = Duration::from_secs(2);
 
 /// A replacement loader, loaded and ready to start once the link is released.
 pub struct Chain {
@@ -48,13 +50,26 @@ struct Server<'a, T: Transport> {
     shown: Option<&'static str>,
     next_status: Instant,
     keepalive: Keepalive,
+    /// `Hello`s seen at the last link report, and when it was made.
+    reported_hellos: u32,
+    next_hello_report: Instant,
 }
 
 /// Serve the desktop until it pushes a replacement loader.
 pub fn serve<T: Transport>(provider: &Provider<T>, clock: Clock) -> Chain {
     let now = clock.now();
     let keepalive = Keepalive::new(IDLE_WATCHDOG, IDLE_REARM, now);
-    let mut server = Server { provider, clock, push: None, last: None, shown: None, next_status: now, keepalive };
+    let mut server = Server {
+        provider,
+        clock,
+        push: None,
+        last: None,
+        shown: None,
+        next_status: now,
+        keepalive,
+        reported_hellos: 0,
+        next_hello_report: now,
+    };
     loop {
         provider.pump();
         while let Some(command) = provider.next_command() {
@@ -100,6 +115,7 @@ impl<T: Transport> Server<'_, T> {
                 log::info!("push of {name}: {size} bytes, {kind:?}, watchdog {watchdog} s");
                 self.push = Some(receiver);
                 self.send(&Message::PushAccepted);
+                self.report_link("push begun");
             },
             Err(reject) => self.reject(reject),
         }
@@ -178,6 +194,7 @@ impl<T: Transport> Server<'_, T> {
         log::info!("{} exited with {status} after {} ms", begin.name, elapsed.as_millis());
         self.last = Some(LastRun { name: begin.name, status, elapsed });
         self.show_status();
+        self.report_link("app exited");
     }
 
     fn prepare_chain(&mut self, image: Image) -> Option<Chain> {
@@ -200,12 +217,25 @@ impl<T: Transport> Server<'_, T> {
         Some(Chain { child, name: begin.name, watchdog })
     }
 
+    /// Log the transport's internals with why, so a link that delivers late explains itself.
+    fn report_link(&self, why: &str) {
+        if let Some(report) = self.provider.diagnostics() {
+            log::info!("link report ({why}): {report}");
+        }
+    }
+
     /// Between messages: keep the watchdog armed, save the log now and then, and report a link
-    /// state change.
+    /// state change or a desktop starting a session.
     fn idle(&mut self) {
         logger::with(BootLog::poll);
         let now = self.clock.now();
         self.keepalive.tick(now);
+        let hellos = self.provider.stats().map_or(self.reported_hellos, |s| s.hellos);
+        if hellos != self.reported_hellos && now >= self.next_hello_report {
+            self.reported_hellos = hellos;
+            self.next_hello_report = now + HELLO_REPORT_GAP;
+            self.report_link("desktop said Hello");
+        }
         if now < self.next_status {
             return;
         }

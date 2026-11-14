@@ -36,6 +36,10 @@ pub trait Transport {
     fn backlog(&self) -> usize;
     /// A short name for the link state, for status lines.
     fn status(&self) -> &'static str;
+    /// A multi-line account of the link's internals, for a link that delivers late or not at all.
+    fn diagnostics(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Who receives what the desktop sends.
@@ -61,6 +65,8 @@ pub struct HubStats {
     pub input_dropped: u64,
     /// Messages for the loader dropped because too many were waiting.
     pub commands_dropped: u32,
+    /// `Hello`s answered: each desktop session starts with at least one.
+    pub hellos: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
@@ -115,6 +121,10 @@ impl<T: Transport> Hub<T> {
 
     pub const fn transport(&self) -> &T {
         &self.transport
+    }
+
+    pub const fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
     }
 
     pub const fn stats(&self) -> HubStats {
@@ -263,7 +273,10 @@ impl<T: Transport> Hub<T> {
             Event::Message(msg) => msg,
         };
         match msg {
-            Message::Hello { .. } => self.announce(),
+            Message::Hello { .. } => {
+                self.stats.hellos = self.stats.hellos.wrapping_add(1);
+                self.announce();
+            },
             Message::Reboot => self.reboot = true,
             Message::Stop => match self.mode {
                 Mode::Running => self.stop = true,

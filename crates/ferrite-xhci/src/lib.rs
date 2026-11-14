@@ -25,6 +25,7 @@ pub mod pci;
 pub mod regs;
 mod ring;
 pub mod stats;
+pub mod trace;
 pub mod trb;
 mod watch;
 

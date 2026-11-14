@@ -10,6 +10,7 @@ use core::sync::atomic::{Ordering, fence};
 use ferrite_hal::{BusAddr, BusAddr32};
 
 use crate::dma::DmaSlice;
+use crate::trace::RingPos;
 use crate::trb::Trb;
 
 /// TRBs per ring segment (one 4 KiB page).
@@ -77,6 +78,19 @@ impl ProducerRing {
     #[must_use]
     pub const fn free(&self) -> usize {
         USABLE - self.pending
+    }
+
+    #[must_use]
+    pub const fn position(&self) -> RingPos {
+        RingPos { enqueue: self.enq, dequeue: self.deq, pending: self.pending, cycle: self.cycle }
+    }
+
+    /// The slot `ptr` names in this ring's segment, link TRB included; `None` outside it.
+    #[must_use]
+    pub fn index_of(&self, ptr: BusAddr) -> Option<usize> {
+        let off = ptr.get().checked_sub(u64::from(self.dma().get()))?;
+        let idx = usize::try_from(off / TRB_BYTES as u64).ok()?;
+        (off.is_multiple_of(TRB_BYTES as u64) && idx < RING_TRBS).then_some(idx)
     }
 
     /// Queue a TRB tagged with `tag` (handed back on completion). False when full.
@@ -164,6 +178,12 @@ impl EventRing {
     #[must_use]
     pub const fn dma(&self) -> BusAddr32 {
         self.mem.bus()
+    }
+
+    /// The slot to consume next and the cycle state it must carry.
+    #[must_use]
+    pub const fn position(&self) -> (usize, bool) {
+        (self.deq, self.cycle)
     }
 
     /// Bus address of the next event to consume, for ERDP.

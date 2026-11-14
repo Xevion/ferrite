@@ -9,6 +9,7 @@
 //! into a refusal instead of aliasing.
 
 use alloc::boxed::Box;
+use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 use core::cell::{RefCell, RefMut};
 use core::ffi::c_void;
@@ -52,6 +53,10 @@ impl Transport for OpenDbc {
 
     fn backlog(&self) -> usize {
         self.buffered()
+    }
+
+    fn diagnostics(&mut self) -> Option<String> {
+        Some(EfiDbc::diagnostics(self).to_string())
     }
 }
 
@@ -345,6 +350,11 @@ impl<T: Transport> Provider<T> {
 
     pub fn stats(&self) -> Option<HubStats> {
         self.state().with_hub(|hub| hub.stats())
+    }
+
+    /// The transport's account of its internals, when it keeps one.
+    pub fn diagnostics(&self) -> Option<String> {
+        self.state().with_hub(|hub| hub.transport_mut().diagnostics()).flatten()
     }
 
     /// The transport's own name for its link state, such as `Configured` for a DbC.
