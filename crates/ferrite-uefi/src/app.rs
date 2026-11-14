@@ -181,7 +181,7 @@ impl<'a> App<'a> {
     ) -> Result<Self, BackendError> {
         let clock = Clock::start();
         let screen = Screen::open(output, &clock)?;
-        let (net, net_err) = match Net::setup(clock.now()) {
+        let (net, net_err) = match Net::setup(clock) {
             Ok(net) => {
                 log::debug!("net: SNP up, {}", net.status());
                 (Some(net), None)

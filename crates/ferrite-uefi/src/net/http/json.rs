@@ -1,11 +1,11 @@
 //! A small typed JSON writer and the document `/api/status` and the event stream send.
 //!
-//! Each type that appears in the document says how it is written through [`ToJson`]. Numbers are
-//! integers only: 64-bit patterns and addresses go out as hex strings, since a JavaScript number
-//! keeps only 53 bits.
+//! Each type that appears in the document says how it is written through [`ToJson`], into any
+//! `fmt::Write`: the status document goes to a buffer the server reuses and short replies to a
+//! stack string. Numbers are integers only: 64-bit patterns and addresses go out as hex strings,
+//! since a JavaScript number keeps only 53 bits.
 
 use alloc::collections::VecDeque;
-use alloc::string::String;
 use core::fmt::{self, Write as _};
 use core::time::Duration;
 
@@ -18,53 +18,75 @@ use crate::net::{Counters, NetStatus};
 use crate::report::{CpuInfo, FaultRecord, PassRecord, Snapshot, TestRecord};
 use crate::sweep::SweepStatus;
 
+/// Room for a short reply (an error or an acknowledgement) on the stack.
+pub const REPLY_CAP: usize = 256;
+
+/// A short reply, built without touching the heap.
+pub type Reply = heapless::String<REPLY_CAP>;
+
 pub trait ToJson {
-    fn to_json(&self, out: &mut String);
+    fn to_json(&self, out: &mut dyn fmt::Write);
+}
+
+/// A sink fails only when it has a fixed capacity and is full, which truncates the document
+/// rather than leaving a state to recover from; the replies are sized to always fit.
+fn push(out: &mut dyn fmt::Write, c: char) {
+    let _ = out.write_char(c);
+}
+
+fn push_str(out: &mut dyn fmt::Write, s: &str) {
+    let _ = out.write_str(s);
 }
 
 /// Writes the members of one object.
 pub struct Object<'a> {
-    out: &'a mut String,
+    out: &'a mut dyn fmt::Write,
     empty: bool,
 }
 
 impl<'a> Object<'a> {
-    pub fn new(out: &'a mut String) -> Self {
-        out.push('{');
+    pub fn new(out: &'a mut dyn fmt::Write) -> Self {
+        push(out, '{');
         Self { out, empty: true }
     }
 
     pub fn field(&mut self, key: &str, value: &(impl ToJson + ?Sized)) -> &mut Self {
         if !self.empty {
-            self.out.push(',');
+            push(self.out, ',');
         }
         self.empty = false;
         key.to_json(self.out);
-        self.out.push(':');
+        push(self.out, ':');
         value.to_json(self.out);
         self
     }
 
     pub fn finish(&mut self) {
-        self.out.push('}');
+        push(self.out, '}');
     }
 }
 
 /// Escapes what is written through it as the inside of a JSON string.
-struct Escape<'a>(&'a mut String);
+struct Escape<'a>(&'a mut dyn fmt::Write);
 
 impl fmt::Write for Escape<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            match c {
-                '"' => self.0.push_str("\\\""),
-                '\\' => self.0.push_str("\\\\"),
-                '\n' => self.0.push_str("\\n"),
-                c if u32::from(c) < 0x20 => write!(self.0, "\\u{:04x}", u32::from(c))?,
-                c => self.0.push(c),
+        let needs_escape = |c: char| matches!(c, '"' | '\\') || u32::from(c) < 0x20;
+        let mut rest = s;
+        while let Some(at) = rest.find(needs_escape) {
+            let (plain, special) = rest.split_at(at);
+            self.0.write_str(plain)?;
+            let mut chars = special.chars();
+            match chars.next() {
+                Some('"') => self.0.write_str("\\\"")?,
+                Some('\\') => self.0.write_str("\\\\")?,
+                Some('\n') => self.0.write_str("\\n")?,
+                Some(c) => write!(self.0, "\\u{:04x}", u32::from(c))?,
+                None => {},
             }
+            rest = chars.as_str();
         }
-        Ok(())
+        self.0.write_str(rest)
     }
 }
 
@@ -72,11 +94,10 @@ impl fmt::Write for Escape<'_> {
 pub struct Text<T>(pub T);
 
 impl<T: fmt::Display> ToJson for Text<T> {
-    fn to_json(&self, out: &mut String) {
-        out.push('"');
-        // Writing into a String cannot fail.
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        push(out, '"');
         let _ = write!(Escape(out), "{}", self.0);
-        out.push('"');
+        push(out, '"');
     }
 }
 
@@ -84,7 +105,7 @@ impl<T: fmt::Display> ToJson for Text<T> {
 pub struct Hex(pub u64);
 
 impl ToJson for Hex {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         let _ = write!(out, "\"{:#x}\"", self.0);
     }
 }
@@ -93,8 +114,8 @@ impl ToJson for Hex {
 pub struct Millis(pub Duration);
 
 impl ToJson for Millis {
-    fn to_json(&self, out: &mut String) {
-        self.0.as_millis().to_json(out);
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        u64::try_from(self.0.as_millis()).unwrap_or(u64::MAX).to_json(out);
     }
 }
 
@@ -106,22 +127,22 @@ where
     F: Fn() -> I,
     I: Iterator<Item: ToJson>,
 {
-    fn to_json(&self, out: &mut String) {
-        out.push('[');
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        push(out, '[');
         for (i, item) in (self.0)().enumerate() {
             if i > 0 {
-                out.push(',');
+                push(out, ',');
             }
             item.to_json(out);
         }
-        out.push(']');
+        push(out, ']');
     }
 }
 
 macro_rules! json_integer {
     ($($t:ty),*) => {$(
         impl ToJson for $t {
-            fn to_json(&self, out: &mut String) {
+            fn to_json(&self, out: &mut dyn fmt::Write) {
                 let _ = write!(out, "{self}");
             }
         }
@@ -131,46 +152,46 @@ macro_rules! json_integer {
 json_integer!(u16, u32, u64, u128, usize);
 
 impl ToJson for bool {
-    fn to_json(&self, out: &mut String) {
-        out.push_str(if *self { "true" } else { "false" });
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        push_str(out, if *self { "true" } else { "false" });
     }
 }
 
 impl ToJson for str {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         Text(self).to_json(out);
     }
 }
 
 impl<T: ToJson + ?Sized> ToJson for &T {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         (**self).to_json(out);
     }
 }
 
 impl<T: ToJson> ToJson for Option<T> {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         match self {
             Some(value) => value.to_json(out),
-            None => out.push_str("null"),
+            None => push_str(out, "null"),
         }
     }
 }
 
 impl<T: ToJson> ToJson for [T] {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         Each(|| self.iter()).to_json(out);
     }
 }
 
 impl<T: ToJson> ToJson for VecDeque<T> {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         Each(|| self.iter()).to_json(out);
     }
 }
 
 impl ToJson for TestRecord {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         Object::new(out)
             .field("test", self.test)
             .field("pass", &self.pass)
@@ -184,7 +205,7 @@ impl ToJson for TestRecord {
 }
 
 impl ToJson for PassRecord {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         Object::new(out)
             .field("pass", &self.pass)
             .field("took_ms", &Millis(self.took))
@@ -202,7 +223,7 @@ fn fault_fields(o: &mut Object<'_>, fault: &Fault) {
 }
 
 impl ToJson for FaultRecord {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         let mut o = Object::new(out);
         o.field("pass", &self.pass).field("test", self.test).field("cpu", &self.cpu);
         fault_fields(&mut o, &self.fault);
@@ -211,7 +232,7 @@ impl ToJson for FaultRecord {
 }
 
 impl ToJson for CpuInfo {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         Object::new(out)
             .field("number", &self.number)
             .field("package", &self.package)
@@ -223,7 +244,7 @@ impl ToJson for CpuInfo {
 }
 
 impl ToJson for Classification {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         let (kind, stuck) = match *self {
             Self::Clean => ("clean", None),
             Self::StuckBits { mask } => ("stuck-bits", Some(mask)),
@@ -235,7 +256,7 @@ impl ToJson for Classification {
 }
 
 impl ToJson for Counters {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         Object::new(out)
             .field("mdns_queries", &self.mdns_queries)
             .field("mdns_replies", &self.mdns_replies)
@@ -250,7 +271,7 @@ impl ToJson for Counters {
 }
 
 impl ToJson for NetStatus {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         let link = &self.link;
         Object::new(out)
             .field("hostname", &Text(mdns::HOST))
@@ -278,7 +299,7 @@ impl StatusDoc<'_> {
 }
 
 impl ToJson for StatusDoc<'_> {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         let status: &SweepStatus = &self.snapshot.status;
         let history = self.snapshot.history;
         let preset: &str = status.preset.into();
@@ -337,7 +358,7 @@ impl ToJson for StatusDoc<'_> {
 struct Section<F>(F);
 
 impl<F: Fn(&mut Object<'_>)> ToJson for Section<F> {
-    fn to_json(&self, out: &mut String) {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
         let mut o = Object::new(out);
         (self.0)(&mut o);
         o.finish();
@@ -345,21 +366,23 @@ impl<F: Fn(&mut Object<'_>)> ToJson for Section<F> {
 }
 
 /// `{"error": message}`.
-pub fn error(message: impl fmt::Display) -> String {
-    let mut out = String::new();
+pub fn error(message: impl fmt::Display) -> Reply {
+    let mut out = Reply::new();
     Object::new(&mut out).field("error", &Text(message)).finish();
     out
 }
 
 /// `{"accepted": name}`, the reply to a control request.
-pub fn accepted(name: &str) -> String {
-    let mut out = String::new();
+pub fn accepted(name: &str) -> Reply {
+    let mut out = Reply::new();
     Object::new(&mut out).field("accepted", name).finish();
     out
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
+    use alloc::string::String;
     use alloc::vec;
 
     use assert2::check;
@@ -384,6 +407,17 @@ mod tests {
         let mut out = String::new();
         Text("a\"b\\c\nd\u{1}\u{e9}").to_json(&mut out);
         check!(out == "\"a\\\"b\\\\c\\nd\\u0001\u{e9}\"");
+    }
+
+    #[test]
+    fn the_longest_reply_fits_its_buffer() {
+        use crate::net::http::api::{self, Control, Rejection};
+
+        let body = format!(r#"{{"preset":"{}"}}"#, "\u{7f}".repeat(40));
+        let source = api::command(Control::Restart, body.as_bytes()).unwrap_err();
+        let reply = error(Rejection::BadBody { source });
+        check!(reply.ends_with("\"}"), "{reply}");
+        check!(reply.len() < REPLY_CAP, "{} bytes", reply.len());
     }
 
     #[test]

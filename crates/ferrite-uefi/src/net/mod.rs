@@ -12,7 +12,8 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::time::Duration;
 
-use ferrite_hal::Instant;
+use ferrite_efi::clock::Clock;
+use ferrite_hal::{Clock as _, Instant};
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::socket::{dhcpv4, udp};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr};
@@ -24,7 +25,7 @@ use uefi::proto::rng::Rng;
 use uefi::{Handle, Status};
 
 use self::device::SnpDevice;
-use self::http::HttpServer;
+use self::http::{HttpServer, PollStats};
 use crate::control::Commands;
 use crate::mdns::{self, Destination, Handled, Responder};
 use crate::report::Snapshot;
@@ -194,6 +195,8 @@ pub struct Net {
     sockets: SocketSet<'static>,
     dhcp: SocketHandle,
     http: HttpServer,
+    http_stats: PollStats,
+    clock: Clock,
     mdns: SocketHandle,
     responder: Responder,
     mdns_out: Vec<u8>,
@@ -204,7 +207,8 @@ pub struct Net {
 
 impl Net {
     /// Open the best SNP handle, bring the adapter up, and start DHCP.
-    pub fn setup(now: Instant) -> Result<Self, NetError> {
+    pub fn setup(clock: Clock) -> Result<Self, NetError> {
+        let now = clock.now();
         let handle = pick_nic()?;
         let reconnect = Reconnect(handle);
         let snp = boot::open_protocol_exclusive::<SimpleNetwork>(handle).context(OpenSnafu { handle })?;
@@ -251,6 +255,8 @@ impl Net {
             sockets,
             dhcp,
             http,
+            http_stats: PollStats::default(),
+            clock,
             mdns,
             responder: Responder::new(),
             mdns_out: Vec::with_capacity(MDNS_BUFFER),
@@ -270,7 +276,9 @@ impl Net {
         let changed = self.iface.poll(at, &mut self.device, &mut self.sockets) == PollResult::SocketStateChanged;
         self.poll_dhcp(now);
 
+        let started = self.clock.now();
         let served = self.http.poll(&mut self.sockets, now, snapshot, self.status, commands);
+        self.http_stats.record(now, self.clock.now() - started, &served);
         self.status.counters.http_responses = self.status.counters.http_responses.wrapping_add(served.responses);
         // Send what the connections just queued now rather than a poll later.
         self.iface.poll_egress(at, &mut self.device, &mut self.sockets);

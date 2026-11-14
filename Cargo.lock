@@ -1088,6 +1088,7 @@ dependencies = [
  "ferrite-mem",
  "ferrite-rt",
  "fontdue",
+ "heapless 0.9.3",
  "log",
  "picoserve",
  "ratatui",

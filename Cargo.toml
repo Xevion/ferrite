@@ -38,6 +38,7 @@ corosensei = { version = "0.3.4", default-features = false }
 crc32fast = { version = "1.5.5", default-features = false }
 # The default `simd` (SSE2 only, chosen at compile time) and `hashbrown` (its no_std maps).
 fontdue = "0.9.5"
+heapless = { version = "0.9.3", default-features = false }
 hmac = { version = "0.13.0", default-features = false }
 humantime = "2.4.0"
 jiff = "0.2.43"

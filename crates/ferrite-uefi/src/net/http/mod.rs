@@ -5,7 +5,13 @@
 //! listens again. [`HttpServer::poll`] polls every one of them once per network poll with a no-op
 //! waker, so a connection advances only as far as its socket buffers allow and the poll stays
 //! short. The futures reach the sockets through [`Shared`], which holds the socket set for the
-//! length of that poll, and read the run from a copy of the sweep's snapshot kept there.
+//! length of that poll.
+//!
+//! The status document is serialized by [`Cache`], at most once per poll and only when a
+//! connection asks for one that is not current. A connection that finds none parks, the poll
+//! renders, and every connection is polled again; requests and event streams then send the same
+//! bytes. Nothing on the request path allocates once the server is running, except a render while
+//! a slow client still holds the previous document.
 
 #![expect(
     clippy::future_not_send,
@@ -13,38 +19,39 @@
 )]
 
 mod api;
+mod doc;
 mod json;
 mod socket;
+#[cfg(test)]
+mod testing;
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
 use alloc::rc::Rc;
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::convert::Infallible;
+use core::future::poll_fn;
 use core::pin::Pin;
-use core::task::{Context, Waker};
+use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 
 use ferrite_hal::Instant;
 use picoserve::io::Read;
 use picoserve::request::{Path, Request};
 use picoserve::response::sse::{EventSource, EventWriter};
-use picoserve::response::{Connection, EventStream, IntoResponse as _, Response, ResponseWriter, StatusCode};
+use picoserve::response::{Connection, Content, EventStream, IntoResponse as _, Response, ResponseWriter, StatusCode};
 use picoserve::routing::PathRouterService;
 use picoserve::{Config, ResponseSent, Router, Server, Timeouts, Timer as _};
 use smoltcp::iface::{SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
 
 use self::api::{Endpoint, Rejection};
-use self::json::{StatusDoc, ToJson as _};
+use self::doc::{Cache, Document};
 use self::socket::{Clock, Conn};
 use super::NetStatus;
 use crate::control::{Command, Commands};
-use crate::report::{FaultRecord, History, Snapshot};
-use crate::sweep::SweepStatus;
+use crate::report::Snapshot;
 
 const HTTP_PORT: u16 = 80;
 /// Server sockets: a browser's six parallel connections and the event stream, with room for a
@@ -56,7 +63,12 @@ const RX_BUFFER: usize = 2048;
 const TX_BUFFER: usize = 8192;
 /// Holds one request's line, headers and body.
 const REQUEST_BUFFER: usize = 2048;
+/// The shortest gap between two events on a stream, so a run that changes every few milliseconds
+/// still sends one a second.
 const EVENT_INTERVAL: Duration = Duration::from_secs(1);
+/// A stream with nothing to say sends a comment this often, so idle connections are not dropped
+/// by middleboxes and a vanished client is noticed.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// How long a quit waits for its reply to be acknowledged.
 const QUIT_GRACE: picoserve::time::Duration = picoserve::time::Duration::from_secs(2);
 /// After a connection ends, how long its socket may take to close before it is aborted.
@@ -64,6 +76,8 @@ const LINGER: Duration = Duration::from_secs(2);
 /// A peer that stops acknowledging for this long is dropped.
 const TCP_TIMEOUT: smoltcp::time::Duration = smoltcp::time::Duration::from_secs(10);
 const TCP_KEEP_ALIVE: smoltcp::time::Duration = smoltcp::time::Duration::from_secs(3);
+/// How often [`PollStats`] logs its summary.
+const STATS_EVERY: Duration = Duration::from_secs(30);
 
 static CONFIG: Config = Config::new(Timeouts {
     start_read_request: picoserve::time::Duration::from_secs(5),
@@ -75,38 +89,14 @@ static CONFIG: Config = Config::new(Timeouts {
 
 static PAGE: &str = include_str!("page.html");
 
-/// The sweep as last seen by the network poll, owned so requests in flight can read it.
-struct Mirror {
-    status: SweepStatus,
-    history: History,
-    faults: VecDeque<FaultRecord>,
-    net: NetStatus,
-}
-
-impl Mirror {
-    fn new(snapshot: &Snapshot<'_>, net: NetStatus) -> Self {
-        Self { status: snapshot.status, history: snapshot.history.clone(), faults: snapshot.faults.clone(), net }
-    }
-
-    /// Copy what changed; the history and fault log only when their revision or count moved.
-    fn update(&mut self, snapshot: &Snapshot<'_>, net: NetStatus) {
-        if self.history.revision != snapshot.history.revision {
-            self.history.clone_from(snapshot.history);
-        }
-        if self.status.faults != snapshot.status.faults || self.faults.len() != snapshot.faults.len() {
-            self.faults.clone_from(snapshot.faults);
-        }
-        self.status = snapshot.status;
-        self.net = net;
-    }
-}
-
 /// What the connection futures share with the server.
 pub struct Shared {
     /// The interface's sockets during [`HttpServer::poll`], an empty set otherwise.
     sockets: RefCell<SocketSet<'static>>,
     now: Cell<Instant>,
-    mirror: RefCell<Option<Mirror>>,
+    cache: RefCell<Cache>,
+    /// Set by a connection that parked for a current document, until the poll renders one.
+    wanted: Cell<bool>,
     commands: RefCell<Vec<Command>>,
     streams: Cell<usize>,
     responses: Cell<u32>,
@@ -117,13 +107,21 @@ impl Shared {
         self.now.get()
     }
 
-    fn status_json(&self) -> Option<String> {
-        let mirror = self.mirror.borrow();
-        let mirror = mirror.as_ref()?;
-        let snapshot = Snapshot { status: mirror.status, history: &mirror.history, faults: &mirror.faults };
-        let mut out = String::with_capacity(4096);
-        StatusDoc { snapshot: &snapshot, net: &mirror.net, now: self.now() }.to_json(&mut out);
-        Some(out)
+    /// The status document, once one that is current exists; the poll renders it on request.
+    async fn document(&self) -> Document {
+        poll_fn(|_| {
+            let document = self.cache.borrow().get(self.now());
+            if document.is_none() {
+                self.wanted.set(true);
+            }
+            document.map_or(Poll::Pending, Poll::Ready)
+        })
+        .await
+    }
+
+    /// What the document shows has changed since this generation.
+    fn changed_since(&self, generation: Option<u64>) -> bool {
+        generation != Some(self.cache.borrow().generation())
     }
 }
 
@@ -132,8 +130,48 @@ impl Shared {
 pub struct Served {
     /// Responses sent in full.
     pub responses: u32,
+    /// Status documents serialized.
+    pub renders: u32,
     /// Some connection has data queued either way, so the next poll should come soon.
     pub busy: bool,
+}
+
+/// The cost of [`HttpServer::poll`], summarized to the log every [`STATS_EVERY`].
+#[derive(Default)]
+pub struct PollStats {
+    since: Instant,
+    polls: u32,
+    total: Duration,
+    worst: Duration,
+    responses: u32,
+    renders: u32,
+}
+
+impl PollStats {
+    /// Note one poll that began at `now`, took `took` and did `served`.
+    pub fn record(&mut self, now: Instant, took: Duration, served: &Served) {
+        if self.polls == 0 {
+            self.since = now;
+        }
+        self.polls += 1;
+        self.total += took;
+        self.worst = self.worst.max(took);
+        self.responses += served.responses;
+        self.renders += served.renders;
+        if now - self.since < STATS_EVERY {
+            return;
+        }
+        log::debug!(
+            "http: {} polls in {:?}, mean {:?}, worst {:?}, {} responses, {} renders",
+            self.polls,
+            now - self.since,
+            self.total / self.polls,
+            self.worst,
+            self.responses,
+            self.renders
+        );
+        *self = Self::default();
+    }
 }
 
 pub struct HttpServer {
@@ -147,7 +185,8 @@ impl HttpServer {
         let shared = Rc::new(Shared {
             sockets: RefCell::new(SocketSet::new(vec![])),
             now: Cell::new(Instant::default()),
-            mirror: RefCell::new(None),
+            cache: RefCell::new(Cache::new()),
+            wanted: Cell::new(false),
             commands: RefCell::new(Vec::new()),
             streams: Cell::new(0),
             responses: Cell::new(0),
@@ -185,15 +224,15 @@ impl HttpServer {
     ) -> Served {
         let shared = &*self.shared;
         shared.now.set(now);
-        match &mut *shared.mirror.borrow_mut() {
-            Some(mirror) => mirror.update(snapshot, net),
-            empty @ None => *empty = Some(Mirror::new(snapshot, net)),
-        }
+        shared.cache.borrow_mut().update(snapshot, net);
         core::mem::swap(&mut *shared.sockets.borrow_mut(), sockets);
-        let mut cx = Context::from_waker(Waker::noop());
-        for connection in &mut self.connections {
-            // The futures loop forever, so this never yields a value.
-            let _ = connection.as_mut().poll(&mut cx);
+        poll_all(&mut self.connections);
+        let renders = u32::from(shared.wanted.take());
+        if renders > 0 {
+            // Connections that parked for a document get it, and the rest of what they were doing,
+            // in the same poll.
+            shared.cache.borrow_mut().render(snapshot, now);
+            poll_all(&mut self.connections);
         }
         core::mem::swap(&mut *shared.sockets.borrow_mut(), sockets);
 
@@ -204,7 +243,15 @@ impl HttpServer {
             let sock = sockets.get::<tcp::Socket<'_>>(h);
             sock.send_queue() > 0 || sock.recv_queue() > 0
         });
-        Served { responses: shared.responses.replace(0), busy }
+        Served { responses: shared.responses.replace(0), renders, busy }
+    }
+}
+
+fn poll_all(connections: &mut [Pin<Box<dyn Future<Output = Infallible>>>]) {
+    let mut cx = Context::from_waker(Waker::noop());
+    for connection in connections {
+        // The futures loop forever, so this never yields a value.
+        let _ = connection.as_mut().poll(&mut cx);
     }
 }
 
@@ -252,7 +299,9 @@ impl Api<'_> {
         mut request: Request<'_, R>,
         writer: W,
     ) -> Result<ResponseSent, W::Error> {
-        let endpoint = api::resolve(request.parts.method(), path);
+        let host = request.parts.headers().get("host").map(|v| v.as_raw());
+        let address = self.shared.cache.borrow().address();
+        let endpoint = api::check_host(host, address).and_then(|()| api::resolve(request.parts.method(), path));
         let control = match endpoint {
             Ok(Endpoint::Control(control)) => control,
             Ok(endpoint) => {
@@ -305,10 +354,7 @@ impl Api<'_> {
                     .write_to(conn, writer)
                     .await
             },
-            Endpoint::Status => match self.shared.status_json() {
-                Some(doc) => send(conn, writer, StatusCode::OK, doc, None).await,
-                None => reject(&Rejection::NotFound, conn, writer).await,
-            },
+            Endpoint::Status => send(conn, writer, StatusCode::OK, self.shared.document().await, None).await,
             Endpoint::Events => match StreamSlot::claim(self.shared) {
                 Some(slot) => EventStream(Updates(slot)).write_to(conn, writer).await,
                 None => reject(&Rejection::Busy, conn, writer).await,
@@ -322,7 +368,7 @@ async fn send<R: Read, W: ResponseWriter<Error = R::Error>>(
     conn: Connection<'_, R>,
     writer: W,
     status: StatusCode,
-    body: String,
+    body: impl Content,
     allow: Option<&'static str>,
 ) -> Result<ResponseSent, W::Error> {
     Response::new(status, body)
@@ -364,53 +410,69 @@ impl Drop for StreamSlot<'_> {
     }
 }
 
-/// The status document as a `status` event every [`EVENT_INTERVAL`].
+/// What a stream sends next.
+enum Due {
+    Event,
+    Keepalive,
+}
+
+/// The status document as a `status` event whenever what it shows changes (at most one per
+/// [`EVENT_INTERVAL`]), and a comment every [`KEEPALIVE_INTERVAL`] that nothing else was sent.
 struct Updates<'a>(StreamSlot<'a>);
 
 impl EventSource for Updates<'_> {
     async fn write_events<W: picoserve::io::Write>(self, mut writer: EventWriter<'_, W>) -> Result<(), W::Error> {
         let shared = self.0.0;
+        let mut sent = None;
+        let mut last_event = shared.now();
+        let mut last_write = last_event;
         loop {
-            match shared.status_json() {
-                Some(doc) => writer.write_event("status", doc.as_str()).await?,
-                None => writer.write_keepalive().await?,
+            let due = poll_fn(|_| {
+                let now = shared.now();
+                if shared.changed_since(sent) && (sent.is_none() || now - last_event >= EVENT_INTERVAL) {
+                    Poll::Ready(Due::Event)
+                } else if now - last_write >= KEEPALIVE_INTERVAL {
+                    Poll::Ready(Due::Keepalive)
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            match due {
+                Due::Event => {
+                    let document = shared.document().await;
+                    writer.write_event("status", document.as_str()).await?;
+                    sent = Some(document.generation());
+                    last_event = shared.now();
+                    last_write = last_event;
+                },
+                Due::Keepalive => {
+                    writer.write_keepalive().await?;
+                    last_write = shared.now();
+                },
             }
             writer.flush().await?;
-            Clock(shared).sleep(EVENT_INTERVAL).await;
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::collections::VecDeque;
+    use alloc::format;
+    use alloc::string::String;
     use core::num::NonZeroUsize;
 
     use assert2::check;
-    use ferrite_mem::analysis::Classification;
-    use ferrite_mem::suite::{Mode, Preset};
     use rstest::rstest;
+    use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
+    use super::testing::{count, idle_status};
     use super::*;
-    use crate::sweep::CoreChoice;
+    use crate::report::{FaultRecord, History, PassRecord};
+    use crate::sweep::{CoreChoice, SweepStatus};
 
-    fn idle_status() -> SweepStatus {
-        SweepStatus {
-            bytes: 1 << 20,
-            test: "own-address",
-            position: (1, 9),
-            test_percent: 0,
-            percent: 0,
-            passes: 0,
-            tier: "sse2",
-            mode: Mode::Single,
-            cpus: 1,
-            faults: 0,
-            first_fault: None,
-            analysis: Classification::Clean,
-            preset: Preset::Standard,
-            paused: false,
-        }
-    }
+    const HOST: &str = "Host: ferrite.local\r\n";
 
     /// The server and one client socket on a smoltcp loopback interface, stepped a millisecond at a time.
     struct Loopback {
@@ -421,7 +483,11 @@ mod tests {
         client: SocketHandle,
         ms: u64,
         served: u32,
+        renders: u32,
+        allocs: u64,
         commands: Commands,
+        status: SweepStatus,
+        net: NetStatus,
         history: History,
         faults: VecDeque<FaultRecord>,
         reply: Vec<u8>,
@@ -449,7 +515,11 @@ mod tests {
                 client,
                 ms: 0,
                 served: 0,
+                renders: 0,
+                allocs: 0,
                 commands: Commands::default(),
+                status: idle_status(),
+                net: NetStatus::default(),
                 history: History::default(),
                 faults: VecDeque::new(),
                 reply: Vec::new(),
@@ -475,10 +545,12 @@ mod tests {
                 let at = smoltcp::time::Instant::from_millis(self.ms.cast_signed());
                 self.iface.poll(at, &mut self.device, &mut self.sockets);
                 let now = Instant::from_epoch(Duration::from_millis(self.ms));
-                let snapshot = Snapshot { status: idle_status(), history: &self.history, faults: &self.faults };
-                let served =
-                    self.http.poll(&mut self.sockets, now, &snapshot, NetStatus::default(), &mut self.commands);
+                let snapshot = Snapshot { status: self.status, history: &self.history, faults: &self.faults };
+                let (served, allocs) =
+                    count(|| self.http.poll(&mut self.sockets, now, &snapshot, self.net, &mut self.commands));
                 self.served += served.responses;
+                self.renders += served.renders;
+                self.allocs += allocs;
                 self.iface.poll_egress(at, &mut self.device, &mut self.sockets);
                 let sock = self.sockets.get_mut::<tcp::Socket<'static>>(self.client);
                 if sock.can_recv() {
@@ -509,22 +581,57 @@ mod tests {
         fn commands(&mut self) -> Vec<Command> {
             self.commands.drain().collect()
         }
+
+        /// The number of status events and keepalive comments in the reply so far.
+        fn events(&self) -> (usize, usize) {
+            let reply = self.reply();
+            (reply.matches("event:status\ndata:{\"uptime_ms\":").count(), reply.matches(":\n\n").count())
+        }
     }
 
     #[rstest]
-    #[case::page("GET / HTTP/1.1\r\n\r\n", "HTTP/1.1 200 \r\n", "<!doctype html>")]
-    #[case::status("GET /api/status HTTP/1.1\r\n\r\n", "HTTP/1.1 200 \r\n", "\"preset\":\"standard\"")]
-    #[case::not_found("GET /favicon.ico HTTP/1.1\r\n\r\n", "HTTP/1.1 404 \r\n", "no such resource")]
-    #[case::wrong_method("GET /api/quit HTTP/1.1\r\n\r\n", "HTTP/1.1 405 \r\n", "Allow: POST\r\n")]
+    #[case::page("GET / HTTP/1.1\r\nHost: ferrite.local\r\n\r\n", "HTTP/1.1 200 \r\n", "<!doctype html>")]
+    #[case::status(
+        "GET /api/status HTTP/1.1\r\nHost: ferrite.local\r\n\r\n",
+        "HTTP/1.1 200 \r\n",
+        "\"preset\":\"standard\""
+    )]
+    #[case::not_found(
+        "GET /favicon.ico HTTP/1.1\r\nHost: ferrite.local\r\n\r\n",
+        "HTTP/1.1 404 \r\n",
+        "no such resource"
+    )]
+    #[case::wrong_method(
+        "GET /api/quit HTTP/1.1\r\nHost: ferrite.local\r\n\r\n",
+        "HTTP/1.1 405 \r\n",
+        "Allow: POST\r\n"
+    )]
     #[case::form_post(
-        "POST /api/quit HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 0\r\n\r\n",
+        "POST /api/quit HTTP/1.1\r\nHost: ferrite.local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 0\r\n\r\n",
         "HTTP/1.1 415 \r\n",
         "application/json"
     )]
     #[case::bad_body(
-        "POST /api/restart HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 17\r\n\r\n{\"preset\":\"fast\"}",
+        "POST /api/restart HTTP/1.1\r\nHost: ferrite.local\r\nContent-Type: application/json\r\nContent-Length: 17\r\n\r\n{\"preset\":\"fast\"}",
         "HTTP/1.1 400 \r\n",
         "unknown preset"
+    )]
+    #[case::no_host("GET /api/status HTTP/1.1\r\n\r\n", "HTTP/1.1 400 \r\n", "missing Host header")]
+    #[case::foreign_status(
+        "GET /api/status HTTP/1.1\r\nHost: evil.example\r\n\r\n",
+        "HTTP/1.1 421 \r\n",
+        "use ferrite.local"
+    )]
+    #[case::foreign_page("GET / HTTP/1.1\r\nHost: evil.example:80\r\n\r\n", "HTTP/1.1 421 \r\n", "use ferrite.local")]
+    #[case::foreign_events(
+        "GET /api/events HTTP/1.1\r\nHost: evil.example\r\n\r\n",
+        "HTTP/1.1 421 \r\n",
+        "use ferrite.local"
+    )]
+    #[case::foreign_control(
+        "POST /api/quit HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        "HTTP/1.1 421 \r\n",
+        "use ferrite.local"
     )]
     fn answers(#[case] request: &str, #[case] status_line: &str, #[case] contains: &str) {
         let mut net = Loopback::new();
@@ -538,13 +645,26 @@ mod tests {
         check!(net.commands().is_empty());
     }
 
+    #[rstest]
+    #[case::our_address("10.0.2.15", "HTTP/1.1 200 \r\n")]
+    #[case::our_address_and_port("10.0.2.15:80", "HTTP/1.1 200 \r\n")]
+    #[case::next_address("10.0.2.16", "HTTP/1.1 421 \r\n")]
+    fn the_leased_address_is_the_one_accepted(#[case] host: &str, #[case] status_line: &str) {
+        let mut net = Loopback::new();
+        net.net.link.address = Some(Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24));
+        net.connect(49_152);
+        net.request(&format!("GET /api/status HTTP/1.1\r\nHost: {host}\r\n\r\n"));
+        net.run(200);
+        check!(net.reply().starts_with(status_line), "{}", net.reply());
+    }
+
     #[test]
     fn a_control_post_queues_its_command() {
         let mut net = Loopback::new();
         net.connect(49_152);
-        net.request(
-            "POST /api/cores HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"cores\":2}",
-        );
+        net.request(&format!(
+            "POST /api/cores HTTP/1.1\r\n{HOST}Content-Type: application/json\r\nContent-Length: 11\r\n\r\n{{\"cores\":2}}"
+        ));
         net.run(200);
         check!(net.reply().starts_with("HTTP/1.1 202 \r\n"));
         check!(net.reply().ends_with("{\"accepted\":\"cores\"}"));
@@ -555,9 +675,11 @@ mod tests {
     fn keep_alive_serves_two_requests_on_one_connection() {
         let mut net = Loopback::new();
         net.connect(49_152);
-        net.request("GET /api/status HTTP/1.1\r\n\r\n");
+        net.request(&format!("GET /api/status HTTP/1.1\r\n{HOST}\r\n"));
         net.run(100);
-        net.request("POST /api/pause HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 0\r\n\r\n");
+        net.request(&format!(
+            "POST /api/pause HTTP/1.1\r\n{HOST}Content-Type: application/json\r\nContent-Length: 0\r\n\r\n"
+        ));
         net.run(100);
         let reply = net.reply();
         check!(reply.starts_with("HTTP/1.1 200 \r\n"));
@@ -572,33 +694,144 @@ mod tests {
     fn an_idle_kept_alive_connection_is_closed_and_the_socket_listens_again() {
         let mut net = Loopback::new();
         net.connect(49_152);
-        net.request("GET /api/status HTTP/1.1\r\n\r\n");
+        net.request(&format!("GET /api/status HTTP/1.1\r\n{HOST}\r\n"));
         net.run_until(|sock| !sock.may_recv(), 10_000);
         check!(!net.client().may_recv(), "the server closed its side");
         net.client().close();
         net.run(100);
 
         net.connect(49_153);
-        net.request("GET / HTTP/1.1\r\n\r\n");
+        net.request(&format!("GET / HTTP/1.1\r\n{HOST}\r\n"));
         net.run(200);
         check!(net.reply().starts_with("HTTP/1.1 200 \r\n"));
         check!(net.served == 2);
     }
 
     #[test]
-    fn the_event_stream_sends_the_status_every_second() {
+    fn requests_close_together_share_one_render() {
         let mut net = Loopback::new();
         net.connect(49_152);
-        net.request("GET /api/events HTTP/1.1\r\n\r\n");
+        for _ in 0..5 {
+            net.request(&format!("GET /api/status HTTP/1.1\r\n{HOST}\r\n"));
+            net.run(20);
+        }
+        check!(net.served == 5);
+        check!(net.renders == 1);
+
+        net.history.revision += 1;
+        net.request(&format!("GET /api/status HTTP/1.1\r\n{HOST}\r\n"));
+        net.run(20);
+        check!(net.served == 6);
+        check!(net.renders == 2);
+    }
+
+    #[test]
+    fn the_event_stream_sends_the_first_status_at_once_then_only_changes() {
+        let mut net = Loopback::new();
+        net.connect(49_152);
+        net.request(&format!("GET /api/events HTTP/1.1\r\n{HOST}\r\n"));
         net.run(2_500);
         let reply = net.reply();
         check!(reply.starts_with("HTTP/1.1 200 \r\n"));
         check!(reply.contains("Content-Type: text/event-stream\r\n"));
-        check!(reply.matches("event:status\ndata:{\"uptime_ms\":").count() == 3, "{reply}");
+        check!(net.events() == (1, 0), "{reply}");
         check!(net.http.shared.streams.get() == 1);
+
+        net.history.revision += 1;
+        net.run(1_100);
+        check!(net.events() == (2, 0));
+
+        net.net.counters.rx_frames += 40;
+        net.run(3_000);
+        check!(net.events() == (2, 0), "counters alone are not a change");
 
         net.client().abort();
         net.run(100);
         check!(net.http.shared.streams.get() == 0, "the stream's slot was given back");
+    }
+
+    #[test]
+    fn a_busy_run_still_sends_one_event_a_second_at_most() {
+        let mut net = Loopback::new();
+        net.connect(49_152);
+        net.request(&format!("GET /api/events HTTP/1.1\r\n{HOST}\r\n"));
+        net.run(100);
+        for _ in 0..30 {
+            net.history.revision += 1;
+            net.run(100);
+        }
+        let (events, _) = net.events();
+        check!((3..=4).contains(&events), "{events} events in about three seconds");
+    }
+
+    #[test]
+    fn an_idle_stream_sends_a_comment_every_fifteen_seconds() {
+        let mut net = Loopback::new();
+        net.connect(49_152);
+        net.request(&format!("GET /api/events HTTP/1.1\r\n{HOST}\r\n"));
+        net.run(14_500);
+        check!(net.events() == (1, 0));
+        net.run(1_000);
+        check!(net.events() == (1, 1));
+        net.run(14_000);
+        check!(net.events() == (1, 1));
+        net.run(1_000);
+        check!(net.events() == (1, 2));
+    }
+
+    #[test]
+    fn a_running_server_makes_no_allocations() {
+        let mut net = Loopback::new();
+        for pass in 0..64 {
+            net.history.passes.push_back(PassRecord { pass, took: Duration::from_secs(90), faults: 3 });
+            net.faults.push_back(FaultRecord {
+                fault: ferrite_mem::Fault {
+                    addr: ferrite_mem::CpuAddr::of(core::ptr::without_provenance::<u8>(0x4000_1008)),
+                    expected: !0,
+                    actual: !0 ^ 0x10,
+                },
+                test: "moving-inversions",
+                cpu: 3,
+                pass,
+            });
+        }
+        net.connect(49_152);
+        let cases = [
+            format!("GET /api/status HTTP/1.1\r\n{HOST}\r\n"),
+            format!("GET / HTTP/1.1\r\n{HOST}\r\n"),
+            format!("GET /nope HTTP/1.1\r\n{HOST}\r\n"),
+            "GET /api/status HTTP/1.1\r\nHost: evil.example\r\n\r\n".into(),
+            format!("POST /api/pause HTTP/1.1\r\n{HOST}Content-Type: application/json\r\nContent-Length: 0\r\n\r\n"),
+            format!(
+                "POST /api/restart HTTP/1.1\r\n{HOST}Content-Type: application/json\r\nContent-Length: 17\r\n\r\n{{\"preset\":\"fast\"}}"
+            ),
+        ];
+        for request in &cases {
+            net.request(request);
+            net.run(30);
+            net.commands();
+        }
+        let (served, allocs) = (net.served, net.allocs);
+        for request in cases.iter().cycle().take(60) {
+            net.history.revision += 1;
+            net.request(request);
+            net.run(30);
+            net.commands();
+        }
+        check!(net.served - served == 60);
+        check!(net.allocs == allocs, "{} allocations in 60 requests", net.allocs - allocs);
+
+        net.client().abort();
+        net.run(2_000);
+        net.connect(49_153);
+        net.request(&format!("GET /api/events HTTP/1.1\r\n{HOST}\r\n"));
+        net.run(1_500);
+        let allocs = net.allocs;
+        for _ in 0..5 {
+            net.history.revision += 1;
+            net.run(1_100);
+        }
+        check!(net.events().0 >= 5);
+        check!(net.allocs == allocs, "{} allocations in 5 events", net.allocs - allocs);
     }
 }

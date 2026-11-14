@@ -7,6 +7,7 @@ use core::time::Duration;
 
 use ferrite_hal::Instant;
 use ferrite_mem::Fault;
+use ferrite_mem::suite::TestKind;
 
 use crate::sweep::SweepStatus;
 
@@ -15,6 +16,7 @@ pub const TEST_LOG: usize = 128;
 pub const PASS_LOG: usize = 64;
 /// Faults kept in full, newest last; every fault is still counted in [`SweepStatus::faults`].
 pub const FAULT_LOG: usize = 64;
+const TEST_KINDS: usize = TestKind::ALL.len();
 
 /// One test of one pass, finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,10 +130,14 @@ impl History {
 
     /// The latest record of each test, in the order they last ran.
     pub fn latest_tests(&self) -> impl Iterator<Item = &TestRecord> {
-        self.tests.iter().enumerate().filter_map(|(i, r)| {
-            let later = self.tests.iter().skip(i + 1).any(|l| l.test == r.test);
-            (!later).then_some(r)
-        })
+        let mut latest: heapless::Vec<&TestRecord, TEST_KINDS> = heapless::Vec::new();
+        for record in self.tests.iter().rev() {
+            if !latest.iter().any(|l| l.test == record.test) && latest.push(record).is_err() {
+                break;
+            }
+        }
+        latest.reverse();
+        latest.into_iter()
     }
 }
 

@@ -147,7 +147,14 @@ function rate(b){return b==null?"-":b>=1e9?(b/1e9).toFixed(2)+" GB/s":(b/1e6).to
 function size(b){return b>=1<<30?(b/(1<<30)).toFixed(b%(1<<30)?1:0)+" GiB":(b/(1<<20)).toFixed(0)+" MiB"}
 function text(id,v){$(id).textContent=v}
 function rows(id,items,f){$(id).innerHTML=items.map(f).join("");$(id+"0").style.display=items.length?"none":"block"}
-let last=null,first=true,paused=false,curPreset=null;
+let last=null,first=true,paused=false,curPreset=null,base=null;
+function clock(){
+  if(!base)return;
+  const dt=performance.now()-base.at;
+  text("elapsed",dur(base.el==null?null:base.el+dt));
+  text("passlbl","Pass "+(base.pass+1)+(base.pel!=null?" - "+dur(base.pel+dt):""));
+  const u=$("up");if(u)u.textContent=dur(base.up+dt);
+}
 function render(d){
   last=Date.now();
   const f=d.faults,bad=f.total>0;
@@ -157,7 +164,6 @@ function render(d){
   st.textContent=bad?f.total+" faults"+(d.paused?", paused":""):d.paused?"paused":"running";
   text("host",d.net.hostname+(d.net.address?"  "+d.net.address.split("/")[0]:""));
   text("preset",d.preset);
-  text("elapsed",dur(d.elapsed_ms));
   text("passes",d.pass.number);
   text("faults",f.total);
   $("ftile").className="tile"+(bad?" bad":"");
@@ -171,7 +177,7 @@ function render(d){
     const x=f.first;
     text("bdetail",x?"first at "+x.addr+" in "+x.test+" on cpu "+x.cpu+": expected "+x.expected+", read "+x.actual+" (bits "+x.flipped+")":"");
   }
-  text("passlbl","Pass "+(d.pass.number+1)+(d.pass.elapsed_ms!=null?" - "+dur(d.pass.elapsed_ms):""));
+  base={at:performance.now(),up:d.uptime_ms,el:d.elapsed_ms,pel:d.pass.elapsed_ms,pass:d.pass.number};
   text("passpct",d.pass.percent+"%");
   $("passbar").style.width=d.pass.percent+"%";
   text("testlbl","Test "+d.test.index+"/"+d.test.count+": "+d.test.name);
@@ -182,7 +188,8 @@ function render(d){
   rows("hist",d.passes.slice().reverse(),p=>"<tr"+(p.faults?' class="bad"':"")+"><td>"+p.pass+'</td><td class="n">'+dur(p.took_ms)+'</td><td class="n">'+p.faults+"</td></tr>");
   rows("procs",d.processors,c=>'<span class="chip'+(c.bsp?" bsp":"")+'" title="package '+c.package+", core "+c.core+", thread "+c.thread+'">cpu'+c.number+" "+c.package+"."+c.core+"."+c.thread+"</span>");
   const n=d.net,k=n.counters;
-  $("net").innerHTML=[["host",n.hostname],["mac",n.mac],["link",n.link_up?"up":"down"],["address",n.address||"-"],["gateway",n.gateway||"-"],["dns",n.dns||"-"],["http",k.http_responses+" responses"],["mdns",k.mdns_queries+" queries, "+k.mdns_replies+" replies"],["frames",k.rx_frames+" rx, "+k.rx_errors+" rx err, "+k.tx_errors+" tx err"],["uptime",dur(d.uptime_ms)]].map(([a,b])=>"<dt>"+a+"</dt><dd>"+esc(b)+"</dd>").join("");
+  $("net").innerHTML=[["host",n.hostname],["mac",n.mac],["link",n.link_up?"up":"down"],["address",n.address||"-"],["gateway",n.gateway||"-"],["dns",n.dns||"-"],["http",k.http_responses+" responses"],["mdns",k.mdns_queries+" queries, "+k.mdns_replies+" replies"],["frames",k.rx_frames+" rx, "+k.rx_errors+" rx err, "+k.tx_errors+" tx err"],["uptime",dur(d.uptime_ms)]].map(([a,b])=>"<dt>"+a+"</dt><dd"+(a=="uptime"?' id="up"':"")+">"+esc(b)+"</dd>").join("");
+  clock();
   const pb=$("pause");pb.textContent=d.paused?"Resume":"Pause";
   if(first){$("preset_sel").value=d.preset;first=false}
 }
@@ -202,13 +209,14 @@ $("cores").onclick=()=>{const v=$("cores_sel").value;post("cores",{cores:v=="cou
 $("quit").onclick=async()=>{if(confirm("Quit ferrite? The memory test stops."))if(await post("quit"))$("gone").className="on"};
 function live(s,t){$("live").className="live "+s;text("livetxt",t||s)}
 let es=null,timer=null;
-function poll(){fetch("/api/status",{cache:"no-store"}).then(r=>r.json()).then(d=>{render(d);live("polling")}).catch(()=>live("offline"))}
+function poll(){fetch("/api/status",{cache:"no-store"}).then(r=>r.json()).then(d=>{render(d);live(es?"live":"polling")}).catch(()=>live("offline"))}
 function connect(){
   es=new EventSource("/api/events");
   es.addEventListener("status",e=>{if(timer){clearInterval(timer);timer=null}render(JSON.parse(e.data));live("live")});
   es.onerror=()=>{es.close();es=null;if(!timer){timer=setInterval(poll,1000);poll()}setTimeout(connect,10000)};
 }
-setInterval(()=>{if(last&&Date.now()-last>4000)live("offline","no updates")},1000);
+setInterval(clock,100);
+setInterval(()=>{if(es&&last&&Date.now()-last>20000)poll()},5000);
 connect();
 </script>
 </body>

@@ -3,17 +3,28 @@
 //! Control requests must say `Content-Type: application/json`. A plain HTML form can only send
 //! form or text bodies, and a cross-origin script that sets this type has to pass a CORS preflight,
 //! which the server never grants, so another site cannot drive the controls from a visitor's browser.
+//!
+//! Every request must also be addressed to this machine: a page on another site whose name has been
+//! re-pointed at our address (DNS rebinding) would otherwise be same-origin with the API and read it
+//! freely. Its requests carry its own name in `Host`, which is refused.
 
+use core::fmt;
+use core::net::Ipv6Addr;
 use core::num::NonZeroUsize;
 
 use ferrite_mem::suite::Preset;
+use smoltcp::wire::Ipv4Address;
 use snafu::Snafu;
 
 use crate::control::Command;
+use crate::mdns::HOST;
 use crate::sweep::CoreChoice;
 
 /// Control bodies longer than this are refused unread.
 pub const BODY_CAP: usize = 256;
+
+/// A rejected preset name as far as it is worth echoing back.
+pub type PresetName = heapless::String<24>;
 
 const PRESETS: [Preset; 4] = [Preset::Quick, Preset::Standard, Preset::Thorough, Preset::Destructive];
 
@@ -63,6 +74,10 @@ pub enum Rejection {
     BadBody { source: BodyError },
     #[snafu(display("too many event streams open, poll /api/status instead"))]
     Busy,
+    #[snafu(display("missing Host header"))]
+    NoHost,
+    #[snafu(display("not served under that name, use {HOST} or this machine's address"))]
+    Misdirected,
 }
 
 impl Rejection {
@@ -72,8 +87,9 @@ impl Rejection {
             Self::MethodNotAllowed { .. } => 405,
             Self::NotJson => 415,
             Self::TooLarge => 413,
-            Self::Unreadable | Self::BadBody { .. } => 400,
+            Self::Unreadable | Self::BadBody { .. } | Self::NoHost => 400,
             Self::Busy => 503,
+            Self::Misdirected => 421,
         }
     }
 }
@@ -92,7 +108,7 @@ pub enum BodyError {
     #[snafu(display("field {field:?} has the wrong type"))]
     WrongType { field: &'static str },
     #[snafu(display("unknown preset {name:?}"))]
-    UnknownPreset { name: alloc::string::String },
+    UnknownPreset { name: PresetName },
     #[snafu(display("cores must be \"all\", \"physical\" or a count of at least 1"))]
     BadCores,
 }
@@ -164,7 +180,73 @@ pub fn preset(name: &str) -> Result<Preset, BodyError> {
     PRESETS
         .into_iter()
         .find(|&p| <&str>::from(p) == name)
-        .ok_or_else(|| BodyError::UnknownPreset { name: alloc::string::String::from(name) })
+        .ok_or_else(|| BodyError::UnknownPreset { name: truncated(name) })
+}
+
+/// The longest prefix of `name` that fits a [`PresetName`].
+fn truncated(name: &str) -> PresetName {
+    let mut kept = PresetName::new();
+    for c in name.chars() {
+        if kept.push(c).is_err() {
+            break;
+        }
+    }
+    kept
+}
+
+/// Whether `host`, the value of a `Host` header, names this machine: its leased `address`, its mDNS
+/// name or loopback (what a forwarded port arrives as), with or without a port.
+pub fn check_host(host: Option<&[u8]>, address: Option<Ipv4Address>) -> Result<(), Rejection> {
+    let host = host.ok_or(Rejection::NoHost)?;
+    if split_port(host).is_some_and(|name| names_us(name, address)) { Ok(()) } else { Err(Rejection::Misdirected) }
+}
+
+/// The host part of `host`, when what follows it (if anything) is a port.
+fn split_port(host: &[u8]) -> Option<&[u8]> {
+    let (name, port) = if host.first() == Some(&b'[') {
+        let (name, rest) = host.split_at(host.iter().position(|&b| b == b']')? + 1);
+        (name, if rest.is_empty() { None } else { Some(rest.strip_prefix(b":")?) })
+    } else {
+        host.iter().rposition(|&b| b == b':').map_or((host, None), |colon| (&host[..colon], Some(&host[colon + 1..])))
+    };
+    let port_ok = port.is_none_or(|port| {
+        port.iter().all(u8::is_ascii_digit) && core::str::from_utf8(port).is_ok_and(|p| p.parse::<u16>().is_ok())
+    });
+    port_ok.then_some(name)
+}
+
+fn names_us(name: &[u8], address: Option<Ipv4Address>) -> bool {
+    if let Some(inner) = name.strip_prefix(b"[").and_then(|n| n.strip_suffix(b"]")) {
+        return core::str::from_utf8(inner)
+            .ok()
+            .and_then(|s| s.parse::<Ipv6Addr>().ok())
+            .is_some_and(|ip| ip.is_loopback());
+    }
+    if let Some(ip) = core::str::from_utf8(name).ok().and_then(|s| s.parse::<Ipv4Address>().ok()) {
+        return ip.is_loopback() || Some(ip) == address;
+    }
+    let name = name.strip_suffix(b".").unwrap_or(name);
+    name.eq_ignore_ascii_case(b"localhost") || display_matches(&HOST, name)
+}
+
+/// Whether `value` displays as `text`, ignoring ASCII case, without building the string.
+fn display_matches(value: &impl fmt::Display, text: &[u8]) -> bool {
+    struct Rest<'a>(&'a [u8]);
+
+    impl fmt::Write for Rest<'_> {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            match self.0.split_at_checked(s.len()) {
+                Some((head, rest)) if head.eq_ignore_ascii_case(s.as_bytes()) => {
+                    self.0 = rest;
+                    Ok(())
+                },
+                _ => Err(fmt::Error),
+            }
+        }
+    }
+
+    let mut rest = Rest(text);
+    fmt::write(&mut rest, format_args!("{value}")).is_ok() && rest.0.is_empty()
 }
 
 /// A value in a flat object; nested values are a syntax error.
@@ -324,7 +406,7 @@ mod tests {
     #[case::restart_empty(Control::Restart, "", BodyError::Syntax { at: 0 })]
     #[case::restart_missing(Control::Restart, "{}", BodyError::Missing { field: "preset" })]
     #[case::restart_number(Control::Restart, r#"{"preset":1}"#, BodyError::WrongType { field: "preset" })]
-    #[case::restart_unknown(Control::Restart, r#"{"preset":"fast"}"#, BodyError::UnknownPreset { name: "fast".into() })]
+    #[case::restart_unknown(Control::Restart, r#"{"preset":"fast"}"#, BodyError::UnknownPreset { name: truncated("fast") })]
     #[case::cores_zero(Control::Cores, r#"{"cores":0}"#, BodyError::BadCores)]
     #[case::cores_word(Control::Cores, r#"{"cores":"half"}"#, BodyError::BadCores)]
     #[case::cores_overflow(Control::Cores, r#"{"cores":99999999999999999999}"#, BodyError::Overflow)]
@@ -335,5 +417,59 @@ mod tests {
     #[case::form_body(Control::Restart, "preset=quick", BodyError::Syntax { at: 0 })]
     fn bad_bodies(#[case] control: Control, #[case] body: &str, #[case] expected: BodyError) {
         check!(command(control, body.as_bytes()) == Err(expected));
+    }
+
+    const LEASE: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
+
+    #[rstest]
+    #[case::address("10.0.2.15")]
+    #[case::address_port("10.0.2.15:80")]
+    #[case::mdns_name("ferrite.local")]
+    #[case::mdns_name_shouting("FERRITE.Local:8080")]
+    #[case::mdns_name_rooted("ferrite.local.")]
+    #[case::loopback("127.0.0.1:8081")]
+    #[case::loopback_range("127.5.5.5")]
+    #[case::localhost("localhost:8081")]
+    #[case::loopback_v6("[::1]:8081")]
+    #[case::loopback_v6_bare("[::1]")]
+    fn hosts_that_are_ours(#[case] host: &str) {
+        check!(check_host(Some(host.as_bytes()), Some(LEASE)) == Ok(()));
+    }
+
+    #[rstest]
+    #[case::other_address("10.0.2.16")]
+    #[case::other_name("evil.example")]
+    #[case::name_as_prefix("ferrite.local.evil.example")]
+    #[case::name_as_suffix("notferrite.local")]
+    #[case::name_with_extra("ferrite.localx")]
+    #[case::address_as_prefix("10.0.2.15.evil.example")]
+    #[case::userinfo("10.0.2.15@evil.example")]
+    #[case::octal_address("010.0.2.15")]
+    #[case::short_loopback("127.1")]
+    #[case::empty("")]
+    #[case::port_only(":80")]
+    #[case::empty_port("10.0.2.15:")]
+    #[case::port_too_big("10.0.2.15:65536")]
+    #[case::port_not_digits("10.0.2.15:8o")]
+    #[case::two_ports("10.0.2.15:80:80")]
+    #[case::other_v6("[::2]")]
+    #[case::unclosed_v6("[::1")]
+    #[case::v6_junk("[::1]x")]
+    fn hosts_that_are_not(#[case] host: &str) {
+        check!(check_host(Some(host.as_bytes()), Some(LEASE)) == Err(Rejection::Misdirected));
+    }
+
+    #[test]
+    fn without_a_lease_only_the_name_and_loopback_pass() {
+        check!(check_host(Some(b"10.0.2.15"), None) == Err(Rejection::Misdirected));
+        check!(check_host(Some(b"ferrite.local"), None) == Ok(()));
+        check!(check_host(Some(b"127.0.0.1"), None) == Ok(()));
+    }
+
+    #[test]
+    fn a_missing_host_is_a_bad_request() {
+        check!(check_host(None, Some(LEASE)) == Err(Rejection::NoHost));
+        check!(Rejection::NoHost.status() == 400);
+        check!(Rejection::Misdirected.status() == 421);
     }
 }
