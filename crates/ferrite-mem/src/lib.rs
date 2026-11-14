@@ -11,7 +11,7 @@
 //!
 //! The [`suite`] builds memtest86+'s tests and ferrite's patterns from these blocks, each as a
 //! state machine stepped a bounded chunk at a time; [`analysis`] tells stuck bits from coupling
-//! in the faults they report.
+//! in the faults they report; [`crew`] runs consecutive split tests on many cores at once.
 
 #![no_std]
 
@@ -22,6 +22,7 @@ extern crate std;
 pub mod analysis;
 mod block;
 mod caps;
+pub mod crew;
 mod fault;
 mod kernels;
 mod ops;

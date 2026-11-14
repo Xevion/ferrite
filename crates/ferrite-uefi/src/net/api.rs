@@ -9,7 +9,7 @@ use ferrite_net::http::{Rejection, Route};
 use snafu::Snafu;
 
 use crate::control::Command;
-use crate::sweep::CoreChoice;
+use ferrite_efi::cores::CoreChoice;
 
 /// A rejected preset name as far as it is worth echoing back.
 pub type PresetName = heapless::String<24>;

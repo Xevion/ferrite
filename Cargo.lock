@@ -963,6 +963,7 @@ dependencies = [
  "assert2",
  "crc32fast",
  "ferrite-hal",
+ "ferrite-mem",
  "ferrite-net",
  "ferrite-wire",
  "ferrite-xhci",

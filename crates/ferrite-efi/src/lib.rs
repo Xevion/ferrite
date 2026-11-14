@@ -9,11 +9,15 @@ extern crate std;
 
 pub mod bootlog;
 pub mod clock;
+pub mod cores;
 pub mod cpu;
+#[cfg(feature = "crew")]
+pub mod crew;
 pub mod dma;
 pub mod entropy;
 pub mod link;
 pub mod logger;
+pub mod memory;
 pub mod mp;
 pub mod paging;
 pub mod pci;

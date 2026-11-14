@@ -12,7 +12,6 @@ pub mod app;
 pub mod backend;
 pub mod control;
 pub mod cores;
-pub mod crew;
 pub mod dash;
 pub mod diag;
 pub mod gfx;

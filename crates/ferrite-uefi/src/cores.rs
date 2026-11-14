@@ -12,10 +12,11 @@ use core::num::NonZeroUsize;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 
-use ferrite_efi::cpu::{FpuControl, VectorState, VectorSupport};
+use ferrite_efi::cpu::{FpuControl, VectorState};
+use ferrite_efi::crew::tier_usable;
 use ferrite_efi::mp::{ApTask, StackUse};
 use ferrite_hal::{Clock, Instant};
-use ferrite_mem::{CpuAddr, Fault, Faults, Inversion, Kernel, Order, Prsg, Region, Tier};
+use ferrite_mem::{CpuAddr, Fault, Faults, Inversion, Kernel, Order, Prsg, Region};
 
 /// The first faults each core keeps with their addresses; the rest are only counted.
 pub const SLOT_FAULTS: usize = 4;
@@ -492,16 +493,6 @@ fn guarded(vector: Option<&VectorState>, kernel: Kernel, f: impl FnOnce()) {
     match vector {
         Some(v) if kernel.tier().is_wide() => v.wide(f),
         _ => f(),
-    }
-}
-
-/// Whether `tier` runs on the calling core as its CR4 and XCR0 are now.
-pub(crate) fn tier_usable(tier: Tier) -> bool {
-    let support = VectorSupport::probe();
-    match tier {
-        Tier::Scalar | Tier::RepString | Tier::Sse2 => true,
-        Tier::Avx2 => support.avx2_usable(),
-        Tier::Avx512 => support.avx512f_usable(),
     }
 }
 

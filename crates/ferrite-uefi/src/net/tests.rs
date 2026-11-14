@@ -20,7 +20,9 @@ use smoltcp::wire::{IpAddress, Ipv4Address, Ipv4Cidr};
 use super::testing::{count, idle_status};
 use super::*;
 use crate::report::{FaultRecord, History, PassRecord};
-use crate::sweep::{CoreChoice, SweepStatus};
+use ferrite_efi::cores::CoreChoice;
+
+use crate::sweep::SweepStatus;
 
 const HOST: &str = "Host: ferrite.local\r\n";
 

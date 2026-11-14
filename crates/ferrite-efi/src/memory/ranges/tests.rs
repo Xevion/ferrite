@@ -47,10 +47,3 @@ fn touching_and_overlapping_ranges_become_one() {
     let free = [range(48, 16), range(16, 16), range(32, 16), range(60, 8)];
     check!(spans(&select(&free, 0)) == [(16, 52)]);
 }
-
-#[test]
-fn the_reserve_is_a_floor_and_a_share_but_at_most_half() {
-    check!(reserve_for(16 << 30) == RESERVE_FLOOR + (512 << 20));
-    check!(reserve_for(100 * MIB) == 50 * MIB);
-    check!(reserve_for(0) == 0);
-}

@@ -4,6 +4,7 @@ use core::num::NonZeroUsize;
 use core::time::Duration;
 
 use assert2::{assert, check};
+use ferrite_efi::memory::Block;
 use ferrite_mem::{Kernel, Regions};
 
 use super::*;
@@ -21,8 +22,13 @@ const CFG: Config = Config {
     ..Config::DEFAULT
 };
 
+/// One host block per entry of `words`.
+fn host_blocks(words: &[usize]) -> Claim {
+    Claim::new(words.iter().map(|&w| Block::heap(w)).collect())
+}
+
 fn sweep_of_words(words: usize) -> Sweep {
-    Sweep::with_buffer(Some(Buffer::host(words)), Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard, None)
+    Sweep::with_buffer(Some(host_blocks(&[words])), Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard, None)
 }
 
 #[test]
@@ -50,7 +56,7 @@ fn tests_and_percent_advance_through_passes() {
 }
 
 fn sweep_of_blocks(words: &[usize]) -> Sweep {
-    Sweep::with_buffer(Some(Buffer::host_blocks(words)), Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard, None)
+    Sweep::with_buffer(Some(host_blocks(words)), Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard, None)
 }
 
 #[test]
@@ -58,7 +64,7 @@ fn sweep_of_blocks(words: &[usize]) -> Sweep {
 fn a_corrupted_word_is_counted_and_reported_with_its_test() {
     let mut sweep = sweep_of_blocks(&[1024, 512, 1024]);
     check!(sweep.status().bytes == 2560 * WORD, "the status counts every block");
-    let block = sweep.run.as_ref().map(|r| r._buffer.blocks[2].base.as_ptr()).unwrap();
+    let block = sweep.run.as_ref().map(|r| r._buffer.blocks()[2].base().as_ptr()).unwrap();
     // Solid bits fills and then verifies, so a word changed between steps reads back wrong.
     while sweep.status().test != "solid bits" {
         sweep.step(64, Instant::default(), None);
@@ -86,7 +92,7 @@ fn a_corrupted_word_is_counted_and_reported_with_its_test() {
 fn a_waiting_suite_does_no_work_until_its_time() {
     let fade = Duration::from_secs(5);
     let mut sweep = Sweep::with_buffer(
-        Some(Buffer::host(1024)),
+        Some(host_blocks(&[1024])),
         Kernels::uniform(Kernel::SCALAR),
         Config { fade, ..CFG },
         Preset::Thorough,
@@ -113,6 +119,14 @@ fn no_buffer_means_no_work() {
     check!(!sweep.has_work(Instant::default()));
     check!(status.bytes == 0);
     check!(status.passes == 0);
+}
+
+#[test]
+fn the_reserve_is_a_floor_and_a_share_but_at_most_half() {
+    const MIB: u64 = 1 << 20;
+    check!(reserve_for(16 << 30) == RESERVE_FLOOR + (512 << 20));
+    check!(reserve_for(100 * MIB) == 50 * MIB);
+    check!(reserve_for(0) == 0);
 }
 
 #[test]
@@ -151,11 +165,11 @@ impl ferrite_hal::Clock for Fixed {
 fn faults_merged_from_several_cores_keep_their_finder_and_classify_together() {
     use ferrite_mem::suite::{Mode, TestKind, shares};
 
-    use crate::crew::{Crew, Job, Seat, Turn};
+    use ferrite_mem::crew::{Crew, Job, Seat, Turn};
 
     let words = 3 * 512;
-    let buffer = Buffer::host(words);
-    let ptr = buffer.blocks[0].base.as_ptr();
+    let buffer = host_blocks(&[words]);
+    let ptr = buffer.blocks()[0].base().as_ptr();
     // SAFETY: the buffer is ours, and is only written below while every job waits at a gate.
     let region = unsafe { Region::from_raw(ptr, words) }.unwrap();
     let mut regions = Regions::from(region);

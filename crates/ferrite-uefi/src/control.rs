@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use ferrite_mem::suite::Preset;
 
-use crate::sweep::CoreChoice;
+use ferrite_efi::cores::CoreChoice;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {

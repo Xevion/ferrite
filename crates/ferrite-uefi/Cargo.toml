@@ -11,7 +11,7 @@ publish.workspace = true
 target = "x86_64-unknown-linux-gnu"
 
 [dependencies]
-ferrite-efi = { workspace = true, features = ["net"] }
+ferrite-efi = { workspace = true, features = ["crew", "net"] }
 ferrite-hal.workspace = true
 ferrite-mem.workspace = true
 ferrite-net.workspace = true

@@ -1,22 +1,15 @@
-//! Which free ranges of the firmware's memory map the sweep takes, and how much it leaves.
+//! Which free ranges of the firmware's memory map a claim takes, and how much it leaves.
 
 use alloc::vec::Vec;
 use core::fmt;
 
 use ferrite_hal::{PAGE_SIZE, PageCount, PhysAddr};
 
-/// Memory below this stays out of the sweep: the firmware keeps its real-mode and legacy areas
+/// Memory below this is never claimed: the firmware keeps its real-mode and legacy areas
 /// there, and the processors' start-up code may sit in it.
 pub const LOW_MEMORY: u64 = 1 << 20;
 /// Free ranges smaller than this are not worth a region of their own.
 pub const MIN_RANGE_BYTES: u64 = 1 << 20;
-/// What the sweep leaves free at least. The firmware allocates after the sweep has taken its share:
-/// the network stack's buffers and the heap, the dashboard, the status page, the fault log and the
-/// Wi-Fi shim's arena for a restart, each from whatever is left.
-pub const RESERVE_FLOOR: u64 = 256 << 20;
-/// The reserve also grows with the machine, by this share of the free memory: the firmware's own
-/// bookkeeping (page tables, the memory map, per-device buffers) scales with installed memory.
-pub const RESERVE_SHARE: u64 = 32;
 
 /// A run of whole free pages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,22 +42,16 @@ impl fmt::Display for Range {
     }
 }
 
-/// How many bytes of `free` memory the sweep leaves: [`RESERVE_FLOOR`] and a share of it, but never
-/// more than half, so a small machine still tests most of what it has.
-#[must_use]
-pub fn reserve_for(free: u64) -> u64 {
-    (RESERVE_FLOOR + free / RESERVE_SHARE).min(free / 2)
-}
-
 /// The free bytes at or above [`LOW_MEMORY`] in `ranges`.
 #[must_use]
 pub fn eligible_bytes(ranges: &[Range]) -> u64 {
     clipped(ranges).iter().map(|r| r.bytes()).sum()
 }
 
-/// The ranges to take out of `free`: every page except the lowest `reserve` bytes at or above
-/// [`LOW_MEMORY`], in pieces of at least [`MIN_RANGE_BYTES`], largest first. Leaving the lowest
-/// addresses keeps what devices with narrow DMA need (the Wi-Fi arena, the firmware's own
+/// The ranges to take out of `free`, largest first.
+///
+/// Every page is taken except the lowest `reserve` bytes at or above [`LOW_MEMORY`], in pieces of
+/// at least [`MIN_RANGE_BYTES`]. Leaving the lowest addresses keeps what devices with narrow DMA need (the Wi-Fi arena, the firmware's own
 /// buffers) available to the allocations that follow the sweep.
 #[must_use]
 pub fn select(free: &[Range], reserve: u64) -> Vec<Range> {

@@ -11,10 +11,13 @@ publish.workspace = true
 panic-handler = []
 # The firmware's Simple Network Protocol as a `ferrite_net::Port`; pulls in smoltcp, so the loader leaves it off.
 net = ["dep:ferrite-net"]
+# Runs `ferrite_mem::crew` jobs on the firmware's APs; pulls in ferrite-mem, so the loader leaves it off.
+crew = ["dep:ferrite-mem"]
 
 [dependencies]
 crc32fast.workspace = true
 ferrite-hal.workspace = true
+ferrite-mem = { workspace = true, optional = true }
 ferrite-net = { workspace = true, optional = true }
 ferrite-wire.workspace = true
 ferrite-xhci.workspace = true

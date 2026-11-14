@@ -9,6 +9,7 @@ use alloc::string::ToString as _;
 use core::time::Duration;
 
 use ferrite_efi::clock::Clock;
+use ferrite_efi::cores::{CoreChoice, Cores};
 use ferrite_efi::cpu::VectorState;
 use ferrite_efi::link::Link as LoaderLink;
 use ferrite_efi::watchdog::Keepalive;
@@ -27,7 +28,7 @@ use crate::diag::Diag;
 use crate::gop::Display;
 use crate::net::Net;
 use crate::report::Snapshot;
-use crate::sweep::{CoreChoice, Cores, Flow, Sweep, SweepStatus};
+use crate::sweep::{Flow, Sweep, SweepStatus};
 use crate::ui::{self, View};
 
 /// The processors split tests run on. Every logical processor: verify-heavy kernels scale up to

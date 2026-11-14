@@ -1,9 +1,9 @@
 use std::vec;
 use std::vec::Vec;
 
+use crate::suite::{Config, Span, TestKind, shares};
+use crate::{BLOCK_BYTES, BLOCK_WORDS, Kernel, Region};
 use assert2::{assert, check};
-use ferrite_mem::suite::{Config, Span, TestKind, shares};
-use ferrite_mem::{BLOCK_BYTES, BLOCK_WORDS, Kernel, Region};
 
 use super::*;
 

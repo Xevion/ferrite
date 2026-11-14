@@ -2,8 +2,8 @@
 //! the memory throughout.
 //!
 //! The BSP gives each core a [`Job`]: the core's [`Test`] state machine for each test of the run
-//! and the regions of its share, so no test state lives on a core's stack. AP jobs start through
-//! `ferrite_efi::mp` once for the whole run; the BSP works its own job a turn at a time between its
+//! and the regions of its share, so no test state lives on a core's stack. An AP runs its job once
+//! for the whole run ([`Job::run_ap`]); the BSP works its own job a turn at a time between its
 //! other duties. The cores meet at the start, at every gated phase boundary ([`Test::gated`]), where
 //! each waits until all have ended the phase, and between tests, where each waits for the BSP to
 //! begin the next round ([`Crew::begin_round`]) or close the crew ([`Crew::close`]), so an AP is
@@ -16,18 +16,35 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 
-use ferrite_efi::cpu::{FpuControl, VectorState};
-use ferrite_efi::mp::{ApTask, StackUse};
 use ferrite_hal::{Clock, Instant};
-use ferrite_mem::suite::{Kernels, Progress, Test};
-use ferrite_mem::{CpuAddr, Fault, Faults, Regions};
 
-use crate::cores::tier_usable;
+use crate::suite::{Kernels, Progress, Test};
+use crate::{CpuAddr, Fault, Faults, Regions, Tier};
 
 /// The first faults each core keeps per test with their addresses; the rest are only counted.
 pub const SEAT_FAULTS: usize = 16;
 /// How long an AP waits at the start for the BSP's release before giving up.
 pub const AP_PATIENCE: Duration = Duration::from_secs(5);
+
+/// Protection for work in the wide vector registers, where the platform needs it.
+pub trait WideGuard {
+    /// Run `f` under the platform's protection for wide-register work.
+    fn wide(&self, f: &mut dyn FnMut());
+}
+
+/// What a core says about itself before it works an AP job.
+pub trait Platform {
+    type Wide: WideGuard;
+
+    /// Whether SSE instructions run on this core.
+    fn sse_ready(&self) -> bool;
+
+    /// Turn the wide vector state on for the job, `None` when it cannot be.
+    fn enable_wide(&self) -> Option<Self::Wide>;
+
+    /// Whether kernels of `tier` run on this core as it is now.
+    fn tier_usable(&self, tier: Tier) -> bool;
+}
 
 /// Why a core did not run its share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -445,7 +462,7 @@ impl<C: Clock> Worker<'_, '_, C> {
 
     /// One bounded step of the job, or a quick look at the gate or the clock while waiting. Wide
     /// kernels run inside `vector`'s guard.
-    pub fn turn(&mut self, vector: Option<&VectorState>) -> Turn {
+    pub fn turn(&mut self, vector: Option<&dyn WideGuard>) -> Turn {
         let job = self.job;
         let (crew, seat) = (job.crew, job.seat);
         if crew.stopped() {
@@ -474,11 +491,12 @@ impl<C: Clock> Worker<'_, '_, C> {
         let mut sink = |f: Fault| seat.record(f);
         let mut faults = Faults::new(seat.room(), &mut sink);
         let kernels = &job.kernels;
-        let mut step = || test.step(regions, kernels, job.budget_bytes, now, &mut faults);
-        let progress = match vector {
-            Some(v) if kernels.is_wide() => v.wide(step),
+        let mut progress = Progress::Running;
+        let mut step = || progress = test.step(regions, kernels, job.budget_bytes, now, &mut faults);
+        match vector {
+            Some(v) if kernels.is_wide() => v.wide(&mut step),
             _ => step(),
-        };
+        }
         let seen = faults.seen();
         if seen > 0 {
             seat.faults.fetch_add(seen, Ordering::AcqRel);
@@ -504,13 +522,13 @@ impl<C: Clock> Worker<'_, '_, C> {
 
     /// Work every round the crew begins, spinning between turns that have nothing to do, until it
     /// is closed or stopped; how the core left its job, which the seat then says too.
-    pub fn serve(&mut self, vector: Option<&VectorState>) -> SeatState {
+    pub fn serve(&mut self, vector: Option<&dyn WideGuard>) -> SeatState {
         let end = self.rounds(vector);
         self.job.seat.set(end);
         end
     }
 
-    fn rounds(&mut self, vector: Option<&VectorState>) -> SeatState {
+    fn rounds(&mut self, vector: Option<&dyn WideGuard>) -> SeatState {
         let crew = self.job.crew;
         let mut seen = 0;
         loop {
@@ -532,20 +550,20 @@ impl<C: Clock> Worker<'_, '_, C> {
     }
 }
 
-// SAFETY: the AP path runs ferrite-mem kernels on its own share, reads CPUID, CR4, XCR0 and the TSC,
-// writes CR4 and XCR0 through VectorState (restored before return) and stores to atomics. No EFI
-// call, allocation, logging or lock; the tests' state lives in the job, so the frames stay small.
-unsafe impl<C: Clock + Sync> ApTask for Job<'_, C> {
-    fn run(&self) {
-        if !FpuControl::read().sse_ready() {
+impl<C: Clock> Job<'_, C> {
+    /// The AP's side of a run: check the core, wait at the start for the BSP's release, then
+    /// [serve](Worker::serve) every round until the crew closes or stops. How it ended is in the
+    /// seat. Allocates nothing and takes no lock, so it may run where only the core's own state is safe.
+    pub fn run_ap<P: Platform>(&self, platform: &P) {
+        if !platform.sse_ready() {
             return self.seat.set(SeatState::Failed(Failure::NoSse));
         }
         let Some(mut worker) = self.take() else {
             return self.seat.set(SeatState::Failed(Failure::Taken));
         };
         let k = self.kernels;
-        let vector = if k.is_wide() { VectorState::enable().ok() } else { None };
-        if ![k.fill, k.verify, k.rmw].iter().all(|k| tier_usable(k.tier())) {
+        let vector = if k.is_wide() { platform.enable_wide() } else { None };
+        if ![k.fill, k.verify, k.rmw].iter().all(|k| platform.tier_usable(k.tier())) {
             return self.seat.set(SeatState::Failed(Failure::Tier));
         }
         self.seat.set(SeatState::Ready);
@@ -555,12 +573,13 @@ unsafe impl<C: Clock + Sync> ApTask for Job<'_, C> {
             Start::TimedOut => return self.seat.set(SeatState::Failed(Failure::StartLine)),
         }
         self.seat.set(SeatState::Running);
-        worker.serve(vector.as_ref());
+        worker.serve(vector.as_ref().map(|v| v as &dyn WideGuard));
         drop(vector);
     }
 
-    fn finish(&self, stack: StackUse) {
-        self.seat.stack_bytes.store(stack.bytes(), Ordering::Relaxed);
+    /// Record how deep the AP's stack went, once its run has ended.
+    pub fn record_stack(&self, bytes: usize) {
+        self.seat.stack_bytes.store(bytes, Ordering::Relaxed);
         self.seat.stack_measured.store(true, Ordering::Release);
     }
 }
