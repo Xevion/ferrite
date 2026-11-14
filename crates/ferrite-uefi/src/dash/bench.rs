@@ -268,7 +268,8 @@ fn profile_full_redraws() {
         stats: &TestStats::default(),
     };
     let (net, net_err) = scenario.net();
-    let frame = Frame { snapshot: &snapshot, net, net_err, now: scenario.now(), time: None };
+    let hardware = Hardware::default();
+    let frame = Frame { snapshot: &snapshot, net, net_err, now: scenario.now(), time: None, hardware: &hardware };
     dash.render(&frame);
     let mut costs = Vec::new();
     for _ in 0..rounds {
@@ -302,6 +303,7 @@ fn profile_a_sweep() {
     let new = new.elapsed();
     let mut twin = Dashboard::new(w, h).expect("dashboard");
     let mut prof = Profile::default();
+    let hardware = Hardware::default();
 
     let mut hashes = String::new();
     let mut costs: Vec<Elapsed> = Vec::new();
@@ -319,7 +321,7 @@ fn profile_a_sweep() {
             stats: &TestStats::default(),
         };
         let (net, net_err) = scenario.net();
-        let frame = Frame { snapshot: &snapshot, net, net_err, now: scenario.now(), time: None };
+        let frame = Frame { snapshot: &snapshot, net, net_err, now: scenario.now(), time: None, hardware: &hardware };
 
         let before = allocations();
         let t = Clock::now();

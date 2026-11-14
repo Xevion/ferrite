@@ -17,6 +17,7 @@ use ferrite_mem::histogram::Histogram;
 use ferrite_config::ClockFormat;
 
 use crate::goal::Goal;
+use crate::hardware::{Facts, Hardware, Vitals};
 use crate::memmap::CellState;
 use crate::pace::{Delta, Outlook, Steadiness, TestStat, TestStats};
 use crate::sweep::Coverage;
@@ -168,12 +169,14 @@ fn render(
 ) -> Vec<Rect> {
     let finished = finished_tests();
     let snapshot = Snapshot { status, history, faults, stats: &finished };
+    let hardware = Hardware::default();
     let frame = Frame {
         snapshot: &snapshot,
         net: Some(net()),
         net_err: None,
         now: START + Duration::from_secs(at),
         time: None,
+        hardware: &hardware,
     };
     dash.render(&frame);
     dash.output().1.to_vec()
@@ -235,12 +238,14 @@ fn the_bar_of_a_short_goal_moves_a_quarter_second_at_a_time_while_the_clocks_wai
     let goal = Goal { passes: None, time: Some(Duration::from_mins(10)), stop_on_fault: false };
     let status = SweepStatus { outlook: Outlook { goal, ..running() }, ..status() };
     let snapshot = Snapshot { status, history: &history, faults: &faults, stats: &finished };
+    let hardware = Hardware::default();
     let at = |millis| Frame {
         snapshot: &snapshot,
         net: Some(net()),
         net_err: None,
         now: START + Duration::from_millis(millis),
         time: None,
+        hardware: &hardware,
     };
     dash.render(&at(500_000));
     dash.render(&at(500_100));
@@ -259,12 +264,14 @@ fn a_clock_tick_allocates_nothing() {
     // The time of day ticks with the run clock, and its end time is on the pass's figure.
     let ends =
         Ends { day: Day::Weekday(jiff::civil::Weekday::Saturday), time: TimeOfDay { hour: 3, minute: 14, second: 0 } };
+    let hardware = Hardware::default();
     let frame = |at: u64| Frame {
         snapshot: &snapshot,
         net: Some(net()),
         net_err: None,
         now: START + Duration::from_secs(at),
         time: Some(at_one_twenty_seven((at % 60) as u8, ends)),
+        hardware: &hardware,
     };
     // The first frames size the scratch buffer and rasterize each digit the clocks show.
     for at in 500..560 {
@@ -361,6 +368,104 @@ fn every_size_renders(
     check!(render(&mut dash, status, &history, &faults, 523) == [dash.canvas.bounds()]);
 }
 
+/// A laptop like the X1 Carbon: a Kaby Lake R with 16 GiB of LPDDR3 in two interleaved channels, running at
+/// 3.4 GHz and 58 C.
+fn laptop() -> Hardware {
+    use ferrite_efi::sensors::{Identity, Signature, TempSource, Vendor};
+    use ferrite_hal::PhysAddr;
+
+    use crate::smbios::{
+        DeviceRange, ErrorCorrection, FormFactor, Handle, MegaTransfers, Memory, MemoryArray, MemoryDevice, MemoryKind,
+        Size,
+    };
+
+    let cpu = Identity {
+        vendor: Vendor::Intel,
+        signature: Signature { family: 6, model: 0x8e, stepping: 10 },
+        brand: "Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz".into(),
+    };
+    let module = |handle: u16, locator: &str| MemoryDevice {
+        handle: Handle(handle),
+        array: Handle(1),
+        locator: Some(locator.into()),
+        bank: Some("BANK 0".into()),
+        size: Size::Bytes(NonZeroU64::new(8 << 30).unwrap()),
+        kind: MemoryKind::Lpddr3,
+        form_factor: FormFactor::Chip,
+        speed: MegaTransfers::new(2133),
+        configured_speed: MegaTransfers::new(2133),
+        manufacturer: Some("Samsung".into()),
+        part_number: Some("K4EBE304EB-EGCF".into()),
+        ranks: Some(1),
+        data_width: Some(64),
+        total_width: Some(64),
+    };
+    let mut memory = Memory {
+        devices: vec![module(0x1100, "ChannelA-DIMM0"), module(0x1101, "ChannelB-DIMM0")],
+        ..Memory::default()
+    };
+    memory.arrays.push(MemoryArray { handle: Handle(1), system: true, correction: ErrorCorrection::None, slots: 2 });
+    for device in [0x1100, 0x1101] {
+        memory.device_ranges.push(DeviceRange {
+            device: Handle(device),
+            array_range: Handle(0x1300),
+            extent: crate::memmap::Extent::new(PhysAddr::new(0), 16 << 30),
+            position: Some(0),
+            depth: Some(0),
+        });
+    }
+    let hardware = Hardware::new(Facts::new(cpu, memory));
+    hardware.set_vitals(Vitals {
+        mhz: Some(3400),
+        measured: true,
+        celsius: Some(58),
+        source: Some(TempSource::IntelPackage),
+    });
+    hardware
+}
+
+#[test]
+fn the_clock_and_temperature_redraw_the_system_section_only_when_a_shown_figure_changes() {
+    let mut dash = Dashboard::new(1280, 800).expect("dashboard");
+    let (history, faults, finished) = (history(), VecDeque::new(), finished_tests());
+    let snapshot = Snapshot { status: status(), history: &history, faults: &faults, stats: &finished };
+    let hardware = laptop();
+    let draw = |dash: &mut Dashboard| {
+        let now = START + Duration::from_secs(500);
+        dash.render(&Frame {
+            snapshot: &snapshot,
+            net: Some(net()),
+            net_err: None,
+            now,
+            time: None,
+            hardware: &hardware,
+        });
+        dash.output().1.to_vec()
+    };
+    draw(&mut dash);
+    check!(draw(&mut dash).is_empty());
+    let shown = hardware.vitals();
+
+    // The same figures from a reading that rounds alike.
+    hardware.set_vitals(Vitals::of(ferrite_efi::sensors::Reading {
+        frequency: Some(ferrite_efi::sensors::Frequency { mhz: 3_398, measured: true }),
+        temperature: Some(ferrite_efi::sensors::Temperature {
+            celsius: 58,
+            source: ferrite_efi::sensors::TempSource::IntelPackage,
+        }),
+    }));
+    check!(hardware.vitals() == shown);
+    check!(draw(&mut dash).is_empty());
+
+    let l = dash.layout;
+    hardware.set_vitals(Vitals { celsius: Some(59), ..shown });
+    let rects = draw(&mut dash);
+    check!(!rects.is_empty() && rects.iter().all(|r| l.system.body.intersect(*r) == *r), "{rects:?}");
+    hardware.set_vitals(Vitals { mhz: Some(3410), ..shown });
+    let rects = draw(&mut dash);
+    check!(!rects.is_empty() && rects.iter().all(|r| l.system.body.intersect(*r) == *r), "{rects:?}");
+}
+
 /// The frames as PNG files in the directory named by `FERRITE_DASH_OUT`, for looking at.
 /// Run with `cargo nextest run -p ferrite-uefi --lib --run-ignored only dash::tests::png_frames`.
 #[test]
@@ -387,7 +492,8 @@ fn png_frames() {
                 time: TimeOfDay { hour: 3, minute: 14, second: 0 },
             };
             let time = Some(at_one_twenty_seven(43, ends));
-            dash.render(&Frame { snapshot: &snapshot, net, net_err, now: at, time });
+            let hardware = laptop();
+            dash.render(&Frame { snapshot: &snapshot, net, net_err, now: at, time, hardware: &hardware });
             let bytes = png(w, h, dash.canvas.bgra());
             std::fs::write(dir.join(std::format!("{scene}-{w}x{h}.png")), bytes).expect("write frame");
         }
@@ -445,7 +551,15 @@ fn a_port_coming_and_going_redraws_the_network_widget_alone() {
     let mut dash = Dashboard::new(1920, 1080).expect("dashboard");
     let (history, faults) = (history(), VecDeque::new());
     let snapshot = Snapshot { status: status(), history: &history, faults: &faults, stats: &TestStats::default() };
-    let frame = |net: Option<NetStatus>, net_err| Frame { snapshot: &snapshot, net, net_err, now: START, time: None };
+    let hardware = Hardware::default();
+    let frame = |net: Option<NetStatus>, net_err| Frame {
+        snapshot: &snapshot,
+        net,
+        net_err,
+        now: START,
+        time: None,
+        hardware: &hardware,
+    };
 
     dash.render(&frame(Some(net()), None));
     let mut two = net();
@@ -480,9 +594,17 @@ fn the_time_of_day_and_the_end_time_redraw_only_the_title_bar() {
     let mut dash = Dashboard::new(1280, 800).expect("dashboard");
     let (history, faults, finished) = (history(), VecDeque::new(), finished_tests());
     let snapshot = Snapshot { status: status(), history: &history, faults: &faults, stats: &finished };
+    let hardware = Hardware::default();
     let draw = |dash: &mut Dashboard, time: TimeLine| {
         let now = START + Duration::from_secs(500);
-        dash.render(&Frame { snapshot: &snapshot, net: Some(net()), net_err: None, now, time: Some(time) });
+        dash.render(&Frame {
+            snapshot: &snapshot,
+            net: Some(net()),
+            net_err: None,
+            now,
+            time: Some(time),
+            hardware: &hardware,
+        });
         dash.output().1.to_vec()
     };
     draw(&mut dash, at_one_twenty_seven(43, ends(3)));

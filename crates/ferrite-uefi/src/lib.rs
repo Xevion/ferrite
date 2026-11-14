@@ -17,11 +17,13 @@ pub mod diag;
 pub mod gfx;
 pub mod goal;
 pub mod gop;
+pub mod hardware;
 pub mod machine;
 pub mod memmap;
 pub mod net;
 pub mod pace;
 pub mod report;
+pub mod smbios;
 pub mod sweep;
 #[cfg(test)]
 mod testing;

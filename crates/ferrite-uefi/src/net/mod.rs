@@ -34,6 +34,7 @@ use self::api::{BodyError, Control};
 use self::json::{StatusDoc, ToJson as _};
 use self::wifi::{Wifi, WifiKey, WifiView};
 use crate::control::{Command, Commands};
+use crate::hardware::{Hardware, Vitals};
 use crate::report::Snapshot;
 use crate::sweep::SweepStatus;
 use crate::wall::Wall;
@@ -68,6 +69,8 @@ pub struct Key {
     wifi: WifiKey,
     /// Moves whenever a finished test's measurements do.
     stats: u64,
+    /// The clock and temperature as shown, which move without the sweep.
+    vitals: Vitals,
 }
 
 /// The status page, its API and the run's controls.
@@ -75,11 +78,19 @@ pub struct Console {
     wifi: WifiView,
     /// The clock the document's times come from.
     wall: Rc<Wall>,
+    /// The machine the document describes.
+    hardware: Rc<Hardware>,
 }
 
 impl Console {
-    pub const fn new(wifi: WifiView, wall: Rc<Wall>) -> Self {
-        Self { wifi, wall }
+    pub fn new(wifi: WifiView, wall: Rc<Wall>) -> Self {
+        Self { wifi, wall, hardware: Rc::new(Hardware::default()) }
+    }
+
+    /// The same console describing `hardware`, which the loop that samples it keeps current.
+    #[must_use]
+    pub fn describing(self, hardware: Rc<Hardware>) -> Self {
+        Self { hardware, ..self }
     }
 }
 
@@ -113,11 +124,12 @@ impl Site for Console {
             faults: snapshot.faults.len(),
             wifi: self.wifi.key(),
             stats: snapshot.stats.revision,
+            vitals: self.hardware.vitals(),
         }
     }
 
     fn render(&self, snapshot: &Snapshot<'_>, net: &NetStatus, now: Instant, out: &mut String) {
-        StatusDoc { snapshot, net, wifi: &self.wifi, now, wall: &self.wall }.to_json(out);
+        StatusDoc { snapshot, net, wifi: &self.wifi, now, wall: &self.wall, hardware: &self.hardware }.to_json(out);
     }
 }
 
@@ -135,19 +147,20 @@ pub struct Net {
 impl Net {
     /// Open every wired NIC the firmware drives as a port, each with its own stack, and start the
     /// Wi-Fi station to join the `networks`, whose link joins as one more port once it is up. Push
-    /// notifications go as `notify` says, and `wall` is kept right over the network as `time` says. Call
-    /// before the sweep claims memory.
+    /// notifications go as `notify` says, `wall` is kept right over the network as `time` says, and the
+    /// status page describes `hardware`. Call before the sweep claims memory.
     pub fn setup(
         clock: Clock,
         networks: Option<Credentials>,
         notify: Option<NotifyConfig>,
         time: &TimeSettings,
         wall: Rc<Wall>,
+        hardware: Rc<Hardware>,
     ) -> Self {
         let now = clock.now();
         let wifi = Wifi::start(clock, networks);
         let mut net = Self {
-            network: Network::new(Console::new(wifi.view(), Rc::clone(&wall))).timed(clock),
+            network: Network::new(Console::new(wifi.view(), Rc::clone(&wall)).describing(hardware)).timed(clock),
             failure: None,
             wifi,
             wifi_port: None,

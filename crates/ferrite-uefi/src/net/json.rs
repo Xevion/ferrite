@@ -9,6 +9,7 @@ use alloc::collections::VecDeque;
 use core::fmt::{self, Write as _};
 use core::time::Duration;
 
+use ferrite_efi::sensors::TempSource;
 use ferrite_hal::Instant;
 use ferrite_mem::Fault;
 use ferrite_mem::analysis::Classification;
@@ -20,8 +21,10 @@ use ferrite_net::{NetStatus, PortStatus};
 
 use super::wifi::{WifiFacts, WifiView};
 use crate::goal::Goal;
+use crate::hardware::{Hardware, Layout};
 use crate::pace::{Delta, Outlook, Steadiness, TestStat};
 use crate::report::{CpuInfo, FaultRecord, PassRecord, Snapshot, TestRecord};
+use crate::smbios::{MegaTransfers, Memory, MemoryDevice, Size};
 use crate::sweep::{MapView, SweepStatus};
 use crate::wall::Wall;
 
@@ -265,7 +268,7 @@ macro_rules! json_integer {
     )*};
 }
 
-json_integer!(i16, u16, u32, u64, u128, usize);
+json_integer!(i16, u8, u16, u32, u64, u128, usize);
 
 impl ToJson for bool {
     fn to_json(&self, out: &mut dyn fmt::Write) {
@@ -447,6 +450,112 @@ impl ToJson for NetDoc<'_> {
     }
 }
 
+/// One memory slot: what the table says of it and, when it has one, the range type 20 maps to it.
+struct ModuleDoc<'a> {
+    device: &'a MemoryDevice,
+    memory: &'a Memory,
+}
+
+impl ToJson for ModuleDoc<'_> {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        let d = self.device;
+        let size = match d.size {
+            Size::Empty => Some(0),
+            Size::Unknown => None,
+            Size::Bytes(bytes) => Some(bytes.get()),
+        };
+        let range = self.memory.range_of(d.handle).map(|r| {
+            Section(move |o: &mut Object<'_>| {
+                o.field("start", &Hex(r.extent.start().get()))
+                    .field("bytes", &(r.extent.end() - r.extent.start().get()));
+            })
+        });
+        Object::new(out)
+            .field("locator", &d.locator.as_deref())
+            .field("bank", &d.bank.as_deref())
+            .field("size_bytes", &size)
+            .field("type", &Text(d.kind))
+            .field("form_factor", &Text(d.form_factor))
+            .field("speed_mts", &d.speed.map(MegaTransfers::get))
+            .field("configured_mts", &d.configured_speed.map(MegaTransfers::get))
+            .field("manufacturer", &d.manufacturer.as_deref())
+            .field("part", &d.part_number.as_deref())
+            .field("ranks", &d.ranks)
+            .field("ecc", &d.has_check_bits())
+            .field("range", &range)
+            .finish();
+    }
+}
+
+impl ToJson for Layout {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        let mut o = Object::new(out);
+        match self {
+            Self::Unknown => o.field("kind", "unknown"),
+            Self::Single => o.field("kind", "single"),
+            Self::Interleaved { ways } => o.field("kind", "interleaved").field("ways", ways),
+            Self::Bands(bands) => o.field("kind", "bands").field(
+                "bands",
+                &Each(|| {
+                    bands.iter().map(|b| {
+                        Section(move |o: &mut Object<'_>| {
+                            o.field("label", b.label.as_str())
+                                .field("start", &Hex(b.extent.start().get()))
+                                .field("bytes", &(b.extent.end() - b.extent.start().get()));
+                        })
+                    })
+                }),
+            ),
+        };
+        o.finish();
+    }
+}
+
+/// The `machine` object: the CPU, its clock and temperature now (null when they cannot be read), the
+/// platform's ECC claim and the memory modules. The clock is in tens of MHz and the temperature in
+/// whole degrees, as the screen shows them.
+struct MachineDoc<'a> {
+    hardware: &'a Hardware,
+}
+
+impl ToJson for MachineDoc<'_> {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        let (facts, live) = (&self.hardware.facts, self.hardware.vitals());
+        let cpu = &facts.cpu;
+        let source = live.source.map(|source| match source {
+            TempSource::IntelPackage => "intel-package",
+            TempSource::IntelCore => "intel-core",
+            TempSource::AmdSmn => "amd-smn",
+        });
+        Object::new(out)
+            .field(
+                "cpu",
+                &Section(|o: &mut Object<'_>| {
+                    o.field("brand", cpu.brand.as_str())
+                        .field("short", facts.cpu_short.as_str())
+                        .field("vendor", &Text(cpu.vendor))
+                        .field("family", &cpu.signature.family)
+                        .field("model", &cpu.signature.model)
+                        .field("stepping", &cpu.signature.stepping);
+                }),
+            )
+            .field("clock_mhz", &live.mhz)
+            .field("clock_measured", &live.mhz.map(|_| live.measured))
+            .field("temp_c", &live.celsius)
+            .field("temp_source", &source)
+            .field("ecc", &facts.ecc_claim().map(Text))
+            .field("corrects_errors", &facts.corrects_errors())
+            .field("modules_text", facts.modules.as_str())
+            .field("layout", &facts.layout)
+            .field("layout_caption", &facts.caption.as_deref())
+            .field(
+                "modules",
+                &Each(|| facts.memory.devices.iter().map(|device| ModuleDoc { device, memory: &facts.memory })),
+            )
+            .finish();
+    }
+}
+
 /// The run as of `now`, with the network it is served over.
 pub struct StatusDoc<'a> {
     pub snapshot: &'a Snapshot<'a>,
@@ -454,6 +563,7 @@ pub struct StatusDoc<'a> {
     pub wifi: &'a WifiView,
     pub now: Instant,
     pub wall: &'a Wall,
+    pub hardware: &'a Hardware,
 }
 
 impl StatusDoc<'_> {
@@ -540,6 +650,7 @@ impl ToJson for StatusDoc<'_> {
             )
             .field("passes", &history.passes)
             .field("processors", history.cpus.as_slice())
+            .field("machine", &MachineDoc { hardware: self.hardware })
             .field("net", &NetDoc { net: self.net, wifi: self.wifi })
             .finish();
     }
@@ -565,7 +676,8 @@ mod tests {
 
     use assert2::check;
     use ferrite_config::{ClockFormat, zone_named};
-    use ferrite_hal::{UnixTime, WallClock};
+    use ferrite_efi::sensors::{Frequency, Identity, Reading, Signature, Temperature, Vendor};
+    use ferrite_hal::{PhysAddr, UnixTime, WallClock};
     use ferrite_mem::CpuAddr;
     use ferrite_mem::histogram::Histogram;
     use ferrite_mem::suite::{Mode, Preset};
@@ -573,9 +685,11 @@ mod tests {
     use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
     use super::*;
-    use crate::memmap::CellState;
+    use crate::hardware::{Facts, Vitals};
+    use crate::memmap::{CellState, Extent};
     use crate::pace::TestStats;
     use crate::report::History;
+    use crate::smbios::{DeviceRange, ErrorCorrection, FormFactor, Handle, MemoryArray, MemoryKind};
 
     fn at(ms: u64) -> Instant {
         Instant::from_epoch(Duration::from_millis(ms))
@@ -710,7 +824,9 @@ mod tests {
         // The RTC said 1794646670 s at the start, so 6.5 s in the time is 1794646676500 ms.
         let seed = WallClock::from_rtc(at(0), UnixTime::from_epoch(Duration::from_secs(1_794_646_670)));
         let wall = Wall::new(Some(seed), zone_named("UTC").unwrap(), ClockFormat::Twelve);
-        StatusDoc { snapshot: &snapshot, net: &net, wifi: &wifi, now: at(6_500), wall: &wall }.to_json(&mut out);
+        let hardware = Hardware::default();
+        StatusDoc { snapshot: &snapshot, net: &net, wifi: &wifi, now: at(6_500), wall: &wall, hardware: &hardware }
+            .to_json(&mut out);
         let expected = concat!(
             r#"{"version":""#,
             env!("CARGO_PKG_VERSION"),
@@ -742,6 +858,9 @@ mod tests {
             r#","spread_basis_points":0,"unsteady":false,"faults":0}],"#,
             r#""passes":[{"pass":0,"took_ms":3000,"faults":1}],"#,
             r#""processors":[{"number":0,"package":0,"core":0,"thread":0,"bsp":true}],"#,
+            r#""machine":{"cpu":{"brand":"","short":"","vendor":"","family":0,"model":0,"stepping":0},"#,
+            r#""clock_mhz":null,"clock_measured":null,"temp_c":null,"temp_source":null,"ecc":null,"#,
+            r#""corrects_errors":null,"modules_text":"","layout":{"kind":"unknown"},"layout_caption":null,"modules":[]},"#,
             r#""net":{"hostname":"ferrite.local","ports":[{"medium":"ethernet","mac":"52:54:00:12:34:56","#,
             r#""link_up":true,"address":"10.0.2.15/24","gateway":"10.0.2.2","dns":null,"#,
             r#""counters":{"mdns_queries":0,"mdns_replies":0,"mdns_malformed":0,"http_responses":7,"#,
@@ -750,6 +869,75 @@ mod tests {
         )
         .replace("@MEDIAN@", &std::format!("{}", steadiness.median))
         .replace("@PENDING@", &"p".repeat(crate::dash::CELLS - 8));
+        check!(out == expected);
+    }
+
+    #[test]
+    fn the_machine_object_describes_the_cpu_the_modules_and_the_sensors() {
+        let cpu = Identity {
+            vendor: Vendor::Intel,
+            signature: Signature { family: 6, model: 0x8e, stepping: 10 },
+            brand: "Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz".into(),
+        };
+        let module = |handle: u16, locator: &str| MemoryDevice {
+            handle: Handle(handle),
+            array: Handle(1),
+            locator: Some(locator.into()),
+            bank: None,
+            size: Size::Bytes(NonZeroU64::new(8 << 30).unwrap()),
+            kind: MemoryKind::Lpddr3,
+            form_factor: FormFactor::Chip,
+            speed: MegaTransfers::new(2133),
+            configured_speed: MegaTransfers::new(2133),
+            manufacturer: Some("Samsung".into()),
+            part_number: Some("K4E".into()),
+            ranks: Some(1),
+            data_width: Some(64),
+            total_width: Some(72),
+        };
+        let mut empty = module(3, "ChannelC");
+        empty.size = Size::Empty;
+        let mut memory =
+            Memory { devices: vec![module(1, "ChannelA"), module(2, "ChannelB"), empty], ..Memory::default() };
+        memory.arrays.push(MemoryArray {
+            handle: Handle(1),
+            system: true,
+            correction: ErrorCorrection::SingleBitEcc,
+            slots: 3,
+        });
+        for device in [1, 2] {
+            memory.device_ranges.push(DeviceRange {
+                device: Handle(device),
+                array_range: Handle(9),
+                extent: Extent::new(PhysAddr::new(0), 16 << 30),
+                position: Some(0),
+                depth: Some(1),
+            });
+        }
+        let hardware = Hardware::new(Facts::new(cpu, memory));
+        hardware.set_vitals(Vitals::of(Reading {
+            frequency: Some(Frequency { mhz: 3_396, measured: true }),
+            temperature: Some(Temperature { celsius: 58, source: TempSource::IntelPackage }),
+        }));
+        let mut out = String::new();
+        MachineDoc { hardware: &hardware }.to_json(&mut out);
+        let expected = concat!(
+            r#"{"cpu":{"brand":"Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz","short":"Core i7-8650U","#,
+            r#""vendor":"GenuineIntel","family":6,"model":142,"stepping":10},"#,
+            r#""clock_mhz":3400,"clock_measured":true,"temp_c":58,"temp_source":"intel-package","#,
+            r#""ecc":"single-bit ECC","corrects_errors":true,"modules_text":"2 x 8 GiB LPDDR3-2133, 1 empty","#,
+            r#""layout":{"kind":"interleaved","ways":2},"layout_caption":"2 channels interleaved","#,
+            r#""modules":["#,
+            r#"{"locator":"ChannelA","bank":null,"size_bytes":8589934592,"type":"LPDDR3","form_factor":"chip","#,
+            r#""speed_mts":2133,"configured_mts":2133,"manufacturer":"Samsung","part":"K4E","ranks":1,"ecc":true,"#,
+            r#""range":{"start":"0x0","bytes":17179869184}},"#,
+            r#"{"locator":"ChannelB","bank":null,"size_bytes":8589934592,"type":"LPDDR3","form_factor":"chip","#,
+            r#""speed_mts":2133,"configured_mts":2133,"manufacturer":"Samsung","part":"K4E","ranks":1,"ecc":true,"#,
+            r#""range":{"start":"0x0","bytes":17179869184}},"#,
+            r#"{"locator":"ChannelC","bank":null,"size_bytes":0,"type":"LPDDR3","form_factor":"chip","#,
+            r#""speed_mts":2133,"configured_mts":2133,"manufacturer":"Samsung","part":"K4E","ranks":1,"ecc":true,"#,
+            r#""range":null}]}"#
+        );
         check!(out == expected);
     }
 

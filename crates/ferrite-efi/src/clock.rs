@@ -28,6 +28,12 @@ impl Clock {
         let per_ms = (t1.wrapping_sub(t0) / CALIBRATION.as_millis() as u64).max(1);
         Self { start: t1, per_ms }
     }
+
+    /// TSC ticks in a second, as the start-up calibration measured them.
+    #[must_use]
+    pub const fn tsc_hz(&self) -> u64 {
+        self.per_ms.saturating_mul(1000)
+    }
 }
 
 /// Instants count from [`Clock::start`].

@@ -24,6 +24,7 @@ pub mod mp;
 pub mod paging;
 pub mod pci;
 pub mod rtc;
+pub mod sensors;
 pub mod session;
 #[cfg(feature = "net")]
 pub mod snp;

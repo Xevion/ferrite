@@ -22,7 +22,7 @@ use crate::gfx::text::{Case, Face, Fonts, Style};
 use crate::gfx::{Canvas, Rect, Rgb, px, whole_px};
 use crate::memmap::CellState;
 use crate::pace::Steadiness;
-use crate::report::{CpuInfo, FaultRecord};
+use crate::report::FaultRecord;
 
 /// The placeholder for what this build cannot read from the machine.
 const NONE: &str = "\u{2014}";
@@ -346,13 +346,15 @@ pub fn tabs(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
 pub fn system(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let s = f.status();
     let list = &f.snapshot.history.cpus;
-    let cpu: String<48> = if list.is_empty() {
-        fixed(format_args!("1 logical"))
-    } else {
-        let first_of =
-            |i: usize, same: fn(&CpuInfo, &CpuInfo) -> bool| !list[..i].iter().any(|before| same(before, &list[i]));
-        let cores = (0..list.len()).filter(|&i| first_of(i, |a, b| (a.package, a.core) == (b.package, b.core))).count();
-        fixed(format_args!("{} logical {SEPARATOR} {cores} core{}", list.len(), plural(cores)))
+    let facts = &f.hardware.facts;
+    let cores = (0..list.len())
+        .filter(|&i| !list[..i].iter().any(|before| (before.package, before.core) == (list[i].package, list[i].core)))
+        .count();
+    let cpu: String<48> = match (facts.cpu_short.as_str(), list.is_empty()) {
+        ("", true) => fixed(format_args!("1 logical")),
+        ("", false) => fixed(format_args!("{} logical {SEPARATOR} {cores} core{}", list.len(), plural(cores))),
+        (name, true) => fixed(format_args!("{name}")),
+        (name, false) => fixed(format_args!("{name} {SEPARATOR} {cores}C/{}T", list.len())),
     };
     let memory: String<48> = if s.coverage.free > 0 {
         let (tested, free) =
@@ -371,6 +373,21 @@ pub fn system(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
         (0, n) => fixed(format_args!("learning, 0 of {n}")),
         (known, n) => fixed(format_args!("{known} of {n} known")),
     };
+    let modules: String<48> = if facts.modules.is_empty() {
+        fixed(format_args!("{NONE}"))
+    } else {
+        let ecc = if facts.corrects_errors() == Some(true) { " ECC" } else { "" };
+        fixed(format_args!("{}{ecc}", facts.modules))
+    };
+    let live = f.hardware.vitals();
+    let clock: String<32> = match (live.mhz, live.celsius) {
+        (None, None) => fixed(format_args!("{NONE}")),
+        (None, Some(c)) => fixed(format_args!("{c} C")),
+        (Some(mhz), None) => fixed(format_args!("{}{mhz} MHz", if live.measured { "" } else { "base " })),
+        (Some(mhz), Some(c)) => {
+            fixed(format_args!("{}{mhz} MHz {SEPARATOR} {c} C", if live.measured { "" } else { "base " }))
+        },
+    };
     p.pairs(
         r,
         &[
@@ -378,9 +395,10 @@ pub fn system(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
             ("Memory", &memory),
             ("Preset", preset),
             ("Tier", s.tier),
-            ("Modules", NONE),
+            ("Modules", &modules),
             ("Timings", &timings),
             ("Bandwidth", &bandwidth),
+            ("Clock", &clock),
         ],
     );
 }
@@ -650,13 +668,22 @@ pub fn map(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     p.text(px(r.x), base, "0", small);
     if map.top > 0 {
         let top = usize::try_from(map.top).unwrap_or(usize::MAX);
-        p.right(px(r.right()), base, &format::size(top), small);
+        let size_w = p.right(px(r.right()), base, &format::size(top), small);
         let each = fixed::<32>(format_args!(
             "1 cell = {}",
             format::size(usize::try_from(map.cell_bytes()).unwrap_or(usize::MAX))
         ));
         let w = p.measure(&each, small);
-        p.text(px(r.x) + (px(r.w) - w) / 2.0, base, &each, small);
+        if let Some(caption) = f.hardware.facts.caption.as_deref() {
+            // The cell size moves up against the map's size to leave the caption the room after the 0.
+            let gap = l.m(10.0);
+            let after_zero = px(r.x) + p.measure("0", small) + gap;
+            let each_x = px(r.right()) - size_w - gap - w;
+            p.text(each_x, base, &each, small);
+            p.fit(after_zero, base, caption, small, each_x - gap - after_zero);
+        } else {
+            p.text(px(r.x) + (px(r.w) - w) / 2.0, base, &each, small);
+        }
     } else {
         p.right(px(r.right()), base, NONE, small);
     }

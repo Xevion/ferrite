@@ -29,6 +29,7 @@ use self::widgets::Pen;
 use crate::gfx::text::{FontError, Fonts};
 use crate::gfx::{Canvas, DirtyRects, Recording, Rect};
 use crate::goal::Goal;
+use crate::hardware::{Hardware, Vitals};
 use crate::net::NoNetwork;
 use crate::pace::{Delta, Overall};
 use crate::report::{FaultRecord, Snapshot};
@@ -57,6 +58,8 @@ pub struct Frame<'a> {
     pub now: Instant,
     /// The time of day and when the times left end, when the clock has a source.
     pub time: Option<TimeLine>,
+    /// The machine: what it is made of, and its clock and temperature now.
+    pub hardware: &'a Hardware,
 }
 
 impl Frame<'_> {
@@ -108,7 +111,7 @@ struct Setup {
 /// The running test's figures that move: its rate now, its average and the average's change from
 /// the saved time.
 type Live = (Option<u64>, Option<u64>, Option<Delta>);
-type SystemKey = (Preset, &'static str, usize, usize, Mode, usize, Coverage, (usize, usize), Option<u64>);
+type SystemKey = (Preset, &'static str, usize, usize, Mode, usize, Coverage, (usize, usize), Option<u64>, Vitals);
 type PassKey = (u64, u64, bool, Option<Eta>, BasisPoints, (Option<BasisPoints>, Option<Eta>, u64));
 type DetailKey = (Mode, usize, usize, u64, Live, Position, Option<u16>);
 type TestsKey = (u64, (usize, usize), u64, bool, u64, Live);
@@ -151,6 +154,7 @@ impl Keys {
                 s.coverage,
                 s.outlook.known,
                 s.outlook.bandwidth,
+                f.hardware.vitals(),
             ),
             pass: (
                 s.passes,

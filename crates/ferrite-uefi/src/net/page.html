@@ -136,9 +136,9 @@ label.d{display:inline-flex;align-items:center;gap:4px}
 <div class="kv">
 <span class="d">CPU</span><span id="cpu">-</span><span class="d">Memory</span><span id="mem">-</span>
 <span class="d">Preset</span><span id="preset">-</span><span class="d">Tier</span><span id="tier">-</span>
-<span class="d">Mode</span><span id="mode">-</span><span class="d">Clock</span><span class="d">&mdash;</span>
-<span class="d">Modules</span><span class="d">&mdash;</span><span class="d">Timings</span><span id="timings">&mdash;</span>
-<span class="d">Bandwidth</span><span id="bandwidth">&mdash;</span>
+<span class="d">Mode</span><span id="mode">-</span><span class="d">Clock</span><span id="cpuclock">&mdash;</span>
+<span class="d">Modules</span><span id="modules">&mdash;</span><span class="d">Timings</span><span id="timings">&mdash;</span>
+<span class="d">Bandwidth</span><span id="bandwidth">&mdash;</span><span class="d">ECC</span><span id="ecc">&mdash;</span>
 </div>
 <div class="chips" id="procs"></div>
 </section>
@@ -167,6 +167,7 @@ label.d{display:inline-flex;align-items:center;gap:4px}
 <section>
 <h2>Memory map</h2>
 <div class="mapaxis"><span>0</span><span id="cell">-</span><span id="msize">-</span></div>
+<div class="d" id="maplayout" style="display:none"></div>
 <div id="map"></div>
 <div class="legend" id="legend"><span data-s="t"><i class="t"></i>Tested</span><span data-s="a"><i class="a"></i>Active</span><span data-s="p"><i></i>Pending</span><span data-s="h"><i class="h"></i>Holding</span><span data-s="x"><i class="x"></i>Fault</span><span data-s="f"><i class="f"></i>Firmware</span><span data-s="n"><i class="n"></i>No RAM</span></div>
 </section>
@@ -304,7 +305,16 @@ function render(d){
   const ppct=Math.floor(d.progress.pass_basis_points/100);
   document.title="ferrite "+(bad?"! ":"")+ppct+"%";
   const procs=d.processors||[],cores=new Set(procs.map(c=>c.package+"."+c.core)).size;
-  text("cpu",(procs.length||d.cpus)+" logical"+(procs.length?DOT+cores+" core"+(cores==1?"":"s"):""));
+  const m=d.machine;
+  text("cpu",(m.cpu.short?m.cpu.short+DOT:"")+(procs.length||d.cpus)+" logical"+(procs.length?DOT+cores+" core"+(cores==1?"":"s"):""));
+  $("cpu").title=m.cpu.brand+(m.cpu.vendor?" ("+m.cpu.vendor+" family "+m.cpu.family+" model 0x"+m.cpu.model.toString(16)+" stepping "+m.cpu.stepping+")":"");
+  text("cpuclock",m.clock_mhz==null&&m.temp_c==null?DASH:[m.clock_mhz==null?"":(m.clock_measured?"":"base ")+m.clock_mhz+" MHz",m.temp_c==null?"":m.temp_c+" C"].filter(Boolean).join(DOT));
+  text("modules",m.modules_text||DASH);
+  $("modules").title=m.modules.map(x=>[x.locator||"slot",x.size_bytes==null?"unknown size":x.size_bytes?size(x.size_bytes):"empty",x.size_bytes?x.type+(x.configured_mts||x.speed_mts?"-"+(x.configured_mts||x.speed_mts):""):"",x.manufacturer,x.part].filter(Boolean).join(" ")).join("\n");
+  text("ecc",m.ecc==null?DASH:m.ecc);
+  const lay=m.layout,ml=$("maplayout");
+  ml.style.display=m.layout_caption?"":"none";
+  if(m.layout_caption){ml.textContent=m.layout_caption;ml.title=lay.kind=="bands"?lay.bands.map(b=>b.label+" "+hx(b.start)+" +"+size(b.bytes)).join("\n"):""}
   var c=d.coverage;
   text("mem",size(d.bytes)+" under test"+(c&&c.free?" · "+Math.floor(c.tested*100/c.free)+"% of free":""));
   text("preset",d.preset);text("tier",d.tier);

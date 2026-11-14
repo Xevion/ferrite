@@ -14,6 +14,7 @@ use ferrite_efi::config;
 use ferrite_efi::cores::{CoreChoice, Cores};
 use ferrite_efi::cpu::VectorState;
 use ferrite_efi::link::Link as LoaderLink;
+use ferrite_efi::sensors::Sensors;
 use ferrite_efi::{rtc, watchdog::Keepalive};
 use ferrite_hal::{Clock as _, Instant, UnixTime, WallClock};
 use ferrite_mem::Caps;
@@ -29,6 +30,7 @@ use crate::dash::{Dashboard, Frame};
 use crate::diag::Diag;
 use crate::goal::Goal;
 use crate::gop::Display;
+use crate::hardware::{Facts, Hardware, Vitals};
 use crate::net::Net;
 use crate::net::notify::{self, Watch};
 use crate::report::Snapshot;
@@ -58,6 +60,8 @@ const NOTIFY_FLUSH: Duration = Duration::from_secs(4);
 const NOTIFY_STEP: Duration = Duration::from_millis(5);
 /// How often draw times are summarised at debug.
 const DRAW_LOG_EVERY: Duration = Duration::from_secs(30);
+/// How often the CPU's clock and temperature are read. The clock is the average over this interval.
+const SENSOR_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Where frames go: the dashboard on the GOP framebuffer, or a short status screen on the text
 /// console of a machine without GOP.
@@ -195,6 +199,10 @@ struct Desk<'a> {
     commands: Commands,
     /// The goal was met and the run is being ended for it.
     goal_met: bool,
+    /// What the machine is, and its clock and temperature as `sensors` last read them.
+    hardware: Rc<Hardware>,
+    sensors: Sensors,
+    next_sensor_read: Instant,
 }
 
 impl<'a> App<'a> {
@@ -212,7 +220,10 @@ impl<'a> App<'a> {
         log::info!("run: goal {goal}");
         let time = settings.time.unwrap_or_default();
         let wall = Rc::new(Wall::new(rtc_clock(&clock), time.zone.clone(), time.clock));
-        let net = Net::setup(clock, settings.credentials, settings.notify, &time, Rc::clone(&wall));
+        let sensors = Sensors::probe(&clock);
+        let hardware = Rc::new(Hardware::new(Facts::detect(sensors.identity().clone())));
+        let net =
+            Net::setup(clock, settings.credentials, settings.notify, &time, Rc::clone(&wall), Rc::clone(&hardware));
         let waiter = Waiter::new(input).inspect_err(|e| log::warn!("ui: no wait events, stalling instead: {e}")).ok();
         let loader = LoaderLink::locate();
         let watchdog = loader.map(|_| Keepalive::new(WATCHDOG, WATCHDOG_REARM, clock.now()));
@@ -234,6 +245,9 @@ impl<'a> App<'a> {
             watchdog,
             commands: Commands::default(),
             goal_met: false,
+            hardware,
+            sensors,
+            next_sensor_read: Instant::default(),
         };
         let mut sweep = Sweep::new(caps, cores, goal);
         sweep.measure_bandwidth(&clock, vector);
@@ -346,6 +360,10 @@ impl Desk<'_> {
         if let Some(watchdog) = self.watchdog.as_mut() {
             watchdog.tick(now);
         }
+        if now >= self.next_sensor_read {
+            self.hardware.set_vitals(Vitals::of(self.sensors.sample(now)));
+            self.next_sensor_read = now + SENSOR_INTERVAL;
+        }
         let net = &mut self.net;
         self.watch.observe(now, snapshot, &mut |notification| net.notify(notification));
         let commands = &mut self.commands;
@@ -457,7 +475,7 @@ impl Desk<'_> {
         let failure = match &mut self.screen {
             Screen::Pixels { dash, display } => {
                 let start = self.clock.now();
-                dash.render(&Frame { snapshot, net, net_err, now, time });
+                dash.render(&Frame { snapshot, net, net_err, now, time, hardware: &self.hardware });
                 let rendered = self.clock.now();
                 let (canvas, rects) = dash.output();
                 if rects.is_empty() {

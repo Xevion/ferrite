@@ -641,7 +641,7 @@ unsafe fn write_cr4(v: u64) {
 
 /// # Safety
 /// The MSR exists.
-unsafe fn read_msr(msr: u32) -> u64 {
+pub(crate) unsafe fn read_msr(msr: u32) -> u64 {
     let (lo, hi): (u32, u32);
     // SAFETY: the caller's; CPL 0.
     unsafe { core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nomem, nostack)) };

@@ -12,6 +12,7 @@ use core::fmt;
 use uefi::system;
 use uefi::table::cfg::ConfigTableEntry;
 
+use crate::smbios::Structures;
 use crate::timings::fnv1a;
 
 /// What the machine's number was made from.
@@ -75,27 +76,14 @@ fn table_at(entry: &[u8]) -> Option<TableAt> {
 /// The UUID of the System Information structure (type 1) in an SMBIOS structure table, unless it is
 /// all zeros or all ones, which is how firmware says it has none.
 fn system_uuid(table: &[u8]) -> Option<[u8; 16]> {
-    let mut at = 0;
-    while let Some(&[kind, len, _, _]) = table.get(at..at + 4) {
-        let len = usize::from(len);
-        if kind == 127 || len < 4 {
-            return None;
-        }
-        if kind == 1 {
-            let uuid: [u8; 16] = table.get(at + 8..at + 24)?.try_into().ok()?;
-            let unset = uuid.iter().all(|&b| b == 0) || uuid.iter().all(|&b| b == 0xff);
-            return (!unset).then_some(uuid);
-        }
-        // The strings after the formatted area end with two NULs.
-        let strings = table.get(at + len..)?;
-        let end = strings.windows(2).position(|w| w == [0, 0])?;
-        at += len + end + 2;
-    }
-    None
+    let system = Structures::new(table).find(|s| s.kind == 1)?;
+    let uuid: [u8; 16] = system.bytes_at(8, 16)?.try_into().ok()?;
+    let unset = uuid.iter().all(|&b| b == 0) || uuid.iter().all(|&b| b == 0xff);
+    (!unset).then_some(uuid)
 }
 
 /// The SMBIOS structure table the firmware published, copied out of its memory.
-fn smbios_table() -> Option<alloc::vec::Vec<u8>> {
+pub(crate) fn smbios_table() -> Option<alloc::vec::Vec<u8>> {
     /// Larger than any real structure table, so a corrupt length cannot make this read far.
     const MAX_TABLE: usize = 256 << 10;
     let entry_of =
