@@ -9,18 +9,19 @@ publish.workspace = true
 [dependencies]
 clap.workspace = true
 crc32fast = { workspace = true, features = ["std"] }
+ferrite-config.workspace = true
 ferrite-wire.workspace = true
 humantime.workspace = true
 jiff.workspace = true
 nusb.workspace = true
 object = { workspace = true, features = ["archive"] }
 rustix.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["std"] }
 serde_json.workspace = true
 sha2.workspace = true
 signal-hook.workspace = true
 snafu = { workspace = true, features = ["std"] }
-toml.workspace = true
+toml = { workspace = true, features = ["std", "parse", "serde", "display"] }
 
 [dev-dependencies]
 assert2.workspace = true

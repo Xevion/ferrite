@@ -151,10 +151,10 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::notify::Config;
+    use crate::notify::{Config, Events};
 
     fn endpoint(url: &str) -> Endpoint {
-        Config::from_env(format!("NOTIFY_URL={url}").as_bytes()).unwrap().endpoint
+        Config::new(url, Format::Text, Events::ALL).unwrap().endpoint
     }
 
     fn pass() -> Notification {

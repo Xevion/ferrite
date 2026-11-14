@@ -13,12 +13,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use ferrite_config::Compact;
 use ferrite_hal::Instant;
 use ferrite_mem::eta::{BasisPoints, Confidence, Estimator, Eta, Forecast, Position, RateMeter};
 use ferrite_mem::histogram::Histogram;
 use ferrite_mem::suite::{Schedule, TestKind};
 
-use crate::goal::{Compact, Goal};
+use crate::goal::Goal;
 use crate::machine::Machine;
 use crate::sweep::Scope;
 use crate::timings::{Disk, Key, Store};

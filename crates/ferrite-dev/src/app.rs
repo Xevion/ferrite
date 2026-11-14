@@ -12,19 +12,21 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use snafu::ResultExt;
 
 use crate::cli::{
-    BenchArgs, BuildArgs, Cli, Command, FirmwareArgs, LoaderArgs, LogArgs, PushArgs, RunArgs, StubsArgs, VendorArgs,
+    BenchArgs, BuildArgs, Cli, Command, FirmwareArgs, LoaderArgs, LogArgs, PushArgs, RunArgs, SettingsArgs, StubsArgs,
+    VendorArgs,
 };
 use crate::config::{self, Config, ConfigError};
 use crate::emit::Emitter;
 use crate::error::{
-    BenchSnafu, BuildSnafu, Error, FirmwareSnafu, LoaderSnafu, LogSnafu, OutputSnafu, PushSnafu, RunSnafu, StubsSnafu,
-    VendorSnafu,
+    BenchSnafu, BuildSnafu, Error, FirmwareSnafu, LoaderSnafu, LogSnafu, OutputSnafu, PushSnafu, RunSnafu,
+    SettingsSnafu, StubsSnafu, VendorSnafu,
 };
 use crate::firmware::{self, FirmwareOptions};
 use crate::live::Live;
 use crate::loader::{self, LoaderOptions};
 use crate::push::{self, PushOptions};
 use crate::run::{self, RunPlan, RunResult};
+use crate::settings::{self, SettingsOptions};
 use crate::stubs::{self, StubsOptions};
 use crate::vendor::{self, VendorOptions};
 use crate::{bench, log};
@@ -49,6 +51,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Error> {
         Command::Vendor(args) => vendor_command(&args),
         Command::Stubs(args) => stubs_command(&args),
         Command::Firmware(args) => firmware_command(&args),
+        Command::Settings(args) => settings_command(&args),
     }
 }
 
@@ -159,6 +162,11 @@ fn firmware_command(args: &FirmwareArgs) -> Result<(), Error> {
         list: args.list,
     };
     firmware::run(&options).context(FirmwareSnafu)
+}
+
+fn settings_command(args: &SettingsArgs) -> Result<(), Error> {
+    let options = SettingsOptions { env: (!args.template).then(|| args.env.clone()), out: args.out.clone() };
+    settings::run(&options).context(SettingsSnafu)
 }
 
 fn run_command(config: &Config, args: &RunArgs) -> Result<(), Error> {

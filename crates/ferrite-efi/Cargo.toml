@@ -7,6 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+# Loads the settings file from the boot volume; pulls in ferrite-config (and so ferrite-net and ferrite-wpa), so the loader leaves it off.
+config = ["dep:ferrite-config"]
 # Records panics in the boot log and shuts down; apps enabling this must not enable uefi's own `panic_handler`.
 panic-handler = []
 # The firmware's Simple Network Protocol as a `ferrite_net::Port`; pulls in smoltcp, so the loader leaves it off.
@@ -16,6 +18,7 @@ crew = ["dep:ferrite-mem"]
 
 [dependencies]
 crc32fast.workspace = true
+ferrite-config = { workspace = true, optional = true }
 ferrite-hal.workspace = true
 ferrite-mem = { workspace = true, optional = true }
 ferrite-net = { workspace = true, optional = true }

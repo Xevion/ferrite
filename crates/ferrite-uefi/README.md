@@ -10,7 +10,7 @@ suite before (or instead of) booting an operating system.
 - [x] Boots under OVMF in QEMU and on real hardware
 - [x] Framebuffer dashboard in the style of a firmware setup screen, drawn with tiny-skia and fontdue and written write-combining; a short text screen where there is no GOP (see Screen)
 - [x] Networking over every wired NIC (SNP) and Wi-Fi at once: DHCP, mDNS (`ferrite.local`), a live status page with a JSON API and run controls. Verified on real hardware over Wi-Fi (the laptop, Intel 8265) and under QEMU over Ethernet (see Networking)
-- [x] Push notifications over plain HTTP (e.g. ntfy) when a pass ends, the first fault is found and the run ends (`\EFI\ferrite\notify.env`)
+- [x] Push notifications over plain HTTP (e.g. ntfy) when a pass ends, the first fault is found and the run ends (the `[notify]` section of `\EFI\ferrite\ferrite.toml`)
 - [x] A 14-test suite (memtest86+'s tests plus March C- and others) on SIMD kernels from scalar to AVX-512, split over every core through MP Services
 - [x] Headless diagnostics log on the boot volume (`\EFI\ferrite\ferrite-uefi.txt`)
 - [x] Recon apps: `pciscan` (PCI and Wi-Fi registers), `xhciscan` (USB controllers and DbC), `dbcping` and `dbcbench` (DbC link)
@@ -174,12 +174,12 @@ Cards covered by the compiled drivers:
 `just stage` puts the firmware those drivers request on the stick, from the
 host's `/lib/firmware`.
 
-The networks to join are `.env` lines in `wifi.env` on the stick, which `just stage`
-copies from the repo's `.env`: `WPA_SSID` and `WPA_PASSPHRASE` for one network,
-`WPA_SSID_1`, `WPA_PASSPHRASE_1` and so on for more (the strongest visible one is
-tried first, then the next). `WPA_KEY_MGMT=NONE` makes a network open, `WPA_HIDDEN=1`
-marks one that does not broadcast its name, and a passphrase network joins with
-WPA3-SAE when the access point offers it, WPA2-PSK otherwise.
+The networks to join are `[[wifi.networks]]` tables in `\EFI\ferrite\ferrite.toml` on the stick,
+which `just stage` writes from the repo's `.env` (`WPA_SSID` and `WPA_PASSPHRASE` for one network,
+`WPA_SSID_1`, `WPA_PASSPHRASE_1` and so on for more; `ferrite-dev settings --template` prints the
+commented template to edit by hand). The strongest visible network is tried first, then the next.
+`security = "open"` makes a network open, `hidden = true` marks one that does not broadcast its
+name, and a passphrase network joins with WPA3-SAE when the access point offers it, WPA2-PSK otherwise.
 
 ## License
 

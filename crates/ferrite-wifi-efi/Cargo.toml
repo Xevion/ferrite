@@ -12,7 +12,7 @@ target = "x86_64-unknown-linux-gnu"
 
 [dependencies]
 corosensei.workspace = true
-ferrite-efi = { workspace = true, features = ["panic-handler"] }
+ferrite-efi = { workspace = true, features = ["config", "panic-handler"] }
 ferrite-hal.workspace = true
 ferrite-lkpi.workspace = true
 ferrite-rt.workspace = true

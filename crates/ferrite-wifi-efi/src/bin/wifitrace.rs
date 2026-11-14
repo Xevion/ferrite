@@ -22,7 +22,7 @@ use core::time::Duration;
 use ferrite_efi::bootlog::{BootLog, Echo};
 use ferrite_efi::clock::Clock;
 use ferrite_efi::cpu::{FpuControl, VectorSupport};
-use ferrite_efi::{entropy, logger, session};
+use ferrite_efi::{config, entropy, logger, session};
 use ferrite_hal::Clock as _;
 use ferrite_rt as _;
 use ferrite_wifi::Shared;
@@ -71,6 +71,11 @@ fn main() -> Status {
 
 /// Bring the shim up, run the test script on it and poll until init is gone.
 fn run() -> Status {
+    let settings = config::load();
+    if settings.errors.iter().any(|error| error.section().is_none_or(|section| section == "wifi")) {
+        log::error!("the Wi-Fi settings are not usable, stopping");
+        return Status::ABORTED;
+    }
     let clock = Clock::start();
     let mut runtime = match Runtime::start(clock, &RuntimeConfig::default()) {
         Ok(runtime) => runtime,
@@ -88,6 +93,7 @@ fn run() -> Status {
         scan_limit: SCAN_LIMIT,
         connect_limit: CONNECT_LIMIT,
         hold: INIT_HOLD,
+        credentials: settings.credentials,
         shared: Rc::clone(&shared),
         lab_ap: None,
     };

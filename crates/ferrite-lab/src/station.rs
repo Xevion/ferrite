@@ -6,8 +6,8 @@
 //! IP (a DHCP lease from the lab AP, pings, UDP and HTTP), back off from a stable connection as from a
 //! first one, and stop on request with the state `Stopped`.
 //!
-//! A named scenario serves a different network from the access point and gives the station a `.env` file
-//! to match: open, hidden, WPA3-SAE, a transition network, several networks of which the first fail. Each
+//! A named scenario serves a different network from the access point and gives the station a settings
+//! file to match: open, hidden, WPA3-SAE, a transition network, several networks of which the first fail. Each
 //! must join, lease an address and pass the IP checks over the link, and stop.
 
 use std::process::ExitCode;
@@ -71,11 +71,11 @@ enum Expect {
     Fails,
 }
 
-/// A network the access point serves, the `.env` text the station is given, and what must happen.
+/// A network the access point serves, the settings file the station is given, and what must happen.
 struct Scenario {
     name: &'static str,
     ap: LabNetwork,
-    env: &'static str,
+    config: &'static str,
     connect_limit: Duration,
     expect: Expect,
 }
@@ -88,7 +88,7 @@ const SCENARIOS: [Scenario; 9] = [
     Scenario {
         name: "open",
         ap: LabNetwork { ssid: OPEN_SSID, passphrase: b"", security: LabSecurity::Open, hidden: false },
-        env: "WPA_SSID=ferrite-open\nWPA_KEY_MGMT=NONE\n",
+        config: "[[wifi.networks]]\nssid = \"ferrite-open\"\nsecurity = \"open\"\n",
         connect_limit: Duration::from_secs(10),
         expect: Expect::Joins,
     },
@@ -100,7 +100,7 @@ const SCENARIOS: [Scenario; 9] = [
             security: LabSecurity::Psk,
             hidden: true,
         },
-        env: "WPA_SSID=ferrite-hidden\nWPA_PASSPHRASE=hidden lab passphrase\nWPA_HIDDEN=1\n",
+        config: "[[wifi.networks]]\nssid = \"ferrite-hidden\"\npassphrase = \"hidden lab passphrase\"\nhidden = true\n",
         connect_limit: Duration::from_secs(10),
         expect: Expect::Joins,
     },
@@ -112,7 +112,7 @@ const SCENARIOS: [Scenario; 9] = [
             security: LabSecurity::Psk,
             hidden: true,
         },
-        env: "WPA_SSID=ferrite-hidden\nWPA_PASSPHRASE=hidden lab passphrase\n",
+        config: "[[wifi.networks]]\nssid = \"ferrite-hidden\"\npassphrase = \"hidden lab passphrase\"\n",
         connect_limit: Duration::from_secs(10),
         expect: Expect::Fails,
     },
@@ -124,7 +124,7 @@ const SCENARIOS: [Scenario; 9] = [
             security: LabSecurity::Sae { h2e: true },
             hidden: false,
         },
-        env: "WPA_SSID=ferrite-sae\nWPA_PASSPHRASE=sae lab passphrase\n",
+        config: "[[wifi.networks]]\nssid = \"ferrite-sae\"\npassphrase = \"sae lab passphrase\"\n",
         connect_limit: Duration::from_secs(10),
         expect: Expect::Joins,
     },
@@ -136,7 +136,7 @@ const SCENARIOS: [Scenario; 9] = [
             security: LabSecurity::Sae { h2e: false },
             hidden: false,
         },
-        env: "WPA_SSID=ferrite-sae\nWPA_PASSPHRASE=sae lab passphrase\nWPA_KEY_MGMT=SAE\n",
+        config: "[[wifi.networks]]\nssid = \"ferrite-sae\"\npassphrase = \"sae lab passphrase\"\nsecurity = \"wpa3\"\n",
         connect_limit: Duration::from_secs(10),
         expect: Expect::Joins,
     },
@@ -148,7 +148,7 @@ const SCENARIOS: [Scenario; 9] = [
             security: LabSecurity::Transition,
             hidden: false,
         },
-        env: "WPA_SSID=ferrite-sae\nWPA_PASSPHRASE=sae lab passphrase\n",
+        config: "[[wifi.networks]]\nssid = \"ferrite-sae\"\npassphrase = \"sae lab passphrase\"\n",
         connect_limit: Duration::from_secs(10),
         expect: Expect::Joins,
     },
@@ -160,16 +160,16 @@ const SCENARIOS: [Scenario; 9] = [
             security: LabSecurity::Transition,
             hidden: false,
         },
-        env: "WPA_SSID=ferrite-sae\nWPA_PASSPHRASE=sae lab passphrase\nWPA_KEY_MGMT=WPA-PSK\n",
+        config: "[[wifi.networks]]\nssid = \"ferrite-sae\"\npassphrase = \"sae lab passphrase\"\nsecurity = \"wpa2\"\n",
         connect_limit: Duration::from_secs(10),
         expect: Expect::Joins,
     },
     Scenario {
         name: "multi",
         ap: LabNetwork::PSK,
-        env: "WPA_SSID=not-in-the-air\nWPA_PASSPHRASE=nobody home here\n\
-              WPA_SSID_1=ferrite-lab\nWPA_PASSPHRASE_1=the wrong passphrase\n\
-              WPA_SSID_2=ferrite-lab\nWPA_PASSPHRASE_2=ferrite lab passphrase\n",
+        config: "[[wifi.networks]]\nssid = \"not-in-the-air\"\npassphrase = \"nobody home here\"\n\
+                 [[wifi.networks]]\nssid = \"ferrite-lab\"\npassphrase = \"the wrong passphrase\"\n\
+                 [[wifi.networks]]\nssid = \"ferrite-lab\"\npassphrase = \"ferrite lab passphrase\"\n",
         connect_limit: Duration::from_secs(3),
         expect: Expect::Joins,
     },
@@ -181,7 +181,7 @@ const SCENARIOS: [Scenario; 9] = [
             security: LabSecurity::Sae { h2e: true },
             hidden: false,
         },
-        env: "WPA_SSID=ferrite-sae\nWPA_PASSPHRASE=another passphrase\n",
+        config: "[[wifi.networks]]\nssid = \"ferrite-sae\"\npassphrase = \"another passphrase\"\n",
         connect_limit: Duration::from_secs(3),
         expect: Expect::Fails,
     },
@@ -231,22 +231,31 @@ fn lose_the_link(
     Ok(wait)
 }
 
-fn lab_env() -> String {
+fn lab_config() -> String {
     let network = LabNetwork::PSK;
     format!(
-        "WPA_SSID={}\nWPA_PASSPHRASE={}\n",
+        "[[wifi.networks]]\nssid = \"{}\"\npassphrase = \"{}\"\n",
         String::from_utf8_lossy(network.ssid),
         String::from_utf8_lossy(network.passphrase)
     )
 }
 
-/// Join the network a scenario serves with the `.env` file it names, or fail to for the scenarios that
-/// must not, then stop.
-fn drive_scenario(sched: &mut LabScheduler, scenario: &Scenario) -> Result<(), ExitCode> {
-    let credentials = Credentials::from_env(scenario.env.as_bytes()).map_err(|error| {
-        log::error!("lab station: the scenario's .env does not parse: {error}");
+/// The networks of a settings file, which must be wholly valid.
+fn credentials_of(config: &str) -> Result<Credentials, ExitCode> {
+    let loaded = ferrite_config::load(config.as_bytes()).into_result().map_err(|error| {
+        log::error!("lab station: the settings do not load: {error}");
         ExitCode::FAILURE
     })?;
+    loaded.credentials.ok_or_else(|| {
+        log::error!("lab station: the settings name no network");
+        ExitCode::FAILURE
+    })
+}
+
+/// Join the network a scenario serves with the settings it names, or fail to for the scenarios that
+/// must not, then stop.
+fn drive_scenario(sched: &mut LabScheduler, scenario: &Scenario) -> Result<(), ExitCode> {
+    let credentials = credentials_of(scenario.config)?;
     let seed = host::stack_seed().map_err(|error| {
         log::error!("reading host entropy failed: {error}");
         ExitCode::FAILURE
@@ -319,10 +328,7 @@ fn drive_scenario(sched: &mut LabScheduler, scenario: &Scenario) -> Result<(), E
 }
 
 fn drive(sched: &mut LabScheduler) -> Result<(), ExitCode> {
-    let credentials = Credentials::from_env(lab_env().as_bytes()).map_err(|error| {
-        log::error!("lab station: the lab credentials are invalid: {error}");
-        ExitCode::FAILURE
-    })?;
+    let credentials = credentials_of(&lab_config())?;
     let seed = host::stack_seed().map_err(|error| {
         log::error!("reading host entropy failed: {error}");
         ExitCode::FAILURE

@@ -22,9 +22,10 @@ use ferrite_efi::entropy;
 use ferrite_efi::snp::{self, SnpError};
 use ferrite_hal::{Clock as _, Instant};
 use ferrite_net::http::{Rejection, Route, Site};
-use ferrite_net::notify::Notification;
+use ferrite_net::notify::{Config as NotifyConfig, Notification, Notifier};
 use ferrite_net::{NetStatus, Network, PortId, StackConfig};
 use ferrite_wifi::PortEvent;
+use ferrite_wpa::env::Credentials;
 
 use self::api::{BodyError, Control};
 use self::json::{StatusDoc, ToJson as _};
@@ -125,11 +126,11 @@ pub struct Net {
 
 impl Net {
     /// Open every wired NIC the firmware drives as a port, each with its own stack, and start the
-    /// Wi-Fi station, whose link joins as one more port once it is up. Call before the sweep claims
-    /// memory.
-    pub fn setup(clock: Clock) -> Self {
+    /// Wi-Fi station to join the `networks`, whose link joins as one more port once it is up. Push
+    /// notifications go as `notify` says. Call before the sweep claims memory.
+    pub fn setup(clock: Clock, networks: Option<Credentials>, notify: Option<NotifyConfig>) -> Self {
         let now = clock.now();
-        let wifi = Wifi::start(clock);
+        let wifi = Wifi::start(clock, networks);
         let mut net = Self {
             network: Network::new(Console::new(wifi.view())).timed(clock),
             failure: None,
@@ -137,8 +138,17 @@ impl Net {
             wifi_port: None,
         };
         net.open_wired(now);
-        if let Some(notifier) = notify::load() {
-            net.network.set_notifier(notifier);
+        if let Some(config) = notify {
+            log::info!(
+                "notify: on, {:?} to {} port {} for {}",
+                config.format,
+                config.endpoint.host,
+                config.endpoint.port,
+                config.events
+            );
+            net.network.set_notifier(Notifier::new(config));
+        } else {
+            log::info!("notify: off");
         }
         let ports = net.network.status().ports().len();
         if ports > 0 {

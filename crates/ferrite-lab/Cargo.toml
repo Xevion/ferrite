@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 corosensei.workspace = true
+ferrite-config.workspace = true
 ferrite-hal.workspace = true
 ferrite-lkpi.workspace = true
 ferrite-net.workspace = true

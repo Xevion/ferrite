@@ -21,6 +21,7 @@ pub mod push;
 pub mod run;
 pub mod runner;
 pub mod session;
+pub mod settings;
 pub mod stubs;
 pub mod tty;
 pub mod usb;

@@ -9,6 +9,7 @@ use core::time::Duration;
 
 use ferrite_efi::clock::Clock;
 use ferrite_wifi::{PortEvent, Shared, StationState};
+use ferrite_wpa::env::Credentials;
 
 #[cfg(ferrite_app)]
 use ferrite_wifi_efi::runtime::{NextPoll, RuntimeConfig};
@@ -91,13 +92,14 @@ pub struct Wifi {
 
 #[cfg(ferrite_app)]
 impl Wifi {
-    /// Start the station. Call before the sweep claims memory: the shim's arena comes from below 4 GiB.
-    pub fn start(clock: Clock) -> Self {
+    /// Start the station to join `networks`. Call before the sweep claims memory: the shim's arena
+    /// comes from below 4 GiB.
+    pub fn start(clock: Clock, networks: Option<Credentials>) -> Self {
         let config = StationConfig {
             runtime: RuntimeConfig { stall_limit: Some(STALL_LIMIT), ..RuntimeConfig::default() },
             ..StationConfig::default()
         };
-        let station = WifiStation::start(clock, &config).inspect_err(|e| log::error!("wifi: {e}")).ok();
+        let station = WifiStation::start(clock, &config, networks).inspect_err(|e| log::error!("wifi: {e}")).ok();
         Self { station }
     }
 
@@ -142,7 +144,7 @@ const NOT_IN_BUILD: &str = "not in this build";
 
 #[cfg(not(ferrite_app))]
 impl Wifi {
-    pub fn start(_clock: Clock) -> Self {
+    pub fn start(_clock: Clock, _networks: Option<Credentials>) -> Self {
         Self {}
     }
 

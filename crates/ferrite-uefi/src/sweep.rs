@@ -337,18 +337,14 @@ impl Sweep {
     /// sweep takes one block of up to [`FALLBACK_BYTES`], halving down to [`MIN_SWEEP_BYTES`].
     /// With no memory the sweep has no work.
     #[must_use]
-    pub fn new(caps: Caps, cores: Option<Cores>) -> Self {
+    pub fn new(caps: Caps, cores: Option<Cores>, goal: Goal) -> Self {
         let claimed = memory::claim_free_memory(reserve_for);
         let lend = claimed.as_ref().map_or(0, Claim::reserve);
         let buffer = claimed.or_else(|| alloc_largest(FALLBACK_BYTES, MIN_SWEEP_BYTES, Claim::any_pages));
         let preset = Preset::Standard;
         let mut sweep = Self::with_buffer(buffer, Kernels::for_caps(caps), preset.config(), preset, cores);
-        sweep.pace = Pace::new(
-            crate::goal::load(),
-            Machine::detect(),
-            Store::new(timings::load()),
-            Some(alloc::boxed::Box::new(BootVolume)),
-        );
+        sweep.pace =
+            Pace::new(goal, Machine::detect(), Store::new(timings::load()), Some(alloc::boxed::Box::new(BootVolume)));
         sweep.with_pages(FirmwarePages, lend)
     }
 

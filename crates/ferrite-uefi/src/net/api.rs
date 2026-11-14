@@ -4,12 +4,13 @@
 
 use core::num::{NonZeroU64, NonZeroUsize};
 
+use ferrite_config::parse_duration;
 use ferrite_mem::suite::Preset;
 use ferrite_net::http::{Rejection, Route};
 use snafu::Snafu;
 
 use crate::control::Command;
-use crate::goal::{Goal, parse_duration};
+use crate::goal::Goal;
 use ferrite_efi::cores::CoreChoice;
 
 /// A rejected preset name as far as it is worth echoing back.

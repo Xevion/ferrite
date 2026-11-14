@@ -45,6 +45,8 @@ pub enum Command {
     Stubs(StubsArgs),
     /// Copy the firmware files the compiled Wi-Fi drivers can request from the host into the stick's firmware directory
     Firmware(FirmwareArgs),
+    /// Write the stick's settings file from the repo's .env lines, or the commented template
+    Settings(SettingsArgs),
     /// Print the effective configuration
     Config,
 }
@@ -202,6 +204,21 @@ pub struct VendorArgs {
     /// The ferrite-wifi-sys crate directory, which holds vendor.toml and receives linux/
     #[arg(long, value_name = "DIR", default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../ferrite-wifi-sys"))]
     pub crate_dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct SettingsArgs {
+    /// The .env file whose WPA_, NOTIFY_ and RUN_ lines are converted
+    #[arg(long, value_name = "FILE", default_value = ".env", conflicts_with = "template")]
+    pub env: PathBuf,
+
+    /// Write the commented template instead of converting a .env file
+    #[arg(long)]
+    pub template: bool,
+
+    /// Write the file here, like esp/efi/ferrite/ferrite.toml; without it, print it
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

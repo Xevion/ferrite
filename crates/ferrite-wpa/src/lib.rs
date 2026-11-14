@@ -1,7 +1,7 @@
 //! WPA2-PSK and WPA3-SAE for a station, in the way iwd and `wpa_supplicant` run them: the PMK from the
 //! passphrase or from the SAE exchange ([`sae`]), the PTK from the 4-way handshake's nonces, EAPOL-Key
 //! frames with their MIC and wrapped key data, the 4-way and group key handshakes as state machines that
-//! hand back replies and keys, and the networks a `.env` file names ([`env`]).
+//! hand back replies and keys, and the validated networks to join ([`env`]).
 //!
 //! Platform-free: frames come in and go out as bytes, keys are returned for the caller to install,
 //! and nonces come from an injected [`Rng`]. The `authenticator` feature adds the access point side.

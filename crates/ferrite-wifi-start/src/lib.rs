@@ -29,6 +29,7 @@ use ferrite_lkpi::sched::SchedHandle;
 use ferrite_lkpi::task::LinuxTasks;
 use ferrite_wifi::{Shared, select};
 use ferrite_wifi_sys::{exitcalls, initcalls};
+use ferrite_wpa::env::Credentials;
 use snafu::Snafu;
 
 type ThreadFn = unsafe extern "C" fn(*mut c_void) -> c_int;
@@ -127,6 +128,8 @@ pub struct StartUp {
     pub connect_limit: Duration,
     /// How long a connection is held before it is left.
     pub hold: Duration,
+    /// The networks the settings file names; without any, the scan runs and the connect is skipped.
+    pub credentials: Option<Credentials>,
     /// Where the open link is offered to the main loop, which runs IP over it and reports its verdict
     /// here; the connection is held until it has, or `hold` passes.
     pub shared: Rc<Shared>,
@@ -307,10 +310,12 @@ fn pci_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
         return simulated_wifi(clock, start_up);
     }
     let Some(name) = bring_card_up(clock, start_up.wifi_limit) else { return false };
-    let wanted = load_credentials(start_up);
+    if start_up.credentials.is_none() {
+        log::info!("no networks are configured; the connect is skipped");
+    }
     enter(c"scanning through nl80211");
     let scanned = match scan::connect().and_then(|mut client| {
-        let hidden = wanted.as_ref().ok().and_then(Option::as_ref).map(|c| select::hidden_ssids(c.networks()));
+        let hidden = start_up.credentials.as_ref().map(|c| select::hidden_ssids(c.networks()));
         let report = scan::scan(
             &mut client,
             &name,
@@ -322,12 +327,9 @@ fn pci_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
         )?;
         Ok((client, report))
     }) {
-        Ok((mut client, report)) => match wanted {
-            Ok(Some(credentials)) => {
-                join_from_credentials(&mut client, &name, &report.bsses, &credentials, start_up, clock)
-            },
-            Ok(None) => true,
-            Err(()) => false,
+        Ok((mut client, report)) => match &start_up.credentials {
+            Some(credentials) => join_from_credentials(&mut client, &name, &report.bsses, credentials, start_up, clock),
+            None => true,
         },
         Err(error) => {
             log::error!("nl80211 scan failed: {error}");
@@ -402,36 +404,14 @@ fn bring_card_up(clock: &dyn Fn() -> Instant, limit: Duration) -> Option<alloc::
     Some(name)
 }
 
-/// The file on the firmware volume with the network to join, in `.env` lines.
-pub const CREDENTIALS_FILE: &str = "wifi.env";
-
-/// The networks `wifi.env` names. `Ok(None)` without the file, where the connect is skipped and that
-/// counts as passing; `Err` for a file that does not parse, which fails the run.
-fn load_credentials(start_up: &StartUp) -> Result<Option<ferrite_wpa::env::Credentials>, ()> {
-    let text = match start_up.firmware_reference.load(CREDENTIALS_FILE) {
-        Ok(text) => text,
-        Err(error) => {
-            log::info!("no credentials ({error}); the connect is skipped");
-            return Ok(None);
-        },
-    };
-    match ferrite_wpa::env::Credentials::from_env(&text) {
-        Ok(credentials) => Ok(Some(credentials)),
-        Err(error) => {
-            log::error!("{CREDENTIALS_FILE}: {error}; the connect is skipped");
-            Err(())
-        },
-    }
-}
-
-/// Join the first of the networks `wifi.env` names that the scan found and that accepts the station,
+/// Join the first of the configured networks that the scan found and that accepts the station,
 /// offer the link to the main loop's IP stack, and leave it again. Any failure is logged with its step
 /// and fails the run, and the teardown still runs.
 fn join_from_credentials(
     client: &mut ferrite_nl80211::client::Client<scan::KernelSocket>,
     name: &str,
     bsses: &[ferrite_nl80211::nl80211::Bss],
-    credentials: &ferrite_wpa::env::Credentials,
+    credentials: &Credentials,
     start_up: &StartUp,
     clock: &dyn Fn() -> Instant,
 ) -> bool {

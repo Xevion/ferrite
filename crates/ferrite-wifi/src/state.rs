@@ -61,7 +61,7 @@ pub enum StationState {
     Starting,
     /// No supported Wi-Fi card is present.
     NoCard,
-    /// There is no network to join: no credentials file, or one that does not parse.
+    /// There is no network to join: none configured, or a `[wifi]` section that is not usable.
     NoCredentials,
     /// A firmware file the card or the regulatory domain needs is missing.
     NoFirmware,

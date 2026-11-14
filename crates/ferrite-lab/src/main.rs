@@ -167,6 +167,7 @@ fn main() -> ExitCode {
         scan_limit: SCAN_LIMIT,
         connect_limit: CONNECT_LIMIT,
         hold: HOLD,
+        credentials: None,
         shared: Rc::clone(&station_link),
         lab_ap: Some(Rc::clone(&ap_link)),
     };

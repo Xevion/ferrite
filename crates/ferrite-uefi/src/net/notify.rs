@@ -1,62 +1,22 @@
 //! The app's side of push notifications.
 //!
-//! Reads the settings from the boot volume, notices in the sweep's history what is worth telling, and
-//! words it. The queue, the retries and the HTTP are `ferrite_net::notify`'s.
+//! Notices in the sweep's history what is worth telling, and words it. The settings are the
+//! `[notify]` section of the settings file; the queue, the retries and the HTTP are
+//! `ferrite_net::notify`'s.
 
 use alloc::format;
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::time::Duration;
 
-use ferrite_efi::volume::{self, ReadError};
 use ferrite_hal::Instant;
 use ferrite_net::mdns::HOST;
-use ferrite_net::notify::{Config, Event, Notification, Notifier};
+use ferrite_net::notify::{Event, Notification};
 
 use crate::report::{FaultRecord, PassRecord, Snapshot};
 use crate::sweep::SweepStatus;
 
-/// Where the settings live on the boot volume.
-const CONFIG_PATH: &str = "\\EFI\\ferrite\\notify.env";
-
 const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
-
-/// The notifier the settings on the boot volume describe; `None`, with a log line saying why, when
-/// there is no file or it is not usable.
-pub fn load() -> Option<Notifier> {
-    notifier(volume::read_file(CONFIG_PATH))
-}
-
-fn notifier(file: Result<Vec<u8>, ReadError>) -> Option<Notifier> {
-    let text = match file {
-        Ok(text) => text,
-        Err(ReadError::NotFound { .. }) => {
-            log::info!("notify: no {CONFIG_PATH}, notifications are off");
-            return None;
-        },
-        Err(e) => {
-            log::warn!("notify: {e}, notifications are off");
-            return None;
-        },
-    };
-    match Config::from_env(&text) {
-        Ok(config) => {
-            log::info!(
-                "notify: on, {:?} to {} port {} for {}",
-                config.format,
-                config.endpoint.host,
-                config.endpoint.port,
-                config.events
-            );
-            Some(Notifier::new(config))
-        },
-        Err(e) => {
-            log::warn!("notify: {CONFIG_PATH}: {e}, notifications are off");
-            None
-        },
-    }
-}
 
 /// Notices events in the sweep's snapshots, one call at a time.
 #[derive(Debug, Default)]
@@ -325,14 +285,5 @@ mod tests {
         let note = run_ended(at(3 * 3600 + 5), &snapshot);
         check!(note.event == Event::End);
         check!(note.message == "ferrite: run ended on ferrite.local after 4 passes, 1 error, 16.0 GiB, 3:00:05");
-    }
-
-    #[rstest]
-    #[case::missing_file(Err(ReadError::NotFound { path: "x".into() }), false)]
-    #[case::bad_url(Ok(b"NOTIFY_URL=https://ntfy.sh/t".to_vec()), false)]
-    #[case::no_url(Ok(b"# nothing\n".to_vec()), false)]
-    #[case::good_file(Ok(b"NOTIFY_URL=http://192.0.2.5:8080/t".to_vec()), true)]
-    fn a_missing_or_bad_file_turns_notifications_off(#[case] file: Result<Vec<u8>, ReadError>, #[case] on: bool) {
-        check!(notifier(file).is_some() == on);
     }
 }

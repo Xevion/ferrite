@@ -63,7 +63,11 @@ struct Rig {
 }
 
 impl Rig {
-    fn new(env: &str, policy: Policy) -> Self {
+    fn new(url: &str, policy: Policy) -> Self {
+        Self::with(url, Format::Text, Events::ALL, policy)
+    }
+
+    fn with(url: &str, format: Format, events: Events, policy: Policy) -> Self {
         let server_link = Rc::new(QueuePort::new([0x02, 0, 0, 0, 0, 1], 1500, 64, 64));
         let client_link = Rc::new(QueuePort::new([0x02, 0, 0, 0, 0, 2], 1500, 64, 64));
         let mut server = Stack::new(
@@ -85,7 +89,7 @@ impl Rig {
         let config = StackConfig { seed: 2, address: Some(cidr(CLIENT)), mdns: false, http: false };
         let port = net.add(Box::new(Rc::clone(&client_link)), config, Instant::default());
         net.stack_mut(port).unwrap().set_dns(Some(SERVER));
-        net.set_notifier(Notifier::with_policy(Config::from_env(env.as_bytes()).unwrap(), policy));
+        net.set_notifier(Notifier::with_policy(Config::new(url, format, events).unwrap(), policy));
         let base_sockets = net.stack_mut(port).unwrap().parts().1.iter().count();
         Self {
             net,
@@ -206,7 +210,7 @@ fn pass(n: usize) -> Notification {
 
 #[test]
 fn a_text_notification_arrives_as_a_post_to_an_address() {
-    let mut rig = Rig::new("NOTIFY_URL=http://10.0.0.1:8080/ferrite-topic", Policy::default());
+    let mut rig = Rig::new("http://10.0.0.1:8080/ferrite-topic", Policy::default());
     check!(rig.net.notify(pass(3)));
     rig.run_until(2_000, |rig| rig.delivered() == 1);
 
@@ -222,7 +226,7 @@ fn a_text_notification_arrives_as_a_post_to_an_address() {
 
 #[test]
 fn a_json_notification_to_a_host_name_is_looked_up_first() {
-    let mut rig = Rig::new("NOTIFY_URL=http://hooks.lab:8080/in\nNOTIFY_FORMAT=json", Policy::default());
+    let mut rig = Rig::with("http://hooks.lab:8080/in", Format::Json, Events::ALL, Policy::default());
     check!(rig.net.notify(pass(1)));
     rig.run_until(3_000, |rig| rig.delivered() == 1);
 
@@ -234,7 +238,8 @@ fn a_json_notification_to_a_host_name_is_looked_up_first() {
 
 #[test]
 fn events_the_config_leaves_out_are_not_queued() {
-    let mut rig = Rig::new("NOTIFY_URL=http://10.0.0.1:8080/t\nNOTIFY_EVENTS=fault,end", Policy::default());
+    let mut rig =
+        Rig::with("http://10.0.0.1:8080/t", Format::Text, Events::of(&[Event::Fault, Event::End]), Policy::default());
     check!(!rig.net.notify(pass(1)));
     check!(rig.net.notifications_pending() == 0);
     check!(rig.net.notify(Notification::new(Event::End, "t", "m")));
@@ -243,7 +248,7 @@ fn events_the_config_leaves_out_are_not_queued() {
 
 #[test]
 fn a_busy_server_is_retried_and_the_order_kept() {
-    let mut rig = Rig::new("NOTIFY_URL=http://10.0.0.1:8080/t", quick());
+    let mut rig = Rig::new("http://10.0.0.1:8080/t", quick());
     rig.script.extend([Some(503), Some(200), Some(200)]);
     check!(rig.net.notify(pass(1)));
     check!(rig.net.notify(pass(2)));
@@ -264,7 +269,7 @@ fn a_failing_server_is_given_up_on_and_leaves_no_sockets(
     #[case] ms: u64,
     #[case] requests: usize,
 ) {
-    let mut rig = Rig::new(&format!("NOTIFY_URL={url}"), quick());
+    let mut rig = Rig::new(url, quick());
     rig.script.extend(script.iter().copied());
     check!(rig.net.notify(pass(1)));
     rig.run(ms);
@@ -276,7 +281,7 @@ fn a_failing_server_is_given_up_on_and_leaves_no_sockets(
 
 #[test]
 fn a_full_queue_drops_the_oldest_while_nothing_can_be_sent() {
-    let mut rig = Rig::new("NOTIFY_URL=http://10.0.0.1:8080/t", Policy { capacity: 3, ..quick() });
+    let mut rig = Rig::new("http://10.0.0.1:8080/t", Policy { capacity: 3, ..quick() });
     // Nothing runs, so nothing leaves.
     (1..=5).for_each(|n| {
         rig.net.notify(pass(n));
@@ -290,7 +295,7 @@ fn a_full_queue_drops_the_oldest_while_nothing_can_be_sent() {
 
 #[test]
 fn the_first_port_with_an_address_carries_it() {
-    let mut rig = Rig::new("NOTIFY_URL=http://10.0.0.1:8080/t", quick());
+    let mut rig = Rig::new("http://10.0.0.1:8080/t", quick());
     // A port ahead of the wired one that never gets an address.
     let mut net = Network::new(Toy::default());
     let none = StackConfig { seed: 3, address: None, mdns: false, http: false };
@@ -298,7 +303,10 @@ fn the_first_port_with_an_address_carries_it() {
         net.add(Box::new(Rc::new(QueuePort::new([0x02, 0, 0, 0, 0, 3], 1500, 64, 64))), none, Instant::default());
     let fixed = StackConfig { seed: 2, address: Some(cidr(CLIENT)), mdns: false, http: false };
     rig.port = net.add(Box::new(Rc::clone(&rig.client_link)), fixed, Instant::default());
-    net.set_notifier(Notifier::with_policy(Config::from_env(b"NOTIFY_URL=http://10.0.0.1:8080/t").unwrap(), quick()));
+    net.set_notifier(Notifier::with_policy(
+        Config::new("http://10.0.0.1:8080/t", Format::Text, Events::ALL).unwrap(),
+        quick(),
+    ));
     rig.net = net;
 
     check!(rig.net.notify(pass(1)));

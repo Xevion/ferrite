@@ -1,7 +1,7 @@
 //! Wi-Fi as a network port for an app.
 //!
 //! [`WifiStation`] brings the Linux Wi-Fi stack up on the first supported card, joins the network
-//! `wifi.env` names, and offers a [`QueuePort`](ferrite_net::QueuePort) once the link is open, withdrawing
+//! the settings file names, and offers a [`QueuePort`](ferrite_net::QueuePort) once the link is open, withdrawing
 //! it when the link drops and offering a new one after the reconnect.
 //!
 //! It never fails the app. A machine with no supported card, no credentials or missing firmware files
@@ -22,7 +22,6 @@ use ferrite_efi::clock::Clock;
 use ferrite_lkpi::firmware::FirmwareProvider as _;
 use ferrite_lkpi::pci::PciPlatform as _;
 use ferrite_wifi::{Failure, Policy, PortEvent, Shared, StationState};
-use ferrite_wifi_start::CREDENTIALS_FILE;
 use ferrite_wifi_start::station::start_station;
 use ferrite_wpa::env::Credentials;
 use snafu::Snafu;
@@ -88,21 +87,17 @@ pub struct WifiStation {
     stop_limit: Duration,
 }
 
-/// Why a station cannot be started, found before any memory is taken: the card, the credentials or a
+/// Why a station cannot be started, found before any memory is taken: the card, the networks or a
 /// firmware file is missing.
-fn preflight(pci: &UefiPci) -> Result<Credentials, StationState> {
+fn preflight(pci: &UefiPci, credentials: Option<Credentials>) -> Result<Credentials, StationState> {
     if pci.devices().is_empty() {
         log::info!("wifi: no supported card");
         return Err(StationState::NoCard);
     }
-    let text = VolumeFirmware.load(CREDENTIALS_FILE).map_err(|error| {
-        log::info!("wifi: no credentials ({error})");
-        StationState::NoCredentials
-    })?;
-    let credentials = Credentials::from_env(&text).map_err(|error| {
-        log::warn!("wifi: {CREDENTIALS_FILE}: {error}");
-        StationState::NoCredentials
-    })?;
+    let Some(credentials) = credentials else {
+        log::info!("wifi: no networks configured");
+        return Err(StationState::NoCredentials);
+    };
     for name in core::iter::once(REGDB).chain(pci.firmware()) {
         VolumeFirmware.load(name).map_err(|error| {
             log::warn!("wifi: {error}");
@@ -113,12 +108,13 @@ fn preflight(pci: &UefiPci) -> Result<Credentials, StationState> {
 }
 
 impl WifiStation {
-    /// Bring the station up on `clock`. `Ok` also covers a machine that cannot run it: the state says
-    /// why, and the app carries on without Wi-Fi. `Err` is a failure to bring the Linux side up.
-    pub fn start(clock: Clock, config: &StationConfig) -> Result<Self, StartError> {
+    /// Bring the station up on `clock`, to join the `networks` the settings file names. `Ok` also covers
+    /// a machine that cannot run it: the state says why, and the app carries on without Wi-Fi. `Err` is
+    /// a failure to bring the Linux side up.
+    pub fn start(clock: Clock, config: &StationConfig, networks: Option<Credentials>) -> Result<Self, StartError> {
         let shared = Shared::new();
         let pci: &'static UefiPci = Box::leak(Box::new(UefiPci::discover()));
-        let credentials = match preflight(pci) {
+        let credentials = match preflight(pci, networks) {
             Ok(credentials) => credentials,
             Err(state) => {
                 shared.set_state(state);

@@ -9,6 +9,7 @@ use alloc::string::ToString as _;
 use core::time::Duration;
 
 use ferrite_efi::clock::Clock;
+use ferrite_efi::config;
 use ferrite_efi::cores::{CoreChoice, Cores};
 use ferrite_efi::cpu::VectorState;
 use ferrite_efi::link::Link as LoaderLink;
@@ -25,6 +26,7 @@ use crate::backend::{BackendError, UefiBackend};
 use crate::control::{Command, Commands};
 use crate::dash::{Dashboard, Frame};
 use crate::diag::Diag;
+use crate::goal::Goal;
 use crate::gop::Display;
 use crate::net::Net;
 use crate::net::notify::{self, Watch};
@@ -190,7 +192,10 @@ impl<'a> App<'a> {
     ) -> Result<Self, BackendError> {
         let clock = Clock::start();
         let screen = Screen::open(output, &clock)?;
-        let net = Net::setup(clock);
+        let settings = config::load();
+        let goal = settings.run.map_or(Goal::UNLIMITED, Goal::from);
+        log::info!("run: goal {goal}");
+        let net = Net::setup(clock, settings.credentials, settings.notify);
         let waiter = Waiter::new(input).inspect_err(|e| log::warn!("ui: no wait events, stalling instead: {e}")).ok();
         let loader = LoaderLink::locate();
         let watchdog = loader.map(|_| Keepalive::new(WATCHDOG, WATCHDOG_REARM, clock.now()));
@@ -212,7 +217,7 @@ impl<'a> App<'a> {
             commands: Commands::default(),
             goal_met: false,
         };
-        let mut sweep = Sweep::new(caps, cores);
+        let mut sweep = Sweep::new(caps, cores, goal);
         sweep.measure_bandwidth(&clock, vector);
         Ok(Self { desk, sweep, chunk_bytes: START_CHUNK_BYTES, vector })
     }

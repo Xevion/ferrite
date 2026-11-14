@@ -1,7 +1,7 @@
-//! Push notifications: a short message sent by POST over plain HTTP to a URL from a config file, in the
+//! Push notifications: a short message sent by POST over plain HTTP to a configured URL, in the
 //! form ntfy takes (a text body, an optional `Title` header) or as JSON.
 //!
-//! - [`Config`]: the `.env` lines naming the URL, body format and events.
+//! - [`Config`]: the URL, body format and events.
 //! - [`Notifier`]: what an app holds. It says what happened ([`Notifier::notify`]); the queue (bounded,
 //!   oldest dropped and counted), the per-attempt timeout and the retries with backoff are its own.
 //! - The sockets live in each [`crate::Stack`] and are driven by its poll, through whichever port has
@@ -22,7 +22,7 @@ use ferrite_hal::Instant;
 
 pub(crate) use self::client::Courier;
 pub use self::client::Failure;
-pub use self::config::{Config, ConfigError, Endpoint, Event, Events, Format, Host, HostName, Problem};
+pub use self::config::{Config, Endpoint, Event, Events, Format, Host, HostName, Problem};
 pub use self::outbox::{Outbox, Outcome, Policy, Settled};
 pub use self::request::{Notification, Reply, Verdict, encode, parse_status_line, verdict};
 

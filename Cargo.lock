@@ -1005,12 +1005,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-config"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "ferrite-net",
+ "ferrite-wpa",
+ "rstest 0.28.0",
+ "serde",
+ "snafu",
+ "toml",
+]
+
+[[package]]
 name = "ferrite-dev"
 version = "0.1.0"
 dependencies = [
  "assert2",
  "clap",
  "crc32fast",
+ "ferrite-config",
  "ferrite-wire",
  "humantime",
  "jiff",
@@ -1033,6 +1047,7 @@ version = "0.1.0"
 dependencies = [
  "assert2",
  "crc32fast",
+ "ferrite-config",
  "ferrite-hal",
  "ferrite-mem",
  "ferrite-net",
@@ -1054,6 +1069,7 @@ version = "0.1.0"
 dependencies = [
  "assert2",
  "corosensei",
+ "ferrite-config",
  "ferrite-hal",
  "ferrite-lkpi",
  "ferrite-net",
@@ -1167,6 +1183,7 @@ name = "ferrite-uefi"
 version = "0.1.0"
 dependencies = [
  "assert2",
+ "ferrite-config",
  "ferrite-efi",
  "ferrite-hal",
  "ferrite-mem",
@@ -1175,6 +1192,7 @@ dependencies = [
  "ferrite-testing",
  "ferrite-wifi",
  "ferrite-wifi-efi",
+ "ferrite-wpa",
  "fontdue",
  "heapless 0.9.3",
  "log",

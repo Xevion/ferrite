@@ -9,6 +9,8 @@ extern crate std;
 
 pub mod bootlog;
 pub mod clock;
+#[cfg(feature = "config")]
+pub mod config;
 pub mod cores;
 pub mod cpu;
 #[cfg(feature = "crew")]
