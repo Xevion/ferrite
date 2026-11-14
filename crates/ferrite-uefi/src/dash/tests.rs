@@ -7,6 +7,7 @@ use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
 use super::*;
 use crate::report::{CpuInfo, History, PassRecord, TestRecord};
+use crate::sweep::Coverage;
 use ferrite_net::{Link, MacAddr, Medium, PortStats, PortStatus, ServiceCounters};
 
 const START: Instant = Instant::from_epoch(Duration::from_secs(5));
@@ -27,6 +28,7 @@ fn status() -> SweepStatus {
         analysis: Classification::Clean,
         preset: Preset::Standard,
         paused: false,
+        coverage: Coverage::NONE,
     }
 }
 

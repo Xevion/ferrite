@@ -23,5 +23,6 @@ pub fn idle_status() -> SweepStatus {
         analysis: Classification::Clean,
         preset: Preset::Standard,
         paused: false,
+        coverage: crate::sweep::Coverage::NONE,
     }
 }

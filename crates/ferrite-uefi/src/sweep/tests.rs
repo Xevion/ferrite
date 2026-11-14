@@ -300,3 +300,181 @@ fn a_sweep_over_several_blocks_tests_each_of_them_every_pass() {
     let status = sweep.status();
     check!(status.faults == 0 && status.bytes == 2560 * WORD);
 }
+
+mod rotation {
+    use alloc::rc::Rc;
+    use core::cell::RefCell;
+
+    use assert2::{assert, check};
+    use ferrite_efi::memory::ranges::Range;
+
+    use super::*;
+    use crate::sweep::rotation::{Closed, Opened, Pages};
+
+    const MAIN_WORDS: usize = 2048;
+    const RESERVE_WORDS: usize = 1024;
+
+    /// What the fake firmware was asked, in order.
+    #[derive(Clone, Default)]
+    struct Calls(Rc<RefCell<Vec<&'static str>>>);
+
+    impl Calls {
+        fn list(&self) -> Vec<&'static str> {
+            self.0.borrow().clone()
+        }
+    }
+
+    struct Fake {
+        calls: Calls,
+        refuse: bool,
+        kept: u64,
+    }
+
+    impl Pages for Fake {
+        fn open(&mut self, _main: &mut Claim, lend: u64) -> Option<Opened> {
+            self.calls.0.borrow_mut().push("open");
+            (!self.refuse).then(|| Opened {
+                reserve: host_blocks(&[RESERVE_WORDS]),
+                lent: vec![Range::new(1 << 20, (lend / 4096) as usize)],
+                free: lend,
+            })
+        }
+
+        fn close(&mut self, _main: &mut Claim, _reserve: Claim, _lent: &[Range]) -> Closed {
+            self.calls.0.borrow_mut().push("close");
+            Closed { kept: self.kept, free: 7 << 20 }
+        }
+    }
+
+    fn rotating(refuse: bool, kept: u64) -> (Sweep, Calls) {
+        let calls = Calls::default();
+        let pages = Fake { calls: calls.clone(), refuse, kept };
+        (sweep_of_words(MAIN_WORDS).with_pages(pages, 1 << 20), calls)
+    }
+
+    /// Step in 1 ms ticks until `done`.
+    fn step_until(sweep: &mut Sweep, mut done: impl FnMut(&Sweep) -> bool) {
+        let mut ms = 0;
+        while !done(sweep) {
+            ms += 1;
+            sweep.step(16 << 10, Instant::from_epoch(Duration::from_millis(ms)), None);
+        }
+    }
+
+    #[test]
+    fn each_pass_is_followed_by_a_pass_over_the_reserve() {
+        let (mut sweep, calls) = rotating(false, 0);
+        let tests = sweep.status().position.1;
+        step_until(&mut sweep, |s| s.rotation.is_open());
+        check!(calls.list() == ["open"], "nothing rotates before the first pass has ended");
+        let status = sweep.status();
+        check!(status.bytes == RESERVE_WORDS * WORD, "the tests run over the reserve");
+        check!(status.passes == 1, "the pass count stays the sweep's");
+        step_until(&mut sweep, |s| !s.rotation.is_open());
+        check!(calls.list() == ["open", "close"]);
+        let status = sweep.status();
+        check!(status.bytes == MAIN_WORDS * WORD);
+        check!((status.passes, status.position.0) == (1, 1), "the sweep goes on with pass 1 from its first test");
+        check!(sweep.history.tests.len() == tests, "the reserve's tests are not the sweep's");
+        step_until(&mut sweep, |s| s.rotation.is_open());
+        check!(calls.list() == ["open", "close", "open"]);
+        check!(sweep.status().passes == 2);
+    }
+
+    #[test]
+    #[expect(clippy::used_underscore_binding, reason = "the buffer field only owns memory outside tests")]
+    fn a_fault_in_the_reserve_is_reported_with_its_address_and_the_pass_it_followed() {
+        let (mut sweep, _) = rotating(false, 0);
+        step_until(&mut sweep, |s| s.rotation.is_open());
+        let block = sweep.run.as_ref().map(|r| r._buffer.blocks()[0].base().as_ptr()).unwrap();
+        while sweep.status().test != "solid bits" {
+            sweep.step(64, Instant::default(), None);
+        }
+        sweep.step(64 << 10, Instant::default(), None);
+        // SAFETY: inside the reserve's block; no step runs while it is written.
+        let expected = unsafe { block.add(40).read() };
+        // SAFETY: as above.
+        unsafe { block.add(40).write(expected ^ 1 << 3) };
+        step_until(&mut sweep, |s| !s.rotation.is_open());
+        let status = sweep.status();
+        check!(status.faults == 1);
+        assert!(let Some(first) = status.first_fault);
+        check!(first.fault.addr.get() == block.addr() + 40 * WORD);
+        check!(first.pass == 0, "the reserve of pass 0 is tested as pass 0");
+    }
+
+    #[test]
+    fn a_refused_window_is_not_asked_for_again_in_the_same_pass() {
+        let (mut sweep, calls) = rotating(true, 0);
+        step_until(&mut sweep, |s| s.status().passes == 2);
+        sweep.step(64, Instant::default(), None);
+        check!(calls.list() == ["open", "open"], "once after each of the two passes");
+        check!(sweep.status().bytes == MAIN_WORDS * WORD);
+        check!(!sweep.rotation.is_open());
+    }
+
+    #[test]
+    fn restarting_inside_a_window_ends_it_and_starts_over() {
+        let (mut sweep, calls) = rotating(false, 0);
+        step_until(&mut sweep, |s| s.rotation.is_open());
+        sweep.restart(Preset::Quick);
+        check!(calls.list() == ["open", "close"]);
+        let status = sweep.status();
+        check!((status.passes, status.bytes, status.preset) == (0, MAIN_WORDS * WORD, Preset::Quick));
+        step_until(&mut sweep, |s| s.rotation.is_open());
+        check!(calls.list() == ["open", "close", "open"], "the first pass after a restart is rotated too");
+    }
+
+    #[test]
+    fn coverage_counts_the_reserve_once_it_has_been_tested() {
+        let (mut sweep, _) = rotating(false, 0);
+        sweep.rotation.reported_free = 64 << 10;
+        let main = (MAIN_WORDS * WORD) as u64;
+        check!(sweep.status().coverage == Coverage { tested: main, free: 64 << 10 });
+        step_until(&mut sweep, |s| s.rotation.is_open());
+        check!(sweep.status().coverage.tested == main, "the reserve counts when its pass is done");
+        step_until(&mut sweep, |s| !s.rotation.is_open());
+        let coverage = sweep.status().coverage;
+        check!(coverage == Coverage { tested: main + (RESERVE_WORDS * WORD) as u64, free: 64 << 10 });
+        check!(coverage.percent() == 37);
+    }
+
+    #[test]
+    fn a_window_cut_short_does_not_count_the_reserve() {
+        let (mut sweep, _) = rotating(false, 0);
+        step_until(&mut sweep, |s| s.rotation.is_open());
+        sweep.restart(Preset::Standard);
+        check!(sweep.status().coverage.tested == (MAIN_WORDS * WORD) as u64);
+    }
+}
+
+#[test]
+fn only_aps_that_never_began_are_called_off() {
+    use ferrite_mem::crew::{Crew, Job};
+
+    let crew = Crew::default();
+    let seats: Vec<Seat> = (0..4).map(|_| Seat::default()).collect();
+    let tests = |_: usize| {
+        vec![Test::for_share(
+            TestKind::SolidBits,
+            CFG,
+            0,
+            &Regions::new(Vec::new()).layout(),
+            Span { start: 0, words: 0 },
+        )]
+    };
+    let jobs: Vec<Job<'_, Fixed>> = seats
+        .iter()
+        .enumerate()
+        .map(|(i, seat)| {
+            Job::new(tests(i), Regions::new(Vec::new()), Kernels::uniform(Kernel::SCALAR), 4096, Fixed, &crew, seat)
+        })
+        .collect();
+    // Seat 1 is in its job, seat 2 has ended; seats 0 and 3 never began.
+    let worker = jobs[1].claim();
+    assert!(let Some(_worker) = worker);
+    let ended = jobs[2].claim();
+    assert!(let Some(ended) = ended);
+    ended.retire();
+    check!(never_began(&[0, 1, 2, 3], &seats) == [0, 3]);
+}

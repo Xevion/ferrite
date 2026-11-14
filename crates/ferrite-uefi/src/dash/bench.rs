@@ -32,6 +32,7 @@ use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 use super::*;
 use crate::gfx::rect::{Plane, changed_bands};
 use crate::report::{CpuInfo, History, PassRecord, TestRecord};
+use crate::sweep::Coverage;
 use ferrite_net::{Link, MacAddr, Medium, PortStats, PortStatus, ServiceCounters};
 
 pub(super) use crate::testing::allocations;
@@ -78,6 +79,7 @@ impl Scenario {
             analysis: Classification::Clean,
             preset: Preset::Standard,
             paused: false,
+            coverage: Coverage::NONE,
         };
         Self { status, history, faults: VecDeque::new(), frame: 0, kinds }
     }

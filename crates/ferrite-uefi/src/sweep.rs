@@ -5,7 +5,8 @@
 //! core of [`Cores`] at once, each on its own share, while the BSP keeps its duties through a
 //! callback; consecutive split tests share one dispatch of the APs. The memory is whole pages from
 //! boot services, one block per free range of the firmware's memory map less a reserve (see
-//! [`ferrite_efi::memory`]), freed on drop. Steps of the AVX tiers run inside [`VectorState::wide`], in chunks
+//! [`ferrite_efi::memory`]), freed on drop; after each pass the reserve itself is tested in a
+//! rotation (see [`rotation`]). Steps of the AVX tiers run inside [`VectorState::wide`], in chunks
 //! of at most [`WIDE_CHUNK_BYTES`], since the firmware's interrupt entry does not save the upper
 //! halves of the vector registers.
 
@@ -16,6 +17,7 @@ use core::fmt;
 use core::num::NonZeroUsize;
 use core::time::Duration;
 
+use self::rotation::{FirmwarePages, Rotation};
 use ferrite_efi::clock::Clock;
 use ferrite_efi::cores::{CoreChoice, Cores};
 use ferrite_efi::cpu::VectorState;
@@ -29,12 +31,15 @@ use ferrite_mem::{Caps, Fault, Faults, Region, Regions, WIDE_CHUNK_BYTES};
 
 use crate::report::{self, CpuInfo, FAULT_LOG, FaultRecord, History, Snapshot, TestRecord};
 
+mod rotation;
+
 const WORD: usize = size_of::<u64>();
 /// Faults handed to the statistics per step; every one is still counted.
 const REPORTS_PER_STEP: u64 = 256;
 /// The slowest per-core rate an AP's dispatch timeout allows for, in bytes per second.
 const AP_FLOOR_RATE: u64 = 250_000_000;
-/// How long the BSP waits for every AP of a split run to reach the start.
+/// How long the BSP waits for every AP of a split run to reach the start. An AP that has not
+/// begun its job by then is called off rather than waited for until the firmware's timeout.
 const GATHER_PATIENCE: Duration = Duration::from_secs(2);
 /// Added to every AP's dispatch timeout, for the start and for waiting on slower cores at gates.
 const AP_SLACK: Duration = Duration::from_secs(10);
@@ -55,6 +60,31 @@ const RESERVE_FLOOR: u64 = 256 << 20;
 /// The reserve also grows with the machine, by this share of the free memory: the firmware's own
 /// bookkeeping (page tables, the memory map, per-device buffers) scales with installed memory.
 const RESERVE_SHARE: u64 = 32;
+
+/// How much of the memory the firmware reports free the sweep has tested.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Coverage {
+    /// Bytes tested: every block the sweep holds each pass, and the reserve of the last rotation.
+    pub tested: u64,
+    /// Bytes the memory map reported free when the sweep took its memory; at least `tested`.
+    pub free: u64,
+}
+
+impl Coverage {
+    pub const NONE: Self = Self { tested: 0, free: 0 };
+
+    /// Tested bytes as a percentage of the free ones, 0 to 100.
+    #[must_use]
+    pub const fn percent(self) -> u64 {
+        memory::percent(self.tested, self.free)
+    }
+}
+
+impl fmt::Display for Coverage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} of {} MiB free ({}%)", self.tested >> 20, self.free >> 20, self.percent())
+    }
+}
 
 /// Sweep progress for the UI, the status page and the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +110,8 @@ pub struct SweepStatus {
     pub preset: Preset,
     /// Sweeping is paused by request.
     pub paused: bool,
+    /// The share of the free memory tested; what the firmware holds stays out of it.
+    pub coverage: Coverage,
 }
 
 impl fmt::Display for SweepStatus {
@@ -88,8 +120,8 @@ impl fmt::Display for SweepStatus {
         let mode: &str = self.mode.into();
         write!(
             f,
-            "{} ({i}/{n}) {}% pass={} {}% {} {mode} on {} cpus faults={}",
-            self.test, self.test_percent, self.passes, self.percent, self.tier, self.cpus, self.faults
+            "{} ({i}/{n}) {}% pass={} {}% {} {mode} on {} cpus faults={} tested {}",
+            self.test, self.test_percent, self.passes, self.percent, self.tier, self.cpus, self.faults, self.coverage
         )
     }
 }
@@ -110,6 +142,7 @@ impl SweepStatus {
         analysis: Classification::Clean,
         preset: Preset::Standard,
         paused: false,
+        coverage: Coverage::NONE,
     };
 }
 
@@ -140,8 +173,9 @@ struct Run {
 }
 
 impl Run {
-    /// The suite over `buffer`; `None`, freeing the buffer, when it cannot be regions.
-    fn new(buffer: Claim, kernels: Kernels, config: Config, preset: Preset) -> Option<Self> {
+    /// The suite over `buffer`, starting at pass `pass`; `None`, freeing the buffer, when it cannot
+    /// be regions.
+    fn new(buffer: Claim, kernels: Kernels, config: Config, preset: Preset, pass: u64) -> Option<Self> {
         let made: Result<Vec<Region<'static>>, _> = buffer
             .blocks()
             .iter()
@@ -156,7 +190,7 @@ impl Run {
                     regions.bytes(),
                     regions.layout().spans().len()
                 );
-                Some(Self { suite: Suite::new(regions, kernels, config, preset), _buffer: buffer })
+                Some(Self { suite: Suite::starting_at(regions, kernels, config, preset, pass), _buffer: buffer })
             },
             Err(e) => {
                 log::error!("sweep: unusable buffer: {e}");
@@ -215,6 +249,7 @@ pub struct Sweep {
     cores: Option<Cores>,
     history: History,
     paused: bool,
+    rotation: Rotation,
 }
 
 impl Sweep {
@@ -224,10 +259,12 @@ impl Sweep {
     /// With no memory the sweep has no work.
     #[must_use]
     pub fn new(caps: Caps, cores: Option<Cores>) -> Self {
-        let buffer = memory::claim_free_memory(reserve_for)
-            .or_else(|| alloc_largest(FALLBACK_BYTES, MIN_SWEEP_BYTES, Claim::any_pages));
+        let claimed = memory::claim_free_memory(reserve_for);
+        let lend = claimed.as_ref().map_or(0, Claim::reserve);
+        let buffer = claimed.or_else(|| alloc_largest(FALLBACK_BYTES, MIN_SWEEP_BYTES, Claim::any_pages));
         let preset = Preset::Standard;
-        Self::with_buffer(buffer, Kernels::for_caps(caps), preset.config(), preset, cores)
+        let sweep = Self::with_buffer(buffer, Kernels::for_caps(caps), preset.config(), preset, cores);
+        sweep.with_pages(FirmwarePages, lend)
     }
 
     fn with_buffer(
@@ -237,10 +274,11 @@ impl Sweep {
         preset: Preset,
         cores: Option<Cores>,
     ) -> Self {
-        let run = buffer.and_then(|buffer| Run::new(buffer, kernels, config, preset));
+        let rotation = Rotation::new(buffer.as_ref());
+        let run = buffer.and_then(|buffer| Run::new(buffer, kernels, config, preset, 0));
         let mut history = History::default();
         history.set_cpus(cores.as_ref().map_or_default(cpu_infos));
-        Self { run, tally: Tally::default(), waiting: None, current: None, cores, history, paused: false }
+        Self { run, tally: Tally::default(), waiting: None, current: None, cores, history, paused: false, rotation }
     }
 
     /// Whether a step now would do work.
@@ -271,9 +309,11 @@ impl Sweep {
     /// Throw away every result and start again from pass 0 with `preset`, over the same buffer.
     pub fn restart(&mut self, preset: Preset) {
         log::info!("sweep: restarting with {preset:?} after {}", self.status());
+        self.close_window(None);
+        self.rotation.restart();
         if let Some(Run { suite, _buffer: buffer }) = self.run.take() {
             let kernels = suite.kernels();
-            self.run = Run::new(buffer, kernels, preset.config(), preset);
+            self.run = Run::new(buffer, kernels, preset.config(), preset, 0);
         }
         self.tally = Tally::default();
         self.waiting = None;
@@ -313,16 +353,15 @@ impl Sweep {
     /// next may split. With `vector` the wide tiers' work runs inside [`VectorState::wide`], at most
     /// [`WIDE_CHUNK_BYTES`] at a time.
     pub fn step(&mut self, chunk_bytes: usize, now: Instant, vector: Option<&VectorState>) {
-        let Some(run) = self.run.as_mut() else { return };
-        if self.waiting.is_some_and(|until| now < until) {
-            return;
-        }
-        if self.paused {
+        if self.run.is_none() || self.waiting.is_some_and(|until| now < until) || self.paused {
             return;
         }
         self.waiting = None;
-        self.history.start(now, self.tally.faults);
-        note(&mut self.current, &mut self.history, self.tally.faults, run.suite.schedule(), now);
+        self.rotate(now);
+        let Some(run) = self.run.as_mut() else { return };
+        let history = history_of(&mut self.rotation, &mut self.history);
+        history.start(now, self.tally.faults);
+        note(&mut self.current, history, self.tally.faults, run.suite.schedule(), now);
         let cpu = self.cores.as_ref().map_or(0, Cores::bsp);
         let guard = vector.filter(|_| run.suite.kernels().is_wide());
         let piece = if guard.is_some() { WIDE_CHUNK_BYTES } else { chunk_bytes };
@@ -355,9 +394,14 @@ impl Sweep {
     /// core that fails is left out and the test it was on runs again without it; with only the BSP
     /// left, the test is left to [`Sweep::step`].
     pub fn run_split(&mut self, vector: Option<&VectorState>, duties: &mut Duties<'_>) -> Flow {
-        let Self { run: Some(run), tally, current, cores: Some(cores), history, .. } = self else {
+        if let Some(cores) = &self.cores {
+            let now = cores.clock().now();
+            self.rotate(now);
+        }
+        let Self { run: Some(run), tally, current, cores: Some(cores), history, rotation, .. } = self else {
             return Flow::Continue;
         };
+        let history = history_of(rotation, history);
         let started = cores.clock().now();
         history.start(started, tally.faults);
         note(current, history, tally.faults, run.suite.schedule(), started);
@@ -397,7 +441,13 @@ impl Sweep {
         let Some(run) = self.run.as_ref() else { return SweepStatus::IDLE };
         let cpus = self.cpus_for(run.suite.test().kind());
         let mode = if cpus > 1 { Mode::Split } else { Mode::Single };
-        SweepStatus { paused: self.paused, ..status_of(run.suite.schedule(), &self.tally, mode, cpus) }
+        let status = status_of(run.suite.schedule(), &self.tally, mode, cpus);
+        SweepStatus {
+            paused: self.paused,
+            passes: self.rotation.passes_done().unwrap_or(status.passes),
+            coverage: self.rotation.coverage(),
+            ..status
+        }
     }
 
     /// The status with the history and the latest faults, for the screen and the status page.
@@ -427,7 +477,14 @@ fn status_of(schedule: &Schedule, tally: &Tally, mode: Mode, cpus: usize) -> Swe
         analysis: tally.stats.classification(),
         preset: schedule.preset(),
         paused: false,
+        coverage: Coverage::NONE,
     }
+}
+
+/// The history the running tests record into: the sweep's own, or a scratch copy while the reserve
+/// is being tested, whose tests and pass are not the sweep's.
+fn history_of<'a>(rotation: &'a mut Rotation, own: &'a mut History) -> &'a mut History {
+    rotation.history().unwrap_or(own)
 }
 
 /// Log and record the test in `current` once the schedule's test is a different one, and start
@@ -476,6 +533,11 @@ enum Dispatch {
 fn ap_timeout(test: &Test) -> Duration {
     let bytes = test.total().saturating_mul(WORD as u64);
     Duration::from_secs(bytes / AP_FLOOR_RATE + 1) + test.waits() + AP_PATIENCE + GATHER_PATIENCE + AP_SLACK
+}
+
+/// The started APs whose seats show they never began their job, so nothing of theirs is running.
+fn never_began(started: &[usize], seats: &[Seat]) -> Vec<usize> {
+    started.iter().copied().filter(|&i| seats[i].state() == SeatState::Idle).collect()
 }
 
 /// Move the faults the seats kept since the last call into `tally`, each with its processor.
@@ -573,6 +635,7 @@ fn dispatch(
     let mut round = Round::of(schedule, tally, cpus.len(), totals[0], dispatched);
     let mut absorbed = vec![0; seats.len()];
     let mut lost: Vec<usize> = Vec::new();
+    let mut called_off: Vec<usize> = Vec::new();
     let mut stop_asked = false;
     let mut completed = 0;
     let panics = mp::ap_panics();
@@ -585,7 +648,7 @@ fn dispatch(
     let (live_seats, closed, timing) = cores.mp().scope(|scope| {
         let mut started = Vec::new();
         for (i, (job, &cpu)) in jobs.iter().zip(&cpus).enumerate().skip(1) {
-            match scope.start(cpu, job, timeout) {
+            match scope.start_cancellable(cpu, job, timeout) {
                 Ok(()) => started.push(i),
                 Err(e) => {
                     log::warn!("sweep: {}: {e}", round.name);
@@ -608,6 +671,11 @@ fn dispatch(
             }
             if now > deadline {
                 lost.extend(started.iter().filter(|&&i| seats[i].state() != SeatState::Ready));
+                for i in never_began(&started, &seats) {
+                    if scope.cancel(cpus[i]) {
+                        called_off.push(i);
+                    }
+                }
                 break false;
             }
             if now >= next_duty {
@@ -635,6 +703,7 @@ fn dispatch(
             crew.abandon();
         }
         let (mut closing, mut closed_at, mut last_check) = (false, gathered_at, gathered_at);
+        let mut swept = false;
         loop {
             let round_done = crew.coordinate(live.iter().map(|&i| &seats[i]));
             if !own_done && let Some(worker) = own.as_mut() {
@@ -689,9 +758,19 @@ fn dispatch(
             let winding_down = closing || crew.stopped();
             if winding_down || now - last_check >= CHECK_EVERY {
                 last_check = now;
-                let running = scope.running();
                 let finished = started.iter().filter(|&&i| seats[i].state().ended()).count();
-                if !crew.stopped() && (mp::ap_panics() != panics || started.len() - running > finished) {
+                // An AP that is still not in its job a while after the run began to end never will be.
+                if winding_down && !swept && now - gathered_at >= GATHER_PATIENCE {
+                    swept = true;
+                    for i in never_began(&started, &seats) {
+                        if scope.cancel(cpus[i]) {
+                            called_off.push(i);
+                        }
+                    }
+                }
+                let running = scope.running();
+                let ended_by_firmware = started.len() - called_off.len() - running;
+                if !crew.stopped() && (mp::ap_panics() != panics || ended_by_firmware > finished) {
                     log::warn!("sweep: {}: an AP stopped answering; stopping the others", round.name);
                     crew.stop();
                 }
@@ -731,7 +810,8 @@ fn dispatch(
     lost.sort_unstable();
     lost.dedup();
     for &i in &lost {
-        log::error!("sweep: {}: {} {}", round.name, cpus[i], seats[i].state());
+        let called = if called_off.contains(&i) { ", called off" } else { "" };
+        log::error!("sweep: {}: {} {}{called}", round.name, cpus[i], seats[i].state());
     }
     if lost.is_empty()
         && live_seats.len() == seats.len()

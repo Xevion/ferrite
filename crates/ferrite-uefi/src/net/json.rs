@@ -403,6 +403,7 @@ mod tests {
             analysis: Classification::StuckBits { mask: 0x10 },
             preset: Preset::Thorough,
             paused: true,
+            coverage: crate::sweep::Coverage::NONE,
         };
         let snapshot = Snapshot { status, history: &history, faults: &faults };
         let mut net = NetStatus::default();

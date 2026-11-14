@@ -8,6 +8,7 @@
 //! waits in the firmware's idle loop again. [`ApTask`] is the contract for code that runs there;
 //! [`Mp::scope`] dispatches it without blocking and waits for every AP before the task can go away.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::cell::RefCell;
@@ -15,6 +16,7 @@ use core::ffi::c_void;
 use core::fmt;
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::time::Duration;
 
@@ -24,6 +26,10 @@ use uefi::boot::{self, EventType, OpenProtocolAttributes, OpenProtocolParams, Sc
 use uefi::proto::pi::mp::MpServices;
 
 use crate::cpu::{FpuControl, VectorSupport};
+
+use self::tether::Tether;
+
+mod tether;
 
 /// The firmware's index of a logical processor, below its processor count. Only [`Mp`] makes one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -353,7 +359,8 @@ impl Mp {
         aps.into_iter().zip(&answers).map(|(number, a)| (number, a.get())).collect()
     }
 
-    /// Run `f` with a [`Scope`] to start AP tasks in, then wait for every task started there to end.
+    /// Run `f` with a [`Scope`] to start AP tasks in, then wait for every task started there to end
+    /// (but not for dispatches called off).
     ///
     /// The wait spins on the completion events, which the firmware signals from its periodic status
     /// check, so it ends up to one check interval after the last AP returns.
@@ -367,8 +374,20 @@ impl Mp {
             core::hint::spin_loop();
         }
         for started in scope.started.take() {
+            if started.detached {
+                // The firmware may still signal the event and an AP may still start the tether.
+                log::warn!(
+                    "mp: {}'s dispatch was called off; the firmware resets it when its timeout expires",
+                    started.number
+                );
+                continue;
+            }
             if let Err(e) = boot::close_event(started.event) {
                 log::debug!("mp: closing {}'s completion event failed: {e}", started.number);
+            }
+            if let Some(tether) = started.tether {
+                // SAFETY: from `Box::into_raw` in `start_cancellable`, and the dispatch has ended.
+                drop(unsafe { Box::from_raw(tether.as_ptr()) });
             }
         }
         result
@@ -380,9 +399,14 @@ struct Started {
     event: Event,
     ended: bool,
     check_failed: bool,
+    /// The heap tether the AP was handed, for a dispatch that can be called off.
+    tether: Option<NonNull<Tether>>,
+    /// Called off before the AP began it: the scope no longer waits for it.
+    detached: bool,
 }
 
-/// Where AP tasks are started; every one has ended before [`Mp::scope`] returns.
+/// Where AP tasks are started; every one has ended before [`Mp::scope`] returns, except a dispatch
+/// called off with [`Scope::cancel`], whose task never runs.
 pub struct Scope<'scope, 'env: 'scope> {
     mp: &'env Mp,
     started: RefCell<Vec<Started>>,
@@ -399,6 +423,50 @@ impl<'scope> Scope<'scope, '_> {
         task: &'scope T,
         timeout: Duration,
     ) -> Result<(), MpError> {
+        let arg = core::ptr::from_ref(task).cast_mut().cast::<c_void>();
+        self.launch(number, trampoline::<T>, arg, timeout, None)
+    }
+
+    /// [`Scope::start`], but the dispatch can be called off with [`Scope::cancel`] while the AP has
+    /// not begun it.
+    pub fn start_cancellable<T: ApTask>(
+        &'scope self,
+        number: ProcessorNumber,
+        task: &'scope T,
+        timeout: Duration,
+    ) -> Result<(), MpError> {
+        let tether = NonNull::from(Box::leak(Box::new(Tether::new(task))));
+        let result = self.launch(number, trampoline::<Tether>, tether.as_ptr().cast(), timeout, Some(tether));
+        if result.is_err() {
+            // SAFETY: from `Box::leak` above, and the firmware never took it.
+            drop(unsafe { Box::from_raw(tether.as_ptr()) });
+        }
+        result
+    }
+
+    /// Call off the dispatch started with [`Scope::start_cancellable`] on `number` if its AP has not
+    /// begun the task: the task is never run, and the scope stops waiting for the AP, whose
+    /// dispatch the firmware ends and resets when its timeout expires. False when there is no such
+    /// dispatch or the AP is already in the task.
+    pub fn cancel(&self, number: ProcessorNumber) -> bool {
+        let mut started = self.started.borrow_mut();
+        let Some(s) = started.iter_mut().find(|s| s.number == number && !s.ended && !s.detached) else {
+            return false;
+        };
+        // SAFETY: the tether is only freed by the scope's end, and `s` has not been detached.
+        let called_off = s.tether.is_some_and(|t| unsafe { t.as_ref() }.cancel());
+        s.detached = called_off;
+        called_off
+    }
+
+    fn launch(
+        &'scope self,
+        number: ProcessorNumber,
+        entry: extern "efiapi" fn(*mut c_void),
+        arg: *mut c_void,
+        timeout: Duration,
+        tether: Option<NonNull<Tether>>,
+    ) -> Result<(), MpError> {
         if !self.mp.aps().any(|p| p.number == number) {
             return Err(MpError::NotAnAp { number });
         }
@@ -406,25 +474,30 @@ impl<'scope> Scope<'scope, '_> {
         let event = unsafe { boot::create_event(EventType::empty(), Tpl::APPLICATION, None, None) }
             .context(CreateEventSnafu { number })?;
         let timeout = timeout.clamp(Duration::from_micros(1), MAX_TIMEOUT);
-        let arg = core::ptr::from_ref(task).cast_mut().cast::<c_void>();
         // SAFETY: the clone is the firmware's; ours stays open until the scope has seen it signalled.
         let firmware_event = unsafe { event.unsafe_clone() };
-        if let Err(source) =
-            self.mp.proto.startup_this_ap(number.0, trampoline::<T>, arg, Some(firmware_event), Some(timeout))
-        {
+        if let Err(source) = self.mp.proto.startup_this_ap(number.0, entry, arg, Some(firmware_event), Some(timeout)) {
             if let Err(e) = boot::close_event(event) {
                 log::debug!("mp: closing {number}'s completion event failed: {e}");
             }
             return Err(MpError::Start { number, source });
         }
-        self.started.borrow_mut().push(Started { number, event, ended: false, check_failed: false });
+        self.started.borrow_mut().push(Started {
+            number,
+            event,
+            ended: false,
+            check_failed: false,
+            tether,
+            detached: false,
+        });
         Ok(())
     }
 
-    /// Tasks started here whose dispatch the firmware has not yet reported ended (done or timed out).
+    /// Tasks started here whose dispatch the firmware has not yet reported ended (done or timed
+    /// out), not counting the ones called off.
     pub fn running(&self) -> usize {
         let mut started = self.started.borrow_mut();
-        for s in started.iter_mut().filter(|s| !s.ended) {
+        for s in started.iter_mut().filter(|s| !s.ended && !s.detached) {
             match boot::check_event(&s.event) {
                 Ok(signalled) => s.ended = signalled,
                 Err(e) if !s.check_failed => {
@@ -434,7 +507,7 @@ impl<'scope> Scope<'scope, '_> {
                 Err(_) => {},
             }
         }
-        started.iter().filter(|s| !s.ended).count()
+        started.iter().filter(|s| !s.ended && !s.detached).count()
     }
 }
 

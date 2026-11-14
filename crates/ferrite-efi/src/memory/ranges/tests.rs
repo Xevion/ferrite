@@ -47,3 +47,30 @@ fn touching_and_overlapping_ranges_become_one() {
     let free = [range(48, 16), range(16, 16), range(32, 16), range(60, 8)];
     check!(spans(&select(&free, 0)) == [(16, 52)]);
 }
+
+#[test]
+fn subtracting_cuts_holes_out_of_the_middle_and_the_ends() {
+    let free = [range(10, 100), range(200, 10)];
+    let hole = [range(20, 10), range(100, 20), range(205, 1)];
+    check!(spans(&subtract(&free, &hole)) == [(10, 10), (30, 70), (200, 5), (206, 4)]);
+    check!(subtract(&free, &[range(0, 300)]).is_empty());
+    check!(spans(&subtract(&free, &[])) == [(10, 100), (200, 10)]);
+}
+
+#[test]
+fn overlapping_holes_are_cut_once() {
+    check!(spans(&subtract(&[range(0, 100)], &[range(40, 20), range(50, 20), range(45, 2)])) == [(0, 40), (70, 30)]);
+}
+
+#[test]
+fn intersecting_keeps_only_what_both_have() {
+    let lent = [range(100, 50), range(300, 20)];
+    let free = [range(120, 100), range(310, 5)];
+    check!(spans(&intersect(&lent, &free)) == [(120, 30), (310, 5)]);
+}
+
+#[test]
+fn held_pages_are_summed_by_kind_inside_the_zone() {
+    let entries = [(1_u32, range(0, 4)), (2, range(2, 10)), (1, range(20, 10)), (2, range(60, 40)), (3, range(40, 1))];
+    check!(held_below(entries, 64 * MIB) == [(1, 13 * MIB), (2, 14 * MIB), (3, MIB)]);
+}
