@@ -137,10 +137,15 @@ impl Outlook {
                 let f =
                     BasisPoints::clamped((self.settled * u64::from(BasisPoints::WHOLE) + u64::from(cycle.get())) / n);
                 let rest = u32::try_from(n - self.settled - 1).unwrap_or(u32::MAX);
-                let eta = self.cycle.zip(self.cycle_left).map(|(c, l)| Eta {
-                    remaining: l.remaining.saturating_add(c.saturating_mul(rest)),
-                    confidence: l.confidence,
-                });
+                // The cycle running is the last one needed: its own time left is the whole answer.
+                let eta = match (self.cycle, self.cycle_left) {
+                    (_, Some(l)) if rest == 0 => Some(l),
+                    (Some(c), Some(l)) => Some(Eta {
+                        remaining: l.remaining.saturating_add(c.saturating_mul(rest)),
+                        confidence: l.confidence,
+                    }),
+                    _ => None,
+                };
                 take(f, eta.map(rounded));
             }
         }
@@ -486,6 +491,7 @@ impl Pace {
             if let Some(rates) = lane.rates.get_mut(look.index) {
                 rates.clear();
             }
+            lane.estimator.skip_to(look.index);
         }
         let forecast = lane.estimator.observe(now, look.index, look.done, look.wait_until);
         lane.forecast = forecast;
@@ -1079,6 +1085,76 @@ mod tests {
         check!(o.overall(secs(100)).fill == Some(BasisPoints::FULL));
         let only_fault = Outlook { goal: Goal { stop_on_fault: true, ..Goal::UNLIMITED }, ..Outlook::NONE };
         check!(only_fault.overall(secs(5)).fill.is_none(), "stopping at a fault has nothing to fill a bar with");
+    }
+
+    #[test]
+    fn the_last_pass_needs_no_cycle_length_to_know_its_end_but_a_later_one_does() {
+        let left = Some(Eta { remaining: secs(300), confidence: Confidence::Estimated });
+        let outlook = |passes, cycle| Outlook {
+            goal: goal(Some(passes), None),
+            settled: 1,
+            cycle,
+            cycle_left: left,
+            ..Outlook::NONE
+        };
+        let last = outlook(2, None).overall(secs(100)).left;
+        check!(last.map(|e| e.remaining.as_secs()) == Some(300), "{last:?}");
+        check!(outlook(3, None).overall(secs(100)).left.is_none(), "one more cycle, of unknown length");
+        let later = outlook(3, Some(secs(1000))).overall(secs(100)).left;
+        check!(later.map(|e| e.remaining.as_secs()) == Some(1300));
+    }
+
+    /// The standard preset's pace, the reserve's own times for all its tests but the first (which
+    /// ends too quickly for a look to catch), and a goal of two passes.
+    fn rotating_pace() -> (Pace, Schedule, Schedule) {
+        let main = schedule(Preset::Standard);
+        let reserve = Schedule::new(Layout::new([WORDS / 4]), Kernels::uniform(Kernel::SCALAR), CFG, Preset::Standard);
+        // Memory is keyed to the 256 MiB, so a test-sized reserve is told from the sweep's memory by its cpus.
+        let reserve_key = Key::new(Machine::UNKNOWN.id, "standard", WORDS / 4 * 8, 2, "scalar");
+        let mut timings = Timings::default();
+        for (i, kind) in TestKind::sequence(Preset::Standard).enumerate() {
+            timings.record(&key(Preset::Standard), kind.name(), secs(10));
+            if i > 0 {
+                timings.record(&reserve_key, kind.name(), secs(2));
+            }
+        }
+        let mut pace = Pace::new(goal(Some(2), None), Machine::UNKNOWN, Store::new(timings), None);
+        pace.set_rotation_scale(WORDS as u64 * 2, WORDS as u64 * 8);
+        pace.set_settled(1);
+        (pace, main, reserve)
+    }
+
+    #[test]
+    fn a_rotation_first_looked_at_after_its_first_test_still_has_a_length_and_the_goal_an_end() {
+        let (mut pace, main, reserve) = rotating_pace();
+        let tests = main.shapes().len() as u64;
+        pace.prepare(Scope::Main, &main, 1, "scalar");
+        pace.observe(&look(Scope::Main, 0, 1, 0, 0));
+        pace.prepare(Scope::Reserve, &reserve, 2, "scalar");
+        let during = pace.observe(&look(Scope::Reserve, 5, 0, 1, 0));
+        check!(during.reserve);
+        let (pass, rotation) = (10 * tests, 2 * (tests - 1));
+        check!(during.cycle == Some(secs(pass + rotation)), "{:?}", during.cycle);
+        check!(during.cycle_progress.is_some());
+        check!(pace.reserve.as_ref().is_some_and(|lane| lane.pass_first.is_some()), "the rotation's length is logged");
+        let overall = during.overall(secs(5));
+        check!(overall.left.map(|e| e.remaining) == Some(secs(rotation)), "{:?}", overall.left);
+    }
+
+    #[test]
+    fn the_goal_counts_the_rotation_after_a_pass_in_the_pass_itself() {
+        let (mut pace, main, _) = rotating_pace();
+        pace.set_goal(goal(Some(1), None));
+        pace.set_settled(0);
+        pace.prepare(Scope::Main, &main, 1, "scalar");
+        let o = pace.observe(&look(Scope::Main, 0, 0, 0, 0));
+        assert!(let Some(pass) = o.pass);
+        assert!(let Some(left) = o.overall(secs(0)).left);
+        let waits: Duration = main.shapes().iter().map(ferrite_mem::suite::Shape::waits).sum();
+        // The pass's tests over a quarter of the memory, and its waits whole.
+        let rotation = pass.remaining.saturating_sub(waits) / 4 + waits;
+        check!(left.remaining.abs_diff(pass.remaining + rotation) <= secs(1), "{left:?} for {pass:?}");
+        check!(left.confidence == Confidence::Estimated, "the rotation is only scaled from the pass");
     }
 
     /// A one-second sample of 1000 words a second (8 kB/s) for each second `from..=to`, on the first test.

@@ -11,7 +11,8 @@
 //!   of its own progress, trusting the extrapolation more the further it is (all of it from a
 //!   quarter of the test on), with its waits taken exactly;
 //! - a test still to run counts for its prior, or, with none, for its words at the speed this pass
-//!   has measured so far, plus its waits exactly.
+//!   has measured so far (once that is half a second of work or more, else at the calibrated speed),
+//!   plus its waits exactly.
 //!
 //! A prediction is only [`Measured`](Confidence::Measured) when every test left has a prior and the
 //! running test is not running at a speed that contradicts its own. Otherwise it is
@@ -49,6 +50,9 @@ const GATE_SPAN: Duration = Duration::from_secs(5);
 /// the mean of the recent ones.
 const GATE_PERCENT: u32 = 2;
 const GATE_SLACK: Duration = Duration::from_secs(1);
+/// The least time of work a pace or a straight line is taken from. A test that took milliseconds
+/// over a few words says nothing about a test of a billion, and scaled up it gives days.
+const MIN_SAMPLE: Duration = Duration::from_millis(500);
 
 /// What a prediction rests on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,6 +147,8 @@ pub struct Estimator {
     priors: Vec<Option<Duration>>,
     /// What each test took on this one.
     took: Vec<Option<Duration>>,
+    /// Tests of this pass that ended before anything looked at them, which count as taking no time.
+    unwatched: Vec<bool>,
     current: Option<Current>,
     /// When the next test starts, if the last one has just finished.
     next_start: Option<Instant>,
@@ -176,10 +182,12 @@ impl Estimator {
     pub fn new(shapes: Vec<Shape>, mut priors: Vec<Option<Duration>>) -> Self {
         priors.resize(shapes.len(), None);
         let took = alloc::vec![None; shapes.len()];
+        let shapes_len = shapes.len();
         Self {
             shapes,
             priors,
             took,
+            unwatched: alloc::vec![false; shapes_len],
             current: None,
             next_start: None,
             samples: VecDeque::new(),
@@ -224,7 +232,16 @@ impl Estimator {
         for (prior, took) in self.priors.iter_mut().zip(&mut self.took) {
             *prior = took.take().or(*prior);
         }
+        self.unwatched.fill(false);
         self.current = None;
+    }
+
+    /// Note that the pass is first looked at in test `index`: the tests before it that have no time
+    /// of this pass ended between two looks, and count for none, so the pass still has a length.
+    pub fn skip_to(&mut self, index: usize) {
+        for (unwatched, took) in self.unwatched.iter_mut().zip(&self.took).take(index) {
+            *unwatched |= took.is_none();
+        }
     }
 
     /// Put every instant the estimator holds `by` later, after the clock ran while the test did not.
@@ -342,7 +359,7 @@ impl Estimator {
 
         // The running test's work time: prior or this pass's pace, blended with its own line.
         let prior_work = self.priors[index].map(|p| p.saturating_sub(shape.waits()));
-        let live = (done > 0 && !work_time.is_zero() && work > 0)
+        let live = (done > 0 && work_time >= MIN_SAMPLE && work > 0)
             .then(|| scale(work_time, u128::from(work), u128::from(done)));
         let pace_guess = self.guess(fin_time, fin_words, work);
         let base = prior_work.or(pace_guess);
@@ -380,7 +397,9 @@ impl Estimator {
         let confidence = if backed { Confidence::Measured } else { Confidence::Estimated };
         let raw = remaining.map(|remaining| Eta { remaining, confidence });
 
-        let before: Option<Duration> = (0..index).map(|k| self.took[k].or(self.priors[k])).sum();
+        let before: Option<Duration> = (0..index)
+            .map(|k| self.took[k].or(self.priors[k]).or_else(|| self.unwatched[k].then_some(Duration::ZERO)))
+            .sum();
         let pass_total = before.zip(remaining).map(|(b, r)| b + elapsed + r);
         let pass_progress = before.zip(pass_total).map(|(b, total)| BasisPoints::of_time(b + elapsed, total));
         let test_words = BasisPoints::of(done, work);
@@ -407,9 +426,9 @@ impl Estimator {
     }
 
     /// The time `words` of work take at the pace of `time` for `done` words, or at the calibrated
-    /// speed while nothing has been measured.
+    /// speed while nothing long enough has been measured.
     fn guess(&self, time: Duration, done: u128, words: u64) -> Option<Duration> {
-        if done > 0 {
+        if done > 0 && time >= MIN_SAMPLE {
             return Some(scale(time, u128::from(words), done));
         }
         let bytes_per_sec = u128::from(self.speed.filter(|&s| s > 0)?);

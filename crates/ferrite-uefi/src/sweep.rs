@@ -372,9 +372,16 @@ impl Sweep {
         }
     }
 
-    /// Whether a step now would do work.
+    /// Whether a step now would do work. A met goal takes no more, so the run ends where the goal
+    /// was met rather than after the next test has begun.
     pub fn has_work(&self, now: Instant) -> bool {
-        self.run.is_some() && !self.paused && self.waiting.is_none_or(|until| now >= until)
+        self.run.is_some() && !self.paused && self.waiting.is_none_or(|until| now >= until) && !self.goal_reached(now)
+    }
+
+    /// Whether the goal is met as of `now`, by what the run's own count of passes, clock and faults say.
+    fn goal_reached(&self, now: Instant) -> bool {
+        let Some(started) = self.history.run_started else { return false };
+        self.pace.goal().met(self.settled_passes(), now - started, self.tally.faults).is_some()
     }
 
     pub const fn paused(&self) -> bool {
@@ -517,6 +524,13 @@ impl Sweep {
             return;
         }
         self.waiting = None;
+        if self.goal_reached(now) {
+            // A reserve pass that has met the goal is still closed, which hands the lent memory back.
+            if self.window_finished() {
+                self.close_window(Some(now));
+            }
+            return;
+        }
         self.rotate(now);
         let Some(run) = self.run.as_mut() else { return };
         let history = history_of(&mut self.rotation, &mut self.history);

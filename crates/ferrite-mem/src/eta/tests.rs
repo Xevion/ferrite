@@ -447,3 +447,55 @@ mod replay {
         }
     }
 }
+
+fn at_ms(ms: u64) -> Instant {
+    Instant::from_epoch(Duration::from_millis(ms))
+}
+
+#[test]
+fn a_pace_from_a_sliver_of_finished_work_forecasts_nothing() {
+    // A few words that took 5 ms say nothing about a test of a billion.
+    let shapes = vec![Shape::new([Stage::Work(100)]), Shape::new([Stage::Work(1_000_000_000)])];
+    let mut est = Estimator::new(shapes, vec![None; 2]);
+    est.observe(at_ms(0), 0, 0, None);
+    est.finish(0, at_ms(5), secs(0));
+    let f = est.observe(at_ms(5), 1, 0, None);
+    check!(f.raw.is_none() && f.test_left.is_none(), "{f:?}");
+    // The calibrated speed is what a pace this short gives way to.
+    let shapes = vec![Shape::new([Stage::Work(100)]), Shape::new([Stage::Work(1_000_000_000)])];
+    let mut est = Estimator::new(shapes, vec![None; 2]).with_speed(Some(8_000_000_000));
+    est.observe(at_ms(0), 0, 0, None);
+    est.finish(0, at_ms(5), secs(0));
+    let f = est.observe(at_ms(5), 1, 0, None);
+    check!(f.test_left == Some(secs(1)), "{f:?}");
+}
+
+#[test]
+fn a_straight_line_through_a_sliver_of_the_running_test_forecasts_nothing() {
+    let mut est = Estimator::new(vec![Shape::new([Stage::Work(1_000_000_000)])], vec![None]);
+    est.observe(at_ms(0), 0, 0, None);
+    let f = est.observe(at_ms(1), 0, 10, None);
+    check!(f.test_left.is_none() && f.raw.is_none(), "{f:?}");
+    // With enough work behind it the line is a forecast.
+    let f = est.observe(at_ms(2000), 0, 500_000_000, None);
+    check!(f.test_left == Some(secs(2)));
+}
+
+#[test]
+fn tests_that_ran_unseen_before_the_first_one_looked_at_take_no_time_in_the_pass_total() {
+    // The first test ended between two looks, and the pass is first seen at its second.
+    let mut est = estimator([None, Some(10), Some(20)]);
+    let f = est.observe(at(0), 1, 0, None);
+    check!(f.pass_total.is_none(), "nothing says the first test was a short one");
+    est.skip_to(1);
+    let f = est.observe(at(0), 1, 0, None);
+    check!(f.pass_total == Some(secs(30)));
+    check!(f.pass_progress.map(BasisPoints::get) == Some(0));
+    let f = est.observe(at(5), 1, 500, None);
+    check!(f.pass_total == Some(secs(30)) && f.pass_progress.map(BasisPoints::get) == Some(1666));
+    // A test that has a time of its own is not replaced by that.
+    est.begin_pass();
+    est.finish(0, at(6), secs(6));
+    est.skip_to(1);
+    check!(est.observe(at(6), 1, 0, None).pass_total == Some(secs(6 + 10 + 20)));
+}

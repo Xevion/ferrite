@@ -162,7 +162,7 @@ impl Sweep {
         }
     }
 
-    fn window_finished(&self) -> bool {
+    pub(super) fn window_finished(&self) -> bool {
         match (&self.rotation.window, &self.run) {
             (Some(w), Some(run)) => run.suite.passes() > w.pass,
             _ => false,
@@ -192,6 +192,7 @@ impl Sweep {
     pub(super) fn settled_passes(&self) -> u64 {
         let Some(run) = &self.run else { return 0 };
         match &self.rotation.window {
+            Some(window) if self.window_finished() => window.pass + 1,
             Some(window) => window.pass,
             None if self.rotation_pending() => run.suite.passes().saturating_sub(1),
             None => run.suite.passes(),

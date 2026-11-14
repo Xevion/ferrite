@@ -279,6 +279,40 @@ fn a_paused_sweep_does_no_work_until_resumed(mut sweep: Sweep) {
 }
 
 #[rstest]
+fn a_goal_of_time_takes_no_more_work_once_the_time_is_up(mut sweep: Sweep) {
+    sweep.set_goal(Goal { time: Some(Duration::from_secs(10)), ..Goal::UNLIMITED });
+    let start = Instant::from_epoch(Duration::from_secs(1));
+    sweep.step(64, start, None);
+    check!(sweep.has_work(start + Duration::from_secs(9)));
+    let up = start + Duration::from_secs(10);
+    check!(!sweep.has_work(up));
+    let before = sweep.status();
+    sweep.step(64 << 10, up, None);
+    check!(sweep.status() == before, "no test goes on after the goal is met");
+}
+
+#[rstest]
+#[expect(clippy::used_underscore_binding, reason = "the buffer field only owns memory outside tests")]
+fn a_goal_of_the_first_fault_takes_no_more_work_once_there_is_one(mut sweep: Sweep) {
+    sweep.set_goal(Goal { stop_on_fault: true, ..Goal::UNLIMITED });
+    let now = Instant::from_epoch(Duration::from_secs(1));
+    let block = sweep.run.as_ref().map(|r| r._buffer.blocks()[0].base().as_ptr()).unwrap();
+    while sweep.status().test != "solid bits" {
+        sweep.step(64, now, None);
+    }
+    sweep.step(64 << 10, now, None);
+    check!(sweep.has_work(now), "nothing wrong yet");
+    // SAFETY: inside the host block; no step runs while it is written.
+    unsafe { block.add(100).write(!0) };
+    sweep.step(64 << 10, now, None);
+    check!(sweep.status().faults > 0);
+    check!(!sweep.has_work(now));
+    let before = sweep.status();
+    sweep.step(64 << 10, now, None);
+    check!(sweep.status() == before);
+}
+
+#[rstest]
 fn restarting_with_the_memtest86_plus_preset_swaps_the_tests_and_counts(mut sweep: Sweep) {
     sweep.restart(Preset::Memtest86Plus);
     let status = sweep.status();
@@ -414,6 +448,34 @@ mod rotation {
         let o = sweep.status().outlook;
         check!(o.settled == 1 && !o.reserve);
         check!(o.goal.met(o.settled, Duration::ZERO, 0).is_some());
+    }
+
+    #[rstest]
+    fn a_pass_goal_met_by_the_rotation_ends_the_run_before_the_next_pass_starts(open_rig: (Sweep, Calls)) {
+        let (mut sweep, _) = open_rig;
+        let tests = sweep.status().position.1;
+        sweep.set_goal(Goal { passes: core::num::NonZeroU64::new(1), ..Goal::UNLIMITED });
+        let mut now = Instant::from_epoch(Duration::from_secs(1));
+        // As the main loop does: look, end the run if the goal is met, else work until the next frame.
+        for _ in 0..1_000 {
+            sweep.tick(now);
+            let o = sweep.status().outlook;
+            if o.goal.met(o.settled, Duration::ZERO, 0).is_some() {
+                break;
+            }
+            for _ in 0..1_000 {
+                if !sweep.has_work(now) {
+                    break;
+                }
+                sweep.step(16 << 10, now, None);
+            }
+            now = now + Duration::from_millis(50);
+        }
+        let status = sweep.status();
+        check!(status.outlook.settled == 1, "{:?}", status.outlook.goal);
+        check!(!sweep.has_work(now));
+        check!((status.position.0, status.test_percent) == (1, 0), "no test of the next pass has begun");
+        check!(sweep.history.tests.len() == tests, "the sweep's own history holds the first pass alone");
     }
 
     #[rstest]
