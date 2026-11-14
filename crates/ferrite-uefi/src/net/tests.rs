@@ -4,6 +4,7 @@
 use std::boxed::Box;
 use std::collections::VecDeque;
 use std::format;
+use std::rc::Rc;
 use std::string::String;
 use std::vec;
 use std::vec::Vec;
@@ -11,7 +12,8 @@ use std::vec::Vec;
 use assert2::check;
 use ferrite_hal::Instant;
 use ferrite_net::loopback::LoopbackPort;
-use ferrite_net::{Network, PortId, StackConfig};
+use ferrite_net::{MacAddr, Network, PortId, StackConfig};
+use ferrite_wifi::{Shared, StationState};
 use rstest::rstest;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp;
@@ -41,7 +43,9 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        let mut net = Network::new(Console);
+        let wifi = Shared::new();
+        wifi.set_state(StationState::Connected { ssid: "home".into(), bssid: MacAddr::new([2, 0, 0, 0, 0, 1]) });
+        let mut net = Network::new(Console::new(WifiView::new(Rc::clone(&wifi))));
         let config =
             StackConfig { seed: 1, address: Some(Ipv4Cidr::new(Ipv4Address::LOCALHOST, 8)), mdns: false, http: true };
         let id = net.add(Box::new(LoopbackPort::new()), config, Instant::default());

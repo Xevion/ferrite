@@ -69,6 +69,14 @@ pub(crate) fn installed(call: &CStr) -> &'static Installed {
     unsafe { &*raw }
 }
 
+/// Whether the caller runs on a scheduler task's stack. On the main stack nothing can switch away, so a
+/// stop there has nowhere to park; on a task it can park that task and leave the rest running.
+pub fn on_task() -> bool {
+    let raw = INSTALLED.load(Ordering::Acquire);
+    // SAFETY: set once by `install` from a leaked box, never freed.
+    !raw.is_null() && unsafe { &*raw }.sched.with_current(|_| ()).is_some()
+}
+
 /// A Linux priority (0 to 139) as the scheduler's; out-of-range values clamp.
 fn priority(prio: c_int) -> Priority {
     let level = u8::try_from(prio.clamp(0, c_int::from(Priority::LOWEST.get()))).unwrap_or(Priority::LOWEST.get());

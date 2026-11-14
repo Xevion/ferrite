@@ -14,6 +14,9 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::rc::Rc;
 use core::time::Duration;
 
 use ferrite_efi::bootlog::{BootLog, Echo};
@@ -22,6 +25,7 @@ use ferrite_efi::cpu::{FpuControl, VectorSupport};
 use ferrite_efi::{entropy, logger, session};
 use ferrite_hal::Clock as _;
 use ferrite_rt as _;
+use ferrite_wifi::Shared;
 use ferrite_wifi_efi::runtime::{EXIT_HALTED, NextPoll, Runtime, RuntimeConfig, halted};
 use ferrite_wifi_start::StartUp;
 use log::LevelFilter;
@@ -75,6 +79,7 @@ fn run() -> Status {
             return e.status();
         },
     };
+    let shared = Shared::new();
     let start_up = StartUp {
         sched: runtime.sched(),
         firmware_reference: runtime.firmware(),
@@ -83,11 +88,17 @@ fn run() -> Status {
         scan_limit: SCAN_LIMIT,
         connect_limit: CONNECT_LIMIT,
         hold: INIT_HOLD,
+        shared: Rc::clone(&shared),
+        lab_ap: None,
     };
-    let init_task = match ferrite_wifi_start::start_init(start_up) {
-        Ok(task) => task,
-        Err(code) => {
+    let init_task = match runtime.on_task(move || ferrite_wifi_start::start_init(start_up)) {
+        Ok(Ok(task)) => task,
+        Ok(Err(code)) => {
             log::error!("starting init failed: {code}");
+            return Status::ABORTED;
+        },
+        Err(e) => {
+            log::error!("starting init failed: {e}");
             return Status::ABORTED;
         },
     };
@@ -95,7 +106,7 @@ fn run() -> Status {
     let mut seed = [0_u8; 8];
     let seeded = entropy::firmware_bytes(&mut seed).inspect_err(|e| log::error!("smoltcp's seed: {e}"));
     let Ok(()) = seeded else { return Status::ABORTED };
-    let mut ip = ferrite_wifi_efi::ip::MainNet::new(u64::from_ne_bytes(seed), HOLD);
+    let mut ip = ferrite_wifi_efi::ip::MainNet::new(shared, u64::from_ne_bytes(seed), HOLD);
     let began = clock.now();
     let mut timed_out = false;
     while runtime.task_state(init_task).is_some() && halted().is_none() {

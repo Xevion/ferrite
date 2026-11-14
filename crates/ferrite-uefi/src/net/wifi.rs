@@ -4,15 +4,19 @@
 //! The station links the Linux Wi-Fi C, so only the UEFI build has it; a host build gets a station
 //! that never starts, which keeps the rest of the app testable on the host.
 
+use alloc::rc::Rc;
 use core::time::Duration;
 
 use ferrite_efi::clock::Clock;
-use ferrite_wifi::PortEvent;
+use ferrite_wifi::{PortEvent, Shared, StationState};
 
 #[cfg(ferrite_app)]
 use ferrite_wifi_efi::runtime::{NextPoll, RuntimeConfig};
 #[cfg(ferrite_app)]
 use ferrite_wifi_efi::station::{StationConfig, WifiStation};
+
+#[cfg(ferrite_app)]
+const RUNTIME_DOWN: &str = "the Wi-Fi runtime did not start";
 
 /// How long one poll may run the Linux side; the sweep's own slices are a millisecond.
 #[cfg(ferrite_app)]
@@ -21,6 +25,64 @@ const BUDGET: Duration = Duration::from_millis(2);
 /// gap is at start-up, while the sweep walks the memory map and claims its ranges.
 #[cfg(ferrite_app)]
 const STALL_LIMIT: Duration = Duration::from_secs(10);
+
+/// What the status document says of the station at one moment, borrowed from its state.
+pub struct WifiFacts<'a> {
+    /// [`StationState::label`].
+    pub state: &'static str,
+    /// The network being joined or joined: set while connecting and connected.
+    pub ssid: Option<&'a str>,
+    /// Whole seconds (at least 1) until the next attempt, for a failure that has one.
+    pub retry_in_s: Option<u64>,
+    /// Whether the state will never change again.
+    pub is_final: bool,
+}
+
+/// What the document shows of the station that changes: the facts less the network's name, which a
+/// state change always moves with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct WifiKey {
+    state: &'static str,
+    retry_in_s: Option<u64>,
+}
+
+/// A reader of the station's state for the status page, valid beyond the station's own life.
+#[derive(Clone)]
+pub struct WifiView {
+    shared: Option<Rc<Shared>>,
+    /// The state to report with no station behind the view.
+    absent: &'static str,
+}
+
+impl WifiView {
+    pub const fn new(shared: Rc<Shared>) -> Self {
+        Self { shared: Some(shared), absent: "" }
+    }
+
+    /// A view with no station, always reporting `state` as a final one.
+    pub const fn absent(state: &'static str) -> Self {
+        Self { shared: None, absent: state }
+    }
+
+    /// Read the facts in place: no clone of the state, no allocation.
+    pub fn read<R>(&self, read: impl FnOnce(WifiFacts<'_>) -> R) -> R {
+        let Some(shared) = &self.shared else {
+            return read(WifiFacts { state: self.absent, ssid: None, retry_in_s: None, is_final: true });
+        };
+        shared.with_state(|state| {
+            let (ssid, retry_in_s) = match state {
+                StationState::Connecting { ssid } | StationState::Connected { ssid, .. } => (Some(ssid.as_str()), None),
+                StationState::Failed { retry_in: Some(wait), .. } => (None, Some(wait.as_secs().max(1))),
+                _ => (None, None),
+            };
+            read(WifiFacts { state: state.label(), ssid, retry_in_s, is_final: state.is_final() })
+        })
+    }
+
+    pub fn key(&self) -> WifiKey {
+        self.read(|facts| WifiKey { state: facts.state, retry_in_s: facts.retry_in_s })
+    }
+}
 
 pub struct Wifi {
     #[cfg(ferrite_app)]
@@ -58,7 +120,12 @@ impl Wifi {
     }
 
     pub fn label(&self) -> &'static str {
-        self.station.as_ref().map_or("the Wi-Fi runtime did not start", WifiStation::label)
+        self.station.as_ref().map_or(RUNTIME_DOWN, WifiStation::label)
+    }
+
+    /// The reader the status page keeps; it goes on reading the final state after [`Wifi::shutdown`].
+    pub fn view(&self) -> WifiView {
+        self.station.as_ref().map_or_else(|| WifiView::absent(RUNTIME_DOWN), |station| WifiView::new(station.shared()))
     }
 
     /// Leave the network and give the card and the shim's memory back.
@@ -69,6 +136,9 @@ impl Wifi {
         }
     }
 }
+
+#[cfg(not(ferrite_app))]
+const NOT_IN_BUILD: &str = "not in this build";
 
 #[cfg(not(ferrite_app))]
 impl Wifi {
@@ -93,7 +163,12 @@ impl Wifi {
 
     #[expect(clippy::unused_self, reason = "the UEFI build's signature")]
     pub fn label(&self) -> &'static str {
-        "not in this build"
+        NOT_IN_BUILD
+    }
+
+    #[expect(clippy::unused_self, reason = "the UEFI build's signature")]
+    pub fn view(&self) -> WifiView {
+        WifiView::absent(NOT_IN_BUILD)
     }
 
     #[expect(clippy::unused_self, clippy::needless_pass_by_ref_mut, reason = "the UEFI build's signature")]

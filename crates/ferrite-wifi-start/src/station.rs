@@ -50,8 +50,9 @@ pub struct StationConfig {
     pub connect_limit: Duration,
     pub reconnect: Policy,
     /// Run on the lab's simulated radios when there is no PCI card: the second radio becomes the access
-    /// point of [`lab_credentials`], and scans look at its channel only.
-    pub simulated: bool,
+    /// point of [`lab_credentials`], scans look at its channel only, and the access point's own link is
+    /// offered through this `Shared` for the lab's IP stack to serve DHCP on.
+    pub lab_ap: Option<Rc<Shared>>,
 }
 
 /// The network the lab's access point serves.
@@ -109,8 +110,8 @@ impl Service {
         }
         if ferrite_lkpi::pci::device_count() > 0 {
             self.serve(&mut supervisor, &clock);
-        } else if self.config.simulated {
-            self.serve_simulated(&mut supervisor, &clock);
+        } else if let Some(offered) = &self.config.lab_ap {
+            self.serve_simulated(offered, &mut supervisor, &clock);
         } else {
             log::info!("no PCI Wi-Fi card was handed to the drivers");
             supervisor.unavailable(StationState::NoCard);
@@ -133,7 +134,7 @@ impl Service {
     }
 
     /// The lab: the second simulated radio is the access point the first joins.
-    fn serve_simulated(&self, supervisor: &mut Supervisor, clock: &dyn Fn() -> Instant) {
+    fn serve_simulated(&self, offered: &Shared, supervisor: &mut Supervisor, clock: &dyn Fn() -> Instant) {
         let ((first, found_first), (second, found_second)) =
             (wireless(WirelessOp::Find, 0), wireless(WirelessOp::Find, 1));
         if found_first != 0 || found_second != 0 {
@@ -153,9 +154,11 @@ impl Service {
                 0 => Ok(()),
                 code => Err(code),
             })?;
-            lab_ap::start(client, self.config.sched.clone(), interface.ifindex, interface.mac, LAB_SSID, pmk)
+            let task =
+                lab_ap::start(client, self.config.sched.clone(), interface.ifindex, interface.mac, LAB_SSID, pmk)?;
+            Ok((task, interface.ifindex))
         });
-        let ap = match ap {
+        let (ap, ap_ifindex) = match ap {
             Ok(ap) => ap,
             Err(error) => {
                 log::error!("station: starting the lab AP failed: {error}");
@@ -164,11 +167,22 @@ impl Service {
             },
         };
         let (_, code) = wireless(WirelessOp::Up, 0);
-        if code == 0 {
-            self.keep_joined(&first, &[Frequency(2412)], supervisor, clock);
-        } else {
+        if code != 0 {
             log::error!("station: dev_open({first}) returned {code}");
             supervisor.failed(Failure::Driver, clock());
+        } else {
+            match crate::net::attach(ap_ifindex) {
+                Ok(attachment) => {
+                    offered.publish(attachment.link());
+                    self.keep_joined(&first, &[Frequency(2412)], supervisor, clock);
+                    offered.withdraw();
+                    attachment.detach();
+                },
+                Err(code) => {
+                    log::error!("station: attaching to the lab AP's frames failed: {code}");
+                    supervisor.failed(Failure::Driver, clock());
+                },
+            }
         }
         ap.stop();
         for nth in [0, 1] {

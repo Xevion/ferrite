@@ -26,7 +26,7 @@ use ferrite_wifi::PortEvent;
 
 use self::api::{BodyError, Control};
 use self::json::{StatusDoc, ToJson as _};
-use self::wifi::Wifi;
+use self::wifi::{Wifi, WifiKey, WifiView};
 use crate::control::{Command, Commands};
 use crate::report::Snapshot;
 use crate::sweep::SweepStatus;
@@ -57,10 +57,20 @@ pub struct Key {
     revision: u64,
     /// The fault log's length, since the status counts faults but not the log's contents.
     faults: usize,
+    /// The Wi-Fi station's state, which changes without the sweep.
+    wifi: WifiKey,
 }
 
 /// The status page, its API and the run's controls.
-pub struct Console;
+pub struct Console {
+    wifi: WifiView,
+}
+
+impl Console {
+    pub const fn new(wifi: WifiView) -> Self {
+        Self { wifi }
+    }
+}
 
 impl Site for Console {
     type State<'a> = Snapshot<'a>;
@@ -86,11 +96,16 @@ impl Site for Console {
     }
 
     fn key(&self, snapshot: &Snapshot<'_>) -> Key {
-        Key { status: snapshot.status, revision: snapshot.history.revision, faults: snapshot.faults.len() }
+        Key {
+            status: snapshot.status,
+            revision: snapshot.history.revision,
+            faults: snapshot.faults.len(),
+            wifi: self.wifi.key(),
+        }
     }
 
     fn render(&self, snapshot: &Snapshot<'_>, net: &NetStatus, now: Instant, out: &mut String) {
-        StatusDoc { snapshot, net, now }.to_json(out);
+        StatusDoc { snapshot, net, wifi: &self.wifi, now }.to_json(out);
     }
 }
 
@@ -109,10 +124,11 @@ impl Net {
     /// memory.
     pub fn setup(clock: Clock) -> Self {
         let now = clock.now();
+        let wifi = Wifi::start(clock);
         let mut net = Self {
-            network: Network::new(Console).timed(clock),
+            network: Network::new(Console::new(wifi.view())).timed(clock),
             failure: None,
-            wifi: Wifi::start(clock),
+            wifi,
             wifi_port: None,
         };
         net.open_wired(now);

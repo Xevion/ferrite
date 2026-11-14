@@ -1,8 +1,9 @@
 //! `wifitrace`'s IP over the connected Wi-Fi link, run from the main loop.
 //!
 //! smoltcp's `DHCPv4` client, echo requests to the router, echo replies to anyone who pings (smoltcp's
-//! own), and a plain-text page on TCP port 80, until the hold ends. The verdict goes back to init with
-//! `finish_session`.
+//! own), and a plain-text page on TCP port 80, until the hold ends. The link arrives as a
+//! [`PortEvent`] on the [`Shared`] the test script offers it through, and the verdict goes back to
+//! the script with [`Shared::report`].
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -14,7 +15,9 @@ use core::time::Duration;
 
 use ferrite_hal::Instant;
 use ferrite_net::http::{Rejection, Route, Site};
+use ferrite_net::port::MacAddr;
 use ferrite_net::{NetStatus, Network, PortId, QueuePort, StackConfig};
+use ferrite_wifi::{PortEvent, Shared};
 
 /// How long the DHCP client gets to a lease.
 const DHCP_LIMIT: Duration = Duration::from_secs(10);
@@ -104,7 +107,8 @@ struct Session {
 }
 
 impl Session {
-    fn new(link: Rc<QueuePort>, name: String, now: Instant, seed: u64, hold: Duration) -> Self {
+    fn new(link: Rc<QueuePort>, now: Instant, seed: u64, hold: Duration) -> Self {
+        let name = alloc::format!("{}", MacAddr::new(link.mac()));
         let mut network = Network::new(TextPage);
         let config = StackConfig { seed, address: None, mdns: false, http: true };
         let id = network.add(Box::new(Rc::clone(&link)), config, now);
@@ -181,8 +185,9 @@ impl Session {
     }
 }
 
-/// The main loop's IP: takes the link init publishes, runs the session and reports back.
+/// The main loop's IP: takes the link the script offers, runs the session and reports back.
 pub struct MainNet {
+    shared: Rc<Shared>,
     session: Option<Session>,
     seed: u64,
     hold: Duration,
@@ -190,23 +195,25 @@ pub struct MainNet {
 
 impl MainNet {
     /// Hold each link for `hold` from the moment it is handed over.
-    pub const fn new(seed: u64, hold: Duration) -> Self {
-        Self { session: None, seed, hold }
+    pub const fn new(shared: Rc<Shared>, seed: u64, hold: Duration) -> Self {
+        Self { shared, session: None, seed, hold }
     }
 
     /// Poll once; returns how long the main loop may sleep for IP's sake, if a session runs.
     pub fn poll(&mut self, now: Instant) -> Option<Duration> {
-        if self.session.is_none()
-            && let Some(session) = ferrite_wifi_start::net::take_session()
-        {
-            self.session = Some(Session::new(session.station, session.station_name, now, self.seed, self.hold));
-        }
-        if ferrite_wifi_start::net::session_closed() && self.session.take().is_some() {
-            log::warn!("ip: init closed the link before the hold ended");
+        while let Some(event) = self.shared.next_port_event() {
+            match event {
+                PortEvent::Up(link) => self.session = Some(Session::new(link, now, self.seed, self.hold)),
+                PortEvent::Down => {
+                    if self.session.take().is_some() {
+                        log::warn!("ip: init closed the link before the hold ended");
+                    }
+                },
+            }
         }
         let session = self.session.as_mut()?;
         if let Some(passed) = session.poll(now) {
-            ferrite_wifi_start::net::finish_session(passed);
+            self.shared.report(passed);
             self.session = None;
             return None;
         }

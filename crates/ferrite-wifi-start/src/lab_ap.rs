@@ -60,6 +60,13 @@ struct Ap {
     rsn: Vec<u8>,
     gtk: Gtk,
     station: Option<Station>,
+    /// A station the AP has sent a deauthentication to: its removal waits for the frame's transmit status.
+    deauthenticated: Option<Deauthenticated>,
+}
+
+struct Deauthenticated {
+    mac: MacAddr,
+    cookie: u64,
 }
 
 struct Station {
@@ -99,7 +106,7 @@ pub fn start(
         "lab AP: {mac} beacons the WPA2-PSK network \"{}\" on 2412 MHz; group key {GTK_INDEX} installed",
         ferrite_nl80211::nl80211::SsidDisplay(ssid)
     );
-    let state = Box::new(Ap { client, sched, ifindex, mac, pmk, rsn, gtk, station: None });
+    let state = Box::new(Ap { client, sched, ifindex, mac, pmk, rsn, gtk, station: None, deauthenticated: None });
     let arg = Box::into_raw(state);
     // SAFETY: called on a task with kthreadd running; the format takes no arguments.
     let task = unsafe { crate::kthread_create_on_node(thread, arg.cast(), crate::NUMA_NO_NODE, c"lab-ap".as_ptr()) };
@@ -172,8 +179,19 @@ impl Ap {
         let Some(station) = self.station.take() else { return Ok(()) };
         let mut frame = header(FC_DEAUTH, station.mac, self.mac);
         frame.extend_from_slice(&REASON_PREV_AUTH_INVALID.to_le_bytes());
-        self.client.send_frame(self.ifindex, &frame)?;
+        let cookie = self.client.send_frame(self.ifindex, &frame)?;
+        self.deauthenticated = Some(Deauthenticated { mac: station.mac, cookie });
+        PORT_OPEN.store(false, Ordering::Release);
         log::info!("lab AP: deauthenticated {}", station.mac);
+        Ok(())
+    }
+
+    /// Drop `mac` from the kernel's station table, as hostapd does when a station leaves or is removed:
+    /// without it a later association of the same address finds the entry and `NEW_STATION` fails with
+    /// `EEXIST`.
+    fn remove_station(&mut self, mac: MacAddr) -> Result<(), ferrite_nl80211::client::ClientError> {
+        self.client.del_station(self.ifindex, mac)?;
+        log::info!("lab AP: station {mac} removed");
         Ok(())
     }
 
@@ -190,10 +208,22 @@ impl Ap {
                     FC_REASSOC_REQ => self.assoc(source, body.get(10..).unwrap_or_default(), body, true),
                     _ => {
                         log::info!("lab AP: {source} left (frame control {fc:#06x})");
-                        self.station = None;
-                        Ok(())
+                        PORT_OPEN.store(false, Ordering::Release);
+                        match self.station.take() {
+                            Some(station) if station.mac == source => self.remove_station(source),
+                            other => {
+                                self.station = other;
+                                Ok(())
+                            },
+                        }
                     },
                 }
+            },
+            Event::FrameTxStatus { cookie, .. }
+                if self.deauthenticated.as_ref().is_some_and(|gone| gone.cookie == cookie) =>
+            {
+                let Some(gone) = self.deauthenticated.take() else { return Ok(()) };
+                self.remove_station(gone.mac)
             },
             Event::FrameTxStatus { cookie, ack, .. } => {
                 let Some(station) = self.station.as_mut().filter(|s| s.assoc_cookie == Some(cookie)) else {

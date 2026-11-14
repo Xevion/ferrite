@@ -1,0 +1,15 @@
+--- a/drivers/net/wireless/intel/iwlwifi/pcie/gen1_2/trans.c
++++ b/drivers/net/wireless/intel/iwlwifi/pcie/gen1_2/trans.c
+@@ -1658,7 +1658,11 @@
+ 	info->num_rxqs = 1;
+ 	ret = pci_enable_msi(pdev);
+ 	if (ret) {
+-		dev_err(&pdev->dev, "pci_enable_msi failed - %d\n", ret);
++		/*
++		 * MSI is configured out (the card would write to the interrupt controller with no
++		 * handler), so legacy interrupts are the expected way here, not a fault.
++		 */
++		dev_info(&pdev->dev, "pci_enable_msi failed - %d; using legacy interrupts\n", ret);
+ 		/* enable rfkill interrupt: hw bug w/a */
+ 		pci_read_config_word(pdev, PCI_COMMAND, &pci_cmd);
+ 		if (pci_cmd & PCI_COMMAND_INTX_DISABLE) {

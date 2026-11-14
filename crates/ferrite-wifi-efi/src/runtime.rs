@@ -9,8 +9,16 @@
 //! No Linux code runs outside a scheduler task, and tasks run only inside `poll`, on the caller's stack.
 //! The timer notify only bumps a counter. A `Runtime` lives once per program: every piece it installs
 //! into the shim can be installed only once.
+//!
+//! Even the calls that create the first kernel threads run on a task ([`Runtime::on_task`]), so a stub
+//! hit anywhere in the Linux C is contained: the task is parked, [`halted`] names the stub, and the app
+//! decides what that ends. The halt hook exits the image only for a hit on the main stack, which an app
+//! that starts its tasks through `on_task` never has.
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::string::String;
+use core::cell::Cell;
 use core::ffi::{CStr, c_char, c_void};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
@@ -26,7 +34,9 @@ use ferrite_lkpi::firmware::{FirmwareProvider, ProviderAlreadyInstalled};
 use ferrite_lkpi::mem::ArenaAlreadyInstalled;
 use ferrite_lkpi::pci::PciAlreadyInstalled;
 use ferrite_lkpi::random::AlreadySeeded;
-use ferrite_lkpi::sched::{DEFAULT_STACK_SIZE, NoHooks, SchedError, SchedHandle, Scheduler, Step, TaskState};
+use ferrite_lkpi::sched::{
+    DEFAULT_STACK_SIZE, NoHooks, Priority, SchedError, SchedHandle, Scheduler, SpawnError, Step, TaskState,
+};
 use ferrite_lkpi::task::AlreadyInstalled;
 use ferrite_lkpi::time::WallClockAlreadySet;
 use snafu::Snafu;
@@ -49,6 +59,9 @@ pub const ARENA_SIZES: [usize; 3] = [64 << 20, 32 << 20, 16 << 20];
 pub const EXIT_HALTED: Status = Status(Status::ERROR_BIT | 0x4000_0000_0000_0000 | 0x56);
 
 const TICK: Duration = Duration::from_millis(1);
+/// How long a bootstrap task, which only creates threads, may take to finish.
+const ON_TASK_LIMIT: Duration = Duration::from_secs(5);
+const ON_TASK_BUDGET: Duration = Duration::from_millis(10);
 /// How far above the timer notify's own frame the interrupted stack is scanned, and how many code
 /// addresses found there are reported.
 const STALL_SCAN: usize = 32 << 10;
@@ -108,6 +121,12 @@ pub enum RuntimeError {
     Kthreadd { code: core::ffi::c_int },
     #[snafu(display("{source}"))]
     Sched { source: SchedError },
+    #[snafu(display("starting a bootstrap task failed: {source}"))]
+    Bootstrap { source: SpawnError },
+    #[snafu(display("the Linux side stopped in stub {stub}"))]
+    Halted { stub: String },
+    #[snafu(display("a bootstrap task did not finish within {} s", ON_TASK_LIMIT.as_secs()))]
+    BootstrapStuck,
 }
 
 impl RuntimeError {
@@ -179,16 +198,17 @@ pub fn halted() -> Option<&'static CStr> {
     (!stub.is_null()).then(|| unsafe { CStr::from_ptr(stub) })
 }
 
-/// The halt hook. On a task stack it parks the task for good and lets the main loop end the run; on the
-/// main stack, where nothing can switch away, it saves the log and exits to the firmware itself.
+/// The halt hook. On a task stack it parks the task for good, the first stub hit or a later one alike
+/// (a card taken off the bus makes the drivers of other tasks hit stubs too), and lets the main loop
+/// end the run; on the main stack, where nothing can switch away, it saves the log and exits to the
+/// firmware itself.
 fn halt(stub: &CStr) -> ! {
     let first = HALTED.swap(stub.as_ptr().cast_mut(), Ordering::AcqRel).is_null();
     log::error!("halted in stub {} during {}", stub.to_string_lossy(), ferrite_wifi_start::stage().to_string_lossy());
     if first {
         ferrite_lkpi::pci::park_all();
     }
-    let on_task = ferrite_lkpi::task::lx_task_current() != ferrite_wifi_start::tasks().init.as_ptr();
-    if first && on_task {
+    if ferrite_lkpi::task::on_task() {
         loop {
             ferrite_lkpi::task::lx_task_schedule(1);
         }
@@ -338,15 +358,44 @@ impl Runtime {
         let sched = Scheduler::new(UefiPlatform::new(clock), stacks, NoHooks);
         ferrite_lkpi::task::install(sched.handle(), ferrite_wifi_start::tasks())
             .map_err(|source| RuntimeError::TaskInstall { source })?;
-        ferrite_wifi_start::start_kthreadd().map_err(|code| RuntimeError::Kthreadd { code })?;
-        Ok(Self {
+        let mut runtime = Self {
             sched,
             clock,
             began: clock.now(),
             polled: ferrite_lkpi::pci::device_count() > 0,
             stacks: stack_stats,
             _resources: resources,
-        })
+        };
+        runtime.on_task(ferrite_wifi_start::start_kthreadd)?.map_err(|code| RuntimeError::Kthreadd { code })?;
+        Ok(runtime)
+    }
+
+    /// Run `f` as a task of its own and poll until it returns its result, so the Linux C it calls (the
+    /// calls that create kernel threads, say) runs on a task stack, where a stub hit parks the task
+    /// instead of ending the image. An error if the task hit a stub, or did not finish in time.
+    pub fn on_task<R: 'static>(&mut self, f: impl FnOnce() -> R + 'static) -> Result<R, RuntimeError> {
+        let result = Rc::new(Cell::new(None));
+        let slot = Rc::clone(&result);
+        // As `init_task`, the task `current` is while the main stack runs, which is who the kernel
+        // thread calls expect to be called by.
+        let user = ferrite_wifi_start::tasks().init.as_ptr() as usize;
+        let priority = Priority::new(120).unwrap_or(Priority::LOWEST);
+        self.sched
+            .spawn("bootstrap", priority, user, move |_| slot.set(Some(f())))
+            .map_err(|source| RuntimeError::Bootstrap { source })?;
+        let began = self.clock.now();
+        loop {
+            self.poll(ON_TASK_BUDGET)?;
+            if let Some(result) = result.take() {
+                return Ok(result);
+            }
+            if let Some(stub) = halted() {
+                return Err(RuntimeError::Halted { stub: stub.to_string_lossy().into_owned() });
+            }
+            if self.clock.now() - began >= ON_TASK_LIMIT {
+                return Err(RuntimeError::BootstrapStuck);
+            }
+        }
     }
 
     /// The scheduler's handle, for starting the first task.

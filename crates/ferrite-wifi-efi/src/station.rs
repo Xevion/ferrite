@@ -125,7 +125,7 @@ impl WifiStation {
                 return Ok(Self { shared, running: None, stop_limit: config.stop_limit });
             },
         };
-        let runtime =
+        let mut runtime =
             Runtime::start_with(clock, &config.runtime, pci).map_err(|source| StartError::Runtime { source })?;
         let service = ferrite_wifi_start::station::StationConfig {
             sched: runtime.sched(),
@@ -135,9 +135,13 @@ impl WifiStation {
             scan_limit: config.scan_limit,
             connect_limit: config.connect_limit,
             reconnect: config.reconnect,
-            simulated: false,
+            lab_ap: None,
         };
-        let task = start_station(service, Rc::clone(&shared)).map_err(|code| StartError::Task { code })?;
+        let offered = Rc::clone(&shared);
+        let task = runtime
+            .on_task(move || start_station(service, offered))
+            .map_err(|source| StartError::Runtime { source })?
+            .map_err(|code| StartError::Task { code })?;
         Ok(Self { shared, running: Some(Running { runtime, task }), stop_limit: config.stop_limit })
     }
 
@@ -149,6 +153,12 @@ impl WifiStation {
     /// [`StationState::label`] of what the station is doing, for a line drawn every frame.
     pub fn label(&self) -> &'static str {
         self.shared.label()
+    }
+
+    /// The state and port the service shares with the app, for a reader that outlives the station (a
+    /// status page keeps reading after [`WifiStation::shutdown`]).
+    pub fn shared(&self) -> Rc<Shared> {
+        Rc::clone(&self.shared)
     }
 
     /// A port that opened or went away since the last call. On `Up` the app starts its stack over the

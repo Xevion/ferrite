@@ -152,6 +152,11 @@ pub fn entropy() -> Result<[u8; ferrite_lkpi::random::SEED_LEN], std::io::Error>
     if usize::try_from(got).is_ok_and(|n| n == seed.len()) { Ok(seed) } else { Err(std::io::Error::last_os_error()) }
 }
 
+/// A seed for the IP stacks' randomness, folded from the host's entropy pool.
+pub fn stack_seed() -> Result<u64, std::io::Error> {
+    Ok(entropy()?.iter().fold(0_u64, |seed, byte| seed.rotate_left(8) ^ u64::from(*byte)))
+}
+
 /// Firmware files read from a directory, `/lib/firmware` in the lab.
 pub struct FirmwareDir {
     root: PathBuf,

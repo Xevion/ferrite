@@ -335,6 +335,15 @@ impl<S: Socket> Client<S> {
         .map(drop)
     }
 
+    /// Remove a station from an AP interface (`NL80211_CMD_DEL_STATION`), so that it can be admitted
+    /// again. Nothing is transmitted: the access point tells the station itself.
+    pub fn del_station(&mut self, ifindex: IfIndex, peer: MacAddr) -> Result<(), ClientError> {
+        self.run(Command::DelStation, false, "DEL_STATION", |b| {
+            b.u32(attr::IFINDEX, ifindex.raw()).attr(attr::MAC, &peer.0)
+        })
+        .map(drop)
+    }
+
     /// Have management frames of `frame_type` (the frame control field) delivered to this socket.
     pub fn register_frame(&mut self, ifindex: IfIndex, frame_type: u16) -> Result<(), ClientError> {
         self.run(Command::RegisterFrame, false, "REGISTER_FRAME", |b| {

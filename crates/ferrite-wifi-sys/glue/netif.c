@@ -167,10 +167,10 @@ int lx_netif_join(struct lx_netif *netif, const u8 *mac)
 	return err;
 }
 
-/* Safe from the main stack: it only marks the thread runnable. */
-void lx_netif_kick(struct lx_netif *netif)
+/* The transmit thread, which the program marks runnable itself: no Linux code may run on its stack. */
+struct task_struct *lx_netif_tx_task(struct lx_netif *netif)
 {
-	wake_up_process(netif->tx_task);
+	return netif->tx_task;
 }
 
 void lx_netif_detach(struct lx_netif *netif)

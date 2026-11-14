@@ -17,6 +17,7 @@ mod scan;
 pub mod station;
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use core::ffi::{CStr, c_char, c_int, c_uint, c_ulong, c_void};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -26,6 +27,7 @@ use ferrite_hal::Instant;
 use ferrite_lkpi::firmware::{FirmwareError, FirmwareProvider};
 use ferrite_lkpi::sched::SchedHandle;
 use ferrite_lkpi::task::LinuxTasks;
+use ferrite_wifi::Shared;
 use ferrite_wifi_sys::{exitcalls, initcalls};
 use snafu::Snafu;
 
@@ -89,7 +91,8 @@ pub fn tasks() -> LinuxTasks {
     LinuxTasks { current, init }
 }
 
-/// Create a kernel thread from the main stack and return its `task_struct`.
+/// Create a kernel thread and return its `task_struct`. This runs Linux code, so the program calls it on a
+/// task of its own (`Runtime::on_task` under UEFI), where a stub hit is contained.
 fn spawn(func: ThreadFn, arg: *mut c_void, name: &CStr, flags: c_ulong) -> Result<NonNull<c_void>, c_int> {
     // SAFETY: the scheduler is installed, `func` is a thread function and `name` outlives the call.
     let pid = unsafe { kernel_thread(func, arg, name.as_ptr(), flags) };
@@ -103,7 +106,7 @@ fn spawn(func: ThreadFn, arg: *mut c_void, name: &CStr, flags: c_ulong) -> Resul
 /// Start kthreadd, as `rest_init` does, so `kthread_create` has someone to ask.
 pub fn start_kthreadd() -> Result<NonNull<c_void>, c_int> {
     let task = spawn(kthreadd, core::ptr::null_mut(), c"kthreadd", CLONE_FS | CLONE_FILES)?;
-    // SAFETY: set once from the main stack before any task runs, as the kernel does.
+    // SAFETY: set once before any other task runs, as the kernel does.
     unsafe { kthreadd_task = task.as_ptr() };
     Ok(task)
 }
@@ -124,6 +127,12 @@ pub struct StartUp {
     pub connect_limit: Duration,
     /// How long a connection is held before it is left.
     pub hold: Duration,
+    /// Where the open link is offered to the main loop, which runs IP over it and reports its verdict
+    /// here; the connection is held until it has, or `hold` passes.
+    pub shared: Rc<Shared>,
+    /// Where the lab AP's own link is offered, beside the station's. Needed when the simulated radios
+    /// run, which is when there is no PCI card.
+    pub lab_ap: Option<Rc<Shared>>,
 }
 
 /// Create the init thread, which runs the checks and every initcall and exitcall, and return its
@@ -389,7 +398,7 @@ fn best_bss<'a>(bsses: &'a [ferrite_nl80211::nl80211::Bss], ssid: &[u8]) -> Opti
         .max_by_key(|bss| bss.signal.map_or(i32::MIN, |s| s.0))
 }
 
-/// Join the network `wifi.env` names, if the scan found it, hand the link to the main loop's IP stack,
+/// Join the network `wifi.env` names, if the scan found it, offer the link to the main loop's IP stack,
 /// and leave it again. Without the file the connect is skipped and that counts as passing; with it, any
 /// failure is logged with its step and fails the run, and the teardown still runs.
 fn join_from_credentials(
@@ -428,15 +437,15 @@ fn join_from_credentials(
     join(client, name, bss, pmk, None, start_up, clock)
 }
 
-/// Connect `name` to `bss`, hand the link (and `ap`'s, in the lab) to the main loop's IP stack, hold
-/// the connection until the main loop is done, detach and leave it; true when every step passed and the
-/// main loop reported success.
+/// Connect `name` to `bss`, offer the link (and `ap`'s, in the lab) to the main loop's IP stack, hold
+/// the connection until the main loop is done, withdraw the links, detach and leave; true when every
+/// step passed and the main loop reported success.
 fn join(
     client: &mut ferrite_nl80211::client::Client<scan::KernelSocket>,
     name: &str,
     bss: &ferrite_nl80211::nl80211::Bss,
     pmk: ferrite_wpa::kdf::Pmk,
-    ap: Option<ferrite_nl80211::nl80211::IfIndex>,
+    ap: Option<(ferrite_nl80211::nl80211::IfIndex, &Shared)>,
     start_up: &StartUp,
     clock: &dyn Fn() -> Instant,
 ) -> bool {
@@ -468,13 +477,16 @@ fn join(
     let held_from = clock();
     let held = attached.as_ref().map(|_| {
         enter(c"holding the connection while the main loop runs IP");
-        connection.hold(client, start_up.hold, &|| net::outcome().is_some(), clock)
+        connection.hold(client, start_up.hold, &|| start_up.shared.verdict().is_some(), clock)
     });
-    let outcome = net::outcome();
-    let taken = net::taken();
+    let outcome = start_up.shared.verdict();
+    let taken = start_up.shared.port_taken();
     if let Some(attachments) = attached {
+        start_up.shared.withdraw();
+        if let Some((_, offered)) = ap {
+            offered.withdraw();
+        }
         attachments.into_iter().for_each(net::Attachment::detach);
-        net::close();
     }
     let held_for = clock() - held_from;
     let ip = match (held, outcome) {
@@ -518,11 +530,11 @@ fn join(
 }
 
 /// Attach the station's netdev, and in the lab the AP's once it has authorized the station, then
-/// publish them to the main loop.
+/// offer them to the main loop, the AP's first so that the station's arrival finds both.
 fn attach_links(
     station: ferrite_nl80211::nl80211::IfIndex,
     name: &str,
-    ap: Option<ferrite_nl80211::nl80211::IfIndex>,
+    ap: Option<(ferrite_nl80211::nl80211::IfIndex, &Shared)>,
     start_up: &StartUp,
     clock: &dyn Fn() -> Instant,
 ) -> Option<alloc::vec::Vec<net::Attachment>> {
@@ -534,14 +546,17 @@ fn attach_links(
             return None;
         },
     }
-    if let Some(ap) = ap {
+    if let Some((ap, offered)) = ap {
         let start = clock();
         while !lab_ap::PORT_OPEN.load(Ordering::Acquire) && clock() - start < start_up.connect_limit {
             // SAFETY: on a task after the time bring-up.
             unsafe { msleep(WIFI_POLL_MS) };
         }
         match net::attach(ap) {
-            Ok(attachment) => attachments.push(attachment),
+            Ok(attachment) => {
+                offered.publish(attachment.link());
+                attachments.push(attachment);
+            },
             Err(code) => {
                 log::error!("attaching to the lab AP's frames failed: {code}");
                 attachments.into_iter().for_each(net::Attachment::detach);
@@ -549,11 +564,7 @@ fn attach_links(
             },
         }
     }
-    net::publish(net::Session {
-        station: attachments[0].link(),
-        station_name: name.into(),
-        ap: attachments.get(1).map(net::Attachment::link),
-    });
+    start_up.shared.publish(attachments[0].link());
     Some(attachments)
 }
 
@@ -580,6 +591,10 @@ fn simulated_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
         (ferrite_wpa::kdf::Ssid::new(LAB_SSID), ferrite_wpa::kdf::Passphrase::new(LAB_PASSPHRASE))
     else {
         log::error!("the lab credentials are invalid");
+        return false;
+    };
+    let Some(ap_shared) = start_up.lab_ap.as_deref() else {
+        log::error!("the simulated radios need an AP link to offer, and the start-up has none");
         return false;
     };
     let pmk = ferrite_wpa::kdf::Pmk::from_passphrase(&passphrase, &ssid);
@@ -623,7 +638,7 @@ fn simulated_wifi(clock: &dyn Fn() -> Instant, start_up: &StartUp) -> bool {
                     bss.security,
                     report.took.as_millis()
                 );
-                let joined = join(&mut client, &first, bss, pmk, Some(ap_ifindex), start_up, clock);
+                let joined = join(&mut client, &first, bss, pmk, Some((ap_ifindex, ap_shared)), start_up, clock);
                 let ap_side =
                     lab_ap::PORT_OPEN.load(Ordering::Acquire) && lab_ap::GROUP_KEY_INSTALLED.load(Ordering::Acquire);
                 if ap_side {

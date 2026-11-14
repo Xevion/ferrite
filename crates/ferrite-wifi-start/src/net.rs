@@ -1,27 +1,23 @@
-//! The frame seam between a Linux `net_device` and the program's smoltcp, and the hand-off of an open
-//! link from the init task to the program's main loop.
+//! The frame seam between a Linux `net_device` and the program's smoltcp.
 //!
 //! `glue/netif.c` registers an `rx_handler` that copies each received frame into the [`QueuePort`]'s queue
 //! and consumes the skb, and runs a transmit kthread that sends the link's queued frames with
-//! `dev_queue_xmit`, woken when smoltcp queues one. Linux code runs only on tasks: the main loop only
-//! touches the queues and marks the thread runnable.
+//! `dev_queue_xmit`. Linux code runs only on tasks: when smoltcp queues a frame the main loop only
+//! touches the queue and marks the sleeping thread runnable in the scheduler, never through the C.
 //!
-//! Once the port is open, init attaches the link and publishes a [`Session`]; the main loop takes it
-//! with [`take_session`], runs IP over it, and reports with [`finish_session`]. Init holds the
-//! connection until then (or its own bound), detaches the link and disconnects.
+//! The station service and the test script attach a link once its port is open and offer the
+//! [`QueuePort`] to the main loop through `ferrite_wifi::Shared`.
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use alloc::string::String;
-use core::cell::RefCell;
 use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU8, Ordering};
 
 use ferrite_net::QueuePort;
 use ferrite_net::mdns::MDNS_GROUP;
 use ferrite_net::port::{FRAME_MAX, MacAddr};
 use ferrite_nl80211::nl80211::IfIndex;
+use ferrite_wifi::Sleeper;
 
 /// Frames queued in each direction before more are dropped.
 const RX_QUEUE: usize = 64;
@@ -38,13 +34,20 @@ unsafe extern "C" {
         res: *mut *mut c_void,
     ) -> c_int;
     fn lx_netif_join(netif: *mut c_void, mac: *const u8) -> c_int;
-    fn lx_netif_kick(netif: *mut c_void);
+    fn lx_netif_tx_task(netif: *mut c_void) -> *mut c_void;
     fn lx_netif_detach(netif: *mut c_void);
 }
 
+/// What the C callbacks and the main loop's kick share for one attachment.
+struct Seam {
+    link: Rc<QueuePort>,
+    /// Whether the transmit thread is parked waiting for a frame.
+    sleeper: Sleeper,
+}
+
 unsafe extern "C" fn rx(ctx: *const c_void, frame: *const u8, len: c_uint) {
-    // SAFETY: `ctx` is the `QueuePort` of a live attachment, which detaches before the link goes.
-    let link = unsafe { &*ctx.cast::<QueuePort>() };
+    // SAFETY: `ctx` is the `Seam` of a live attachment, which detaches before the seam goes.
+    let link = &unsafe { &*ctx.cast::<Seam>() }.link;
     if frame.is_null() {
         link.count_rx_drop();
     } else {
@@ -55,8 +58,13 @@ unsafe extern "C" fn rx(ctx: *const c_void, frame: *const u8, len: c_uint) {
 
 unsafe extern "C" fn pull(ctx: *const c_void, buf: *mut u8, cap: c_uint) -> c_int {
     // SAFETY: as in `rx`.
-    let link = unsafe { &*ctx.cast::<QueuePort>() };
-    let Some(frame) = link.next_tx() else { return 0 };
+    let seam = unsafe { &*ctx.cast::<Seam>() };
+    let link = &seam.link;
+    let Some(frame) = link.next_tx() else {
+        seam.sleeper.going_to_sleep();
+        return 0;
+    };
+    seam.sleeper.awake();
     if frame.len() > cap as usize {
         link.count_tx_drop();
         return -1;
@@ -68,13 +76,13 @@ unsafe extern "C" fn pull(ctx: *const c_void, buf: *mut u8, cap: c_uint) -> c_in
 
 unsafe extern "C" fn sent(ctx: *const c_void, code: c_int) {
     // SAFETY: as in `rx`.
-    let link = unsafe { &*ctx.cast::<QueuePort>() };
+    let link = &unsafe { &*ctx.cast::<Seam>() }.link;
     link.transmitted(code == 0);
 }
 
 /// A `net_device`'s frames routed to a [`QueuePort`] until [`Attachment::detach`].
 pub struct Attachment {
-    link: Rc<QueuePort>,
+    seam: Rc<Seam>,
     netif: NonNull<c_void>,
     ifindex: IfIndex,
 }
@@ -89,9 +97,10 @@ pub fn attach(ifindex: IfIndex) -> Result<Attachment, c_int> {
         return Err(code);
     }
     let link = Rc::new(QueuePort::new(mac, mtu as usize, RX_QUEUE, TX_QUEUE));
+    let seam = Rc::new(Seam { link, sleeper: Sleeper::default() });
     let mut netif = core::ptr::null_mut();
-    // SAFETY: called on a task; the link outlives the attachment, which `detach` ends.
-    let code = unsafe { lx_netif_attach(raw, Rc::as_ptr(&link).cast(), rx, pull, sent, &raw mut netif) };
+    // SAFETY: called on a task; the seam outlives the attachment, which `detach` ends.
+    let code = unsafe { lx_netif_attach(raw, Rc::as_ptr(&seam).cast(), rx, pull, sent, &raw mut netif) };
     let Some(netif) = NonNull::new(netif).filter(|_| code == 0) else { return Err(code) };
     let group = MacAddr::ipv4_multicast(MDNS_GROUP.octets());
     // SAFETY: on a task, with the attachment live; the address is 6 readable bytes.
@@ -99,98 +108,35 @@ pub fn attach(ifindex: IfIndex) -> Result<Attachment, c_int> {
     if joined != 0 {
         log::warn!("net: joining {group} on ifindex {ifindex} failed ({joined}); mDNS queries will not arrive");
     }
-    let kick = netif.as_ptr();
-    // SAFETY: the kick is cleared in `detach` before the thread it wakes is stopped.
-    link.set_kick(Some(Box::new(move || unsafe { lx_netif_kick(kick) })));
+    // SAFETY: on a task, with the attachment live.
+    let tx_task = unsafe { lx_netif_tx_task(netif.as_ptr()) };
+    // The scheduler wakes the thread: the C's `wake_up_process` would run Linux code on the main stack.
+    // The kick is cleared in `detach` and on withdrawal, before the thread it wakes is stopped.
+    let kicked = Rc::downgrade(&seam);
+    seam.link.set_kick(Some(Box::new(move || {
+        if let Some(seam) = kicked.upgrade()
+            && seam.sleeper.wake_needed()
+        {
+            ferrite_lkpi::task::lx_task_unblock(tx_task);
+        }
+    })));
     log::info!(
         "net: frames of ifindex {ifindex} ({}, MTU {mtu}) go to the IP stack; at most {RX_QUEUE} queued each way, frames up to {FRAME_MAX} bytes",
         ferrite_nl80211::nl80211::MacAddr(mac)
     );
-    Ok(Attachment { link, netif, ifindex })
+    Ok(Attachment { seam, netif, ifindex })
 }
 
 impl Attachment {
     pub fn link(&self) -> Rc<QueuePort> {
-        Rc::clone(&self.link)
+        Rc::clone(&self.seam.link)
     }
 
     /// Stop routing frames, from a task, and log the link's counters.
     pub fn detach(self) {
-        self.link.set_kick(None);
+        self.seam.link.set_kick(None);
         // SAFETY: on a task; the attachment is live and ended once.
         unsafe { lx_netif_detach(self.netif.as_ptr()) };
-        log::info!("net: ifindex {} detached; frames {}", self.ifindex, self.link.stats());
+        log::info!("net: ifindex {} detached; frames {}", self.ifindex, self.seam.link.stats());
     }
-}
-
-/// An open link for the main loop: the station's, and in the lab the AP's too.
-pub struct Session {
-    pub station: Rc<QueuePort>,
-    pub station_name: String,
-    pub ap: Option<Rc<QueuePort>>,
-}
-
-const IDLE: u8 = 0;
-const READY: u8 = 1;
-const TAKEN: u8 = 2;
-const FINISHED_OK: u8 = 3;
-const FINISHED_FAILED: u8 = 4;
-const CLOSED: u8 = 5;
-
-static STATE: AtomicU8 = AtomicU8::new(IDLE);
-
-struct Slot(RefCell<Option<Session>>);
-
-// SAFETY: one CPU, and the tasks and the main loop never run at once; no borrow outlives a call here.
-unsafe impl Sync for Slot {}
-
-static SLOT: Slot = Slot(RefCell::new(None));
-
-pub(crate) fn publish(session: Session) {
-    if let Ok(mut slot) = SLOT.0.try_borrow_mut() {
-        *slot = Some(session);
-        STATE.store(READY, Ordering::Release);
-    }
-}
-
-/// The open link, once, when init has published one.
-pub fn take_session() -> Option<Session> {
-    STATE.compare_exchange(READY, TAKEN, Ordering::AcqRel, Ordering::Acquire).ok()?;
-    SLOT.0.try_borrow_mut().ok()?.take()
-}
-
-/// The main loop is done with the link; `ok` is whether its IP checks passed.
-pub fn finish_session(ok: bool) {
-    let _ = STATE.compare_exchange(
-        TAKEN,
-        if ok { FINISHED_OK } else { FINISHED_FAILED },
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    );
-}
-
-/// Init has detached the link, so the main loop's stack over it should go.
-pub fn session_closed() -> bool {
-    STATE.load(Ordering::Acquire) == CLOSED
-}
-
-/// What the main loop reported, once it has.
-pub(crate) fn outcome() -> Option<bool> {
-    match STATE.load(Ordering::Acquire) {
-        FINISHED_OK => Some(true),
-        FINISHED_FAILED => Some(false),
-        _ => None,
-    }
-}
-
-/// Whether the main loop took the session.
-pub(crate) fn taken() -> bool {
-    STATE.load(Ordering::Acquire) != READY
-}
-
-pub(crate) fn close() {
-    if let Ok(mut slot) = SLOT.0.try_borrow_mut() {
-        slot.take();
-    }
-    STATE.store(CLOSED, Ordering::Release);
 }

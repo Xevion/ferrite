@@ -2,7 +2,7 @@
 //! interface on the AP (wlan1, 10.42.0.1/24) and one on the station (wlan0), both over the frame seam.
 //! The AP answers DHCP with a fixed lease (10.42.0.2/24), and once the station's DHCP client has it, the
 //! station pings the AP, sends a UDP datagram the AP echoes, and fetches the AP's HTTP page over TCP; the
-//! result goes back to init with `finish_session`.
+//! result goes back with `Shared::report`.
 
 use std::convert::Infallible;
 use std::rc::Rc;
@@ -12,6 +12,7 @@ use ferrite_hal::Instant;
 use ferrite_net::http::{Rejection, Route, Site};
 use ferrite_net::port::MacAddr;
 use ferrite_net::{NetStatus, Network, PortId, QueuePort, Stack, StackConfig};
+use ferrite_wifi::{PortEvent, Shared};
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::{tcp, udp};
 use smoltcp::wire::{DhcpMessageType, DhcpPacket, DhcpRepr, IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr};
@@ -359,31 +360,66 @@ fn response_complete(reply: &[u8]) -> bool {
     reply.len() >= head_end + 4 + length
 }
 
-/// The main loop's IP: takes the session init publishes, runs the checks and hands back the result.
-#[derive(Default)]
+/// The main loop's IP: takes the links the station and the lab AP offer, runs the checks over each new
+/// station link against the AP's, and reports the result through the station's `Shared`.
 pub struct MainNet {
+    station: Rc<Shared>,
+    ap: Rc<Shared>,
+    seed: u64,
+    station_link: Option<Rc<QueuePort>>,
+    ap_link: Option<Rc<QueuePort>>,
     lab: Option<LabNet>,
+    /// Whether the station link that is up has had its verdict.
+    checked: bool,
+    /// How many station links have come up.
+    links: u32,
 }
 
 impl MainNet {
+    pub const fn new(station: Rc<Shared>, ap: Rc<Shared>, seed: u64) -> Self {
+        Self { station, ap, seed, station_link: None, ap_link: None, lab: None, checked: false, links: 0 }
+    }
+
+    /// How many station links have come up since the start.
+    pub const fn links(&self) -> u32 {
+        self.links
+    }
+
+    /// Whether a station link is up now.
+    pub const fn link_up(&self) -> bool {
+        self.station_link.is_some()
+    }
+
     /// Poll once; returns how long the main loop may sleep for IP's sake.
-    pub fn poll(&mut self, now: Instant, seed: u64) -> Option<Duration> {
-        if self.lab.is_none()
-            && let Some(session) = ferrite_wifi_start::net::take_session()
-        {
-            if let Some(ap) = session.ap {
-                self.lab = Some(LabNet::new(session.station, ap, now, seed));
-            } else {
-                log::error!("ip: the lab session has no AP link");
-                ferrite_wifi_start::net::finish_session(false);
-            }
-        }
-        if ferrite_wifi_start::net::session_closed() {
+    pub fn poll(&mut self, now: Instant) -> Option<Duration> {
+        while let Some(event) = self.ap.next_port_event() {
+            self.ap_link = match event {
+                PortEvent::Up(link) => Some(link),
+                PortEvent::Down => None,
+            };
             self.lab = None;
+        }
+        while let Some(event) = self.station.next_port_event() {
+            self.station_link = match event {
+                PortEvent::Up(link) => {
+                    self.checked = false;
+                    self.links += 1;
+                    Some(link)
+                },
+                PortEvent::Down => None,
+            };
+            self.lab = None;
+        }
+        if self.lab.is_none()
+            && !self.checked
+            && let (Some(station), Some(ap)) = (&self.station_link, &self.ap_link)
+        {
+            self.lab = Some(LabNet::new(Rc::clone(station), Rc::clone(ap), now, self.seed));
         }
         let lab = self.lab.as_mut()?;
         if let Some(passed) = lab.poll(now) {
-            ferrite_wifi_start::net::finish_session(passed);
+            self.station.report(passed);
+            self.checked = true;
             self.lab = None;
             return None;
         }

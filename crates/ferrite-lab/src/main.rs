@@ -17,9 +17,11 @@ use std::backtrace::Backtrace;
 use std::ffi::CStr;
 use std::io::Write as _;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use ferrite_lkpi::sched::{NoHooks, Scheduler, Step};
+use ferrite_wifi::Shared;
 use ferrite_wifi_start::StartUp;
 use log::LevelFilter;
 
@@ -51,18 +53,19 @@ fn poll_until_done<
 >(
     sched: &mut Scheduler<P, S, H>,
     init_id: ferrite_lkpi::sched::TaskId,
+    (station, ap): (Rc<Shared>, Rc<Shared>),
 ) -> Result<(), ExitCode> {
-    let seed = match host::entropy() {
-        Ok(bytes) => bytes.iter().fold(0_u64, |seed, byte| seed.rotate_left(8) ^ u64::from(*byte)),
+    let seed = match host::stack_seed() {
+        Ok(seed) => seed,
         Err(error) => {
             log::error!("reading host entropy failed: {error}");
             return Err(ExitCode::FAILURE);
         },
     };
-    let mut ip = net::MainNet::default();
+    let mut ip = net::MainNet::new(station, ap, seed);
     while sched.info(init_id).is_some() {
         let step = sched.poll(BUDGET);
-        let ip_wait = ip.poll(sched.handle().now(), seed);
+        let ip_wait = ip.poll(sched.handle().now());
         match step {
             Ok(step) if step.runnable || sched.info(init_id).is_none() || ip_wait == Some(Duration::ZERO) => {},
             Ok(Step { next_deadline: Some(at), .. }) => {
@@ -155,6 +158,7 @@ fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("station") {
         return station::run(&mut sched);
     }
+    let (station_link, ap_link) = (Shared::new(), Shared::new());
     let start_up = StartUp {
         sched: sched.handle(),
         firmware_reference: firmware,
@@ -163,6 +167,8 @@ fn main() -> ExitCode {
         scan_limit: SCAN_LIMIT,
         connect_limit: CONNECT_LIMIT,
         hold: HOLD,
+        shared: Rc::clone(&station_link),
+        lab_ap: Some(Rc::clone(&ap_link)),
     };
     let init_task = match ferrite_wifi_start::start_init(start_up) {
         Ok(task) => task,
@@ -176,7 +182,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    if let Err(code) = poll_until_done(&mut sched, init_id) {
+    if let Err(code) = poll_until_done(&mut sched, init_id, (station_link, ap_link)) {
         return code;
     }
     if ferrite_wifi_start::init_failed() { ExitCode::FAILURE } else { ExitCode::SUCCESS }

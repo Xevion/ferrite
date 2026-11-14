@@ -17,6 +17,7 @@ use ferrite_net::http::JsonEscape;
 use ferrite_net::mdns;
 use ferrite_net::{NetStatus, PortStatus};
 
+use super::wifi::{WifiFacts, WifiView};
 use crate::report::{CpuInfo, FaultRecord, PassRecord, Snapshot, TestRecord};
 use crate::sweep::SweepStatus;
 
@@ -257,9 +258,36 @@ impl ToJson for PortStatus {
     }
 }
 
-impl ToJson for NetStatus {
+impl ToJson for WifiFacts<'_> {
     fn to_json(&self, out: &mut dyn fmt::Write) {
-        Object::new(out).field("hostname", &Text(mdns::HOST)).field("ports", self.ports()).finish();
+        Object::new(out)
+            .field("state", self.state)
+            .field("ssid", &self.ssid)
+            .field("retry_in_s", &self.retry_in_s)
+            .field("final", &self.is_final)
+            .finish();
+    }
+}
+
+impl ToJson for WifiView {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        self.read(|facts| facts.to_json(out));
+    }
+}
+
+/// The `net` object: the host name, every port and the Wi-Fi station.
+struct NetDoc<'a> {
+    net: &'a NetStatus,
+    wifi: &'a WifiView,
+}
+
+impl ToJson for NetDoc<'_> {
+    fn to_json(&self, out: &mut dyn fmt::Write) {
+        Object::new(out)
+            .field("hostname", &Text(mdns::HOST))
+            .field("ports", self.net.ports())
+            .field("wifi", self.wifi)
+            .finish();
     }
 }
 
@@ -267,6 +295,7 @@ impl ToJson for NetStatus {
 pub struct StatusDoc<'a> {
     pub snapshot: &'a Snapshot<'a>,
     pub net: &'a NetStatus,
+    pub wifi: &'a WifiView,
     pub now: Instant,
 }
 
@@ -327,7 +356,7 @@ impl ToJson for StatusDoc<'_> {
             .field("tests", &Each(|| history.latest_tests()))
             .field("passes", &history.passes)
             .field("processors", history.cpus.as_slice())
-            .field("net", self.net)
+            .field("net", &NetDoc { net: self.net, wifi: self.wifi })
             .finish();
     }
 }
@@ -345,6 +374,7 @@ impl<F: Fn(&mut Object<'_>)> ToJson for Section<F> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::rc::Rc;
     use alloc::string::String;
     use alloc::vec;
 
@@ -420,7 +450,8 @@ mod tests {
             services: ServiceCounters { http_responses: 7, ..ServiceCounters::default() },
         });
         let mut out = String::new();
-        StatusDoc { snapshot: &snapshot, net: &net, now: at(6_500) }.to_json(&mut out);
+        let wifi = WifiView::absent("not in this build");
+        StatusDoc { snapshot: &snapshot, net: &net, wifi: &wifi, now: at(6_500) }.to_json(&mut out);
         check!(
             out == concat!(
                 r#"{"uptime_ms":6500,"preset":"thorough","paused":true,"elapsed_ms":5500,"bytes":1073741824,"#,
@@ -439,8 +470,37 @@ mod tests {
                 r#""net":{"hostname":"ferrite.local","ports":[{"medium":"ethernet","mac":"52:54:00:12:34:56","#,
                 r#""link_up":true,"address":"10.0.2.15/24","gateway":"10.0.2.2","dns":null,"#,
                 r#""counters":{"mdns_queries":0,"mdns_replies":0,"mdns_malformed":0,"http_responses":7,"#,
-                r#""rx_frames":5,"rx_dropped":0,"tx_frames":0,"tx_dropped":0,"tx_errors":0,"tx_reclaimed":0}}]}}"#
+                r#""rx_frames":5,"rx_dropped":0,"tx_frames":0,"tx_dropped":0,"tx_errors":0,"tx_reclaimed":0}}],"#,
+                r#""wifi":{"state":"not in this build","ssid":null,"retry_in_s":null,"final":true}}}"#
             )
         );
+    }
+
+    #[test]
+    fn the_wifi_member_follows_the_station_state() {
+        use ferrite_wifi::{Failure, Shared, StationState};
+
+        let shared = Shared::new();
+        let view = WifiView::new(Rc::clone(&shared));
+        let written = |view: &WifiView| {
+            let mut out = String::new();
+            view.to_json(&mut out);
+            out
+        };
+        check!(written(&view) == r#"{"state":"starting","ssid":null,"retry_in_s":null,"final":false}"#);
+
+        shared.set_state(StationState::Connecting { ssid: "ho\"me".into() });
+        check!(written(&view) == r#"{"state":"connecting","ssid":"ho\"me","retry_in_s":null,"final":false}"#);
+
+        shared.set_state(StationState::Failed { reason: Failure::Lost, retry_in: Some(Duration::from_secs(4)) });
+        check!(written(&view) == r#"{"state":"the link was lost","ssid":null,"retry_in_s":4,"final":false}"#);
+        let retrying = view.key();
+
+        shared.set_state(StationState::Failed { reason: Failure::Driver, retry_in: None });
+        check!(
+            written(&view)
+                == r#"{"state":"the card's driver is not running","ssid":null,"retry_in_s":null,"final":true}"#
+        );
+        check!(view.key() != retrying, "a change of state moves the key, so the document is rendered again");
     }
 }
