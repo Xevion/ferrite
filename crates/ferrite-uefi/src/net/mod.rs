@@ -120,7 +120,7 @@ impl Net {
         if ports > 0 {
             log::debug!("net: {ports} wired ports up");
         } else if net.wifi.pending() {
-            log::info!("net: no wired NIC ({}); waiting for Wi-Fi", net.reason().wired);
+            log::info!("net: {}; waiting for Wi-Fi", net.reason().wired);
         } else {
             log::warn!("net: no network: {}", net.reason());
         }

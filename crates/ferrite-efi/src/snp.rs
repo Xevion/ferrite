@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use ferrite_hal::Instant;
+use ferrite_net::mdns::MDNS_GROUP;
 use ferrite_net::port::{MacAddr, Medium, Port, PortStats, TxError};
 use snafu::{ResultExt as _, Snafu};
 use uefi::boot::{self, ScopedProtocol};
@@ -30,9 +31,6 @@ const TX_SLOTS: usize = 8;
 const TX_STALE: Duration = Duration::from_secs(1);
 /// Bound on recycled buffers drained per call, against firmware returning the same one forever.
 const MAX_RECYCLE_PER_POLL: usize = 4 * TX_SLOTS;
-/// The mDNS group, 224.0.0.251, whose frames the receive filter lets through.
-const MDNS_GROUP: [u8; 4] = [224, 0, 0, 251];
-
 /// Fixed transmit buffers and which of them the firmware still holds.
 pub struct TxPool {
     bufs: Box<[[u8; FRAME_CAP]]>,
@@ -344,12 +342,11 @@ impl Port for SnpPort {
     }
 }
 
-/// The Ethernet group address for an IPv4 multicast group: 01:00:5e and the group's low 23 bits.
-fn ipv4_group_mac(group: [u8; 4]) -> EfiMacAddr {
-    let [_, b, c, d] = group;
-    let mut mac = EfiMacAddr([0; 32]);
-    mac.0[..6].copy_from_slice(&[0x01, 0x00, 0x5E, b & 0x7F, c, d]);
-    mac
+/// `mac` in the firmware's 32-byte form.
+fn efi_mac(mac: MacAddr) -> EfiMacAddr {
+    let mut efi = EfiMacAddr([0; 32]);
+    efi.0[..6].copy_from_slice(&mac.octets());
+    efi
 }
 
 /// Enable unicast and broadcast, plus the best multicast mode the NIC supports: the mDNS group in
@@ -359,7 +356,7 @@ fn configure_filters(handle: Handle, snp: &SimpleNetwork) -> Result<(), SnpError
     let mode = snp.mode();
     let supported = ReceiveFlags::from_bits_truncate(mode.receive_filter_mask);
     let base = (ReceiveFlags::UNICAST | ReceiveFlags::BROADCAST) & supported;
-    let group = [ipv4_group_mac(MDNS_GROUP)];
+    let group = [efi_mac(MacAddr::ipv4_multicast(MDNS_GROUP.octets()))];
     log::debug!(
         "net: receive filters supported {supported:?}, {} multicast slots, currently {:?}",
         mode.max_mcast_filter_count,
@@ -437,11 +434,5 @@ mod tests {
         let mut pool = TxPool::new();
         check!(pool.frame_mut(0, 60).len() == 60);
         check!(pool.frame_mut(0, FRAME_CAP + 100).len() == FRAME_CAP);
-    }
-
-    #[test]
-    fn group_mac_keeps_the_low_23_bits() {
-        check!(ipv4_group_mac(MDNS_GROUP).0[..6] == [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB]);
-        check!(ipv4_group_mac([239, 255, 255, 250]).0[..6] == [0x01, 0x00, 0x5E, 0x7F, 0xFF, 0xFA]);
     }
 }

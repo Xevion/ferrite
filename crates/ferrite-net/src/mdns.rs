@@ -14,6 +14,8 @@ use smoltcp::wire::Ipv4Address;
 use snafu::{OptionExt as _, Snafu, ensure};
 
 pub const MDNS_PORT: u16 = 5353;
+/// The IPv4 group mDNS queries and answers go to. Every port receives it (see [`crate::port::Port`]).
+pub const MDNS_GROUP: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 
 /// The hostname we answer for.
 pub const HOST: Name<'static> = {

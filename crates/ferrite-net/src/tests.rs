@@ -446,3 +446,10 @@ fn a_running_server_makes_no_allocations() {
     check!(rig.events().0 >= 5);
     check!(rig.allocs == allocs, "{} allocations in 5 events", rig.allocs - allocs);
 }
+
+#[test]
+fn an_ipv4_group_mac_keeps_the_low_23_bits() {
+    use crate::port::MacAddr;
+    check!(MacAddr::ipv4_multicast(crate::mdns::MDNS_GROUP.octets()).octets() == [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB]);
+    check!(MacAddr::ipv4_multicast([239, 255, 255, 250]).octets() == [0x01, 0x00, 0x5E, 0x7F, 0xFF, 0xFA]);
+}

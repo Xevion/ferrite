@@ -16,6 +16,7 @@
 #include <net/net_namespace.h>
 
 #define LX_NETIF_FRAME_MAX (ETH_HLEN + ETH_DATA_LEN)
+#define LX_NETIF_GROUPS 4
 
 struct lx_netif {
 	struct net_device *dev;
@@ -27,6 +28,9 @@ struct lx_netif {
 	/* The next frame to send copied into buf: its length, 0 when none is queued, < 0 to skip one. */
 	int (*pull)(const void *ctx, u8 *buf, unsigned int cap);
 	void (*sent)(const void *ctx, int rc);
+	/* Multicast addresses joined for the program, left again on detach. */
+	u8 groups[LX_NETIF_GROUPS][ETH_ALEN];
+	unsigned int n_groups;
 	u8 rx_buf[LX_NETIF_FRAME_MAX];
 	u8 tx_buf[LX_NETIF_FRAME_MAX];
 };
@@ -147,6 +151,22 @@ int lx_netif_attach(int ifindex, const void *ctx,
 	return 0;
 }
 
+/*
+ * Receive frames to the Ethernet group `mac` too: it joins the device's multicast list, which mac80211
+ * turns into the card's filter. Without it the card drops multicast such as mDNS.
+ */
+int lx_netif_join(struct lx_netif *netif, const u8 *mac)
+{
+	int err;
+
+	if (netif->n_groups >= LX_NETIF_GROUPS)
+		return -ENOSPC;
+	err = dev_mc_add(netif->dev, mac);
+	if (!err)
+		memcpy(netif->groups[netif->n_groups++], mac, ETH_ALEN);
+	return err;
+}
+
 /* Safe from the main stack: it only marks the thread runnable. */
 void lx_netif_kick(struct lx_netif *netif)
 {
@@ -155,7 +175,11 @@ void lx_netif_kick(struct lx_netif *netif)
 
 void lx_netif_detach(struct lx_netif *netif)
 {
+	unsigned int i;
+
 	kthread_stop(netif->tx_task);
+	for (i = 0; i < netif->n_groups; i++)
+		dev_mc_del(netif->dev, netif->groups[i]);
 	rtnl_lock();
 	netdev_rx_handler_unregister(netif->dev);
 	netdev_put(netif->dev, &netif->tracker);

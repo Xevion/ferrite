@@ -26,6 +26,14 @@ impl MacAddr {
     pub const fn octets(self) -> [u8; 6] {
         self.0
     }
+
+    /// The Ethernet group address an IPv4 multicast group is sent to: 01:00:5e and the group's low
+    /// 23 bits.
+    #[must_use]
+    pub const fn ipv4_multicast(group: [u8; 4]) -> Self {
+        let [_, b, c, d] = group;
+        Self([0x01, 0x00, 0x5E, b & 0x7F, c, d])
+    }
 }
 
 impl fmt::Display for MacAddr {
@@ -93,6 +101,9 @@ impl fmt::Display for PortStats {
 
 /// A source and sink of Ethernet frames. Object safe, so a set of ports of different kinds can be
 /// held together; every method is non-blocking.
+///
+/// A port receives frames to its own address, broadcast, and the mDNS group
+/// ([`MacAddr::ipv4_multicast`] of [`crate::mdns::MDNS_GROUP`]); NICs filter other multicast away.
 pub trait Port {
     fn medium(&self) -> Medium;
     fn mac(&self) -> MacAddr;

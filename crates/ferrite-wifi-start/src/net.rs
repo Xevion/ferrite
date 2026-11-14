@@ -19,7 +19,8 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use ferrite_net::QueuePort;
-use ferrite_net::port::FRAME_MAX;
+use ferrite_net::mdns::MDNS_GROUP;
+use ferrite_net::port::{FRAME_MAX, MacAddr};
 use ferrite_nl80211::nl80211::IfIndex;
 
 /// Frames queued in each direction before more are dropped.
@@ -36,6 +37,7 @@ unsafe extern "C" {
         sent: unsafe extern "C" fn(*const c_void, c_int),
         res: *mut *mut c_void,
     ) -> c_int;
+    fn lx_netif_join(netif: *mut c_void, mac: *const u8) -> c_int;
     fn lx_netif_kick(netif: *mut c_void);
     fn lx_netif_detach(netif: *mut c_void);
 }
@@ -91,6 +93,12 @@ pub fn attach(ifindex: IfIndex) -> Result<Attachment, c_int> {
     // SAFETY: called on a task; the link outlives the attachment, which `detach` ends.
     let code = unsafe { lx_netif_attach(raw, Rc::as_ptr(&link).cast(), rx, pull, sent, &raw mut netif) };
     let Some(netif) = NonNull::new(netif).filter(|_| code == 0) else { return Err(code) };
+    let group = MacAddr::ipv4_multicast(MDNS_GROUP.octets());
+    // SAFETY: on a task, with the attachment live; the address is 6 readable bytes.
+    let joined = unsafe { lx_netif_join(netif.as_ptr(), group.octets().as_ptr()) };
+    if joined != 0 {
+        log::warn!("net: joining {group} on ifindex {ifindex} failed ({joined}); mDNS queries will not arrive");
+    }
     let kick = netif.as_ptr();
     // SAFETY: the kick is cleared in `detach` before the thread it wakes is stopped.
     link.set_kick(Some(Box::new(move || unsafe { lx_netif_kick(kick) })));

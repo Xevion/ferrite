@@ -24,7 +24,6 @@ use crate::ping::Pinger;
 use crate::port::Port;
 use crate::status::{Link, OptAddr, PortStatus, ServiceCounters};
 
-const MDNS_ADDR: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_BUFFER: usize = 1500;
 const MDNS_PACKETS: usize = 4;
 
@@ -222,7 +221,7 @@ impl Stack {
     fn serve_mdns(&mut self, now: Instant) {
         let Some(mdns) = &mut self.mdns else { return };
         let ip = self.link.address.map(|cidr| cidr.address());
-        let group = IpEndpoint::new(IpAddress::Ipv4(MDNS_ADDR), mdns::MDNS_PORT);
+        let group = IpEndpoint::new(IpAddress::Ipv4(mdns::MDNS_GROUP), mdns::MDNS_PORT);
         let sock = self.sockets.get_mut::<udp::Socket<'_>>(mdns.socket);
         let counters = &mut self.services;
         let out = &mut mdns.out;
@@ -298,8 +297,8 @@ impl Stack {
 
 impl Mdns {
     fn new(iface: &mut Interface, sockets: &mut SocketSet<'static>) -> Self {
-        if let Err(e) = iface.join_multicast_group(MDNS_ADDR) {
-            log::warn!("net: joining {MDNS_ADDR} failed, mDNS disabled: {e}");
+        if let Err(e) = iface.join_multicast_group(mdns::MDNS_GROUP) {
+            log::warn!("net: joining {} failed, mDNS disabled: {e}", mdns::MDNS_GROUP);
         }
         let mut socket = udp::Socket::new(
             udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; MDNS_PACKETS], vec![0; MDNS_BUFFER]),
