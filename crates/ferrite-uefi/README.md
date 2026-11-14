@@ -36,8 +36,9 @@ variables in the `Justfile` if your distro puts them elsewhere). QEMU has no
 xHCI Debug Capability, so the DbC apps only run to "no DbC found" there.
 
 Every app writes its log to `\EFI\ferrite\<app>.txt` on the boot volume (for
-example `\EFI\ferrite\xhciscan.txt`). QEMU's `fat:rw:` drive corrupts files that
-grow, so inspect those logs from a real FAT image instead.
+example `\EFI\ferrite\xhciscan.txt`). `just qemu` boots from a FAT image built
+from `esp/` (QEMU's `fat:rw:` folder drive corrupts growing files and can abort
+QEMU), and `just qemu-log <app>` prints that log after a run.
 
 ### Deploying to real hardware
 

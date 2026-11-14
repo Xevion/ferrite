@@ -8,6 +8,8 @@ ovmf_vars := "/usr/share/OVMF/OVMF_VARS_4M.fd"
 # `tap` joins tap-ferrite on libvirt's NAT bridge virbr0, where mDNS works.
 user_net := "-netdev user,id=net0,hostfwd=tcp::8080-:80"
 tap_net := "-netdev tap,id=net0,ifname=tap-ferrite,script=no,downscript=no"
+# The ESP as a FAT image, under target/ so it stays out of git.
+qemu_esp := "target/qemu-esp.img"
 
 alias c := check
 alias t := test
@@ -72,8 +74,9 @@ stage app="ferrite-uefi": vendor
     {{ if app == "wifitrace" { "mkdir -p esp/efi/ferrite/firmware && cp /lib/firmware/regulatory.db esp/efi/ferrite/firmware/ && cp /lib/firmware/iwlwifi-8265-36.ucode esp/efi/ferrite/firmware/ && if test -f .env; then grep -E '^WPA_(SSID|PASSPHRASE)=' .env > esp/efi/ferrite/firmware/wifi.env || true; fi" } else { "true" } }}
     test -f OVMF_VARS.fd || cp {{ ovmf_vars }} OVMF_VARS.fd
 
-# boot an app in QEMU: `just qemu`, `just qemu xhciscan serial`, `just qemu ferrite-uefi serial tap`; a fourth argument picks the CPU model and a fifth the -smp topology (`just qemu membench serial user host 8,cores=4,threads=2`)
+# boot an app in QEMU: `just qemu`, `just qemu xhciscan serial`, `just qemu ferrite-uefi serial tap`; a fourth argument picks the CPU model and a fifth the -smp topology (`just qemu membench serial user host 8,cores=4,threads=2`). The ESP is copied into a FAT image (QEMU's `fat:rw:` folder drive aborts under steady log writes); `just qemu-log` prints the app's log from it afterwards
 qemu app="ferrite-uefi" mode="gui" net="user" cpu="" smp="": (stage app)
+    rm -f {{ qemu_esp }} && mkfs.vfat -C {{ qemu_esp }} 131072 > /dev/null && mcopy -s -i {{ qemu_esp }} esp/efi ::/
     qemu-system-x86_64 \
         -enable-kvm \
         {{ if cpu != "" { "-cpu " + cpu } else { "" } }} \
@@ -82,11 +85,15 @@ qemu app="ferrite-uefi" mode="gui" net="user" cpu="" smp="": (stage app)
         -m 512M \
         -drive if=pflash,format=raw,readonly=on,file={{ ovmf_code }} \
         -drive if=pflash,format=raw,file=OVMF_VARS.fd \
-        -drive format=raw,file=fat:rw:esp \
+        -drive format=raw,file={{ qemu_esp }} \
         {{ if net == "tap" { tap_net } else { user_net } }} -device e1000,netdev=net0 \
         -device qemu-xhci \
         -device virtio-rng-pci \
         {{ if mode == "serial" { "-nographic" } else { "-display gtk" } }}
+
+# print an app's log from the last `just qemu` run's FAT image
+qemu-log app="ferrite-uefi":
+    mtype -i {{ qemu_esp }} ::/efi/ferrite/{{ app }}.txt
 
 # copy the staged ESP onto a mounted FAT32 USB stick: `just stage-usb /run/media/$USER/FERRITE`
 stage-usb mount app="ferrite-uefi": (stage app)
