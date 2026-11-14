@@ -14,7 +14,6 @@
 	],
 	"bump-minor-pre-major": true,
 	"always-update": true,
-	"bump-patch-for-minor-pre-major": true,
 	"include-v-in-tag": true,
 	"include-component-in-tag": false,
 	"plugins": ["sentence-case"],
