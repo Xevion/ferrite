@@ -36,6 +36,7 @@ uefi = { workspace = true, features = ["global_allocator"] }
 
 [dev-dependencies]
 assert2.workspace = true
+ferrite-testing.workspace = true
 rstest.workspace = true
 smoltcp.workspace = true
 

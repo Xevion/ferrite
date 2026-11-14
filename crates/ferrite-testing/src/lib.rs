@@ -7,6 +7,7 @@
 //! semantics (RW1C, RW1S, DCE side effects) and produces events into the
 //! driver's event ring.
 
+pub mod counting;
 mod dbc;
 mod dma;
 

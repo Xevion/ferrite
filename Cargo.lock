@@ -1037,6 +1037,7 @@ version = "0.1.0"
 dependencies = [
  "assert2",
  "ferrite-hal",
+ "ferrite-testing",
  "heapless 0.9.3",
  "log",
  "picoserve",
@@ -1094,6 +1095,7 @@ dependencies = [
  "ferrite-mem",
  "ferrite-net",
  "ferrite-rt",
+ "ferrite-testing",
  "ferrite-wifi",
  "ferrite-wifi-efi",
  "fontdue",

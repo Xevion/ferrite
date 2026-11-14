@@ -16,6 +16,7 @@ snafu.workspace = true
 
 [dev-dependencies]
 assert2.workspace = true
+ferrite-testing.workspace = true
 rstest.workspace = true
 
 [lints]
