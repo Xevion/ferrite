@@ -1,5 +1,5 @@
 [package]
-name = "ferrite-netif"
+name = "ferrite-net"
 description = "Ethernet frames between a kernel network device and smoltcp: bounded queues, the Device, ping and a tiny HTTP responder"
 version.workspace = true
 edition.workspace = true

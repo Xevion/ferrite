@@ -983,7 +983,7 @@ dependencies = [
  "corosensei",
  "ferrite-hal",
  "ferrite-lkpi",
- "ferrite-netif",
+ "ferrite-net",
  "ferrite-wifi-start",
  "ferrite-wifi-sys",
  "libc",
@@ -1030,7 +1030,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferrite-netif"
+name = "ferrite-net"
 version = "0.1.0"
 dependencies = [
  "assert2",
@@ -1108,7 +1108,7 @@ dependencies = [
  "ferrite-efi",
  "ferrite-hal",
  "ferrite-lkpi",
- "ferrite-netif",
+ "ferrite-net",
  "ferrite-rt",
  "ferrite-wifi-start",
  "log",
@@ -1123,7 +1123,7 @@ version = "0.1.0"
 dependencies = [
  "ferrite-hal",
  "ferrite-lkpi",
- "ferrite-netif",
+ "ferrite-net",
  "ferrite-nl80211",
  "ferrite-wifi-sys",
  "ferrite-wpa",

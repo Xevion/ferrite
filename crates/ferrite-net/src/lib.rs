@@ -1,8 +1,8 @@
-//! Ethernet frames between a kernel network device and smoltcp: a [`Link`] holds bounded receive and
-//! transmit queues with drop counters, and [`LinkDevice`] is the smoltcp `Device` over them.
+//! Networking shared by every app, platform-free: the [`port::Port`] every NIC is seen through, and
+//! the IP stack and services that run over ports.
 //!
-//! Platform-free: the program moves frames between the queues and the device (the Wi-Fi start-up does
-//! it with a Linux `rx_handler` and a transmit thread) and polls smoltcp from its own loop. A `Link` is
+//! A [`QueuePort`] is a port fed by a device that pushes frames (the Wi-Fi start-up does it with a Linux
+//! `rx_handler` and a transmit thread): bounded receive and transmit queues with drop counters. It is
 //! single-threaded; the device side and the program side must never run at the same time.
 
 #![no_std]
@@ -14,23 +14,20 @@ extern crate std;
 pub mod dhcp;
 pub mod http;
 pub mod ping;
+pub mod port;
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use core::fmt;
 
 use smoltcp::iface::{Config, Interface};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::wire::{EthernetAddress, HardwareAddress};
 
-/// The Ethernet payload size of a Wi-Fi netdev.
-pub const MTU: usize = 1500;
-pub const ETH_HEADER: usize = 14;
-/// The largest frame either queue carries: header and MTU, no FCS.
-pub const FRAME_MAX: usize = ETH_HEADER + MTU;
+use crate::port::{ETH_HEADER, MTU, MacAddr, Port, PortStats, TxError};
 
 struct FrameQueue {
     frames: VecDeque<Vec<u8>>,
@@ -52,37 +49,14 @@ impl FrameQueue {
     }
 }
 
-/// Frame counters since the link was made.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Stats {
-    pub rx_frames: u64,
-    /// Received frames lost: the queue was full, the frame too large, or the device could not copy it.
-    pub rx_dropped: u64,
-    pub tx_frames: u64,
-    /// Frames smoltcp sent into a full transmit queue, or larger than the device takes.
-    pub tx_dropped: u64,
-    /// Frames the device refused to send.
-    pub tx_errors: u64,
-}
-
-impl fmt::Display for Stats {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "rx {} (dropped {}), tx {} (dropped {}, errors {})",
-            self.rx_frames, self.rx_dropped, self.tx_frames, self.tx_dropped, self.tx_errors
-        )
-    }
-}
-
 struct State {
     rx: FrameQueue,
     tx: FrameQueue,
-    stats: Stats,
+    stats: PortStats,
 }
 
 /// One network device's frames in both directions.
-pub struct Link {
+pub struct QueuePort {
     mac: [u8; 6],
     mtu: usize,
     state: RefCell<State>,
@@ -90,7 +64,7 @@ pub struct Link {
     kick: RefCell<Option<Box<dyn Fn()>>>,
 }
 
-impl Link {
+impl QueuePort {
     /// A link for a device with address `mac` and payload size `mtu` (at most [`MTU`]), queueing at most
     /// `rx_cap` received and `tx_cap` outgoing frames.
     pub fn new(mac: [u8; 6], mtu: usize, rx_cap: usize, tx_cap: usize) -> Self {
@@ -100,7 +74,7 @@ impl Link {
             state: RefCell::new(State {
                 rx: FrameQueue::new(rx_cap),
                 tx: FrameQueue::new(tx_cap),
-                stats: Stats::default(),
+                stats: PortStats::default(),
             }),
             kick: RefCell::new(None),
         }
@@ -156,7 +130,7 @@ impl Link {
         self.with(|state| !state.tx.frames.is_empty()).unwrap_or(false)
     }
 
-    /// The device side's verdict on a frame from [`Link::next_tx`].
+    /// The device side's verdict on a frame from [`QueuePort::next_tx`].
     pub fn transmitted(&self, ok: bool) {
         self.with(|state| {
             if ok {
@@ -167,12 +141,12 @@ impl Link {
         });
     }
 
-    /// A frame from [`Link::next_tx`] the device side could not take at all.
+    /// A frame from [`QueuePort::next_tx`] the device side could not take at all.
     pub fn count_tx_drop(&self) {
         self.with(|state| state.stats.tx_dropped += 1);
     }
 
-    pub fn stats(&self) -> Stats {
+    pub fn stats(&self) -> PortStats {
         self.with(|state| state.stats).unwrap_or_default()
     }
 
@@ -197,8 +171,8 @@ impl Link {
     }
 
     /// The smoltcp device over this link.
-    pub const fn device(&self) -> LinkDevice<'_> {
-        LinkDevice(self)
+    pub const fn device(&self) -> QueueDevice<'_> {
+        QueueDevice(self)
     }
 
     /// A smoltcp interface with this link's address, at `now`.
@@ -209,14 +183,62 @@ impl Link {
     }
 }
 
+impl Port for Rc<QueuePort> {
+    fn medium(&self) -> port::Medium {
+        port::Medium::WiFi
+    }
+
+    fn mac(&self) -> MacAddr {
+        MacAddr::new(self.mac)
+    }
+
+    fn mtu(&self) -> usize {
+        self.mtu
+    }
+
+    fn link_up(&self) -> bool {
+        true
+    }
+
+    fn service(&mut self, _now: ferrite_hal::Instant) {}
+
+    fn receive(&mut self, buf: &mut [u8]) -> Option<usize> {
+        let frame = self.next_rx()?;
+        let n = frame.len().min(buf.len());
+        buf[..n].copy_from_slice(&frame[..n]);
+        Some(n)
+    }
+
+    fn can_transmit(&self) -> bool {
+        self.with(|state| state.tx.frames.len() < state.tx.cap).unwrap_or(false)
+    }
+
+    fn transmit(&mut self, _now: ferrite_hal::Instant, frame: &[u8]) -> Result<(), TxError> {
+        if frame.len() > ETH_HEADER + self.mtu {
+            self.count_tx_drop();
+            return Err(TxError::TooLarge);
+        }
+        if !self.can_transmit() {
+            self.count_tx_drop();
+            return Err(TxError::Busy);
+        }
+        self.queue_tx(frame.to_vec());
+        Ok(())
+    }
+
+    fn stats(&self) -> PortStats {
+        QueuePort::stats(self)
+    }
+}
+
 /// smoltcp's time from the HAL's.
 pub fn smol_instant(now: ferrite_hal::Instant) -> smoltcp::time::Instant {
     smoltcp::time::Instant::from_micros(i64::try_from(now.since_epoch().as_micros()).unwrap_or(i64::MAX))
 }
 
-pub struct LinkDevice<'a>(&'a Link);
+pub struct QueueDevice<'a>(&'a QueuePort);
 
-impl Device for LinkDevice<'_> {
+impl Device for QueueDevice<'_> {
     type RxToken<'b>
         = FrameRx
     where
@@ -255,7 +277,7 @@ impl RxToken for FrameRx {
     }
 }
 
-pub struct FrameTx<'a>(&'a Link);
+pub struct FrameTx<'a>(&'a QueuePort);
 
 impl TxToken for FrameTx<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
@@ -280,7 +302,7 @@ mod tests {
 
     #[test]
     fn full_queues_and_oversize_frames_are_counted_not_kept() {
-        let link = Link::new([2, 0, 0, 0, 0, 1], 1500, 2, 1);
+        let link = QueuePort::new([2, 0, 0, 0, 0, 1], 1500, 2, 1);
         let kicks = Rc::new(Cell::new(0));
         let counted = Rc::clone(&kicks);
         link.set_kick(Some(Box::new(move || counted.set(counted.get() + 1))));
@@ -288,7 +310,7 @@ mod tests {
         for _ in 0..3 {
             link.deliver(&[0; 60]);
         }
-        link.deliver(&[0; FRAME_MAX + 1]);
+        link.deliver(&[0; port::FRAME_MAX + 1]);
         let mut device = link.device();
         let now = smoltcp::time::Instant::ZERO;
         let (rx, tx) = device.receive(now).expect("a queued frame");
@@ -303,6 +325,6 @@ mod tests {
         link.transmitted(true);
         check!(link.next_tx().is_none());
         check!(kicks.get() == 1, "only a queued frame wakes the device side");
-        check!(link.stats() == Stats { rx_frames: 2, rx_dropped: 2, tx_frames: 1, tx_dropped: 1, tx_errors: 0 });
+        check!(link.stats() == PortStats { rx_frames: 2, rx_dropped: 2, tx_frames: 1, tx_dropped: 1, tx_errors: 0 });
     }
 }

@@ -11,10 +11,10 @@ use core::fmt::Write as _;
 use core::time::Duration;
 
 use ferrite_hal::Instant;
-use ferrite_netif::dhcp::DhcpClient;
-use ferrite_netif::http::HttpResponder;
-use ferrite_netif::ping::Pinger;
-use ferrite_netif::{Link, smol_instant};
+use ferrite_net::dhcp::DhcpClient;
+use ferrite_net::http::HttpResponder;
+use ferrite_net::ping::Pinger;
+use ferrite_net::{QueuePort, smol_instant};
 use smoltcp::iface::{Interface, SocketSet};
 
 /// How long the DHCP client gets to a lease.
@@ -27,7 +27,7 @@ const HTTP_PORT: u16 = 80;
 const IDLE_POLL: Duration = Duration::from_millis(5);
 
 struct Session {
-    link: Rc<Link>,
+    link: Rc<QueuePort>,
     name: String,
     iface: Interface,
     sockets: SocketSet<'static>,
@@ -41,7 +41,7 @@ struct Session {
 }
 
 impl Session {
-    fn new(link: Rc<Link>, name: String, now: Instant, seed: u64, hold: Duration) -> Self {
+    fn new(link: Rc<QueuePort>, name: String, now: Instant, seed: u64, hold: Duration) -> Self {
         let iface = link.interface(smol_instant(now), seed);
         let mut sockets = SocketSet::new(Vec::new());
         let dhcp = DhcpClient::new(&mut sockets);

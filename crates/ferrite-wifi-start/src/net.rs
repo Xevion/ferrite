@@ -1,7 +1,7 @@
 //! The frame seam between a Linux `net_device` and the program's smoltcp, and the hand-off of an open
 //! link from the init task to the program's main loop.
 //!
-//! `glue/netif.c` registers an `rx_handler` that copies each received frame into the [`Link`]'s queue
+//! `glue/netif.c` registers an `rx_handler` that copies each received frame into the [`QueuePort`]'s queue
 //! and consumes the skb, and runs a transmit kthread that sends the link's queued frames with
 //! `dev_queue_xmit`, woken when smoltcp queues one. Linux code runs only on tasks: the main loop only
 //! touches the queues and marks the thread runnable.
@@ -18,7 +18,8 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use ferrite_netif::{FRAME_MAX, Link};
+use ferrite_net::QueuePort;
+use ferrite_net::port::FRAME_MAX;
 use ferrite_nl80211::nl80211::IfIndex;
 
 /// Frames queued in each direction before more are dropped.
@@ -40,8 +41,8 @@ unsafe extern "C" {
 }
 
 unsafe extern "C" fn rx(ctx: *const c_void, frame: *const u8, len: c_uint) {
-    // SAFETY: `ctx` is the `Link` of a live attachment, which detaches before the link goes.
-    let link = unsafe { &*ctx.cast::<Link>() };
+    // SAFETY: `ctx` is the `QueuePort` of a live attachment, which detaches before the link goes.
+    let link = unsafe { &*ctx.cast::<QueuePort>() };
     if frame.is_null() {
         link.count_rx_drop();
     } else {
@@ -52,7 +53,7 @@ unsafe extern "C" fn rx(ctx: *const c_void, frame: *const u8, len: c_uint) {
 
 unsafe extern "C" fn pull(ctx: *const c_void, buf: *mut u8, cap: c_uint) -> c_int {
     // SAFETY: as in `rx`.
-    let link = unsafe { &*ctx.cast::<Link>() };
+    let link = unsafe { &*ctx.cast::<QueuePort>() };
     let Some(frame) = link.next_tx() else { return 0 };
     if frame.len() > cap as usize {
         link.count_tx_drop();
@@ -65,13 +66,13 @@ unsafe extern "C" fn pull(ctx: *const c_void, buf: *mut u8, cap: c_uint) -> c_in
 
 unsafe extern "C" fn sent(ctx: *const c_void, code: c_int) {
     // SAFETY: as in `rx`.
-    let link = unsafe { &*ctx.cast::<Link>() };
+    let link = unsafe { &*ctx.cast::<QueuePort>() };
     link.transmitted(code == 0);
 }
 
-/// A `net_device`'s frames routed to a [`Link`] until [`Attachment::detach`].
+/// A `net_device`'s frames routed to a [`QueuePort`] until [`Attachment::detach`].
 pub struct Attachment {
-    link: Rc<Link>,
+    link: Rc<QueuePort>,
     netif: NonNull<c_void>,
     ifindex: IfIndex,
 }
@@ -85,7 +86,7 @@ pub fn attach(ifindex: IfIndex) -> Result<Attachment, c_int> {
     if code != 0 {
         return Err(code);
     }
-    let link = Rc::new(Link::new(mac, mtu as usize, RX_QUEUE, TX_QUEUE));
+    let link = Rc::new(QueuePort::new(mac, mtu as usize, RX_QUEUE, TX_QUEUE));
     let mut netif = core::ptr::null_mut();
     // SAFETY: called on a task; the link outlives the attachment, which `detach` ends.
     let code = unsafe { lx_netif_attach(raw, Rc::as_ptr(&link).cast(), rx, pull, sent, &raw mut netif) };
@@ -101,7 +102,7 @@ pub fn attach(ifindex: IfIndex) -> Result<Attachment, c_int> {
 }
 
 impl Attachment {
-    pub fn link(&self) -> Rc<Link> {
+    pub fn link(&self) -> Rc<QueuePort> {
         Rc::clone(&self.link)
     }
 
@@ -116,9 +117,9 @@ impl Attachment {
 
 /// An open link for the main loop: the station's, and in the lab the AP's too.
 pub struct Session {
-    pub station: Rc<Link>,
+    pub station: Rc<QueuePort>,
     pub station_name: String,
-    pub ap: Option<Rc<Link>>,
+    pub ap: Option<Rc<QueuePort>>,
 }
 
 const IDLE: u8 = 0;

@@ -8,10 +8,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use ferrite_hal::Instant;
-use ferrite_netif::dhcp::DhcpClient;
-use ferrite_netif::http::HttpResponder;
-use ferrite_netif::ping::Pinger;
-use ferrite_netif::{Link, smol_instant};
+use ferrite_net::dhcp::DhcpClient;
+use ferrite_net::http::HttpResponder;
+use ferrite_net::ping::Pinger;
+use ferrite_net::{QueuePort, smol_instant};
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::wire::{DhcpMessageType, DhcpPacket, DhcpRepr, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr};
@@ -37,13 +37,13 @@ const IDLE_POLL: Duration = Duration::from_millis(5);
 const PAGE: &str = "ferrite lab AP\n";
 
 struct Side {
-    link: Rc<Link>,
+    link: Rc<QueuePort>,
     iface: Interface,
     sockets: SocketSet<'static>,
 }
 
 impl Side {
-    fn new(link: Rc<Link>, addr: Option<Ipv4Address>, now: Instant, seed: u64) -> Self {
+    fn new(link: Rc<QueuePort>, addr: Option<Ipv4Address>, now: Instant, seed: u64) -> Self {
         let mut iface = link.interface(smol_instant(now), seed);
         if let Some(addr) = addr {
             iface.update_ip_addrs(|addrs| {
@@ -86,7 +86,7 @@ pub struct LabNet {
 }
 
 impl LabNet {
-    fn new(station: Rc<Link>, ap: Rc<Link>, now: Instant, seed: u64) -> Self {
+    fn new(station: Rc<QueuePort>, ap: Rc<QueuePort>, now: Instant, seed: u64) -> Self {
         let mut station = Side::new(station, None, now, seed);
         let mut ap = Side::new(ap, Some(AP_ADDR), now, seed.rotate_left(17));
         log::info!(
