@@ -181,12 +181,6 @@ impl<'a> App<'a> {
         let clock = Clock::start();
         let screen = Screen::open(output, &clock)?;
         let net = Net::setup(clock);
-        let status = net.status();
-        if status.is_empty() {
-            log::warn!("net: no network: {}", net.reason());
-        } else {
-            log::debug!("net: {} ports up", status.ports().len());
-        }
         let waiter = Waiter::new(input).inspect_err(|e| log::warn!("ui: no wait events, stalling instead: {e}")).ok();
         let loader = LoaderLink::locate();
         let watchdog = loader.map(|_| Keepalive::new(WATCHDOG, WATCHDOG_REARM, clock.now()));

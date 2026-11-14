@@ -349,7 +349,7 @@ unsafe fn set(undo: &mut Undo, slot: *mut u64, value: u64) {
 /// either end with tables from `spares`.
 ///
 /// # Safety
-/// The tables are live or fake, writes to them are allowed, and nothing reads them concurrently.
+/// As for [`remap`].
 unsafe fn retype(
     tables: &mut impl Tables,
     start: u64,
@@ -357,6 +357,23 @@ unsafe fn retype(
     index: u8,
     spares: &[u64],
     undo: &mut Undo,
+) -> Result<(), PagingError> {
+    // SAFETY: the caller's.
+    unsafe { remap(tables, start, end, spares, undo, |level, entry| level.with_pat_index(entry, index)) }
+}
+
+/// Rewrite every leaf covering `[start, end)` with `leaf(level, entry)`, splitting large pages that
+/// straddle either end with tables from `spares`.
+///
+/// # Safety
+/// The tables are live or fake, writes to them are allowed, and nothing reads them concurrently.
+unsafe fn remap(
+    tables: &mut impl Tables,
+    start: u64,
+    end: u64,
+    spares: &[u64],
+    undo: &mut Undo,
+    leaf: impl Fn(Level, u64) -> u64,
 ) -> Result<(), PagingError> {
     let mut addr = start;
     while addr < end {
@@ -375,7 +392,7 @@ unsafe fn retype(
             let base = addr & !(level.size() - 1);
             if base >= start && base + level.size() <= end {
                 // SAFETY: the caller's.
-                unsafe { set(undo, slot, level.with_pat_index(entry, index)) };
+                unsafe { set(undo, slot, leaf(level, entry)) };
                 addr = base + level.size();
                 break;
             }
@@ -483,6 +500,74 @@ impl Drop for WriteCombining {
                 log::warn!("paging: freeing a page-table page failed: {e}");
             }
         }
+    }
+}
+
+/// One 4 KiB page made not-present in the firmware's identity map, so any access to it faults; present
+/// again on drop. Used as a guard below a stack.
+///
+/// A large page around it is split for good: the tables stay, since other guards may sit in them. Only
+/// this CPU's TLB is flushed, so only this CPU may run on the stack above it.
+#[must_use = "dropping it makes the page present again"]
+pub struct GuardPage {
+    slot: NonNull<u64>,
+    entry: u64,
+}
+
+impl fmt::Debug for GuardPage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GuardPage")
+            .field("slot", &self.slot)
+            .field("entry", &format_args!("{:#x}", self.entry))
+            .finish()
+    }
+}
+
+/// Splits one page can need: a 1 GiB page into 2 MiB ones, then one of those into 4 KiB ones.
+const GUARD_SPLITS: usize = 2;
+
+impl GuardPage {
+    /// Make the page at `page` (4 KiB aligned) not-present.
+    ///
+    /// # Safety
+    /// The page is this program's and nothing accesses it while the guard lives.
+    pub unsafe fn new(page: PhysAddr) -> Result<Self, PagingError> {
+        ensure!(read_cr4() & CR4_LA57 == 0, FiveLevelSnafu);
+        let spares: Vec<NonNull<u8>> = (0..GUARD_SPLITS)
+            .map(|_| boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, 1))
+            .collect::<Result<_, _>>()
+            .map_err(|source| PagingError::Allocate { source })?;
+        let spare_addrs: Vec<u64> = spares.iter().map(|p| p.as_ptr() as u64).collect();
+        let start = page.get() & !(PAGE - 1);
+        let mut undo = Undo::default();
+        let result = with_tables_writable(|| {
+            // SAFETY: interrupts are off and WP is clear; the spares are ours and unused; the page is
+            // the caller's to fault.
+            let result = unsafe { remap(&mut Live, start, start + PAGE, &spare_addrs, &mut undo, |_, e| e & !PRESENT) };
+            flush_tlb();
+            result
+        });
+        // Tables a split took now hold live entries; the spares a split did not take go back.
+        for page in spares.into_iter().skip(undo.used) {
+            // SAFETY: allocated as one page above, and no entry points at it.
+            if let Err(e) = unsafe { boot::free_pages(page, 1) } {
+                log::warn!("paging: freeing a spare page-table page failed: {e}");
+            }
+        }
+        result?;
+        let &(slot, entry) = undo.entries.last().ok_or(PagingError::NotMapped { addr: start })?;
+        let slot = NonNull::new(slot).ok_or(PagingError::NotMapped { addr: start })?;
+        Ok(Self { slot, entry })
+    }
+}
+
+impl Drop for GuardPage {
+    fn drop(&mut self) {
+        with_tables_writable(|| {
+            // SAFETY: the leaf entry this guard cleared; splits are never undone, so it is still live.
+            unsafe { self.slot.as_ptr().write(self.entry) };
+            flush_tlb();
+        });
     }
 }
 

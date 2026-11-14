@@ -287,6 +287,11 @@ impl Service {
             leave(connection, &mut client, self.config.connect_limit, clock);
             return next;
         }
+        // Power save holds frames to the station until the access point's next beacon, up to ~100 ms.
+        match client.set_power_save(interface.ifindex, false) {
+            Ok(()) => log::info!("station: power save off"),
+            Err(error) => log::warn!("station: power save stays on: {error}"),
+        }
         enter(c"attaching the netdev to the IP stack");
         let attachment = match crate::net::attach(interface.ifindex) {
             Ok(attachment) => attachment,

@@ -1,4 +1,5 @@
-//! Task stacks from firmware pages, each with a guard page below it when the firmware can make one.
+//! Task stacks from firmware pages, each with a not-present guard page below it: through the firmware's
+//! page attribute protocol, or, where the firmware refuses, by editing the page tables directly.
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -8,6 +9,8 @@ use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
 use corosensei::stack::{Stack, StackPointer};
+use ferrite_efi::paging::GuardPage;
+use ferrite_hal::PhysAddr;
 use ferrite_lkpi::sched::{CANARY_WORDS, PAINT, StackAllocError, StackSource};
 use uefi::boot::{self, AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
 use uefi::mem::memory_map::MemoryAttribute;
@@ -137,11 +140,19 @@ impl StackStats {
     }
 }
 
+/// How a stack's lowest page was made to fault.
+enum Guard {
+    /// Through the firmware's protocol, which has to be asked to undo it.
+    Firmware,
+    /// In the page tables directly; present again when this drops.
+    Tables(GuardPage),
+}
+
 /// A run of firmware pages: a guard page, then the stack.
 pub struct PageStack {
     low: NonNull<u8>,
     size: usize,
-    guarded: bool,
+    guard: Option<Guard>,
 }
 
 impl PageStack {
@@ -164,13 +175,14 @@ unsafe impl Stack for PageStack {
 
 /// Stacks of `size` bytes from `AllocatePages`, each with a guard page below.
 ///
-/// The guard page is made not-present when the firmware has a protocol for it, so an overrun faults at
-/// once; otherwise it is spare and the scheduler's canary words catch the overrun when the task next
-/// switches out.
+/// The guard page is made not-present, so an overrun faults at once: through the firmware's protocol
+/// when it has one that works, else in the page tables. Should both fail it is spare, and the
+/// scheduler's canary words catch the overrun when the task next switches out.
 pub struct PageStacks {
+    /// `None` once the firmware has no protocol or refused one guard.
     backend: Option<Backend>,
-    /// Cleared when the firmware refuses a guard, so later stacks go without.
-    guarding: bool,
+    /// Cleared when editing the page tables failed, so later stacks go without.
+    tables: bool,
     registry: Rc<RefCell<Registry>>,
     size: usize,
 }
@@ -180,23 +192,35 @@ impl PageStacks {
         let backend = Backend::probe();
         match &backend {
             Some(backend) => log::info!("task stack guard pages: {}", backend.name()),
-            None => log::warn!("task stack guard pages: the firmware has no protocol for them; the canary guards"),
+            None => log::info!("task stack guard pages: the page tables, since the firmware has no protocol"),
         }
-        Self { guarding: backend.is_some(), backend, registry: Rc::default(), size }
+        Self { backend, tables: true, registry: Rc::default(), size }
     }
 
     pub fn stats(&self) -> StackStats {
         StackStats { registry: self.registry.clone(), size: self.size }
     }
 
-    fn guard(&mut self, page: usize) -> bool {
-        let Some(backend) = self.backend.as_ref().filter(|_| self.guarding) else { return false };
-        match backend.set_not_present(page, true) {
-            Ok(()) => true,
+    fn guard(&mut self, page: usize) -> Option<Guard> {
+        if let Some(backend) = &self.backend {
+            match backend.set_not_present(page, true) {
+                Ok(()) => return Some(Guard::Firmware),
+                Err(error) => {
+                    log::info!("task stack guard pages: {} refused one ({error}); the page tables", backend.name());
+                    self.backend = None;
+                },
+            }
+        }
+        if !self.tables {
+            return None;
+        }
+        // SAFETY: the allocation's lowest page, below the stack, which nothing uses.
+        match unsafe { GuardPage::new(PhysAddr::new(page as u64)) } {
+            Ok(guard) => Some(Guard::Tables(guard)),
             Err(error) => {
                 log::warn!("making a stack guard page not-present failed: {error}; later stacks go without");
-                self.guarding = false;
-                false
+                self.tables = false;
+                None
             },
         }
     }
@@ -213,12 +237,12 @@ impl StackSource for PageStacks {
                 StackAllocError { size }
             },
         )?;
-        let guarded = self.guard(low.as_ptr().addr());
-        let stack = PageStack { low, size, guarded };
+        let guard = self.guard(low.as_ptr().addr());
+        let stack = PageStack { low, size, guard };
         let mut registry = self.registry.borrow_mut();
         registry.live.push((stack.limit_addr(), stack.limit_addr() + size));
         registry.allocated += 1;
-        registry.guarded += usize::from(guarded);
+        registry.guarded += usize::from(stack.guard.is_some());
         drop(registry);
         Ok(stack)
     }
@@ -230,13 +254,17 @@ impl StackSource for PageStacks {
         registry.live.retain(|&(l, _)| l != limit);
         registry.deepest = registry.deepest.max(reached);
         drop(registry);
-        if stack.guarded {
-            let page = stack.low.as_ptr().addr();
-            let restored = self.backend.as_ref().map_or(Ok(()), |backend| backend.set_not_present(page, false));
-            if let Err(error) = restored {
-                log::error!("restoring the stack guard page at {page:#x} failed: {error}; its pages are kept");
-                return;
-            }
+        match stack.guard {
+            Some(Guard::Firmware) => {
+                let page = stack.low.as_ptr().addr();
+                let restored = self.backend.as_ref().map_or(Ok(()), |backend| backend.set_not_present(page, false));
+                if let Err(error) = restored {
+                    log::error!("restoring the stack guard page at {page:#x} failed: {error}; its pages are kept");
+                    return;
+                }
+            },
+            Some(Guard::Tables(guard)) => drop(guard),
+            None => {},
         }
         // SAFETY: the pages are the allocation `allocate` made, and the scheduler no longer runs on them.
         if let Err(error) = unsafe { boot::free_pages(stack.low, stack.size / PAGE + 1) } {

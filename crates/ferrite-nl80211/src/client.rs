@@ -253,6 +253,15 @@ impl<S: Socket> Client<S> {
         .map(drop)
     }
 
+    /// Turn 802.11 power save on or off (`NL80211_CMD_SET_POWER_SAVE`). Off keeps the radio awake, so
+    /// frames to the station arrive at once instead of at the access point's next beacon.
+    pub fn set_power_save(&mut self, ifindex: IfIndex, enabled: bool) -> Result<(), ClientError> {
+        self.run(Command::SetPowerSave, false, "SET_POWER_SAVE", |b| {
+            b.u32(attr::IFINDEX, ifindex.raw()).u32(attr::PS_STATE, u32::from(enabled))
+        })
+        .map(drop)
+    }
+
     /// Send an EAPOL frame (802.1X header on) to `dest` over the control port.
     pub fn send_eapol(&mut self, ifindex: IfIndex, dest: MacAddr, frame: &[u8]) -> Result<(), ClientError> {
         self.run(Command::ControlPortFrame, false, "CONTROL_PORT_FRAME", |b| {

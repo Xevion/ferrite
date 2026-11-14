@@ -100,6 +100,22 @@ fn undoing_in_reverse_restores_every_entry() {
 }
 
 #[test]
+fn a_guard_clears_one_page_and_leaves_its_neighbours_mapped() {
+    let mut fake = identity();
+    let addr = 4 * GIB + 0x45_6000;
+    let mut undo = Undo::default();
+    // SAFETY: fake tables.
+    unsafe { remap(&mut fake, addr, addr + PAGE, &SPARES, &mut undo, |_, e| e & !PRESENT).unwrap() };
+    check!(leaf_in(&mut fake, addr).is_none());
+    check!(leaf_in(&mut fake, addr - PAGE).map(|l| l.size) == Some(PAGE));
+    check!(leaf_in(&mut fake, addr + PAGE).map(|l| l.size) == Some(PAGE));
+    let &(slot, old) = undo.entries.last().unwrap();
+    // SAFETY: an entry of the fake tables.
+    unsafe { *slot = old };
+    check!(leaf_in(&mut fake, addr).map(|l| l.size) == Some(PAGE), "restoring the last entry maps it again");
+}
+
+#[test]
 fn an_unmapped_address_fails() {
     let mut fake = identity();
     let mut undo = Undo::default();

@@ -38,6 +38,7 @@ pub enum Command {
     RegisterFrame,
     Frame,
     FrameTxStatus,
+    SetPowerSave,
     PortAuthorized,
     ControlPortFrame,
     ControlPortFrameTxStatus,
@@ -69,6 +70,7 @@ impl Command {
             58 => Self::RegisterFrame,
             59 => Self::Frame,
             60 => Self::FrameTxStatus,
+            61 => Self::SetPowerSave,
             125 => Self::PortAuthorized,
             129 => Self::ControlPortFrame,
             139 => Self::ControlPortFrameTxStatus,
@@ -100,6 +102,7 @@ impl Command {
             Self::RegisterFrame => 58,
             Self::Frame => 59,
             Self::FrameTxStatus => 60,
+            Self::SetPowerSave => 61,
             Self::PortAuthorized => 125,
             Self::ControlPortFrame => 129,
             Self::ControlPortFrameTxStatus => 139,
@@ -150,6 +153,7 @@ pub mod attr {
     pub const COOKIE: u16 = 88;
     pub const FRAME_MATCH: u16 = 91;
     pub const ACK: u16 = 92;
+    pub const PS_STATE: u16 = 93;
     pub const FRAME_TYPE: u16 = 101;
     pub const CONTROL_PORT_ETHERTYPE: u16 = 102;
     pub const CONTROL_PORT_NO_ENCRYPT: u16 = 103;

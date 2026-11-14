@@ -116,6 +116,14 @@ impl Net {
             wifi_port: None,
         };
         net.open_wired(now);
+        let ports = net.network.status().ports().len();
+        if ports > 0 {
+            log::debug!("net: {ports} wired ports up");
+        } else if net.wifi.pending() {
+            log::info!("net: no wired NIC ({}); waiting for Wi-Fi", net.reason().wired);
+        } else {
+            log::warn!("net: no network: {}", net.reason());
+        }
         net
     }
 
@@ -148,12 +156,10 @@ impl Net {
         while let Some(event) = self.wifi.next_port_event() {
             if let Some(id) = self.wifi_port.take() {
                 self.network.remove(id);
-                log::info!("wifi: link down; its stack is dropped");
             }
             if let PortEvent::Up(port) = event {
                 let config = StackConfig::appliance(entropy::random_u64());
                 self.wifi_port = Some(self.network.add(Box::new(port), config, now));
-                log::info!("wifi: link up; starting DHCP over it");
             }
         }
     }

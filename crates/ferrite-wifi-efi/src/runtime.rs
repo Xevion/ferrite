@@ -409,11 +409,11 @@ impl Runtime {
         TICKS.load(Ordering::Relaxed)
     }
 
-    /// End the run: take the cards off the bus, log the stack and interrupt counters, remove the tasks,
-    /// close the timer and give the arena back. The task that ran the exitcalls must be done already.
+    /// End the run: log the stack and interrupt counters, then (on drop) take the cards off the bus,
+    /// remove the tasks, close the timer and give the arena back. The task that ran the exitcalls must be
+    /// done already.
     pub fn shutdown(self) {
         PROGRESS.store(0, Ordering::Relaxed);
-        ferrite_lkpi::pci::park_all();
         let stacks = self.stacks.report();
         log::info!(
             "task stacks: {} allocated, {} with a guard page, deepest use {} of {} bytes",

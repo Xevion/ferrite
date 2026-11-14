@@ -52,6 +52,11 @@ impl Wifi {
         self.station.as_ref()?.next_port_event()
     }
 
+    /// Whether the station may still bring a link up: it started and has not ended.
+    pub fn pending(&self) -> bool {
+        self.station.as_ref().is_some_and(|station| !station.state().is_final())
+    }
+
     pub fn label(&self) -> &'static str {
         self.station.as_ref().map_or("the Wi-Fi runtime did not start", WifiStation::label)
     }
@@ -79,6 +84,11 @@ impl Wifi {
     #[expect(clippy::unused_self, reason = "the UEFI build's signature")]
     pub fn next_port_event(&self) -> Option<PortEvent> {
         None
+    }
+
+    #[expect(clippy::unused_self, reason = "the UEFI build's signature")]
+    pub fn pending(&self) -> bool {
+        false
     }
 
     #[expect(clippy::unused_self, reason = "the UEFI build's signature")]
