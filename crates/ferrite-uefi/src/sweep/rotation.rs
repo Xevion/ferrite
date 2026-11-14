@@ -26,6 +26,9 @@ use uefi::mem::memory_map::MemoryType;
 use super::{Coverage, Run, Sweep, note};
 use crate::report::History;
 
+/// Bytes of the lent block the firmware may keep before the log warns.
+const KEPT_WARN: u64 = 1 << 20;
+
 /// What opening a window got.
 pub struct Opened {
     /// The reserve's free pages, to be tested.
@@ -182,11 +185,11 @@ impl Sweep {
 
     fn open_window(&mut self, now: Instant) {
         let Self { run, rotation, history, tally, current, waiting, .. } = self;
-        let Some(Run { suite, _buffer: mut main }) = run.take() else { return };
+        let Some(Run { suite, _buffer: mut main, scope }) = run.take() else { return };
         let (kernels, config, preset, passes) = (suite.kernels(), suite.config(), suite.preset(), suite.passes());
         // The pass's last test is recorded in the sweep's history before the reserve's tests start.
         history.start(now, tally.faults);
-        note(current, history, tally.faults, suite.schedule(), now);
+        note(current, history, tally.faults, scope, suite.schedule(), now);
         drop(suite);
         *current = None;
         *waiting = None;
@@ -198,7 +201,7 @@ impl Sweep {
         let lent_bytes: u64 = lent.iter().map(|r| r.bytes()).sum();
         let pass = passes - 1;
         let reserve_bytes = reserve.bytes() as u64;
-        if let Some(reserve_run) = Run::new(reserve, kernels, config, preset, pass) {
+        if let Some(reserve_run) = Run::new(reserve, kernels, config, preset, pass).map(Run::into_reserve) {
             log::info!(
                 "sweep: reserve rotation after pass {pass}: {} MiB of the reserve under test, {} MiB lent to the firmware, which has {} MiB free",
                 reserve_bytes >> 20,
@@ -234,7 +237,7 @@ impl Sweep {
         };
         let finished = run.as_ref().is_some_and(|r| r.suite.passes() > pass);
         let reserve = match run.take() {
-            Some(Run { suite, _buffer: reserve }) => {
+            Some(Run { suite, _buffer: reserve, .. }) => {
                 drop(suite);
                 reserve
             },
@@ -249,14 +252,16 @@ impl Sweep {
         let lowest = free.lowest.min(closed.free);
         let coverage = rotation.coverage();
         let state = if finished { "ended" } else { "cut short" };
-        let log_level = if closed.kept > 0 { log::Level::Warn } else { log::Level::Info };
+        // A few pages kept are the firmware's ordinary allocations during the window; a MiB or more
+        // means it came to depend on the lent block, and that much stays untested until it frees it.
+        let log_level = if closed.kept >= KEPT_WARN { log::Level::Warn } else { log::Level::Info };
         log::log!(
             log_level,
-            "sweep: reserve rotation {state}: the firmware had {} MiB free at the start, {} MiB at the end, lowest {} MiB; {} MiB of the lent block stayed with it; tested {coverage}",
+            "sweep: reserve rotation {state}: the firmware had {} MiB free at the start, {} MiB at the end, lowest {} MiB; {} KiB of the lent block stayed with it; tested {coverage}",
             free.start >> 20,
             closed.free >> 20,
             lowest >> 20,
-            closed.kept >> 20
+            closed.kept >> 10
         );
         *run = Run::new(main, kernels, config, preset, pass + 1);
         *current = None;

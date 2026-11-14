@@ -170,9 +170,37 @@ fn reserve_for(free: u64) -> u64 {
 struct Run {
     suite: Suite<'static>,
     _buffer: Claim,
+    scope: Scope,
+}
+
+/// Which memory a run covers, for the log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    /// The sweep's own memory.
+    Main,
+    /// The firmware's reserve, tested after the pass of that number.
+    Reserve,
+}
+
+/// How the log names a test's pass: `pass 3`, or `reserve after pass 3`.
+struct PassLabel(Scope, u64);
+
+impl fmt::Display for PassLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Scope::Main => write!(f, "pass {}", self.1),
+            Scope::Reserve => write!(f, "reserve after pass {}", self.1),
+        }
+    }
 }
 
 impl Run {
+    /// The same run, marked as covering the firmware's reserve.
+    const fn into_reserve(mut self) -> Self {
+        self.scope = Scope::Reserve;
+        self
+    }
+
     /// The suite over `buffer`, starting at pass `pass`; `None`, freeing the buffer, when it cannot
     /// be regions.
     fn new(buffer: Claim, kernels: Kernels, config: Config, preset: Preset, pass: u64) -> Option<Self> {
@@ -190,7 +218,11 @@ impl Run {
                     regions.bytes(),
                     regions.layout().spans().len()
                 );
-                Some(Self { suite: Suite::starting_at(regions, kernels, config, preset, pass), _buffer: buffer })
+                Some(Self {
+                    suite: Suite::starting_at(regions, kernels, config, preset, pass),
+                    _buffer: buffer,
+                    scope: Scope::Main,
+                })
             },
             Err(e) => {
                 log::error!("sweep: unusable buffer: {e}");
@@ -311,7 +343,7 @@ impl Sweep {
         log::info!("sweep: restarting with {preset:?} after {}", self.status());
         self.close_window(None);
         self.rotation.restart();
-        if let Some(Run { suite, _buffer: buffer }) = self.run.take() {
+        if let Some(Run { suite, _buffer: buffer, .. }) = self.run.take() {
             let kernels = suite.kernels();
             self.run = Run::new(buffer, kernels, preset.config(), preset, 0);
         }
@@ -361,7 +393,7 @@ impl Sweep {
         let Some(run) = self.run.as_mut() else { return };
         let history = history_of(&mut self.rotation, &mut self.history);
         history.start(now, self.tally.faults);
-        note(&mut self.current, history, self.tally.faults, run.suite.schedule(), now);
+        note(&mut self.current, history, self.tally.faults, run.scope, run.suite.schedule(), now);
         let cpu = self.cores.as_ref().map_or(0, Cores::bsp);
         let guard = vector.filter(|_| run.suite.kernels().is_wide());
         let piece = if guard.is_some() { WIDE_CHUNK_BYTES } else { chunk_bytes };
@@ -404,7 +436,7 @@ impl Sweep {
         let history = history_of(rotation, history);
         let started = cores.clock().now();
         history.start(started, tally.faults);
-        note(current, history, tally.faults, run.suite.schedule(), started);
+        note(current, history, tally.faults, run.scope, run.suite.schedule(), started);
         *current = None;
         loop {
             match dispatch(run, tally, cores, history, vector, duties) {
@@ -489,7 +521,14 @@ fn history_of<'a>(rotation: &'a mut Rotation, own: &'a mut History) -> &'a mut H
 
 /// Log and record the test in `current` once the schedule's test is a different one, and start
 /// timing that.
-fn note(current: &mut Option<Current>, history: &mut History, faults: u64, schedule: &Schedule, now: Instant) {
+fn note(
+    current: &mut Option<Current>,
+    history: &mut History,
+    faults: u64,
+    scope: Scope,
+    schedule: &Schedule,
+    now: Instant,
+) {
     let (test, pass) = (schedule.test().kind().name(), schedule.passes());
     let start = Current {
         test,
@@ -502,7 +541,12 @@ fn note(current: &mut Option<Current>, history: &mut History, faults: u64, sched
         Some(c) if c.test != test || c.pass != pass => {
             let took = now - c.started;
             let bytes = schedule.layout().bytes();
-            log::info!("sweep: pass {} {} took {} ms over {bytes} bytes on 1 cpu", c.pass, c.test, took.as_millis());
+            log::info!(
+                "sweep: {} {} took {} ms over {bytes} bytes on 1 cpu",
+                PassLabel(scope, c.pass),
+                c.test,
+                took.as_millis()
+            );
             let record = TestRecord {
                 pass: c.pass,
                 test: c.test,
@@ -602,6 +646,7 @@ fn dispatch(
     duties: &mut Duties<'_>,
 ) -> Dispatch {
     let Some(parts) = NonZeroUsize::new(cores.cpus().len()) else { return Dispatch::Lost(Vec::new()) };
+    let covers = run.scope;
     let (regions, schedule) = run.suite.split();
     let (first, pass, config, kernels) =
         (schedule.test().kind(), schedule.passes(), schedule.config(), schedule.kernels());
@@ -725,8 +770,8 @@ fn dispatch(
                 let took = ended - round.started;
                 let n = cpus.len();
                 log::info!(
-                    "sweep: pass {} {} took {} ms over {} bytes on {n} cpus",
-                    round.pass,
+                    "sweep: {} {} took {} ms over {} bytes on {n} cpus",
+                    PassLabel(covers, round.pass),
                     round.name,
                     took.as_millis(),
                     layout.bytes()
