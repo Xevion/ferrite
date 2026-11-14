@@ -262,6 +262,10 @@ impl Drop for SnpPort {
             log::warn!("net: SNP stop failed: {e}");
         }
         log::debug!("net: SNP state {:?} -> {:?} on close", state, self.snp.mode().state);
+        // A NIC left running may still read a held buffer, so the pool outlives the port.
+        if self.tx.in_flight() > 0 && self.snp.mode().state == NetworkState::INITIALIZED {
+            core::mem::forget(core::mem::take(&mut self.tx.bufs));
+        }
     }
 }
 

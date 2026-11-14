@@ -321,8 +321,12 @@ fn claim_free_memory() -> Option<Buffer> {
     let mut blocks: Vec<Block> = Vec::new();
     let mut plan: Option<(u64, u64)> = None;
     for _ in 0..CLAIM_ROUNDS {
-        let map =
-            boot::memory_map(MemoryType::LOADER_DATA).inspect_err(|e| log::warn!("sweep: no memory map: {e}")).ok()?;
+        // A later round that cannot read the map keeps what the earlier ones took.
+        let Ok(map) =
+            boot::memory_map(MemoryType::LOADER_DATA).inspect_err(|e| log::warn!("sweep: no memory map: {e}"))
+        else {
+            break;
+        };
         let free = FreeMemory::of(&map);
         drop(map);
         let (_, reserve) = *plan.get_or_insert_with(|| {
