@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.3.0](https://github.com/Xevion/ferrite/compare/v0.2.0...v0.3.0) (2026-11-15)
+
+
+### Features
+
+* **ops:** Cap per-pattern failure collection via FailureBudget and --max-errors ([7e7386f](https://github.com/Xevion/ferrite/commit/7e7386f4d50f30ee6de54e54ebda34aa0cd1e8a8))
+* **pattern:** Add moving inversions with bidirectional sweep across two seeds ([7f7127d](https://github.com/Xevion/ferrite/commit/7f7127da3794d5a04a63ad5de07147b624f4fb89))
+* **pattern:** Add RandomFill pattern with xoshiro256** PRNG and --seed/--random-passes flags ([a218488](https://github.com/Xevion/ferrite/commit/a218488ceaec3ed9bc9b72aea26617b92dcf580a))
+* **pattern:** Introduce static metadata describing fault coverage and cost per pattern ([ffd0394](https://github.com/Xevion/ferrite/commit/ffd03941b61eafdb8909de07e664dea5765e3339))
+* **tracing:** Add -v flag for tiered log verbosity, RUST_LOG takes precedence ([3f86c36](https://github.com/Xevion/ferrite/commit/3f86c363810b9402d4c743d932848b16a11f54b6))
+
+
+### Bug Fixes
+
+* Adopt map_or_default and iterator loops for clippy 1.100 ([a1148dd](https://github.com/Xevion/ferrite/commit/a1148dd9919675941fe6db29082fb1662e63faaa))
+* **physmem:** Read words with as_chunks instead of chunks_exact ([0e40289](https://github.com/Xevion/ferrite/commit/0e40289acb54e80ed084f9fe6be37d754d4ac9e8))
+
+
+### Performance Improvements
+
+* **avx512:** Use scalar verify_indexed over SIMD for indexed fill-and-verify ([77b4422](https://github.com/Xevion/ferrite/commit/77b442252f2ae1ccd749a8393f05cdfd73ca0b42))
+
+
+### Code Refactoring
+
+* **benches:** Introduce Size newtype with binary labels, add bench flags and filter support ([e6e3b49](https://github.com/Xevion/ferrite/commit/e6e3b49933552500fa9cbb259335e4bb30c800d5))
+* **units:** Add format_count, format_duration, format_millis and apply across output ([4938095](https://github.com/Xevion/ferrite/commit/4938095f667776a13c29c34b9d5618f1cf051198))
+
+
+### Documentation
+
+* Add missing_docs deny gate and backfill pub field/variant doc comments ([7ebf0b5](https://github.com/Xevion/ferrite/commit/7ebf0b5f828f924a4434d98032fa3b32881a270b))
+* **lib:** Add crate overview, module doc comments, and rustdoc deny gates ([2866b19](https://github.com/Xevion/ferrite/commit/2866b19b26c6c2326f0d166f2a29a9f6ddfb72f1))
+
+
+### Continuous Integration
+
+* **release:** Bump minor for features before 1.0 ([b89b037](https://github.com/Xevion/ferrite/commit/b89b0370ff6f0d64946884d38818523c5f0d6951))
+* **tempo:** Restrict cancel-in-progress to check workflow only ([f74e2e7](https://github.com/Xevion/ferrite/commit/f74e2e755a8f96764527b9697a993547661bedf2))
+
+
+### Miscellaneous
+
+* **deps:** Bump assert2 to 0.4.1 ([ecaf094](https://github.com/Xevion/ferrite/commit/ecaf094479ff0d4a996314c439585eef365ff3a3))
+* Reformat prose ([f12e938](https://github.com/Xevion/ferrite/commit/f12e938ef51c11e5a8abe7a2259875d1a18553a8))
+
 ## [0.2.0](https://github.com/Xevion/ferrite/compare/v0.1.4...v0.2.0) (2026-07-04)
 
 
