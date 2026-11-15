@@ -419,10 +419,8 @@ impl PhysResolver for PagemapResolver {
         pread_exact(&self.pagemap_fd, &mut buf, file_offset).context(ReadPagemapSnafu)?;
 
         let mut changed = 0usize;
-        for i in 0..page_count {
-            let off = i * 8;
-            let entry = buf[off..off + 8].try_into().map_or(0, u64::from_le_bytes);
-            let new_pfn = parse_pagemap_entry(entry).unwrap_or(0);
+        for (i, chunk) in buf.as_chunks::<8>().0.iter().enumerate() {
+            let new_pfn = parse_pagemap_entry(u64::from_le_bytes(*chunk)).unwrap_or(0);
             if new_pfn != self.pfns[i] {
                 changed += 1;
             }

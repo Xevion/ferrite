@@ -83,7 +83,7 @@ impl CoverageCtx {
 /// requested. clap guarantees `--cull` implies `--coverage-file`.
 #[must_use]
 pub fn cull_ranges(cull: bool, ctx: Option<&CoverageCtx>) -> Option<Vec<PfnRange>> {
-    cull.then(|| ctx.map(|c| c.store.ranges.clone()).unwrap_or_default())
+    cull.then(|| ctx.map_or_default(|c| c.store.ranges.clone()))
 }
 
 /// Merge a completed run into the coverage store, persist it, and attach

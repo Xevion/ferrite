@@ -66,9 +66,9 @@ impl BitErrorStats {
         let xor = failure.xor();
         self.union_xor_mask |= xor;
 
-        for bit in 0..64 {
+        for (bit, count) in self.bit_flip_counts.iter_mut().enumerate() {
             if xor & (1u64 << bit) != 0 {
-                self.bit_flip_counts[bit] += 1;
+                *count += 1;
             }
         }
 

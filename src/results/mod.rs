@@ -63,8 +63,7 @@ impl ResultsDoc {
     pub fn passes(&self) -> impl Iterator<Item = PassDoc<'_>> {
         self.0["passes"]
             .as_array()
-            .map(|a| a.iter().map(PassDoc).collect::<Vec<_>>())
-            .unwrap_or_default()
+            .map_or_default(|a| a.iter().map(PassDoc).collect::<Vec<_>>())
             .into_iter()
     }
 
@@ -117,8 +116,7 @@ impl<'a> PassDoc<'a> {
     pub fn pattern_results(&self) -> impl Iterator<Item = PatternDoc<'a>> {
         self.0["pattern_results"]
             .as_array()
-            .map(|a| a.iter().map(PatternDoc).collect::<Vec<_>>())
-            .unwrap_or_default()
+            .map_or_default(|a| a.iter().map(PatternDoc).collect::<Vec<_>>())
             .into_iter()
     }
 }
@@ -363,7 +361,7 @@ impl ErrorAnalysisDoc<'_> {
     pub fn per_pattern_failures(&self) -> Vec<(String, u64)> {
         self.0["per_pattern_failures"]
             .as_array()
-            .map(|arr| {
+            .map_or_default(|arr| {
                 arr.iter()
                     .filter_map(|entry| {
                         let arr = entry.as_array()?;
@@ -373,25 +371,21 @@ impl ErrorAnalysisDoc<'_> {
                     })
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     /// `(bit_position, flip_count)` pairs.
     #[must_use]
     pub fn bit_positions(&self) -> Vec<(u8, u32)> {
-        self.0["bit_positions"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|entry| {
-                        let arr = entry.as_array()?;
-                        let pos = arr.first()?.as_u64()? as u8;
-                        let count = arr.get(1)?.as_u64()? as u32;
-                        Some((pos, count))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.0["bit_positions"].as_array().map_or_default(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let arr = entry.as_array()?;
+                    let pos = arr.first()?.as_u64()? as u8;
+                    let count = arr.get(1)?.as_u64()? as u32;
+                    Some((pos, count))
+                })
+                .collect()
+        })
     }
 }
 
