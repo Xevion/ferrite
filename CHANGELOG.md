@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/Xevion/ferrite/compare/v0.3.0...v0.3.1) (2026-11-15)
+
+
+### Continuous Integration
+
+* **coverage:** Bump cargo-llvm-cov to 0.9.1 ([77e71f3](https://github.com/Xevion/ferrite/commit/77e71f395a8529baebfe1d0e9b08e3de73524e3f))
+
 ## [0.3.0](https://github.com/Xevion/ferrite/compare/v0.2.0...v0.3.0) (2026-11-15)
 
 
