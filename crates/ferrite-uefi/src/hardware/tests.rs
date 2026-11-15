@@ -4,8 +4,9 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
 use assert2::check;
-use ferrite_efi::sensors::{Frequency, Signature, Temperature, Vendor};
+use ferrite_efi::sensors::{Frequency, Temperature};
 use ferrite_hal::PhysAddr;
+use ferrite_power::cpuid::{Signature, Vendor};
 use rstest::rstest;
 
 use super::*;

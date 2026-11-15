@@ -388,8 +388,9 @@ fn every_size_renders(
 /// A laptop like the X1 Carbon: a Kaby Lake R with 16 GiB of LPDDR3 in two interleaved channels, running at
 /// 3.4 GHz and 58 C.
 fn laptop() -> Hardware {
-    use ferrite_efi::sensors::{Identity, Signature, TempSource, Vendor};
+    use ferrite_efi::sensors::{Identity, TempSource};
     use ferrite_hal::PhysAddr;
+    use ferrite_power::cpuid::{Signature, Vendor};
 
     use crate::smbios::{
         DeviceRange, ErrorCorrection, FormFactor, Handle, MegaTransfers, Memory, MemoryArray, MemoryDevice, MemoryKind,

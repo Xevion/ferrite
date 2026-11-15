@@ -7,11 +7,12 @@ use core::time::Duration;
 
 use assert2::{assert, check};
 use ferrite_config::{ClockFormat, zone_named};
-use ferrite_efi::sensors::{Identity, Signature, TempSource, Vendor};
+use ferrite_efi::sensors::{Identity, TempSource};
 use ferrite_hal::{Instant, PhysAddr, UnixTime, WallClock};
 use ferrite_mem::analysis::Classification;
 use ferrite_mem::suite::{Mode, Preset};
 use ferrite_mem::{CpuAddr, Fault};
+use ferrite_power::cpuid::{Signature, Vendor};
 use rstest::rstest;
 
 use super::*;

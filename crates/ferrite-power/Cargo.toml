@@ -1,0 +1,21 @@
+[package]
+name = "ferrite-power"
+description = "Processor clock, energy and limit registers for Intel and AMD: discovery, typed decoding, clock requests and power telemetry over any MSR access"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+arbitrary-int.workspace = true
+bitbybit.workspace = true
+ferrite-hal.workspace = true
+snafu.workspace = true
+strum.workspace = true
+
+[dev-dependencies]
+assert2.workspace = true
+rstest.workspace = true
+
+[lints]
+workspace = true

@@ -15,6 +15,7 @@ ferrite-config.workspace = true
 ferrite-efi = { workspace = true, features = ["config", "crew", "net"] }
 ferrite-hal.workspace = true
 ferrite-mem.workspace = true
+ferrite-power.workspace = true
 ferrite-net.workspace = true
 ferrite-wifi.workspace = true
 ferrite-wpa.workspace = true

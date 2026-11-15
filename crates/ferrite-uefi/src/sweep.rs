@@ -23,6 +23,7 @@ use ferrite_efi::cores::{CoreChoice, Cores};
 use ferrite_efi::cpu::VectorState;
 use ferrite_efi::memory::ranges::Range;
 use ferrite_efi::memory::{self, Block, Claim};
+use ferrite_efi::mp::Mp;
 use ferrite_efi::mp::{self, ProcessorNumber, STACK_PROBE};
 use ferrite_hal::{Clock as _, Instant, PhysAddr};
 use ferrite_mem::analysis::{Classification, FaultStats};
@@ -523,6 +524,11 @@ impl Sweep {
     }
 
     /// Run split tests on the processors `choice` picks from the next test on.
+    /// The MP services the sweep's cores run through, when it has any.
+    pub fn mp(&self) -> Option<&Mp> {
+        self.cores.as_ref().map(Cores::mp)
+    }
+
     pub fn set_cores(&mut self, choice: CoreChoice) {
         if let Some(cores) = self.cores.as_mut() {
             cores.rechoose(choice);

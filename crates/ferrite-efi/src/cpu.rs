@@ -9,6 +9,8 @@ use core::fmt;
 
 use snafu::Snafu;
 
+use crate::x86::{read_cr4, without_interrupts, write_cr4};
+
 /// XCR0 state-component bits that AVX needs: SSE (1) and AVX (2).
 const XCR0_AVX: u64 = 0b110;
 /// XCR0 bits AVX-512 adds: opmask, ZMM upper halves, ZMM16-31.
@@ -135,7 +137,6 @@ impl fmt::Display for VectorSupport {
 
 /// XCR0 bit for x87 state, which must always be set.
 const XCR0_X87: u64 = 1;
-const RFLAGS_IF: u64 = 1 << 9;
 
 #[derive(Debug, Snafu, PartialEq, Eq)]
 pub enum XsaveError {
@@ -205,19 +206,14 @@ impl VectorState {
     /// EDK2's interrupt entry saves only the FXSAVE state, so wide-register work must not be
     /// interrupted. Keep `f` short (well under 1 ms) so the firmware's timer is not starved.
     pub fn wide<R>(&self, f: impl FnOnce() -> R) -> R {
-        let flags: u64;
-        // SAFETY: CPL 0; reads RFLAGS through the stack and clears IF.
-        unsafe { core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags, options(nomem)) };
-        let result = f();
-        if self.xcr0 & XCR0_AVX == XCR0_AVX {
-            // SAFETY: AVX state is enabled; no compiled code in this crate keeps values in upper halves.
-            unsafe { core::arch::asm!("vzeroupper", options(nomem, nostack, preserves_flags)) };
-        }
-        if flags & RFLAGS_IF != 0 {
-            // SAFETY: interrupts were on before, so turning them back on restores the caller's state.
-            unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
-        }
-        result
+        without_interrupts(|| {
+            let result = f();
+            if self.xcr0 & XCR0_AVX == XCR0_AVX {
+                // SAFETY: AVX state is enabled; no compiled code in this crate keeps values in upper halves.
+                unsafe { core::arch::asm!("vzeroupper", options(nomem, nostack, preserves_flags)) };
+            }
+            result
+        })
     }
 }
 
@@ -262,20 +258,6 @@ fn read_mxcsr() -> u32 {
 unsafe fn write_mxcsr(value: u32) {
     // SAFETY: the caller's contract.
     unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &raw const value, options(nostack, preserves_flags, readonly)) };
-}
-
-fn read_cr4() -> u64 {
-    let cr4: u64;
-    // SAFETY: reading CR4 at CPL 0 has no side effects.
-    unsafe { core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags)) };
-    cr4
-}
-
-/// # Safety
-/// `value` must be a valid CR4 for the running firmware: only OSXSAVE may differ from what it had.
-unsafe fn write_cr4(value: u64) {
-    // SAFETY: the caller's contract.
-    unsafe { core::arch::asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) };
 }
 
 /// # Safety

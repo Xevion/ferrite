@@ -6,7 +6,8 @@
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use alloc::string::ToString as _;
+use alloc::string::{String, ToString as _};
+use core::fmt::Write as _;
 use core::time::Duration;
 
 use ferrite_efi::clock::Clock;
@@ -14,12 +15,15 @@ use ferrite_efi::config;
 use ferrite_efi::cores::{CoreChoice, Cores};
 use ferrite_efi::cpu::VectorState;
 use ferrite_efi::link::Link as LoaderLink;
-use ferrite_efi::perf::Plan;
+use ferrite_efi::mp::Mp;
+use ferrite_efi::power::Power;
 use ferrite_efi::sensors::Sensors;
 use ferrite_efi::{rtc, watchdog::Keepalive};
 use ferrite_hal::{Clock as _, Instant, UnixTime, WallClock};
 use ferrite_mem::Caps;
 use ferrite_net::NetStatus;
+use ferrite_power::control::Request;
+use ferrite_power::rapl::Domain;
 use ratatui::Terminal;
 use uefi::Event;
 use uefi::boot::{self, EventType, TimerTrigger, Tpl};
@@ -66,6 +70,8 @@ const NOTIFY_STEP: Duration = Duration::from_millis(5);
 const DRAW_LOG_EVERY: Duration = Duration::from_secs(30);
 /// How often the CPU's clock and temperature are read. The clock is the average over this interval.
 const SENSOR_INTERVAL: Duration = Duration::from_secs(1);
+/// How often the power meter's reading goes to the log.
+const POWER_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Where frames go: the dashboard on the GOP framebuffer, or a short status screen on the text
 /// console of a machine without GOP.
@@ -209,6 +215,9 @@ struct Desk<'a> {
     hardware: Rc<Hardware>,
     sensors: Sensors,
     next_sensor_read: Instant,
+    /// The clock request this app made, and the energy and limit meter.
+    power: Power,
+    next_power_log: Instant,
 }
 
 impl<'a> App<'a> {
@@ -234,9 +243,8 @@ impl<'a> App<'a> {
         let loader = LoaderLink::locate();
         let watchdog = loader.map(|_| Keepalive::new(WATCHDOG, WATCHDOG_REARM, clock.now()));
         let cores = Cores::locate(CORES, clock);
-        if let Some(plan) = Plan::probe() {
-            plan.raise(cores.as_ref().map(Cores::mp));
-        }
+        let mut power = Power::discover();
+        power.apply(Request::MAX, cores.as_ref().map(Cores::mp));
         let desk = Desk {
             input,
             screen,
@@ -258,6 +266,8 @@ impl<'a> App<'a> {
             hardware,
             sensors,
             next_sensor_read: Instant::default(),
+            power,
+            next_power_log: Instant::default(),
         };
         let mut sweep = Sweep::new(caps, cores, goal);
         desk.hardware.set_machine(sweep.machine());
@@ -309,6 +319,7 @@ impl<'a> App<'a> {
         self.desk.save_report(self.now(), &self.sweep.snapshot(), why);
         self.desk.announce_end(&self.sweep.snapshot());
         self.desk.net.shutdown();
+        self.desk.end_power(self.sweep.mp());
     }
 
     /// Apply the queued commands in order; [`Flow::Stop`] when one of them was [`Command::Quit`].
@@ -367,6 +378,47 @@ impl<'a> App<'a> {
 }
 
 impl Desk<'_> {
+    /// Read the power meter; log its reading every [`POWER_LOG_INTERVAL`].
+    fn sample_power(&mut self, now: Instant) {
+        let Some(sample) = self.power.sample(now) else { return };
+        if now < self.next_power_log {
+            return;
+        }
+        self.next_power_log = now + POWER_LOG_INTERVAL;
+        let mut line = String::new();
+        for (domain, watts) in sample.power.iter() {
+            let _ = write!(line, " {}={watts}", <&str>::from(domain));
+        }
+        if let Some(throttled) = sample.throttled {
+            let _ = write!(line, " throttled={}ms", throttled.as_millis());
+        }
+        if let Some(reasons) = sample.reasons {
+            let _ = write!(line, " limits=[{}]", reasons.active);
+        }
+        log::info!("power:{line}");
+    }
+
+    /// Put the firmware's clock request back and log what the run used.
+    fn end_power(&mut self, mp: Option<&Mp>) {
+        let meter = self.power.meter();
+        if let Some(energy) = meter.energy(Domain::Package) {
+            log::info!("power: the package used {energy} over the run");
+        }
+        let tally = meter.tally();
+        if tally.samples > 0 {
+            let mut line = String::new();
+            for (limit, count) in tally.ranked() {
+                let _ = write!(line, " {}={}%", <&str>::from(limit), u64::from(count) * 100 / u64::from(tally.samples));
+            }
+            log::info!(
+                "power: clock limited by{} over {} samples",
+                if line.is_empty() { " nothing" } else { &line },
+                tally.samples
+            );
+        }
+        self.power.restore(mp);
+    }
+
     /// One round of the duties: re-arm the watchdog, poll the network, read keys and the loader's
     /// stop, draw when a frame is due, log. Returns when they are next due (`None` when a queued
     /// command has to cut the sweep short) and any goal set meanwhile, which takes effect at once
@@ -378,6 +430,7 @@ impl Desk<'_> {
         if now >= self.next_sensor_read {
             self.hardware.set_vitals(Vitals::of(self.sensors.sample(now)));
             self.next_sensor_read = now + SENSOR_INTERVAL;
+            self.sample_power(now);
         }
         let net = &mut self.net;
         self.watch.observe(now, snapshot, &mut |notification| net.notify(notification));

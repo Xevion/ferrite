@@ -325,8 +325,8 @@ impl Default for Hardware {
     /// A machine that is known to be nothing: for hosts and tests with nothing to ask.
     fn default() -> Self {
         let cpu = Identity {
-            vendor: ferrite_efi::sensors::Vendor::Other([0; 12]),
-            signature: ferrite_efi::sensors::Signature { family: 0, model: 0, stepping: 0 },
+            vendor: ferrite_power::cpuid::Vendor::Other([0; 12]),
+            signature: ferrite_power::cpuid::Signature { family: 0, model: 0, stepping: 0 },
             brand: String::new(),
         };
         Self::new(Facts::new(cpu, Memory::default()))

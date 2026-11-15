@@ -20,6 +20,7 @@ crew = ["dep:ferrite-mem"]
 crc32fast.workspace = true
 ferrite-config = { workspace = true, optional = true }
 ferrite-hal.workspace = true
+ferrite-power.workspace = true
 ferrite-mem = { workspace = true, optional = true }
 ferrite-net = { workspace = true, optional = true }
 ferrite-wire.workspace = true

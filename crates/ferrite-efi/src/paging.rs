@@ -14,6 +14,8 @@ use ferrite_hal::PhysAddr;
 use snafu::{Snafu, ensure};
 use uefi::boot::{self, AllocateType, MemoryType};
 
+use crate::x86::{read_cr0, read_cr3, read_cr4, read_msr, without_interrupts, write_cr0, write_cr4, write_msr};
+
 const IA32_PAT: u32 = 0x277;
 const IA32_MTRRCAP: u32 = 0xfe;
 const IA32_MTRR_DEF_TYPE: u32 = 0x2ff;
@@ -32,7 +34,6 @@ const ADDR_LARGE: u64 = 0x000f_ffff_ffff_e000;
 const CR0_WP: u64 = 1 << 16;
 const CR4_PGE: u64 = 1 << 7;
 const CR4_LA57: u64 = 1 << 12;
-const RFLAGS_IF: u64 = 1 << 9;
 
 const PAGE: u64 = 4096;
 const ENTRIES: usize = 512;
@@ -573,20 +574,15 @@ impl Drop for GuardPage {
 
 /// Run `f` with interrupts off and CR0.WP clear, since firmware may map its tables read-only.
 fn with_tables_writable<R>(f: impl FnOnce() -> R) -> R {
-    let flags: u64;
-    // SAFETY: CPL 0; reads RFLAGS through the stack and clears IF.
-    unsafe { core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags, options(nomem)) };
-    let cr0 = read_cr0();
-    // SAFETY: clearing WP only lets CPL 0 write read-only pages; it is restored below.
-    unsafe { write_cr0(cr0 & !CR0_WP) };
-    let result = f();
-    // SAFETY: the value read above.
-    unsafe { write_cr0(cr0) };
-    if flags & RFLAGS_IF != 0 {
-        // SAFETY: interrupts were on before.
-        unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
-    }
-    result
+    without_interrupts(|| {
+        let cr0 = read_cr0();
+        // SAFETY: clearing WP only lets CPL 0 write read-only pages; it is restored below.
+        unsafe { write_cr0(cr0 & !CR0_WP) };
+        let result = f();
+        // SAFETY: the value read above.
+        unsafe { write_cr0(cr0) };
+        result
+    })
 }
 
 /// Drop every translation, global ones included.
@@ -601,59 +597,6 @@ fn flush_tlb() {
     } else {
         // SAFETY: reloading CR3 with its own value flushes non-global translations.
         unsafe { core::arch::asm!("mov cr3, {}", in(reg) read_cr3(), options(nostack, preserves_flags)) };
-    }
-}
-
-fn read_cr0() -> u64 {
-    let v: u64;
-    // SAFETY: CPL 0.
-    unsafe { core::arch::asm!("mov {}, cr0", out(reg) v, options(nomem, nostack, preserves_flags)) };
-    v
-}
-
-/// # Safety
-/// `v` is a valid CR0 for the running system.
-unsafe fn write_cr0(v: u64) {
-    // SAFETY: the caller's.
-    unsafe { core::arch::asm!("mov cr0, {}", in(reg) v, options(nostack, preserves_flags)) };
-}
-
-fn read_cr3() -> u64 {
-    let v: u64;
-    // SAFETY: CPL 0.
-    unsafe { core::arch::asm!("mov {}, cr3", out(reg) v, options(nomem, nostack, preserves_flags)) };
-    v
-}
-
-fn read_cr4() -> u64 {
-    let v: u64;
-    // SAFETY: CPL 0.
-    unsafe { core::arch::asm!("mov {}, cr4", out(reg) v, options(nomem, nostack, preserves_flags)) };
-    v
-}
-
-/// # Safety
-/// `v` is a valid CR4 for the running system.
-unsafe fn write_cr4(v: u64) {
-    // SAFETY: the caller's.
-    unsafe { core::arch::asm!("mov cr4, {}", in(reg) v, options(nostack, preserves_flags)) };
-}
-
-/// # Safety
-/// The MSR exists.
-pub(crate) unsafe fn read_msr(msr: u32) -> u64 {
-    let (lo, hi): (u32, u32);
-    // SAFETY: the caller's; CPL 0.
-    unsafe { core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nomem, nostack)) };
-    u64::from(hi) << 32 | u64::from(lo)
-}
-
-/// # Safety
-/// The MSR exists and `v` is valid for it.
-pub(crate) unsafe fn write_msr(msr: u32, v: u64) {
-    // SAFETY: the caller's; CPL 0.
-    unsafe {
-        core::arch::asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32, options(nostack));
     }
 }
 

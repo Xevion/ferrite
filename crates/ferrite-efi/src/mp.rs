@@ -20,12 +20,14 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::time::Duration;
 
+use ferrite_power::cpuid::{CoreType, CpuidSource, Feature, HybridEax, read_features};
 use snafu::{ResultExt, Snafu};
 use uefi::Event;
 use uefi::boot::{self, EventType, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol, Tpl};
 use uefi::proto::pi::mp::MpServices;
 
 use crate::cpu::{FpuControl, VectorSupport};
+use crate::x86::Cpuid;
 
 use self::tether::Tether;
 
@@ -60,28 +62,17 @@ pub struct Location {
 pub enum CoreKind {
     /// Not a hybrid part: every core is the same.
     Uniform,
-    Performance,
-    Efficient,
-    Unknown(u8),
-}
-
-impl CoreKind {
-    const fn from_leaf_1a(eax: u32) -> Self {
-        match (eax >> 24) as u8 {
-            0x20 => Self::Efficient,
-            0x40 => Self::Performance,
-            raw => Self::Unknown(raw),
-        }
-    }
+    /// A hybrid part's core, or the raw type a type this crate does not know reads as.
+    Hybrid(Result<CoreType, u8>),
 }
 
 impl fmt::Display for CoreKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Uniform => f.write_str("uniform"),
-            Self::Performance => f.write_str("P"),
-            Self::Efficient => f.write_str("E"),
-            Self::Unknown(raw) => write!(f, "type {raw:#x}"),
+            Self::Hybrid(Ok(CoreType::Performance)) => f.write_str("P"),
+            Self::Hybrid(Ok(CoreType::Efficient)) => f.write_str("E"),
+            Self::Hybrid(Err(raw)) => write!(f, "type {raw:#x}"),
         }
     }
 }
@@ -336,7 +327,7 @@ impl Mp {
             if answer.done.load(Ordering::Acquire) {
                 let leaf = answer.leaf_1a.load(Ordering::Relaxed);
                 p.kind = Some(if answer.hybrid.load(Ordering::Relaxed) {
-                    CoreKind::from_leaf_1a(leaf)
+                    CoreKind::Hybrid(HybridEax::new_with_raw_value(leaf).core_type())
                 } else {
                     CoreKind::Uniform
                 });
@@ -521,10 +512,9 @@ struct Identify {
 // SAFETY: CPUID and stores to atomics.
 unsafe impl ApTask for Identify {
     fn run(&self) {
-        let max = __cpuid(0).eax;
-        let hybrid = max >= 7 && __cpuid_count(7, 0).edx & (1 << 15) != 0;
-        if hybrid && max >= 0x1a {
-            self.leaf_1a.store(__cpuid_count(0x1a, 0).eax, Ordering::Relaxed);
+        let hybrid = read_features(&Cpuid).has(Feature::Hybrid);
+        if hybrid {
+            self.leaf_1a.store(Cpuid.cpuid_checked(0x1a).eax, Ordering::Relaxed);
         }
         self.hybrid.store(hybrid, Ordering::Relaxed);
         self.done.store(true, Ordering::Release);

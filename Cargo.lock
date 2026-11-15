@@ -1052,6 +1052,7 @@ dependencies = [
  "ferrite-hal",
  "ferrite-mem",
  "ferrite-net",
+ "ferrite-power",
  "ferrite-wire",
  "ferrite-xhci",
  "log",
@@ -1155,6 +1156,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-power"
+version = "0.1.0"
+dependencies = [
+ "arbitrary-int",
+ "assert2",
+ "bitbybit",
+ "ferrite-hal",
+ "rstest 0.28.0",
+ "snafu",
+ "strum",
+]
+
+[[package]]
 name = "ferrite-recon"
 version = "0.1.0"
 dependencies = [
@@ -1193,6 +1207,7 @@ dependencies = [
  "ferrite-hal",
  "ferrite-mem",
  "ferrite-net",
+ "ferrite-power",
  "ferrite-rt",
  "ferrite-testing",
  "ferrite-wifi",

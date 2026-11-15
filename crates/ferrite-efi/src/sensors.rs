@@ -10,11 +10,9 @@
 //! through the index and data pair in the root complex's PCI configuration space. An unsupported
 //! sensor reads as `None`; nothing is guessed.
 //!
-//! Nothing here can recover from a fault, and an MSR the CPU lacks raises one. Every MSR read is
-//! therefore gated on the CPUID bits and model that say the register exists, and all of them are
-//! skipped under a hypervisor, whose MSR set is its own. The hardware decode is unverified on
-//! anything but the machines in the project's hardware notes; the pure decoders are tested against
-//! register values.
+//! The registers are read without fault handling, so every MSR read is gated on the CPUID bits and
+//! model that say the register exists, and all of them are skipped under a hypervisor, whose MSR
+//! set is its own. The decoders are `ferrite_power`'s.
 
 use alloc::string::String;
 use core::arch::x86_64::{__cpuid, __cpuid_count};
@@ -22,18 +20,17 @@ use core::fmt;
 use core::time::Duration;
 
 use ferrite_hal::{Instant, PciAddress, PciConfig};
+use ferrite_power::amd::tctl_celsius;
+use ferrite_power::cpuid::{Feature, Features, Signature, Vendor, read_features};
+use ferrite_power::intel;
+use ferrite_power::msr::MsrIo;
+use ferrite_power::units::effective_mhz;
 use uefi::boot;
 use uefi::proto::pci::root_bridge::PciRootBridgeIo;
 
 use crate::clock::Clock;
-use crate::paging::read_msr;
 use crate::pci::RootBridge;
-
-const IA32_MPERF: u32 = 0xe7;
-const IA32_APERF: u32 = 0xe8;
-const IA32_THERM_STATUS: u32 = 0x19c;
-const MSR_TEMPERATURE_TARGET: u32 = 0x1a2;
-const IA32_PACKAGE_THERM_STATUS: u32 = 0x1b1;
+use crate::x86::{Cpuid, RawMsrs};
 
 /// The root complex's SMN index and data registers in PCI configuration space, and the register
 /// that holds the current control temperature.
@@ -44,71 +41,6 @@ const AMD_PCI_VENDOR: u16 = 0x1022;
 
 /// Samples closer together than this give the last reading again: a short interval measures noise.
 const MIN_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Who made the CPU, from CPUID leaf 0.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Vendor {
-    Intel,
-    Amd,
-    /// The twelve bytes of any other vendor string.
-    Other([u8; 12]),
-}
-
-impl Vendor {
-    /// The vendor string is in EBX, EDX, ECX order.
-    fn from_registers(ebx: u32, ecx: u32, edx: u32) -> Self {
-        let mut text = [0; 12];
-        for (byte, value) in text.iter_mut().zip([ebx, edx, ecx].into_iter().flat_map(u32::to_le_bytes)) {
-            *byte = value;
-        }
-        match &text {
-            b"GenuineIntel" => Self::Intel,
-            b"AuthenticAMD" => Self::Amd,
-            _ => Self::Other(text),
-        }
-    }
-}
-
-impl fmt::Display for Vendor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Intel => f.write_str("GenuineIntel"),
-            Self::Amd => f.write_str("AuthenticAMD"),
-            Self::Other(text) => {
-                let end = text.iter().position(|&b| b == 0).unwrap_or(text.len());
-                f.write_str(core::str::from_utf8(&text[..end]).unwrap_or("unknown"))
-            },
-        }
-    }
-}
-
-/// Family, model and stepping with the extended fields of CPUID leaf 1 folded in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Signature {
-    pub family: u16,
-    pub model: u8,
-    pub stepping: u8,
-}
-
-impl Signature {
-    /// The signature in leaf 1's EAX: the extended family adds to a base family of 0xf, and the
-    /// extended model is the model's high nibble for families 6 and 0xf.
-    #[must_use]
-    pub const fn from_eax(eax: u32) -> Self {
-        let base_family = (eax >> 8) as u16 & 0xf;
-        let family = if base_family == 0xf { base_family + ((eax >> 20) as u16 & 0xff) } else { base_family };
-        let model = (eax >> 4) as u8 & 0xf;
-        let model =
-            if base_family == 0x6 || base_family == 0xf { model | ((eax >> 16) as u8 & 0xf) << 4 } else { model };
-        Self { family, model, stepping: eax as u8 & 0xf }
-    }
-}
-
-impl fmt::Display for Signature {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "family {} model {:#x} stepping {}", self.family, self.model, self.stepping)
-    }
-}
 
 /// What CPUID says the processor is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,48 +85,6 @@ fn brand_string(leaves: &[[u32; 4]; 3]) -> String {
     text.split_whitespace().collect::<alloc::vec::Vec<_>>().join(" ")
 }
 
-/// The CPUID bits that say which registers exist.
-#[expect(clippy::struct_excessive_bools, reason = "one flag for each CPUID bit, read together")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Features {
-    hypervisor: bool,
-    /// Leaf 6 EAX bit 0: the digital thermal sensor.
-    digital_sensor: bool,
-    /// Leaf 6 EAX bit 6: the package thermal management registers.
-    package_sensor: bool,
-    /// Leaf 6 ECX bit 0: `IA32_APERF` and `IA32_MPERF`.
-    aperf_mperf: bool,
-    /// Leaf 0x16 EAX: the base frequency in MHz.
-    base_mhz: Option<u32>,
-}
-
-impl Features {
-    fn read() -> Self {
-        let max = __cpuid(0).eax;
-        let thermal = (max >= 6).then(|| __cpuid(6));
-        let frequency = (max >= 0x16).then(|| __cpuid_count(0x16, 0).eax);
-        Self::from_leaves(__cpuid(1).ecx, thermal.map(|r| (r.eax, r.ecx)), frequency)
-    }
-
-    const fn from_leaves(features_ecx: u32, thermal: Option<(u32, u32)>, frequency_eax: Option<u32>) -> Self {
-        let (sensor_bits, counter_bits) = match thermal {
-            Some(regs) => regs,
-            None => (0, 0),
-        };
-        let base = match frequency_eax {
-            Some(eax) => eax & 0xffff,
-            None => 0,
-        };
-        Self {
-            hypervisor: features_ecx & (1 << 31) != 0,
-            digital_sensor: sensor_bits & 1 != 0,
-            package_sensor: sensor_bits & (1 << 6) != 0,
-            aperf_mperf: counter_bits & 1 != 0,
-            base_mhz: if base == 0 { None } else { Some(base) },
-        }
-    }
-}
-
 /// Which sensor to read the temperature from, or why there is none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Plan {
@@ -207,58 +97,18 @@ const fn has_temperature_target(sig: Signature) -> bool {
     sig.family == 6 && sig.model >= 0x1a && !matches!(sig.model, 0x1c | 0x26 | 0x27 | 0x35 | 0x36)
 }
 
-fn plan(vendor: Vendor, sig: Signature, features: &Features) -> Result<Plan, &'static str> {
-    if features.hypervisor {
+fn plan(vendor: Vendor, sig: Signature, features: Features) -> Result<Plan, &'static str> {
+    if features.has(Feature::Hypervisor) {
         return Err("running under a hypervisor");
     }
     match vendor {
-        Vendor::Intel if !features.digital_sensor => Err("CPUID reports no digital thermal sensor"),
+        Vendor::Intel if !features.has(Feature::DigitalSensor) => Err("CPUID reports no digital thermal sensor"),
         Vendor::Intel if !has_temperature_target(sig) => Err("no TjMax register on this model"),
-        Vendor::Intel => Ok(Plan::IntelDigital { package: features.package_sensor }),
+        Vendor::Intel => Ok(Plan::IntelDigital { package: features.has(Feature::PackageThermal) }),
         Vendor::Amd if sig.family >= 0x17 => Ok(Plan::AmdSmn),
         Vendor::Amd => Err("no SMN thermal register before AMD family 17h"),
         Vendor::Other(_) => Err("no known sensor for this vendor"),
     }
-}
-
-/// `TjMax`, the temperature the digital readout counts down from: bits 23:16 of `MSR_TEMPERATURE_TARGET`,
-/// 0 when the register has none.
-const fn tj_max(target: u64) -> Option<u8> {
-    match (target >> 16) as u8 {
-        0 => None,
-        tj => Some(tj),
-    }
-}
-
-/// Degrees Celsius from a thermal status register: the readout in bits 22:16 is degrees below `TjMax`,
-/// good only while the valid bit (31) is set.
-fn digital_celsius(status: u64, tj_max: u8) -> Option<i16> {
-    if status & (1 << 31) == 0 {
-        return None;
-    }
-    Some(i16::from(tj_max) - i16::from((status >> 16 & 0x7f) as u8))
-}
-
-/// Degrees Celsius from `THM_TCON_CUR_TMP`: bits 31:21 in eighths of a degree, less 49 degrees when the
-/// range-select bit (19) is set. All ones is what a read of nothing returns. This is the control
-/// temperature (Tctl), which some parts offset from the die temperature.
-fn smn_celsius(raw: u32) -> Option<i16> {
-    if raw == u32::MAX {
-        return None;
-    }
-    let eighths = i32::try_from(raw >> 21).ok()?;
-    let milli = eighths * 125 - if raw & (1 << 19) != 0 { 49_000 } else { 0 };
-    i16::try_from((milli + 500).div_euclid(1000)).ok()
-}
-
-/// The clock in MHz from the TSC frequency and how far APERF and MPERF advanced; `None` when MPERF
-/// did not move (the core never ran) or the result is zero.
-fn effective_mhz(tsc_hz: u64, aperf: u64, mperf: u64) -> Option<u32> {
-    if mperf == 0 {
-        return None;
-    }
-    let mhz = u128::from(tsc_hz) * u128::from(aperf) / u128::from(mperf) / 1_000_000;
-    u32::try_from(mhz).ok().filter(|&mhz| mhz > 0)
 }
 
 /// A clock figure.
@@ -331,7 +181,7 @@ impl Smn {
     }
 
     fn celsius(&mut self) -> Option<i16> {
-        smn_celsius(self.read(THM_TCON_CUR_TMP)?)
+        tctl_celsius(self.read(THM_TCON_CUR_TMP)?)
     }
 }
 
@@ -346,8 +196,12 @@ enum Thermal {
 pub struct Sensors {
     identity: Identity,
     features: Features,
+    /// The base frequency CPUID leaf 0x16 states.
+    base_mhz: Option<u32>,
     tsc_hz: u64,
     thermal: Option<Thermal>,
+    /// Every read is gated on the CPUID bits and model that say the register exists.
+    msrs: RawMsrs,
     counters: Option<Counters>,
     last_sample: Option<Instant>,
     reading: Reading,
@@ -359,17 +213,20 @@ impl Sensors {
     #[must_use]
     pub fn probe(clock: &Clock) -> Self {
         let identity = Identity::read();
-        let features = Features::read();
+        let features = read_features(&Cpuid);
+        let base_mhz = (__cpuid(0).eax >= 0x16).then(|| __cpuid_count(0x16, 0).eax & 0xffff).filter(|&mhz| mhz != 0);
         let tsc_hz = clock.tsc_hz();
         log::info!("cpu: {identity}");
         log::info!(
             "cpu: TSC {} MHz measured, base {} by CPUID 0x16, APERF/MPERF {}",
             tsc_hz / 1_000_000,
-            features.base_mhz.map_or_else(|| String::from("not given"), |mhz| alloc::format!("{mhz} MHz")),
-            if features.aperf_mperf && !features.hypervisor { "read" } else { "not read" },
+            base_mhz.map_or_else(|| String::from("not given"), |mhz| alloc::format!("{mhz} MHz")),
+            if Self::counts(features) { "read" } else { "not read" },
         );
-        let thermal = match plan(identity.vendor, identity.signature, &features) {
-            Ok(plan) => Self::open_thermal(plan),
+        // SAFETY: each read below is gated on the CPUID bits and model that say its register exists.
+        let mut msrs = unsafe { RawMsrs::new() };
+        let thermal = match plan(identity.vendor, identity.signature, features) {
+            Ok(plan) => Self::open_thermal(plan, &mut msrs),
             Err(why) => {
                 log::info!("cpu: no temperature: {why}");
                 None
@@ -378,8 +235,10 @@ impl Sensors {
         let mut sensors = Self {
             identity,
             features,
+            base_mhz,
             tsc_hz,
             thermal,
+            msrs,
             counters: None,
             last_sample: None,
             reading: Reading::default(),
@@ -393,16 +252,28 @@ impl Sensors {
         sensors
     }
 
-    fn open_thermal(plan: Plan) -> Option<Thermal> {
+    fn counts(features: Features) -> bool {
+        features.has(Feature::AperfMperf) && !features.has(Feature::Hypervisor)
+    }
+
+    fn open_thermal(plan: Plan, msrs: &mut RawMsrs) -> Option<Thermal> {
         match plan {
             Plan::IntelDigital { package } => {
-                // SAFETY: `plan` allowed this on an Intel family 6 model that has `MSR_TEMPERATURE_TARGET`.
-                let target = unsafe { read_msr(MSR_TEMPERATURE_TARGET) };
-                let Some(tj_max) = tj_max(target) else {
-                    log::info!("cpu: no temperature: MSR_TEMPERATURE_TARGET gives no TjMax ({target:#x})");
+                // `plan` allowed this on an Intel family 6 model that has `MSR_TEMPERATURE_TARGET`.
+                let target = msrs.read(intel::TEMPERATURE_TARGET).ok()?;
+                let tj_max = target.tj_max();
+                if tj_max == 0 {
+                    log::info!(
+                        "cpu: no temperature: MSR_TEMPERATURE_TARGET gives no TjMax ({:#x})",
+                        target.raw_value()
+                    );
                     return None;
-                };
-                log::info!("cpu: TjMax {tj_max} C, {} sensor", if package { "package" } else { "core" });
+                }
+                log::info!(
+                    "cpu: TjMax {tj_max} C, throttling from {} C, {} sensor",
+                    target.throttle_celsius().unwrap_or_else(|| i16::from(tj_max)),
+                    if package { "package" } else { "core" }
+                );
                 Some(Thermal::Intel { tj_max, package })
             },
             Plan::AmdSmn => {
@@ -427,7 +298,7 @@ impl Sensors {
             return self.reading;
         }
         self.last_sample = Some(now);
-        let base = self.features.base_mhz.map(|mhz| Frequency { mhz, measured: false });
+        let base = self.base_mhz.map(|mhz| Frequency { mhz, measured: false });
         self.reading.frequency = self.measure_frequency().or(base);
         self.reading.temperature = self.read_temperature();
         self.reading
@@ -435,29 +306,27 @@ impl Sensors {
 
     /// The effective clock over the interval since the last call, once there is one.
     fn measure_frequency(&mut self) -> Option<Frequency> {
-        if !self.features.aperf_mperf || self.features.hypervisor {
+        if !Self::counts(self.features) {
             return None;
         }
-        // SAFETY: CPUID leaf 6 reports APERF and MPERF, and no hypervisor is hiding them.
-        let now = unsafe { Counters { aperf: read_msr(IA32_APERF), mperf: read_msr(IA32_MPERF) } };
+        let now =
+            Counters { aperf: self.msrs.read(intel::IA32_APERF).ok()?, mperf: self.msrs.read(intel::IA32_MPERF).ok()? };
         let before = self.counters.replace(now)?;
         effective_mhz(self.tsc_hz, now.aperf.wrapping_sub(before.aperf), now.mperf.wrapping_sub(before.mperf))
-            .map(|mhz| Frequency { mhz, measured: true })
+            .map(|mhz| Frequency { mhz: mhz.0, measured: true })
     }
 
     fn read_temperature(&mut self) -> Option<Temperature> {
         match self.thermal.as_mut()? {
             Thermal::Intel { tj_max, package } => {
                 let (tj_max, package) = (*tj_max, *package);
-                let package = package.then(|| {
-                    // SAFETY: leaf 6 reports the package thermal registers.
-                    let status = unsafe { read_msr(IA32_PACKAGE_THERM_STATUS) };
-                    digital_celsius(status, tj_max).map(|c| (c, TempSource::IntelPackage))
-                });
-                let found = package.flatten().or_else(|| {
-                    // SAFETY: the digital sensor bit is set, so IA32_THERM_STATUS exists.
-                    let status = unsafe { read_msr(IA32_THERM_STATUS) };
-                    digital_celsius(status, tj_max).map(|c| (c, TempSource::IntelCore))
+                let msrs = &mut self.msrs;
+                let package = package
+                    .then(|| msrs.read(intel::IA32_PACKAGE_THERM_STATUS).ok()?.celsius(tj_max))
+                    .flatten()
+                    .map(|c| (c, TempSource::IntelPackage));
+                let found = package.or_else(|| {
+                    msrs.read(intel::IA32_THERM_STATUS).ok()?.celsius(tj_max).map(|c| (c, TempSource::IntelCore))
                 });
                 found.map(|(celsius, source)| Temperature { celsius, source })
             },

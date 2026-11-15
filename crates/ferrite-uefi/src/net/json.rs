@@ -676,12 +676,13 @@ mod tests {
 
     use assert2::check;
     use ferrite_config::{ClockFormat, zone_named};
-    use ferrite_efi::sensors::{Frequency, Identity, Reading, Signature, Temperature, Vendor};
+    use ferrite_efi::sensors::{Frequency, Identity, Reading, Temperature};
     use ferrite_hal::{PhysAddr, UnixTime, WallClock};
     use ferrite_mem::CpuAddr;
     use ferrite_mem::histogram::Histogram;
     use ferrite_mem::suite::{Mode, Preset};
     use ferrite_net::{Link, MacAddr, Medium, PortStats, ServiceCounters};
+    use ferrite_power::cpuid::{Signature, Vendor};
     use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
     use super::*;
