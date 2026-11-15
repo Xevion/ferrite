@@ -42,11 +42,11 @@ struct ApPage;
 
 /// The control that no route has.
 #[derive(Clone, Copy)]
-enum NoControl {}
+struct NoControl(Infallible);
 
 impl From<NoControl> for &'static str {
     fn from(control: NoControl) -> Self {
-        match control {}
+        match control.0 {}
     }
 }
 
@@ -74,7 +74,7 @@ impl Site for ApPage {
     }
 
     fn command(&self, control: NoControl, _body: &[u8]) -> Result<(), Infallible> {
-        match control {}
+        match control.0 {}
     }
 
     fn key(&self, _state: &()) {}

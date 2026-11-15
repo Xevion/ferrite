@@ -1,0 +1,59 @@
+name: Wi-Fi
+
+on:
+  push:
+    branches: [master]
+    tags-ignore: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  FERRITE_LLVM: /usr/lib/llvm-21/bin
+
+# A push groups by commit, so pushes in quick succession each keep their own run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  wifi:
+    name: Linux Wi-Fi C and the apps that link it
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM 21 and the kernel build tools
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh 21
+          sudo apt-get install -y --no-install-recommends flex bison bc wireless-regdb
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.132
+
+      - name: Cache the Linux snapshot
+        uses: actions/cache@v4
+        with:
+          path: crates/ferrite-wifi-sys/linux
+          key: linux-snapshot-${{ hashFiles('crates/ferrite-wifi-sys/vendor.toml', 'crates/ferrite-wifi-sys/source.list', 'crates/ferrite-wifi-sys/cflags.txt', 'crates/ferrite-wifi-sys/patches/**', 'crates/ferrite-wifi-sys/vendor_inputs.rs') }}
+
+      - name: Vendor the Linux snapshot
+        run: cargo run --locked -q -p ferrite-dev -- vendor
+
+      - name: Clippy (Wi-Fi crates and the ELF-built apps)
+        run: |
+          cargo clippy --locked -p ferrite-wifi-sys -p ferrite-lab -p ferrite-wifi-start --all-targets -- -D warnings
+          cargo efi-app-clippy --locked -- -D warnings
+
+      - name: Tests
+        run: cargo nextest run --locked -p ferrite-wifi-sys -p ferrite-lab -p ferrite-wifi-start --no-fail-fast --hide-progress-bar --failure-output final

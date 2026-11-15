@@ -71,7 +71,7 @@ jobs:
       - name: Run tests
         run: cargo nextest run -p ferrite --no-fail-fast --hide-progress-bar --failure-output final ${{ matrix.features }}
 
-  # Every crate that builds without the Linux snapshot.
+  # Every crate that builds without the Linux snapshot; the Wi-Fi C is covered by wifi.yml.
   workspace:
     name: Workspace
     runs-on: ubuntu-latest

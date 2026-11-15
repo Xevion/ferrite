@@ -16,6 +16,7 @@ strchrnul lx_strchrnul
 strcmp lx_strcmp
 strcpy lx_strcpy
 strcspn lx_strcspn
+strlcat lx_strlcat
 strlen lx_strlen
 strncasecmp lx_strncasecmp
 strncat lx_strncat
