@@ -179,7 +179,7 @@ fn time(out: &mut String, t: &Time) {
 fn cpu(out: &mut String, c: &Cpu) {
     header(out, c.is_default(), "[cpu]");
     let text = &[
-        "auto: per test, the lowest clock within the tolerance of its fastest. max: the highest clock all the",
+        "auto: per test, the lowest clock within the tolerance of its speed at the highest. max: the highest clock all the",
         "time, hottest. firmware: leave it as the firmware set it. calibrate: run each test at a ladder of",
         "clocks and record speed and power.",
     ];
@@ -187,6 +187,7 @@ fn cpu(out: &mut String, c: &Cpu) {
     let text =
         &["Degrees Celsius to stay under, 40 to 105, by lowering the clock. The processor's own limit when left out."];
     line(out, c.max_temp.is_some(), "max_temp", &c.max_temp.unwrap_or(85).to_string(), text);
-    let text = &["How much slower than its fastest a test may run in auto, in percent, 0 to 50. 3 by default."];
+    let text =
+        &["How much slower than at the highest clock a test may run in auto, in percent, 0 to 50. 3 by default."];
     line(out, c.tolerance.is_some(), "tolerance", &c.tolerance.unwrap_or(3).to_string(), text);
 }

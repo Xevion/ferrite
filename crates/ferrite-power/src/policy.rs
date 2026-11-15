@@ -10,14 +10,14 @@ pub enum ClockMode {
     Firmware,
     /// The highest level every core allows, all the time.
     Max,
-    /// The lowest ceiling per test that keeps it within the tolerance of its fastest.
+    /// The lowest ceiling per test that keeps it within the tolerance of its rate at the highest.
     #[default]
     Auto,
     /// Run each test at each step of clock ceilings and record its speed and power.
     Calibrate,
 }
 
-/// How much slower than its fastest a test may run in [`ClockMode::Auto`], in whole percent.
+/// How much slower than at the highest clock a test may run in [`ClockMode::Auto`], in whole percent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Tolerance(u8);
 

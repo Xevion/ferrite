@@ -182,7 +182,7 @@ pub struct Cpu {
     pub clock: CpuClock,
     /// Degrees Celsius to stay under, 40 to 105.
     pub max_temp: Option<i16>,
-    /// How much slower than its fastest a test may run in auto, in percent, 0 to 50.
+    /// How much slower than at the highest clock a test may run in auto, in percent, 0 to 50.
     pub tolerance: Option<u8>,
 }
 
