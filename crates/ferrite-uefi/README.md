@@ -1,9 +1,8 @@
 # ferrite-uefi
 
-A spike exploring a **bare-metal memory-testing bootloader**: a UEFI application
-that tests RAM on every core, draws a dashboard on the framebuffer and serves a
-live status page, with no OS underneath, as a proof of concept for running ferrite's Linux RAM test
-suite before (or instead of) booting an operating system.
+ferrite's UEFI application: a bare-metal memory tester that boots without an
+operating system, tests RAM on every core, draws a dashboard on the framebuffer
+and serves a live status page and JSON API over wired and Wi-Fi networking.
 
 ## Status
 
