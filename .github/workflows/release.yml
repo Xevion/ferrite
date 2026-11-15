@@ -1,25 +1,57 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build and upload (e.g. v0.1.0)"
+        description: "Existing tag to release again (e.g. v0.4.0)"
         required: true
         type: string
 
 env:
   CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.release.tag_name || inputs.tag }}
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
+  release:
+    name: Create release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check the tag against the version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ferrite") | .version')
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::$TAG does not match ferrite's version $version"
+            exit 1
+          fi
+
+      - name: Create the GitHub release
+        run: |
+          awk -v head="## [${TAG#v}]" 'index($0, "## ") == 1 { if (found) exit; found = index($0, head) == 1; next } found' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no entry for ${TAG#v}"
+            exit 1
+          fi
+          gh release view "$TAG" || gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   build:
     name: Build (${{ matrix.target.arch }})
+    needs: release
     runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 20
     permissions:
@@ -39,7 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ env.TAG }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -74,7 +106,6 @@ jobs:
           retention-days: 7
 
       - name: Upload to GitHub release
-        if: github.event_name == 'release'
-        run: gh release upload "${{ github.event.release.tag_name }}" "ferrite-linux-${{ matrix.target.arch }}" --clobber
+        run: gh release upload "$TAG" "ferrite-linux-${{ matrix.target.arch }}" --clobber
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
