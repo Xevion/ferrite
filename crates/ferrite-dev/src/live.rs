@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use strum::VariantArray as _;
+
 use crate::bench::{self, BenchOptions, Phase};
 use crate::chain;
 use crate::config::Config;
@@ -54,7 +56,7 @@ impl Env for Live<'_> {
                 log::run(&config, &options, &mut emitter, &flag).err().map(|e| chain(&e))
             },
             CaptureKind::Bench { wait, link } => {
-                let options = BenchOptions { phases: Phase::ALL.to_vec(), wait, link };
+                let options = BenchOptions { phases: Phase::VARIANTS.to_vec(), wait, link };
                 bench::run(&config, &options, &mut emitter, &flag).err().map(|e| chain(&e))
             },
         })?;

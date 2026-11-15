@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 
+use strum::VariantArray as _;
+
 use crate::bench::Phase;
 use crate::link::{
     DEFAULT_IN_SIZE, DEFAULT_IN_TRANSFERS, DEFAULT_OUT_SIZE, DEFAULT_OUT_TRANSFERS, LinkOptions, Transport, UsbConfig,
@@ -69,7 +71,7 @@ pub struct LogArgs {
 #[derive(Debug, Args)]
 pub struct BenchArgs {
     /// Phases to exercise and report; the others are followed passively so the target advances
-    #[arg(long, value_delimiter = ',', default_values_t = Phase::ALL)]
+    #[arg(long, value_delimiter = ',', default_values_t = Phase::VARIANTS.iter().copied())]
     pub phases: Vec<Phase>,
 
     /// How long to wait for the device and the target's first announcement
@@ -336,7 +338,7 @@ mod tests {
     fn bench_phases_default_to_all_and_split_on_commas() {
         assert!(let Ok(cli) = Cli::try_parse_from(["ferrite-dev", "bench"]));
         assert!(let Command::Bench(args) = cli.command);
-        check!(args.phases == Phase::ALL);
+        check!(args.phases == Phase::VARIANTS);
         assert!(let Ok(cli) = Cli::try_parse_from(["ferrite-dev", "bench", "--phases", "echo,micro", "--wait", "90s"]));
         assert!(let Command::Bench(args) = cli.command);
         check!(args.phases == [Phase::Echo, Phase::Micro]);

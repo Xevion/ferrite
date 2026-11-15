@@ -7,6 +7,7 @@ use assert2::check;
 use ferrite_efi::sensors::{Frequency, Temperature};
 use ferrite_hal::PhysAddr;
 use ferrite_power::cpuid::{Signature, Vendor};
+use ferrite_power::units::Mhz;
 use rstest::rstest;
 
 use super::*;
@@ -73,6 +74,20 @@ fn the_speed_it_runs_at_is_the_one_shown() {
     check!(modules_text(&memory(vec![slow], vec![])) == "1 x 8 GiB DDR4-2666");
 }
 
+#[rstest]
+#[case::running_at_the_rated_speed(2133, 2133, "A: 8 GiB LPDDR3 DIMM, 2133 MT/s, 64 of 64 bits")]
+#[case::running_below_it(3200, 2666, "A: 8 GiB LPDDR3 DIMM, 3200 MT/s, running 2666 MT/s, 64 of 64 bits")]
+#[case::no_rated_speed(0, 2666, "A: 8 GiB LPDDR3 DIMM, running 2666 MT/s, 64 of 64 bits")]
+fn a_module_line_names_the_running_speed_only_when_it_is_news(
+    #[case] rated: u32,
+    #[case] running: u32,
+    #[case] want: &str,
+) {
+    let mut device = module(1, "A", 8, MemoryKind::Lpddr3, rated);
+    device.configured_speed = MegaTransfers::new(running);
+    check!(ModuleLine(&device).to_string() == want);
+}
+
 #[test]
 fn modules_mapped_to_the_same_range_are_interleaved() {
     let devices = vec![module(1, "A", 8, MemoryKind::Lpddr3, 2133), module(2, "B", 8, MemoryKind::Lpddr3, 2133)];
@@ -119,12 +134,12 @@ fn the_brand_is_shortened_to_the_part_name(#[case] brand: &str, #[case] short: &
 #[test]
 fn the_clock_is_shown_to_ten_megahertz_so_a_smaller_change_is_not_a_new_figure() {
     let reading = |mhz, measured| Reading {
-        frequency: Some(Frequency { mhz, measured }),
+        frequency: Some(Frequency { mhz: Mhz(mhz), measured }),
         temperature: Some(Temperature { celsius: 61, source: TempSource::IntelPackage }),
     };
-    check!(Vitals::of(reading(1896, true)).mhz == Some(1900));
-    check!(Vitals::of(reading(1894, true)).mhz == Some(1890));
-    check!(Vitals::of(reading(1895, true)).mhz == Some(1900));
+    check!(Vitals::of(reading(1896, true)).mhz == Some(Mhz(1900)));
+    check!(Vitals::of(reading(1894, true)).mhz == Some(Mhz(1890)));
+    check!(Vitals::of(reading(1895, true)).mhz == Some(Mhz(1900)));
     check!(Vitals::of(reading(1896, true)) == Vitals::of(reading(1904, true)), "both show 1900, so neither redraws");
     check!(Vitals::of(reading(1900, false)).measured == false);
     check!(Vitals::of(Reading::default()) == Vitals::default());

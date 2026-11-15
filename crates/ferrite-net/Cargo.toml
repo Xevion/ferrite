@@ -13,6 +13,7 @@ log.workspace = true
 picoserve.workspace = true
 smoltcp = { workspace = true, features = ["socket-icmp", "auto-icmp-echo-reply"] }
 snafu.workspace = true
+strum.workspace = true
 
 [dev-dependencies]
 assert2.workspace = true

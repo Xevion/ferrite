@@ -1039,6 +1039,7 @@ dependencies = [
  "sha2 0.11.1",
  "signal-hook 0.4.6",
  "snafu",
+ "strum",
  "toml",
 ]
 
@@ -1058,6 +1059,7 @@ dependencies = [
  "log",
  "rstest 0.28.0",
  "snafu",
+ "strum",
  "uefi",
 ]
 
@@ -1067,6 +1069,7 @@ version = "0.1.0"
 dependencies = [
  "assert2",
  "rstest 0.28.0",
+ "strum",
 ]
 
 [[package]]
@@ -1142,6 +1145,7 @@ dependencies = [
  "rstest 0.28.0",
  "smoltcp",
  "snafu",
+ "strum",
 ]
 
 [[package]]

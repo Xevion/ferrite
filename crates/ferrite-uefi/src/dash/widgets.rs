@@ -385,9 +385,9 @@ pub fn system(p: &mut Pen<'_>, r: Rect, f: &Frame<'_>) {
     let clock: String<32> = match (live.mhz, live.celsius) {
         (None, None) => fixed(format_args!("{NONE}")),
         (None, Some(c)) => fixed(format_args!("{c} C")),
-        (Some(mhz), None) => fixed(format_args!("{}{mhz} MHz", if live.measured { "" } else { "base " })),
+        (Some(mhz), None) => fixed(format_args!("{}{mhz}", if live.measured { "" } else { "base " })),
         (Some(mhz), Some(c)) => {
-            fixed(format_args!("{}{mhz} MHz {SEPARATOR} {c} C", if live.measured { "" } else { "base " }))
+            fixed(format_args!("{}{mhz} {SEPARATOR} {c} C", if live.measured { "" } else { "base " }))
         },
     };
     p.pairs(

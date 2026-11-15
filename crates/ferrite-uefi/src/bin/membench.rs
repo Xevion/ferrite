@@ -25,7 +25,7 @@ use ferrite_efi::cpu::{FpuControl, VectorState, VectorSupport};
 use ferrite_efi::link::Link as LoaderLink;
 use ferrite_efi::mp::{self, ControlRegisters, Mp, Processor, ProcessorNumber, STACK_PROBE};
 use ferrite_efi::watchdog::Keepalive;
-use ferrite_efi::{logger, session};
+use ferrite_efi::{crew, logger, session};
 use ferrite_hal::{Clock as _, Instant};
 use ferrite_mem::crew::{AP_PATIENCE, SeatState, StartLine, WideGuard};
 use ferrite_mem::{Caps, Fault, Faults, Inversion, Kernel, Order, Prsg, Region, Stores, Tier, WIDE_CHUNK_BYTES};
@@ -531,9 +531,7 @@ fn main() -> Status {
         .inspect(|v| log::info!("cpu: vector state on, {v}; {}; {}", FpuControl::read(), VectorSupport::probe()))
         .inspect_err(|e| log::warn!("cpu: {e}; running the baseline tiers only"))
         .ok();
-    let support = VectorSupport::probe();
-    // SAFETY: the probe reads CPUID and XCR0 as they are now, after enabling.
-    let caps = unsafe { Caps::new(support.avx2_usable(), support.avx512f_usable()) };
+    let caps = crew::usable_caps();
     let status = bench(caps, vector.as_ref());
     if let Some(vector) = vector {
         let (saved, _) = vector.xcr0();

@@ -9,11 +9,10 @@ use alloc::collections::VecDeque;
 use core::fmt::{self, Write as _};
 use core::time::Duration;
 
-use ferrite_efi::sensors::TempSource;
 use ferrite_hal::Instant;
 use ferrite_mem::Fault;
 use ferrite_mem::analysis::Classification;
-use ferrite_mem::eta::{BasisPoints, Confidence, Eta, Position};
+use ferrite_mem::eta::{BasisPoints, Eta, Position};
 
 use ferrite_net::http::JsonEscape;
 use ferrite_net::mdns;
@@ -111,11 +110,9 @@ impl ToJson for Secs {
 /// A time left: seconds, what the figure rests on, and when it ends in Unix milliseconds, which is
 /// absent until the clock has a source.
 fn eta_fields(o: &mut Object<'_>, eta: Eta, ends_unix_ms: Option<u64>) {
-    let confidence = match eta.confidence {
-        Confidence::Measured => "measured",
-        Confidence::Estimated => "estimated",
-    };
-    o.field("left_s", &Secs(eta.remaining)).field("confidence", confidence).field("ends_unix_ms", &ends_unix_ms);
+    o.field("left_s", &Secs(eta.remaining))
+        .field("confidence", <&str>::from(eta.confidence))
+        .field("ends_unix_ms", &ends_unix_ms);
 }
 
 /// The clock: the time in Unix milliseconds, which the page shows in its own zone, and whether the
@@ -466,8 +463,7 @@ impl ToJson for ModuleDoc<'_> {
         };
         let range = self.memory.range_of(d.handle).map(|r| {
             Section(move |o: &mut Object<'_>| {
-                o.field("start", &Hex(r.extent.start().get()))
-                    .field("bytes", &(r.extent.end() - r.extent.start().get()));
+                o.field("start", &Hex(r.extent.start().get())).field("bytes", &r.extent.bytes());
             })
         });
         Object::new(out)
@@ -501,7 +497,7 @@ impl ToJson for Layout {
                         Section(move |o: &mut Object<'_>| {
                             o.field("label", b.label.as_str())
                                 .field("start", &Hex(b.extent.start().get()))
-                                .field("bytes", &(b.extent.end() - b.extent.start().get()));
+                                .field("bytes", &b.extent.bytes());
                         })
                     })
                 }),
@@ -522,11 +518,7 @@ impl ToJson for MachineDoc<'_> {
     fn to_json(&self, out: &mut dyn fmt::Write) {
         let (facts, live) = (&self.hardware.facts, self.hardware.vitals());
         let cpu = &facts.cpu;
-        let source = live.source.map(|source| match source {
-            TempSource::IntelPackage => "intel-package",
-            TempSource::IntelCore => "intel-core",
-            TempSource::AmdSmn => "amd-smn",
-        });
+        let source = live.source.map(<&str>::from);
         Object::new(out)
             .field(
                 "cpu",
@@ -539,7 +531,7 @@ impl ToJson for MachineDoc<'_> {
                         .field("stepping", &cpu.signature.stepping);
                 }),
             )
-            .field("clock_mhz", &live.mhz)
+            .field("clock_mhz", &live.mhz.map(|mhz| mhz.0))
             .field("clock_measured", &live.mhz.map(|_| live.measured))
             .field("temp_c", &live.celsius)
             .field("temp_source", &source)
@@ -676,13 +668,15 @@ mod tests {
 
     use assert2::check;
     use ferrite_config::{ClockFormat, zone_named};
-    use ferrite_efi::sensors::{Frequency, Identity, Reading, Temperature};
+    use ferrite_efi::sensors::{Frequency, Identity, Reading, TempSource, Temperature};
     use ferrite_hal::{PhysAddr, UnixTime, WallClock};
     use ferrite_mem::CpuAddr;
+    use ferrite_mem::eta::Confidence;
     use ferrite_mem::histogram::Histogram;
     use ferrite_mem::suite::{Mode, Preset};
     use ferrite_net::{Link, MacAddr, Medium, PortStats, ServiceCounters};
     use ferrite_power::cpuid::{Signature, Vendor};
+    use ferrite_power::units::Mhz;
     use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
     use super::*;
@@ -917,7 +911,7 @@ mod tests {
         }
         let hardware = Hardware::new(Facts::new(cpu, memory));
         hardware.set_vitals(Vitals::of(Reading {
-            frequency: Some(Frequency { mhz: 3_396, measured: true }),
+            frequency: Some(Frequency { mhz: Mhz(3_396), measured: true }),
             temperature: Some(Temperature { celsius: 58, source: TempSource::IntelPackage }),
         }));
         let mut out = String::new();

@@ -5,14 +5,11 @@
 //! a hash, so the file never holds the UUID itself. How much memory is under test is not part of it:
 //! that is a field of its own in the timings key.
 
-use core::arch::x86_64::__cpuid;
-use core::ffi::c_void;
 use core::fmt;
 
-use uefi::system;
-use uefi::table::cfg::ConfigTableEntry;
+use ferrite_efi::sensors;
 
-use crate::smbios::Structures;
+use crate::smbios::{self, Structures};
 use crate::timings::fnv1a;
 
 /// What the machine's number was made from.
@@ -44,33 +41,19 @@ impl Machine {
     /// This machine, from the firmware if it has an identity worth the name.
     #[must_use]
     pub fn detect() -> Self {
-        let machine = smbios_table()
-            .and_then(|table| system_uuid(&table))
-            .map_or_else(cpu_brand, |uuid| Self { id: fnv1a(&uuid), source: Source::SmbiosUuid });
+        let uuid = smbios::with_table(system_uuid).flatten();
+        let machine = Self::identify(uuid, &sensors::fingerprint());
         log::info!("machine: {:016x}, from {}", machine.id, machine.source);
         machine
     }
-}
 
-/// An SMBIOS entry point's table: its address and length.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TableAt {
-    address: u64,
-    len: usize,
-}
-
-/// The structure table an entry point describes: the 64-bit `_SM3_` entry point or the 32-bit `_SM_` one.
-fn table_at(entry: &[u8]) -> Option<TableAt> {
-    let le32 = |at: usize| entry.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-    if entry.starts_with(b"_SM3_") {
-        let address = entry.get(0x10..0x18).map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))?;
-        return Some(TableAt { address, len: le32(0x0c)? as usize });
+    /// The firmware's UUID when it gave one, else the CPU's fingerprint.
+    fn identify(uuid: Option<[u8; 16]>, cpu: &[u8; 52]) -> Self {
+        uuid.map_or_else(
+            || Self { id: fnv1a(cpu), source: Source::CpuBrand },
+            |uuid| Self { id: fnv1a(&uuid), source: Source::SmbiosUuid },
+        )
     }
-    if entry.starts_with(b"_SM_") {
-        let len = entry.get(0x16..0x18).map(|b| u16::from_le_bytes([b[0], b[1]]))?;
-        return Some(TableAt { address: u64::from(le32(0x18)?), len: usize::from(len) });
-    }
-    None
 }
 
 /// The UUID of the System Information structure (type 1) in an SMBIOS structure table, unless it is
@@ -82,47 +65,11 @@ fn system_uuid(table: &[u8]) -> Option<[u8; 16]> {
     (!unset).then_some(uuid)
 }
 
-/// The SMBIOS structure table the firmware published, copied out of its memory.
-pub(crate) fn smbios_table() -> Option<alloc::vec::Vec<u8>> {
-    /// Larger than any real structure table, so a corrupt length cannot make this read far.
-    const MAX_TABLE: usize = 256 << 10;
-    let entry_of =
-        |guid| system::with_config_table(|entries| entries.iter().find(|e| e.guid == guid).map(|e| e.address));
-    let entry: *const c_void =
-        entry_of(ConfigTableEntry::SMBIOS3_GUID).or_else(|| entry_of(ConfigTableEntry::SMBIOS_GUID))?;
-    // SAFETY: the configuration table names the entry point, which is at least 0x1f bytes in either format.
-    let header = unsafe { core::slice::from_raw_parts(entry.cast::<u8>(), 0x20) };
-    let TableAt { address, len } = table_at(header)?;
-    if len == 0 || len > MAX_TABLE {
-        return None;
-    }
-    // SAFETY: the entry point gives this address and length for the structure table, which the
-    // firmware keeps in memory it does not hand out to anyone else.
-    let table = unsafe { core::slice::from_raw_parts(usize::try_from(address).ok()? as *const u8, len) };
-    Some(table.to_vec())
-}
-
-/// The CPU's brand string and signature, for a machine whose firmware has no UUID.
-fn cpu_brand() -> Machine {
-    let mut text = [0_u8; 48 + 4];
-    let max = __cpuid(0x8000_0000).eax;
-    if max >= 0x8000_0004 {
-        for (i, leaf) in (0x8000_0002..=0x8000_0004_u32).enumerate() {
-            let r = __cpuid(leaf);
-            for (j, reg) in [r.eax, r.ebx, r.ecx, r.edx].into_iter().enumerate() {
-                text[i * 16 + j * 4..][..4].copy_from_slice(&reg.to_le_bytes());
-            }
-        }
-    }
-    text[48..].copy_from_slice(&__cpuid(1).eax.to_le_bytes());
-    Machine { id: fnv1a(&text), source: Source::CpuBrand }
-}
-
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -174,18 +121,19 @@ mod tests {
     }
 
     #[test]
-    fn entry_points_give_the_table() {
-        let mut v3 = alloc::vec![0_u8; 0x18];
-        v3[..5].copy_from_slice(b"_SM3_");
-        v3[0x0c..0x10].copy_from_slice(&0x1234_u32.to_le_bytes());
-        v3[0x10..0x18].copy_from_slice(&0x7abc_d000_u64.to_le_bytes());
-        check!(table_at(&v3) == Some(TableAt { address: 0x7abc_d000, len: 0x1234 }));
-        let mut v2 = alloc::vec![0_u8; 0x1f];
-        v2[..4].copy_from_slice(b"_SM_");
-        v2[0x16..0x18].copy_from_slice(&0x0abc_u16.to_le_bytes());
-        v2[0x18..0x1c].copy_from_slice(&0x000f_0000_u32.to_le_bytes());
-        check!(table_at(&v2) == Some(TableAt { address: 0xf_0000, len: 0xabc }));
-        assert!(table_at(b"_DMI_").is_none());
-        check!(table_at(&v3[..0x10]).is_none());
+    fn the_cpu_identity_hashes_the_raw_brand_bytes_and_signature() {
+        // The input of the id that saved timings are keyed by; it must not change.
+        let brand = b"Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz";
+        let mut cpu = [0_u8; 52];
+        cpu[..brand.len()].copy_from_slice(brand);
+        cpu[48..].copy_from_slice(&0x0008_06ea_u32.to_le_bytes());
+        let machine = Machine::identify(None, &cpu);
+        check!(machine == Machine { id: 0xa131_497c_20d7_c3af, source: Source::CpuBrand });
+    }
+
+    #[test]
+    fn a_uuid_wins_over_the_cpu() {
+        let machine = Machine::identify(Some(UUID), &[0; 52]);
+        check!(machine == Machine { id: fnv1a(&UUID), source: Source::SmbiosUuid });
     }
 }

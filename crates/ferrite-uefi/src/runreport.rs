@@ -15,10 +15,9 @@ use ferrite_hal::Instant;
 
 use crate::dash::format::{self, hms};
 use crate::goal::Met;
-use crate::hardware::{Hardware, Layout, slot_name};
+use crate::hardware::{Hardware, Layout, ModuleLine};
 use crate::pace::Outlook;
 use crate::report::{FaultRecord, Snapshot, TestRecord};
-use crate::smbios::MemoryDevice;
 use crate::wall::Wall;
 
 pub mod store;
@@ -206,13 +205,13 @@ impl Report<'_> {
             p.row("Layout", caption);
         }
         for (i, device) in facts.memory.devices.iter().enumerate() {
-            p.row(if i == 0 { "Modules" } else { "" }, ModuleRow(device));
+            p.row(if i == 0 { "Modules" } else { "" }, ModuleLine(device));
         }
         let vitals = self.hardware.vitals();
         match vitals.mhz {
             Some(mhz) => p.row(
                 "Clock",
-                format_args!("{mhz} MHz ({})", if vitals.measured { "measured" } else { "base, not measured" }),
+                format_args!("{mhz} ({})", if vitals.measured { "measured" } else { "base, not measured" }),
             ),
             None => p.row("Clock", "unknown"),
         }
@@ -342,7 +341,7 @@ impl Report<'_> {
         let flipped = fault.expected ^ fault.actual;
         p.blank();
         match module_of(&self.hardware.facts.layout, address) {
-            Some(module) => p.line(format_args!("{number:>3}. {address:#018x}  in {}", Ascii(module))),
+            Some(module) => p.line(format_args!("{number:>3}. {address:#018x}  in {module}")),
             None => p.line(format_args!("{number:>3}. {address:#018x}")),
         }
         p.line(format_args!(
@@ -354,7 +353,7 @@ impl Report<'_> {
     }
 }
 
-/// Text from the firmware with whatever is not printable ASCII shown as `?`, so a report is ASCII.
+/// The CPUID brand string with whatever is not printable ASCII shown as `?`, so a report is ASCII.
 struct Ascii<'a>(&'a str);
 
 impl fmt::Display for Ascii<'_> {
@@ -363,39 +362,10 @@ impl fmt::Display for Ascii<'_> {
     }
 }
 
-/// A memory module as one row: its slot, size, technology, speeds and part.
-struct ModuleRow<'a>(&'a MemoryDevice);
-
-impl fmt::Display for ModuleRow<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let d = self.0;
-        write!(f, "{}: {}", Ascii(&slot_name(d)), d.size)?;
-        if !d.populated() {
-            return Ok(());
-        }
-        if let Some(kind) = d.kind.name() {
-            write!(f, " {kind}")?;
-        }
-        if let Some(speed) = d.speed {
-            write!(f, " {speed} MT/s")?;
-        }
-        if let Some(running) = d.configured_speed.filter(|running| Some(*running) != d.speed) {
-            write!(f, " (running {running} MT/s)")?;
-        }
-        if let Some(part) = &d.part_number {
-            write!(f, ", part {}", Ascii(part))?;
-        }
-        if let Some(maker) = &d.manufacturer {
-            write!(f, " by {}", Ascii(maker))?;
-        }
-        Ok(())
-    }
-}
-
 /// The module whose address band holds `address`, when the firmware gave each its own band.
 fn module_of(layout: &Layout, address: u64) -> Option<&str> {
     let Layout::Bands(bands) = layout else { return None };
-    bands.iter().find(|b| (b.extent.start().get()..b.extent.end()).contains(&address)).map(|b| b.label.as_str())
+    bands.iter().find(|b| b.extent.contains(address)).map(|b| b.label.as_str())
 }
 
 /// One table of finished tests.

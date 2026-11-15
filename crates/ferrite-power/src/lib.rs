@@ -23,7 +23,6 @@ pub mod intel;
 pub mod limits;
 pub mod msr;
 pub mod rapl;
-pub mod set;
 pub mod telemetry;
 pub mod units;
 

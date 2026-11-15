@@ -2,21 +2,24 @@
 //! task that runs a job under MP Services.
 
 use ferrite_hal::Clock;
-use ferrite_mem::Tier;
 use ferrite_mem::crew::{Job, Platform, WideGuard};
+use ferrite_mem::{Caps, Tier};
 
 use crate::cpu::{FpuControl, VectorState, VectorSupport};
 use crate::mp::{ApTask, StackUse};
 
+/// The tiers that run on the calling core as its CR4 and XCR0 are now.
+#[must_use]
+pub fn usable_caps() -> Caps {
+    let support = VectorSupport::probe();
+    // SAFETY: the probe reads CPUID and XCR0 as they are now, and the `_usable` checks need both.
+    unsafe { Caps::new(support.avx2_usable(), support.avx512f_usable()) }
+}
+
 /// Whether `tier` runs on the calling core as its CR4 and XCR0 are now.
 #[must_use]
 pub fn tier_usable(tier: Tier) -> bool {
-    let support = VectorSupport::probe();
-    match tier {
-        Tier::Scalar | Tier::RepString | Tier::Sse2 => true,
-        Tier::Avx2 => support.avx2_usable(),
-        Tier::Avx512 => support.avx512f_usable(),
-    }
+    usable_caps().has(tier)
 }
 
 impl WideGuard for VectorState {

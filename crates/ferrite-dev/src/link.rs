@@ -10,7 +10,8 @@ pub const DEFAULT_IN_SIZE: usize = 16 * 1024;
 pub const DEFAULT_OUT_TRANSFERS: usize = 8;
 pub const DEFAULT_OUT_SIZE: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, strum::IntoStaticStr)]
+#[strum(serialize_all = "lowercase")]
 pub enum Transport {
     /// The device through usbfs, with many large transfers in flight
     #[default]
@@ -19,18 +20,9 @@ pub enum Transport {
     Tty,
 }
 
-impl Transport {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Usb => "usb",
-            Self::Tty => "tty",
-        }
-    }
-}
-
 impl fmt::Display for Transport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad(self.name())
+        f.pad(<&str>::from(self))
     }
 }
 

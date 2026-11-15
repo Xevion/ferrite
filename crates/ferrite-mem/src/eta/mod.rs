@@ -55,7 +55,8 @@ const GATE_SLACK: Duration = Duration::from_secs(1);
 const MIN_SAMPLE: Duration = Duration::from_millis(500);
 
 /// What a prediction rests on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
 pub enum Confidence {
     /// Extrapolated from this pass alone, or contradicted by it: show it as approximate.
     Estimated,

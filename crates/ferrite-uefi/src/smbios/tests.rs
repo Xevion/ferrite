@@ -346,3 +346,19 @@ fn a_table_cannot_grow_the_lists_past_the_cap() {
     let many: Vec<Vec<u8>> = (0..MAX_ENTRIES + 40).map(|i| lpddr3(u16::try_from(i).unwrap(), "x")).collect();
     assert!(Memory::parse(&table(&many)).devices.len() == MAX_ENTRIES);
 }
+
+#[test]
+fn entry_points_give_the_table() {
+    let mut v3 = vec![0_u8; 0x18];
+    v3[..5].copy_from_slice(b"_SM3_");
+    v3[0x0c..0x10].copy_from_slice(&0x1234_u32.to_le_bytes());
+    v3[0x10..0x18].copy_from_slice(&0x7abc_d000_u64.to_le_bytes());
+    check!(table_at(&v3) == Some(TableAt { address: 0x7abc_d000, len: 0x1234 }));
+    let mut v2 = vec![0_u8; 0x1f];
+    v2[..4].copy_from_slice(b"_SM_");
+    v2[0x16..0x18].copy_from_slice(&0x0abc_u16.to_le_bytes());
+    v2[0x18..0x1c].copy_from_slice(&0x000f_0000_u32.to_le_bytes());
+    check!(table_at(&v2) == Some(TableAt { address: 0xf_0000, len: 0xabc }));
+    assert!(table_at(b"_DMI_").is_none());
+    check!(table_at(&v3[..0x10]).is_none());
+}

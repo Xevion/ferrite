@@ -5,6 +5,7 @@ use std::fmt;
 use std::time::Duration;
 
 use ferrite_wire::bench::{SinkStats, percentile};
+use strum::VariantArray as _;
 
 use super::Phase;
 
@@ -172,8 +173,8 @@ fn echo_line(e: &EchoResult) -> String {
 /// The phase and text of a target summary line such as `bench echo: chunks=...`, wherever in the
 /// line the logger put it.
 pub fn target_summary(line: &str) -> Option<(Phase, &str)> {
-    Phase::ALL.into_iter().find_map(|phase| {
-        let key = format!("bench {}:", phase.name());
+    Phase::VARIANTS.iter().copied().find_map(|phase| {
+        let key = format!("bench {}:", <&str>::from(phase));
         let at = line.find(&key)?;
         Some((phase, line[at + key.len()..].trim()))
     })

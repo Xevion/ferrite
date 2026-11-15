@@ -10,16 +10,16 @@ pub trait Flag: Copy + strum::VariantArray + Into<&'static str> + 'static {
 }
 
 /// Implements [`Flag`] for fieldless enums by declaration order.
+#[macro_export]
 macro_rules! flag {
     ($($t:ty),* $(,)?) => {
-        $(impl $crate::set::Flag for $t {
+        $(impl $crate::Flag for $t {
             fn index(self) -> u32 {
                 self as u32
             }
         })*
     };
 }
-pub(crate) use flag;
 
 pub struct Set<T> {
     bits: u32,
@@ -28,6 +28,7 @@ pub struct Set<T> {
 
 impl<T: Flag> Set<T> {
     pub const EMPTY: Self = Self { bits: 0, of: PhantomData };
+    pub const ALL: Self = Self { bits: u32::MAX >> (32 - T::VARIANTS.len()), of: PhantomData };
 
     #[must_use]
     pub fn has(self, flag: T) -> bool {

@@ -11,6 +11,7 @@ extern crate std;
 
 mod addr;
 mod reg;
+mod set;
 mod time;
 mod wall;
 
@@ -20,6 +21,7 @@ use core::time::Duration;
 
 pub use addr::{BusAddr, BusAddr32, PciAddress, PhysAddr};
 pub use reg::{DmaPtrReg, MmioExt, ReadOnly, ReadWrite, Readable, Reg, RegValue, Rw1c, Rw1cWrite};
+pub use set::{Flag, Set};
 pub use time::{Instant, PageCount};
 pub use wall::{Correction, MAX_RATE_PPM, Offset, UnixTime, WallClock};
 

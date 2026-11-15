@@ -1,6 +1,9 @@
 //! The SMBIOS structure table, and the memory structures in it: physical memory arrays (type 16),
 //! memory devices (17) and the address ranges mapped to them (19 and 20).
 //!
+//! [`with_table`] finds the table through the firmware's configuration table and lends it in place,
+//! so every reader parses the one copy the firmware keeps.
+//!
 //! The table is firmware's data, so nothing in it is trusted: [`Structures`] stops at the first
 //! structure that does not fit in the bytes left, every field is read with a bounds check, and a
 //! field the structure is too short to have reads as absent. A table that lies gives fewer
@@ -12,10 +15,13 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ffi::c_void;
 use core::fmt;
 use core::num::{NonZeroU32, NonZeroU64};
 
 use ferrite_hal::PhysAddr;
+use uefi::system;
+use uefi::table::cfg::ConfigTableEntry;
 
 use crate::memmap::Extent;
 
@@ -30,9 +36,62 @@ const MAX_ENTRIES: usize = 512;
 /// The longest string kept; firmware pads some fields to a fixed width.
 const MAX_STRING: usize = 64;
 
+/// Larger than any real structure table, so a corrupt length cannot make a read go far.
+const MAX_TABLE: usize = 256 << 10;
+
 /// A structure's handle: the number other structures refer to it by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Handle(pub u16);
+
+fn le_u16(bytes: &[u8], at: usize) -> Option<u16> {
+    bytes.get(at..at.checked_add(2)?)?.try_into().ok().map(u16::from_le_bytes)
+}
+
+fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    bytes.get(at..at.checked_add(4)?)?.try_into().ok().map(u32::from_le_bytes)
+}
+
+fn le_u64(bytes: &[u8], at: usize) -> Option<u64> {
+    bytes.get(at..at.checked_add(8)?)?.try_into().ok().map(u64::from_le_bytes)
+}
+
+/// An SMBIOS entry point's structure table: its address and length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TableAt {
+    address: u64,
+    len: usize,
+}
+
+/// The structure table an entry point describes: the 64-bit `_SM3_` entry point or the 32-bit `_SM_` one.
+fn table_at(entry: &[u8]) -> Option<TableAt> {
+    if entry.starts_with(b"_SM3_") {
+        return Some(TableAt { address: le_u64(entry, 0x10)?, len: le_u32(entry, 0x0c)? as usize });
+    }
+    if entry.starts_with(b"_SM_") {
+        return Some(TableAt { address: u64::from(le_u32(entry, 0x18)?), len: usize::from(le_u16(entry, 0x16)?) });
+    }
+    None
+}
+
+/// Runs `f` on the structure table the firmware published, read where the firmware keeps it; `None`
+/// when it published none.
+pub fn with_table<R>(f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+    let entry_of =
+        |guid| system::with_config_table(|entries| entries.iter().find(|e| e.guid == guid).map(|e| e.address));
+    let entry: *const c_void =
+        entry_of(ConfigTableEntry::SMBIOS3_GUID).or_else(|| entry_of(ConfigTableEntry::SMBIOS_GUID))?;
+    // SAFETY: the configuration table names the entry point, which is at least 0x1f bytes in either format.
+    let header = unsafe { core::slice::from_raw_parts(entry.cast::<u8>(), 0x20) };
+    let TableAt { address, len } = table_at(header)?;
+    if len == 0 || len > MAX_TABLE {
+        return None;
+    }
+    // SAFETY: the entry point gives this address and length for the structure table, which the
+    // firmware keeps in memory it does not hand out to anyone else, and this app never exits boot
+    // services, so it stays in place for as long as `f` runs.
+    let table = unsafe { core::slice::from_raw_parts(usize::try_from(address).ok()? as *const u8, len) };
+    Some(f(table))
+}
 
 /// One structure of the table: its formatted area (header included) and its string set.
 #[derive(Clone, Copy, Debug)]
@@ -53,17 +112,17 @@ impl Structure<'_> {
 
     #[must_use]
     pub fn u16_at(&self, offset: usize) -> Option<u16> {
-        self.formatted.get(offset..offset.checked_add(2)?)?.try_into().ok().map(u16::from_le_bytes)
+        le_u16(self.formatted, offset)
     }
 
     #[must_use]
     pub fn u32_at(&self, offset: usize) -> Option<u32> {
-        self.formatted.get(offset..offset.checked_add(4)?)?.try_into().ok().map(u32::from_le_bytes)
+        le_u32(self.formatted, offset)
     }
 
     #[must_use]
     pub fn u64_at(&self, offset: usize) -> Option<u64> {
-        self.formatted.get(offset..offset.checked_add(8)?)?.try_into().ok().map(u64::from_le_bytes)
+        le_u64(self.formatted, offset)
     }
 
     /// `len` bytes of the formatted area from `offset`; `None` when the structure is shorter.

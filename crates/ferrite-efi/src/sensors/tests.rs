@@ -25,6 +25,33 @@ fn the_brand_string_is_trimmed_and_cut_at_the_nul() {
     check!(brand_string(&[[0; 4]; 3]) == "");
 }
 
+/// The registers of leaves 0x80000002 to 0x80000004 for a brand string, as CPUID returns them.
+fn brand_leaves_of(text: &[u8]) -> [[u32; 4]; 3] {
+    let mut bytes = [0_u8; 48];
+    bytes[..text.len()].copy_from_slice(text);
+    let mut leaves = [[0_u32; 4]; 3];
+    for (i, word) in bytes.as_chunks::<4>().0.iter().enumerate() {
+        leaves[i / 4][i % 4] = u32::from_le_bytes(*word);
+    }
+    leaves
+}
+
+#[test]
+fn the_fingerprint_is_the_raw_brand_bytes_then_leaf_1_eax() {
+    let brand = b"Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz";
+    let mut want = [0_u8; 52];
+    want[..brand.len()].copy_from_slice(brand);
+    want[48..].copy_from_slice(&[0xea, 0x06, 0x08, 0x00]);
+    check!(fingerprint_of(&brand_leaves_of(brand), 0x0008_06ea) == want);
+}
+
+#[test]
+fn a_processor_without_a_brand_string_fingerprints_zeros_and_its_signature() {
+    let mut want = [0_u8; 52];
+    want[48..].copy_from_slice(&0x0008_06eau32.to_le_bytes());
+    check!(fingerprint_of(&[[0; 4]; 3], 0x0008_06ea) == want);
+}
+
 #[rstest]
 #[case::kaby_lake_r(Vendor::Intel, intel(0x8e), true, true, Ok(Plan::IntelDigital { package: true }))]
 #[case::no_package_sensor(Vendor::Intel, intel(0x3c), true, false, Ok(Plan::IntelDigital { package: false }))]

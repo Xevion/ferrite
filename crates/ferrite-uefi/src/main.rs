@@ -5,7 +5,7 @@ use core::time::Duration;
 
 use ferrite_efi::bootlog::{BootLog, Echo};
 use ferrite_efi::cpu::{FpuControl, VectorState, VectorSupport};
-use ferrite_efi::{logger, session};
+use ferrite_efi::{crew, logger, session};
 use ferrite_mem::Caps;
 #[cfg(ferrite_app)]
 use ferrite_rt as _;
@@ -35,11 +35,7 @@ fn main() -> Status {
         .inspect_err(|e| log::warn!("cpu: {e}; sweeping with the baseline tiers"))
         .ok();
     let caps = match vector {
-        Some(_) => {
-            let support = VectorSupport::probe();
-            // SAFETY: the probe reads CPUID and XCR0 as they are now, after enabling.
-            unsafe { Caps::new(support.avx2_usable(), support.avx512f_usable()) }
-        },
+        Some(_) => crew::usable_caps(),
         // Without our state the wide tiers would run unguarded, so they stay off.
         None => Caps::BASELINE,
     };

@@ -4,6 +4,7 @@ use std::vec::Vec;
 
 use assert2::{assert, check};
 use ferrite_mem::{CpuAddr, Fault};
+use ferrite_power::units::Mhz;
 use rstest::rstest;
 use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
 
@@ -434,7 +435,7 @@ fn laptop() -> Hardware {
     }
     let hardware = Hardware::new(Facts::new(cpu, memory));
     hardware.set_vitals(Vitals {
-        mhz: Some(3400),
+        mhz: Some(Mhz(3400)),
         measured: true,
         celsius: Some(58),
         source: Some(TempSource::IntelPackage),
@@ -466,7 +467,7 @@ fn the_clock_and_temperature_redraw_the_system_section_only_when_a_shown_figure_
 
     // The same figures from a reading that rounds alike.
     hardware.set_vitals(Vitals::of(ferrite_efi::sensors::Reading {
-        frequency: Some(ferrite_efi::sensors::Frequency { mhz: 3_398, measured: true }),
+        frequency: Some(ferrite_efi::sensors::Frequency { mhz: Mhz(3_398), measured: true }),
         temperature: Some(ferrite_efi::sensors::Temperature {
             celsius: 58,
             source: ferrite_efi::sensors::TempSource::IntelPackage,
@@ -479,7 +480,7 @@ fn the_clock_and_temperature_redraw_the_system_section_only_when_a_shown_figure_
     hardware.set_vitals(Vitals { celsius: Some(59), ..shown });
     let rects = draw(&mut dash);
     check!(!rects.is_empty() && rects.iter().all(|r| l.system.body.intersect(*r) == *r), "{rects:?}");
-    hardware.set_vitals(Vitals { mhz: Some(3410), ..shown });
+    hardware.set_vitals(Vitals { mhz: Some(Mhz(3410)), ..shown });
     let rects = draw(&mut dash);
     check!(!rects.is_empty() && rects.iter().all(|r| l.system.body.intersect(*r) == *r), "{rects:?}");
 }

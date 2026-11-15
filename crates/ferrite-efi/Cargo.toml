@@ -27,6 +27,7 @@ ferrite-wire.workspace = true
 ferrite-xhci.workspace = true
 log.workspace = true
 snafu.workspace = true
+strum.workspace = true
 uefi.workspace = true
 
 [dev-dependencies]

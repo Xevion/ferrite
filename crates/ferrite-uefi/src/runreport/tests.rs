@@ -13,6 +13,7 @@ use ferrite_mem::analysis::Classification;
 use ferrite_mem::suite::{Mode, Preset};
 use ferrite_mem::{CpuAddr, Fault};
 use ferrite_power::cpuid::{Signature, Vendor};
+use ferrite_power::units::Mhz;
 use rstest::rstest;
 
 use super::*;
@@ -92,7 +93,7 @@ fn hardware(ranges: bool) -> Hardware {
     let hardware = Hardware::new(Facts::new(cpu, memory));
     hardware.set_machine(Machine { id: 0xfeed_beef_0123_4567, source: Source::SmbiosUuid });
     let reading = |celsius| Vitals {
-        mhz: Some(1900),
+        mhz: Some(Mhz(1900)),
         measured: true,
         celsius: Some(celsius),
         source: Some(TempSource::IntelPackage),
@@ -263,8 +264,8 @@ Signature     GenuineIntel family 6 model 0x8e stepping 10
 Memory        2 x 8 GiB DDR4-2666
 ECC           single-bit ECC (the firmware's claim, not verified)
 Layout        2 modules, separate ranges
-Modules       ChannelA-DIMM0: 8 GiB DDR4 3200 MT/s (running 2666 MT/s), part M471A1K43CB1-CTD by Samsung
-              ChannelB-DIMM0: 8 GiB DDR4 3200 MT/s (running 2666 MT/s), part M471A1K43CB1-CTD by Samsung
+Modules       ChannelA-DIMM0: 8 GiB DDR4 DIMM, 3200 MT/s, running 2666 MT/s, 1 rank, 64 of 64 bits, part M471A1K43CB1-CTD by Samsung
+              ChannelB-DIMM0: 8 GiB DDR4 DIMM, 3200 MT/s, running 2666 MT/s, 1 rank, 64 of 64 bits, part M471A1K43CB1-CTD by Samsung
 Clock         1900 MHz (measured)
 Temperature   63 C at the last reading, 74 C the highest of the run
               read from the Intel package thermal status
@@ -334,8 +335,8 @@ Signature     GenuineIntel family 6 model 0x8e stepping 10
 Memory        2 x 8 GiB DDR4-2666
 ECC           single-bit ECC (the firmware's claim, not verified)
 Layout        2 modules, separate ranges
-Modules       ChannelA-DIMM0: 8 GiB DDR4 3200 MT/s (running 2666 MT/s), part M471A1K43CB1-CTD by Samsung
-              ChannelB-DIMM0: 8 GiB DDR4 3200 MT/s (running 2666 MT/s), part M471A1K43CB1-CTD by Samsung
+Modules       ChannelA-DIMM0: 8 GiB DDR4 DIMM, 3200 MT/s, running 2666 MT/s, 1 rank, 64 of 64 bits, part M471A1K43CB1-CTD by Samsung
+              ChannelB-DIMM0: 8 GiB DDR4 DIMM, 3200 MT/s, running 2666 MT/s, 1 rank, 64 of 64 bits, part M471A1K43CB1-CTD by Samsung
 Clock         1900 MHz (measured)
 Temperature   63 C at the last reading, 74 C the highest of the run
               read from the Intel package thermal status
@@ -451,14 +452,12 @@ fn a_clock_without_a_source_gives_no_time_of_day() {
 }
 
 #[test]
-fn what_the_firmware_spells_outside_ascii_is_shown_as_a_question_mark() {
+fn a_brand_string_outside_ascii_is_shown_with_question_marks() {
     let mut run = passing();
     run.hardware.facts.cpu.brand = "Intel\u{ae} Core\u{2122} i7".into();
-    run.hardware.facts.memory.devices[0].part_number = Some("M4\u{e9}1".into());
     let text = run.render(Why::Quit);
     assert!(text.is_ascii());
     check!(text.contains("CPU           Intel? Core? i7\n"));
-    check!(text.contains("part M4?1 by Samsung"));
 }
 
 #[rstest]

@@ -8,7 +8,7 @@
 use bitbybit::bitfield;
 
 use crate::msr::{Msr, register};
-use crate::set::{Set, flag};
+use ferrite_hal::{Set, flag};
 
 /// The Haswell-generation register.
 pub const HASWELL_LIMIT_REASONS: Msr<HaswellReasons> = Msr::at(0x690);

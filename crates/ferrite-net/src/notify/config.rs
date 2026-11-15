@@ -6,6 +6,7 @@ use alloc::string::String;
 use core::fmt;
 use core::str::FromStr as _;
 
+use ferrite_hal::Set;
 use smoltcp::wire::Ipv4Address;
 
 const DEFAULT_PORT: u16 = 80;
@@ -13,7 +14,8 @@ const NAME_MAX: usize = 253;
 const LABEL_MAX: usize = 63;
 
 /// Something worth telling the user about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr, strum::VariantArray, strum::Display)]
+#[strum(serialize_all = "lowercase")]
 pub enum Event {
     /// A pass over every test finished.
     Pass,
@@ -23,57 +25,34 @@ pub enum Event {
     End,
 }
 
-impl Event {
-    pub const ALL: [Self; 3] = [Self::Pass, Self::Fault, Self::End];
-
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Pass => "pass",
-            Self::Fault => "fault",
-            Self::End => "end",
-        }
-    }
-
-    const fn bit(self) -> u8 {
-        1 << self as u8
-    }
-}
-
-impl fmt::Display for Event {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
+ferrite_hal::flag!(Event);
 
 /// The events a user asked to hear about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Events(u8);
+pub struct Events(Set<Event>);
 
 impl Events {
-    pub const ALL: Self = Self(Event::Pass.bit() | Event::Fault.bit() | Event::End.bit());
+    pub const ALL: Self = Self(Set::ALL);
 
     /// Exactly `events`.
     #[must_use]
     pub fn of(events: &[Event]) -> Self {
-        Self(events.iter().fold(0, |bits, event| bits | event.bit()))
+        Self(events.iter().copied().collect())
     }
 
     #[must_use]
-    pub const fn contains(self, event: Event) -> bool {
-        self.0 & event.bit() != 0
+    pub fn contains(self, event: Event) -> bool {
+        self.0.has(event)
     }
 }
 
+/// The names separated by commas.
 impl fmt::Display for Events {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut first = true;
-        for event in Event::ALL.into_iter().filter(|event| self.contains(*event)) {
-            if !first {
-                f.write_str(",")?;
-            }
-            first = false;
-            f.write_str(event.name())?;
+        let mut names = self.0.iter().map(<&str>::from);
+        if let Some(first) = names.next() {
+            f.write_str(first)?;
+            names.try_for_each(|name| write!(f, ",{name}"))?;
         }
         Ok(())
     }

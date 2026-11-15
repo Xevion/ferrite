@@ -24,7 +24,7 @@ use ferrite_power::amd::tctl_celsius;
 use ferrite_power::cpuid::{Feature, Features, Signature, Vendor, read_features};
 use ferrite_power::intel;
 use ferrite_power::msr::MsrIo;
-use ferrite_power::units::effective_mhz;
+use ferrite_power::units::{Mhz, effective_mhz};
 use uefi::boot;
 use uefi::proto::pci::root_bridge::PciRootBridgeIo;
 
@@ -56,19 +56,41 @@ impl Identity {
     #[must_use]
     pub fn read() -> Self {
         let leaf0 = __cpuid(0);
-        let mut leaves = [[0_u32; 4]; 3];
-        if __cpuid(0x8000_0000).eax >= 0x8000_0004 {
-            for (leaf, regs) in (0x8000_0002..).zip(&mut leaves) {
-                let r = __cpuid(leaf);
-                *regs = [r.eax, r.ebx, r.ecx, r.edx];
-            }
-        }
         Self {
             vendor: Vendor::from_registers(leaf0.ebx, leaf0.ecx, leaf0.edx),
             signature: Signature::from_eax(__cpuid(1).eax),
-            brand: brand_string(&leaves),
+            brand: brand_string(&brand_leaves()),
         }
     }
+}
+
+/// The registers of leaves 0x80000002 to 0x80000004, all zero when the processor has no brand string.
+fn brand_leaves() -> [[u32; 4]; 3] {
+    let mut leaves = [[0_u32; 4]; 3];
+    if __cpuid(0x8000_0000).eax >= 0x8000_0004 {
+        for (leaf, regs) in (0x8000_0002..).zip(&mut leaves) {
+            let r = __cpuid(leaf);
+            *regs = [r.eax, r.ebx, r.ecx, r.edx];
+        }
+    }
+    leaves
+}
+
+/// The raw identifying bytes of the processor, untrimmed.
+///
+/// The 48 bytes of the brand string leaves (zeros without them), then leaf 1 EAX, little-endian.
+/// Machine ids are hashes of these bytes, so their layout must not change.
+#[must_use]
+pub fn fingerprint() -> [u8; 52] {
+    fingerprint_of(&brand_leaves(), __cpuid(1).eax)
+}
+
+fn fingerprint_of(leaves: &[[u32; 4]; 3], leaf1_eax: u32) -> [u8; 52] {
+    let mut out = [0_u8; 52];
+    for (chunk, reg) in out.as_chunks_mut::<4>().0.iter_mut().zip(leaves.iter().flatten().chain([&leaf1_eax])) {
+        chunk.copy_from_slice(&reg.to_le_bytes());
+    }
+    out
 }
 
 impl fmt::Display for Identity {
@@ -114,13 +136,14 @@ fn plan(vendor: Vendor, sig: Signature, features: Features) -> Result<Plan, &'st
 /// A clock figure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Frequency {
-    pub mhz: u32,
+    pub mhz: Mhz,
     /// Measured over an interval, rather than the base frequency CPUID states.
     pub measured: bool,
 }
 
 /// Where a temperature was read from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
 pub enum TempSource {
     IntelPackage,
     IntelCore,
@@ -298,7 +321,7 @@ impl Sensors {
             return self.reading;
         }
         self.last_sample = Some(now);
-        let base = self.base_mhz.map(|mhz| Frequency { mhz, measured: false });
+        let base = self.base_mhz.map(|mhz| Frequency { mhz: Mhz(mhz), measured: false });
         self.reading.frequency = self.measure_frequency().or(base);
         self.reading.temperature = self.read_temperature();
         self.reading
@@ -313,7 +336,7 @@ impl Sensors {
             Counters { aperf: self.msrs.read(intel::IA32_APERF).ok()?, mperf: self.msrs.read(intel::IA32_MPERF).ok()? };
         let before = self.counters.replace(now)?;
         effective_mhz(self.tsc_hz, now.aperf.wrapping_sub(before.aperf), now.mperf.wrapping_sub(before.mperf))
-            .map(|mhz| Frequency { mhz: mhz.0, measured: true })
+            .map(|mhz| Frequency { mhz, measured: true })
     }
 
     fn read_temperature(&mut self) -> Option<Temperature> {

@@ -4,7 +4,7 @@ use core::fmt;
 
 use bitbybit::{bitenum, bitfield};
 
-use crate::set::Set;
+use ferrite_hal::Set;
 
 /// One CPUID result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -243,7 +243,7 @@ pub enum Feature {
     InvariantTsc,
 }
 
-crate::set::flag!(Feature);
+ferrite_hal::flag!(Feature);
 
 /// The set of [`Feature`]s CPUID reports.
 pub type Features = Set<Feature>;

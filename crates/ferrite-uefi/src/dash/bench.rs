@@ -35,6 +35,7 @@ use crate::pace::Outlook;
 use crate::pace::TestStats;
 use crate::report::{CpuInfo, History, PassRecord, TestRecord};
 use crate::sweep::Coverage;
+use crate::timings::fnv1a;
 use ferrite_net::{Link, MacAddr, Medium, PortStats, PortStatus, ServiceCounters};
 
 pub(super) use crate::testing::allocations;
@@ -165,10 +166,6 @@ fn net() -> NetStatus {
         services: ServiceCounters::default(),
     });
     net
-}
-
-fn hash(pixels: &[u8]) -> u64 {
-    pixels.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
 
 fn ms(d: Elapsed) -> f64 {
@@ -368,7 +365,7 @@ fn profile_a_sweep() {
         prev.extend_from_slice(dash.canvas.bgra());
 
         timed_render(&mut twin, &frame, &mut prof);
-        let (a, b) = (hash(dash.canvas.bgra()), hash(twin.canvas.bgra()));
+        let (a, b) = (fnv1a(dash.canvas.bgra()), fnv1a(twin.canvas.bgra()));
         check!(a == b, "frame {i}: the profiled render drew something else");
         check!(dash.output().1 == twin.output().1, "frame {i}: the profiled render pushes other rects");
         writeln!(hashes, "{i} {a:016x}").ok();

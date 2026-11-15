@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use clap::ValueEnum;
 use ferrite_wire::bench::Marker;
 use snafu::{ResultExt, Snafu};
+use strum::VariantArray as _;
 
 use self::peer::Peer;
 pub use self::report::Report;
@@ -29,7 +30,8 @@ const PHASE_WAIT: Duration = Duration::from_secs(30);
 const MICRO_WAIT: Duration = Duration::from_secs(30);
 const SUMMARY_WAIT: Duration = Duration::from_secs(10);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum, strum::IntoStaticStr, strum::VariantArray)]
+#[strum(serialize_all = "lowercase")]
 pub enum Phase {
     Source,
     Sink,
@@ -37,22 +39,9 @@ pub enum Phase {
     Micro,
 }
 
-impl Phase {
-    pub const ALL: [Self; 4] = [Self::Source, Self::Sink, Self::Echo, Self::Micro];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Source => "source",
-            Self::Sink => "sink",
-            Self::Echo => "echo",
-            Self::Micro => "micro",
-        }
-    }
-}
-
 impl std::fmt::Display for Phase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.pad(self.name())
+        f.pad(<&str>::from(self))
     }
 }
 
@@ -203,7 +192,7 @@ fn play<L: Read + Write>(
         return Err(unexpected("BENCH micro", marker));
     }
     peer.await_marker(Marker::Done, Instant::now() + MICRO_WAIT)?;
-    peer.collect_summaries(&Phase::ALL, Instant::now() + SUMMARY_WAIT)
+    peer.collect_summaries(Phase::VARIANTS, Instant::now() + SUMMARY_WAIT)
 }
 
 fn unexpected(expected: &str, got: Marker) -> BenchError {
@@ -260,7 +249,7 @@ mod tests {
         let mut report = Report::default();
         let outcome = session(
             &mut Peer::new(&mut link, &mut emitter, &stop),
-            &Phase::ALL,
+            Phase::VARIANTS,
             Instant::now() + Duration::from_secs(5),
             &mut report,
         );
@@ -306,7 +295,7 @@ mod tests {
         let stop = AtomicBool::new(false);
         let mut report = Report::default();
         let mut peer = Peer::new(&mut link, &mut emitter, &stop).resend_ready_every(Duration::from_millis(20));
-        let outcome = session(&mut peer, &Phase::ALL, Instant::now() + Duration::from_millis(100), &mut report);
+        let outcome = session(&mut peer, Phase::VARIANTS, Instant::now() + Duration::from_millis(100), &mut report);
         assert!(let Err(BenchError::Timeout { .. }) = outcome);
         check!(!report.started);
         check!(ready_count(&link.written) >= 3);
@@ -320,7 +309,7 @@ mod tests {
         let mut report = Report::default();
         let outcome = session(
             &mut Peer::new(&mut link, &mut emitter, &stop),
-            &Phase::ALL,
+            Phase::VARIANTS,
             Instant::now() + Duration::from_secs(1),
             &mut report,
         );
@@ -338,7 +327,7 @@ mod tests {
         let mut report = Report::default();
         let outcome = session(
             &mut Peer::new(&mut link, &mut emitter, &stop),
-            &Phase::ALL,
+            Phase::VARIANTS,
             Instant::now() + Duration::from_secs(1),
             &mut report,
         );

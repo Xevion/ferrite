@@ -12,8 +12,8 @@ use crate::intel::{self, MiscEnable, PlatformInfo, TurboRatioLimit};
 use crate::limits::Layout;
 use crate::msr::{Fault, MsrIo};
 use crate::rapl::{self, Domain, Flavor, PackageLimits, Units};
-use crate::set::Set;
 use crate::units::Mhz;
+use ferrite_hal::Set;
 
 /// Why the clock cannot be asked for here.
 #[derive(Debug, Snafu, Clone, Copy, PartialEq, Eq)]

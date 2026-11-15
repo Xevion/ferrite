@@ -75,10 +75,21 @@ impl Extent {
         self.start
     }
 
+    #[must_use]
+    pub const fn bytes(self) -> u64 {
+        self.bytes
+    }
+
     /// One past the last byte.
     #[must_use]
     pub const fn end(self) -> u64 {
         self.start.get().saturating_add(self.bytes)
+    }
+
+    /// Whether the byte at physical address `address` is in the run.
+    #[must_use]
+    pub const fn contains(self, address: u64) -> bool {
+        address >= self.start.get() && address < self.end()
     }
 }
 

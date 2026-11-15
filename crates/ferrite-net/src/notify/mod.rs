@@ -111,7 +111,7 @@ impl Notifier {
     /// there was none.
     pub(crate) fn finished(&mut self, result: Result<u16, Failure>, now: Instant) {
         let event = self.sending.take();
-        let event = event.map_or("a", Event::name);
+        let event = event.map_or("a", <&str>::from);
         let (outcome, failure) = match result {
             Ok(status) => match verdict(status) {
                 Verdict::Delivered => (Outcome::Delivered, None),

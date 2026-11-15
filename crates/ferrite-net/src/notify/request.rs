@@ -52,7 +52,7 @@ fn body(format: Format, notification: &Notification) -> String {
         Format::Json => {
             let mut out = String::from("{\"event\":");
             // Writing into a String cannot fail.
-            let _ = json_string(&mut out, notification.event.name());
+            let _ = json_string(&mut out, <&str>::from(notification.event));
             out.push_str(",\"title\":");
             let _ = json_string(&mut out, &notification.title);
             out.push_str(",\"message\":");

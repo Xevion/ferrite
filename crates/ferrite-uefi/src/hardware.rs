@@ -13,10 +13,11 @@ use core::cell::Cell;
 use core::fmt::{self, Write as _};
 
 use ferrite_efi::sensors::{Identity, Reading, TempSource};
+use ferrite_power::units::Mhz;
 
-use crate::machine::{self, Machine};
+use crate::machine::Machine;
 use crate::memmap::Extent;
-use crate::smbios::{ErrorCorrection, Memory, MemoryDevice, Size};
+use crate::smbios::{self, ErrorCorrection, Memory, MemoryDevice, Size};
 
 /// One module's place in physical memory, labelled by its slot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,11 +104,11 @@ impl Facts {
     /// the ECC claim.
     #[must_use]
     pub fn detect(cpu: Identity) -> Self {
-        let table = machine::smbios_table();
-        if table.is_none() {
+        let memory = smbios::with_table(Memory::parse);
+        if memory.is_none() {
             log::info!("memory: the firmware publishes no SMBIOS table");
         }
-        let facts = Self::new(cpu, table.as_deref().map_or_default(Memory::parse));
+        let facts = Self::new(cpu, memory.unwrap_or_default());
         facts.log_memory();
         facts
     }
@@ -132,7 +133,7 @@ impl Facts {
                         "memory: {} at {:#x}, {} bytes",
                         band.label,
                         band.extent.start().get(),
-                        bytes_of(band.extent)
+                        band.extent.bytes()
                     );
                 }
             },
@@ -187,7 +188,7 @@ pub fn modules_text(memory: &Memory) -> String {
 /// The technology and speed of a module: `LPDDR3-2133`, or just the technology without a speed.
 fn module_kind(device: &MemoryDevice) -> String {
     let mut out = String::new();
-    if !matches!(device.kind, crate::smbios::MemoryKind::Unspecified | crate::smbios::MemoryKind::Other) {
+    if !matches!(device.kind, smbios::MemoryKind::Unspecified | smbios::MemoryKind::Other) {
         let _ = write!(out, "{}", device.kind);
     }
     if let Some(rate) = device.configured_speed.or(device.speed) {
@@ -196,12 +197,9 @@ fn module_kind(device: &MemoryDevice) -> String {
     out
 }
 
-fn bytes_of(extent: Extent) -> u64 {
-    extent.end() - extent.start().get()
-}
-
-/// A memory device as one log line.
-struct ModuleLine<'a>(&'a MemoryDevice);
+/// A memory device as one line, for the log and the report: slot, size, technology, form factor,
+/// speeds (the speed it runs at only when it is not the rated one), ranks, bus widths and part.
+pub struct ModuleLine<'a>(pub &'a MemoryDevice);
 
 impl fmt::Display for ModuleLine<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -212,7 +210,7 @@ impl fmt::Display for ModuleLine<'_> {
             if let Some(speed) = d.speed {
                 write!(f, ", {speed} MT/s")?;
             }
-            if let Some(speed) = d.configured_speed {
+            if let Some(speed) = d.configured_speed.filter(|running| Some(*running) != d.speed) {
                 write!(f, ", running {speed} MT/s")?;
             }
             if let Some(ranks) = d.ranks {
@@ -253,7 +251,7 @@ pub fn short_brand(brand: &str) -> String {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Vitals {
     /// The clock in MHz, to the nearest ten.
-    pub mhz: Option<u32>,
+    pub mhz: Option<Mhz>,
     /// Whether the clock was measured, rather than the base frequency CPUID states.
     pub measured: bool,
     /// The temperature in whole degrees Celsius.
@@ -265,7 +263,7 @@ impl Vitals {
     #[must_use]
     pub fn of(reading: Reading) -> Self {
         Self {
-            mhz: reading.frequency.map(|f| (f.mhz + 5) / 10 * 10),
+            mhz: reading.frequency.map(|f| Mhz((f.mhz.0 + 5) / 10 * 10)),
             measured: reading.frequency.is_some_and(|f| f.measured),
             celsius: reading.temperature.map(|t| t.celsius),
             source: reading.temperature.map(|t| t.source),

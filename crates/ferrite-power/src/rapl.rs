@@ -11,8 +11,8 @@ use bitbybit::bitfield;
 use core::time::Duration;
 
 use crate::msr::{Msr, register};
-use crate::set::flag;
 use crate::units::{MicroJoules, MilliWatts};
+use ferrite_hal::flag;
 
 pub const INTEL_POWER_UNIT: Msr<PowerUnit> = Msr::at(0x606);
 pub const PKG_POWER_LIMIT: Msr<PackagePowerLimit> = Msr::at(0x610);
