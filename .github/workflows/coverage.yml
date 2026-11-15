@@ -9,8 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A push groups by commit, so pushes in quick succession each keep their own run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: false
 
 jobs:
