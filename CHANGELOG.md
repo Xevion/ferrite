@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.0](https://github.com/Xevion/ferrite/compare/v0.3.0...v0.4.0) (2026-11-15)
+
+
+### Features
+
+* **uefi:** A bare-metal memory tester that boots as a UEFI application with no operating system underneath: a 14-test suite (memtest86+'s tests plus March C- and others) on SIMD kernels from scalar to AVX-512, split across every core, over all free memory and the firmware's reserve
+* **uefi:** Framebuffer dashboard with a memory map drawn from physical addresses, per-test rates, and an ETA from this machine's measured test times; a text console where there is no GOP
+* **uefi:** Memory modules, CPU model, clock and temperature from SMBIOS and the CPU's own counters
+* **uefi:** A clock ceiling chosen per test from its measured rate, power and temperature (`[cpu]` in `ferrite.toml`)
+* **uefi:** Plain-text end-of-run report saved to the boot volume
+* **net:** Live status page and JSON API with pause, restart and goal controls over wired NICs (UEFI SNP) and Wi-Fi at once, with DHCP, mDNS (`ferrite.local`) and SNTP wall time
+* **net:** Push notifications over plain HTTP (e.g. ntfy) at the end of a pass, on the first fault and at the end of the run
+* **wifi:** Linux Wi-Fi drivers on a Rust kernel shim with a Rust WPA2/WPA3-SAE supplicant, including open and hidden networks; run on hardware with the Intel 8265
+* **config:** One `ferrite.toml` on the boot volume for Wi-Fi networks, notifications, run goals, time zone and CPU policy
+
+
+### Other Changes
+
+* Relicensed under MIT OR Apache-2.0. `ferrite-wifi-sys` compiles Linux sources and is GPL-2.0-only, so the UEFI app binary, which links it, is distributed under GPL-2.0
+* The repository is a Cargo workspace; the Linux tester lives in `crates/ferrite-linux`, still as package and binary `ferrite`
+* Release assets remain the Linux tester's binaries; the UEFI app is built and staged from source (`just stage-usb`)
+
 ## [0.3.0](https://github.com/Xevion/ferrite/compare/v0.2.0...v0.3.0) (2026-11-15)
 
 
