@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Xevion/ferrite/actions/workflows/check.yml/badge.svg)](https://github.com/Xevion/ferrite/actions/workflows/check.yml)
 [![Coverage](https://codecov.io/gh/Xevion/ferrite/branch/master/graph/badge.svg)](https://codecov.io/gh/Xevion/ferrite)
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 A userspace memory tester for Linux, written in Rust.
 
@@ -54,4 +54,4 @@ Requires a recent stable Rust toolchain (2024 edition).
 
 ## License
 
-[GPL-3.0](LICENSE)
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
