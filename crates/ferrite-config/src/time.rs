@@ -8,24 +8,17 @@ use jiff::tz::{TimeZone, TimeZoneDatabase};
 use serde::Deserialize;
 
 /// How a time of day is written.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, strum::IntoStaticStr)]
 pub enum ClockFormat {
     /// `01:27:43 AM`.
     #[default]
     #[serde(rename = "12h")]
+    #[strum(serialize = "12h")]
     Twelve,
     /// `13:27:43`.
     #[serde(rename = "24h")]
+    #[strum(serialize = "24h")]
     TwentyFour,
-}
-
-impl ClockFormat {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Twelve => "12h",
-            Self::TwentyFour => "24h",
-        }
-    }
 }
 
 /// The validated `[time]` section.

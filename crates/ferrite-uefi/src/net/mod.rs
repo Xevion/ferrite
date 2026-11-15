@@ -203,12 +203,15 @@ impl Net {
             log::info!(
                 "time: NTP on, {} configured servers, then the lease's and the pool; zone {zone}, {} clock",
                 time.servers.len(),
-                time.clock.name()
+                <&str>::from(time.clock)
             );
             let sync = Sync::new(time.servers.clone(), Box::new(entropy::random_u64), self.wall.pivot(now));
             self.network.set_sync(sync);
         } else {
-            log::info!("time: NTP off, the clock stays on the firmware's; zone {zone}, {} clock", time.clock.name());
+            log::info!(
+                "time: NTP off, the clock stays on the firmware's; zone {zone}, {} clock",
+                <&str>::from(time.clock)
+            );
         }
     }
 

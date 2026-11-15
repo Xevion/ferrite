@@ -151,6 +151,7 @@ impl Run {
             test: TESTS[1],
             position: (2, 3),
             test_percent: 40,
+            test_done: 0,
             percent: 60,
             passes: settled,
             tier: "avx2",

@@ -8,9 +8,11 @@ publish.workspace = true
 
 [dependencies]
 ferrite-net.workspace = true
+ferrite-power.workspace = true
 ferrite-wpa.workspace = true
 jiff = { workspace = true, features = ["alloc", "tzdb-bundle-always"] }
 serde = { workspace = true, features = ["alloc"] }
+strum.workspace = true
 snafu.workspace = true
 toml = { workspace = true, features = ["parse", "serde", "display"] }
 

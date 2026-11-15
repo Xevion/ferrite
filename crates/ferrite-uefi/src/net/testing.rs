@@ -14,6 +14,7 @@ pub fn idle_status() -> SweepStatus {
         test: "own-address",
         position: (1, 9),
         test_percent: 0,
+        test_done: 0,
         percent: 0,
         passes: 0,
         tier: "sse2",

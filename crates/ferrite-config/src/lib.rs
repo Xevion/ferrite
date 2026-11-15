@@ -63,7 +63,9 @@ pub use convert::MAX_NETWORKS;
 pub use error::{ConfigError, Path, Problem, Segment};
 pub use load::{Loaded, load};
 pub use run::{Compact, RunGoal, parse_duration};
-pub use schema::{Config, Network, Notify, NotifyEvent, NotifyFormat, Run, Secret, Security, Time, Wifi};
+pub use schema::{
+    Config, Cpu, CpuClock, Network, Notify, NotifyEvent, NotifyFormat, Run, Secret, Security, Time, Wifi,
+};
 pub use time::{ClockFormat, TimeSettings, zone_named};
 
 /// Where the file lives on the boot volume.

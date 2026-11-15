@@ -54,6 +54,7 @@ fn status() -> SweepStatus {
         test: TestKind::MarchCMinus.name(),
         position: (5, 14),
         test_percent: 37,
+        test_done: 0,
         percent: 41,
         passes: 3,
         tier: "avx2",

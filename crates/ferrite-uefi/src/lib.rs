@@ -10,6 +10,7 @@ extern crate std;
 
 pub mod app;
 pub mod backend;
+pub mod clocking;
 pub mod control;
 pub mod cores;
 pub mod dash;

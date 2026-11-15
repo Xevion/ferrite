@@ -57,6 +57,10 @@ pub trait Platform {
 
     /// Whether kernels of `tier` run on this core as it is now.
     fn tier_usable(&self, tier: Tier) -> bool;
+
+    /// Between steps of the job: the platform's own per-core upkeep, such as following a clock
+    /// request. Must be cheap when there is nothing to do; it runs after every step.
+    fn tend(&self) {}
 }
 
 /// Why a core did not run its share.
@@ -759,12 +763,17 @@ impl<C: Clock> Worker<'_, '_, C> {
     /// Work every round the crew begins, spinning between turns that have nothing to do, until it
     /// is closed or stopped; how the core left its job, which the seat then says too.
     pub fn serve(&mut self, vector: Option<&dyn WideGuard>) -> SeatState {
-        let end = self.rounds(vector);
+        self.serve_tending(vector, &|| {})
+    }
+
+    /// [`Worker::serve`], calling `tend` after every step worked.
+    pub fn serve_tending(&mut self, vector: Option<&dyn WideGuard>, tend: &dyn Fn()) -> SeatState {
+        let end = self.rounds(vector, tend);
         self.job.seat.set(end);
         end
     }
 
-    fn rounds(&mut self, vector: Option<&dyn WideGuard>) -> SeatState {
+    fn rounds(&mut self, vector: Option<&dyn WideGuard>, tend: &dyn Fn()) -> SeatState {
         let crew = self.job.crew;
         let mut seen = 0;
         loop {
@@ -776,7 +785,7 @@ impl<C: Clock> Worker<'_, '_, C> {
             self.begin(seen);
             loop {
                 match self.turn(vector) {
-                    Turn::Worked => {},
+                    Turn::Worked => tend(),
                     Turn::Gate | Turn::Wait(_) => core::hint::spin_loop(),
                     Turn::Done => break,
                     Turn::Stopped => return SeatState::Stopped,
@@ -796,7 +805,7 @@ impl<C: Clock> Job<'_, C> {
         let Some(entered) = enter_ap(platform, self.seat, &self.taken, &kernels, &self.crew.line, &self.clock) else {
             return;
         };
-        self.worker().serve(entered.guard());
+        self.worker().serve_tending(entered.guard(), &|| platform.tend());
     }
 
     /// Record how deep the AP's stack went, once its run has ended.

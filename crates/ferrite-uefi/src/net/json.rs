@@ -784,6 +784,7 @@ mod tests {
             test: "moving-inversions",
             position: (2, 9),
             test_percent: 40,
+            test_done: 0,
             percent: 15,
             passes: 1,
             tier: "avx2",

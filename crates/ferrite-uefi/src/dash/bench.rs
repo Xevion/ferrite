@@ -72,6 +72,7 @@ impl Scenario {
             test: kinds[0].name(),
             position: (1, kinds.len()),
             test_percent: 0,
+            test_done: 0,
             percent: 0,
             passes: 0,
             tier: "avx2",

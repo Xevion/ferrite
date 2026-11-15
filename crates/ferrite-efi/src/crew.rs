@@ -1,6 +1,7 @@
 //! `ferrite_mem::crew` jobs on the firmware's APs: what a core reports about itself, and the AP
 //! task that runs a job under MP Services.
 
+use core::cell::Cell;
 use ferrite_hal::Clock;
 use ferrite_mem::crew::{Job, Platform, WideGuard};
 use ferrite_mem::{Caps, Tier};
@@ -29,8 +30,11 @@ impl WideGuard for VectorState {
 }
 
 /// The calling core, asked through its control registers and CPUID.
-#[derive(Clone, Copy, Debug)]
-pub struct ThisCore;
+#[derive(Debug, Default)]
+pub struct ThisCore {
+    /// The clock request generation this core last followed.
+    clock_seen: Cell<u32>,
+}
 
 impl Platform for ThisCore {
     type Wide = VectorState;
@@ -46,14 +50,19 @@ impl Platform for ThisCore {
     fn tier_usable(&self, tier: Tier) -> bool {
         tier_usable(tier)
     }
+
+    fn tend(&self) {
+        crate::power::follow(&self.clock_seen);
+    }
 }
 
 // SAFETY: the AP path runs ferrite-mem kernels on its own share, reads CPUID, CR4, XCR0 and the TSC,
-// writes CR4 and XCR0 through VectorState (restored before return) and stores to atomics. No EFI
+// writes CR4 and XCR0 through VectorState (restored before return), follows the published clock
+// request through the power MSRs discovery found, and stores to atomics. No EFI
 // call, allocation, logging or lock; the tests' state lives in the job, so the frames stay small.
 unsafe impl<C: Clock + Sync> ApTask for Job<'_, C> {
     fn run(&self) {
-        self.run_ap(&ThisCore);
+        self.run_ap(&ThisCore::default());
     }
 
     fn finish(&self, stack: StackUse) {

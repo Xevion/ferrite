@@ -252,6 +252,12 @@ fn at(path: &str) -> Path {
     format!("[time]\nservers = [\"http://{SECRET}\"]\n"),
     2, 12, "time.servers[0]", Some(Problem::NtpServer)
 )]
+#[case::cpu_temp_range("[cpu]\nmax_temp = 120\n".into(), 2, 12, "cpu.max_temp", Some(Problem::TempLimit))]
+#[case::cpu_tolerance_range("[cpu]\ntolerance = 60\n".into(), 2, 13, "cpu.tolerance", Some(Problem::Tolerance))]
+#[case::cpu_clock_variant(
+    format!("[cpu]\nclock = \"{SECRET}\"\n"),
+    2, 9, "cpu.clock", Some(Problem::BadValue { expected: "one of `firmware`, `max`, `auto`, `calibrate`".into() })
+)]
 #[case::unknown_time_key(format!("[time]\nzones = \"{SECRET}\"\n"), 2, 1, "time.zones", Some(Problem::UnknownKey))]
 fn a_bad_file_names_its_line_column_and_key_and_never_the_value(
     #[case] text: String,
@@ -396,6 +402,7 @@ fn debug_output_hides_passphrases_and_the_url() {
         notify: Some(Notify { url: Secret::new("http://h/s3cr3t-topic"), format: NotifyFormat::Text, events: None }),
         run: Run::default(),
         time: Time::default(),
+        cpu: Cpu::default(),
     };
     check!(!format!("{plain:?}").contains("s3cr3t"));
 }
@@ -438,6 +445,7 @@ fn sample() -> Config {
             zone: Some("Europe/Berlin".into()),
             clock: ClockFormat::TwentyFour,
         },
+        cpu: Cpu { clock: CpuClock::Max, max_temp: Some(88), tolerance: Some(5) },
     }
 }
 
@@ -523,6 +531,7 @@ fn defaults_stay_commented_when_values_are_filled_in() {
         notify: Some(Notify { url: Secret::new("http://h/t"), format: NotifyFormat::Text, events: None }),
         run: Run::default(),
         time: Time::default(),
+        cpu: Cpu::default(),
     };
     let text = config.render();
     for set in ["\nssid = ", "\npassphrase = ", "\nurl = ", "\n[[wifi.networks]]", "\n[notify]"] {
@@ -538,7 +547,20 @@ fn defaults_stay_commented_when_values_are_filled_in() {
         "\n# [time]",
         "\n# ntp = ",
         "\n# zone = ",
+        "\n# [cpu]",
+        "\n# clock = ",
     ] {
         check!(text.contains(unset), "{unset}");
     }
+}
+
+#[test]
+fn the_cpu_section_becomes_a_policy_and_defaults_to_auto() {
+    let loaded = load(b"[cpu]\nclock = \"calibrate\"\nmax_temp = 85\n");
+    check!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+    let policy = loaded.cpu.unwrap();
+    check!(policy.clock == ferrite_power::policy::ClockMode::Calibrate);
+    check!(policy.max_temp.map(ferrite_power::policy::TempLimit::celsius) == Some(85));
+    check!(policy.tolerance == ferrite_power::policy::Tolerance::DEFAULT);
+    check!(load(b"[cpu]\n").cpu == Some(ferrite_power::policy::Policy::default()));
 }

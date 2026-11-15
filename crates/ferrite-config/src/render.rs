@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::MAX_NETWORKS;
-use crate::schema::{Config, Network, Notify, NotifyEvent, NotifyFormat, Run, Secret, Security, Time};
+use crate::schema::{Config, Cpu, CpuClock, Network, Notify, NotifyEvent, NotifyFormat, Run, Secret, Security, Time};
 use crate::time::ClockFormat;
 
 const HEADER: &str = "\
@@ -27,6 +27,10 @@ const NOTIFY_DOC: &str = "\
 
 const RUN_DOC: &str = "\
 ## When a run ends by itself: the first part met ends it. With none set it goes on until stopped.
+";
+
+const CPU_DOC: &str = "\
+## The processor's clock while the memory is tested.
 ";
 
 const TIME_DOC: &str = "\
@@ -80,6 +84,9 @@ impl Config {
         out.push('\n');
         out.push_str(TIME_DOC);
         time(&mut out, &self.time);
+        out.push('\n');
+        out.push_str(CPU_DOC);
+        cpu(&mut out, &self.cpu);
         out
     }
 }
@@ -114,7 +121,7 @@ fn network(out: &mut String, n: &Network, commented: bool, docs: bool) {
         "auto: WPA3-SAE when the access point offers it, else WPA2-PSK. wpa2: WPA2-PSK only. wpa3: WPA3-SAE only.",
         "open: no encryption, and no passphrase.",
     ];
-    line(out, !commented && n.security != Security::Auto, "security", &quote(n.security.name()), doc(text));
+    line(out, !commented && n.security != Security::Auto, "security", &quote(n.security.into()), doc(text));
     let text = &["True when the network does not broadcast its name, so the scan asks for it."];
     line(out, !commented && n.hidden, "hidden", if n.hidden { "true" } else { "false" }, doc(text));
 }
@@ -126,9 +133,14 @@ fn notify(out: &mut String, n: &Notify, commented: bool) {
     line(out, !commented, "url", &quote(n.url.expose()), text);
     let text =
         &["text: the message as the body, the title in a Title header.", "json: {\"event\", \"title\", \"message\"}."];
-    line(out, !commented && n.format != NotifyFormat::Text, "format", &quote(n.format.name()), text);
-    let events: Vec<String> =
-        n.events.as_deref().unwrap_or(&NotifyEvent::ALL).iter().map(|e| quote(e.name())).collect();
+    line(out, !commented && n.format != NotifyFormat::Text, "format", &quote(n.format.into()), text);
+    let events: Vec<String> = n
+        .events
+        .as_deref()
+        .unwrap_or(<NotifyEvent as strum::VariantArray>::VARIANTS)
+        .iter()
+        .map(|&e| quote(e.into()))
+        .collect();
     let text = &[
         "Which events to hear about: pass (a pass finished), fault (the first memory fault) and end (the run ended).",
         "All three by default.",
@@ -161,5 +173,20 @@ fn time(out: &mut String, t: &Time) {
     let text = &["An IANA time zone name for the times shown, such as America/Chicago. UTC when left out."];
     line(out, t.zone.is_some(), "zone", &quote(t.zone.as_deref().unwrap_or("America/Chicago")), text);
     let text = &["12h shows 01:27:43 AM, 24h shows 13:27:43."];
-    line(out, t.clock != ClockFormat::Twelve, "clock", &quote(t.clock.name()), text);
+    line(out, t.clock != ClockFormat::Twelve, "clock", &quote(t.clock.into()), text);
+}
+
+fn cpu(out: &mut String, c: &Cpu) {
+    header(out, c.is_default(), "[cpu]");
+    let text = &[
+        "auto: per test, the lowest clock within the tolerance of its fastest. max: the highest clock all the",
+        "time, hottest. firmware: leave it as the firmware set it. calibrate: run each test at a ladder of",
+        "clocks and record speed and power.",
+    ];
+    line(out, c.clock != CpuClock::Auto, "clock", &quote(<&str>::from(c.clock)), text);
+    let text =
+        &["Degrees Celsius to stay under, 40 to 105, by lowering the clock. The processor's own limit when left out."];
+    line(out, c.max_temp.is_some(), "max_temp", &c.max_temp.unwrap_or(85).to_string(), text);
+    let text = &["How much slower than its fastest a test may run in auto, in percent, 0 to 50. 3 by default."];
+    line(out, c.tolerance.is_some(), "tolerance", &c.tolerance.unwrap_or(3).to_string(), text);
 }

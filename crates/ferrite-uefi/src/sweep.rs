@@ -136,6 +136,8 @@ pub struct SweepStatus {
     pub position: (usize, usize),
     /// Progress through the current test and through the pass, over every core, 0 to 100.
     pub test_percent: u16,
+    /// Work units of the current test done so far over every core, rising while it runs.
+    pub test_done: u64,
     pub percent: u16,
     pub passes: u64,
     /// The widest kernel tier in use, for display.
@@ -177,6 +179,7 @@ impl SweepStatus {
         test: "none",
         position: (0, 0),
         test_percent: 0,
+        test_done: 0,
         percent: 0,
         passes: 0,
         tier: "none",
@@ -691,6 +694,7 @@ fn status_of(schedule: &Schedule, tally: &Tally, mode: Mode, cpus: usize) -> Swe
         test: schedule.test().kind().name(),
         position: schedule.position(),
         test_percent: schedule.test().percent(),
+        test_done: schedule.test().done(),
         percent: schedule.percent(),
         passes: schedule.passes(),
         tier: tier_of(schedule.kernels()),
@@ -874,6 +878,7 @@ fn live(base: &SweepStatus, seats: &[Seat], tally: &Tally, faults_before: u64, w
     let done: u64 = seats.iter().map(Seat::done).sum();
     SweepStatus {
         test_percent: suite::percent(done, test_total),
+        test_done: done.min(test_total),
         percent: suite::percent(pass_done + done.min(test_total), pass_total),
         faults: faults_before + seats.iter().map(Seat::faults).sum::<u64>(),
         first_fault: tally.first,

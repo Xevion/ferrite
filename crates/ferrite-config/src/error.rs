@@ -120,6 +120,10 @@ pub enum Problem {
     TooManyNtpServers { max: usize },
     #[snafu(display("not a time zone of the tz database, expected a name such as America/Chicago or UTC"))]
     Zone,
+    #[snafu(display("not a temperature limit: expected 40 to 105"))]
+    TempLimit,
+    #[snafu(display("not a tolerance: expected 0 to 50"))]
+    Tolerance,
 }
 
 /// A problem with its place in the file, as the line and column a text editor shows (both from 1).

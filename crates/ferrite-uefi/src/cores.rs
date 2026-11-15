@@ -325,7 +325,8 @@ fn under(vector: Option<&dyn WideGuard>, kernel: Kernel, f: impl FnOnce()) {
 unsafe impl<C: Clock + Sync> ApTask for CoreJob<'_, C> {
     fn run(&self) {
         let kernels = [self.spec.kernel];
-        let Some(entered) = enter_ap(&ThisCore, &self.slot.seat, &self.taken, &kernels, self.line, &self.spec.clock)
+        let Some(entered) =
+            enter_ap(&ThisCore::default(), &self.slot.seat, &self.taken, &kernels, self.line, &self.spec.clock)
         else {
             return;
         };

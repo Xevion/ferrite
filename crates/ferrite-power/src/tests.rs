@@ -314,3 +314,130 @@ fn the_effective_clock_scales_the_tsc_by_the_counters(
 ) {
     check!(effective_mhz(tsc_hz, aperf, mperf) == mhz.map(Mhz));
 }
+
+mod governing {
+    use core::time::Duration;
+
+    use assert2::check;
+    use ferrite_hal::Instant;
+
+    use crate::control::{Bound, Levels};
+    use crate::governor::{Governor, Ladder, Observation, Timing};
+    use crate::policy::{ClockMode, Policy, TempLimit, Tolerance};
+    use crate::units::{Mhz, MicroJoules};
+
+    /// The X1 Carbon's HWP levels: lowest 1, efficient 14, guaranteed 17, highest 36, 100 MHz each.
+    fn kaby_lake_r() -> Levels {
+        Levels { lowest: 1, efficient: 14, nominal: 17, highest: 36, khz_per_level: Some(100_000) }
+    }
+
+    const FAST: Timing = Timing { settle: Duration::from_millis(100), window: Duration::from_millis(500) };
+
+    /// Run `test` for `ticks` of 100 ms, its work rate set by the ceiling asked for; returns the ceilings asked.
+    fn drive(
+        governor: &mut Governor,
+        test: &'static str,
+        start: Duration,
+        ticks: u32,
+        rate: impl Fn(Bound) -> u64,
+        celsius: impl Fn(u32) -> i16,
+    ) -> std::vec::Vec<Bound> {
+        let mut asked = std::vec::Vec::new();
+        let mut ceiling = governor.ladder().steps()[0];
+        let mut done = 0;
+        for tick in 0..ticks {
+            let now = Instant::from_epoch(start + Duration::from_millis(100) * tick);
+            let obs = Observation {
+                now,
+                test,
+                done,
+                celsius: Some(celsius(tick)),
+                energy: Some(MicroJoules(u64::from(tick) * 1_500_000)),
+            };
+            if let Some(request) = governor.observe(obs) {
+                ceiling = request.ceiling;
+                asked.push(ceiling);
+            }
+            done += rate(ceiling) / 10;
+        }
+        asked
+    }
+
+    /// A memory-bound test: no faster above 2500 MHz.
+    fn memory_bound(ceiling: Bound) -> u64 {
+        match ceiling {
+            Bound::Highest => 1000,
+            Bound::Clock(Mhz(m)) if m >= 2500 => 990,
+            Bound::Clock(Mhz(m)) if m >= 2000 => 800,
+            _ => 500,
+        }
+    }
+
+    #[test]
+    fn the_ladder_steps_evenly_from_the_highest_level_to_the_base_clock() {
+        let ladder = Ladder::from_levels(&kaby_lake_r(), 5);
+        check!(
+            ladder.steps()
+                == [
+                    Bound::Highest,
+                    Bound::Clock(Mhz(3200)),
+                    Bound::Clock(Mhz(2700)),
+                    Bound::Clock(Mhz(2200)),
+                    Bound::Clock(Mhz(1700))
+                ]
+        );
+    }
+
+    #[test]
+    fn auto_probes_every_step_then_holds_the_lowest_within_tolerance() {
+        let policy = Policy { clock: ClockMode::Auto, max_temp: None, tolerance: Tolerance::DEFAULT };
+        let mut governor = Governor::new(policy, Ladder::from_levels(&kaby_lake_r(), 5)).with_timing(FAST);
+        let asked = drive(&mut governor, "moving-inversions", Duration::ZERO, 60, memory_bound, |_| 70);
+        check!(asked.first() == Some(&Bound::Highest));
+        check!(asked.last() == Some(&Bound::Clock(Mhz(2700))), "{asked:?}");
+        let record = &governor.records()[0];
+        check!(record.chosen == Some(2));
+        check!(record.steps[0].unwrap().power.is_some(), "the energy counter gives each step's power");
+    }
+
+    #[test]
+    fn a_probe_cut_short_resumes_when_the_test_comes_back() {
+        let policy = Policy { clock: ClockMode::Auto, max_temp: None, tolerance: Tolerance::DEFAULT };
+        let mut governor = Governor::new(policy, Ladder::from_levels(&kaby_lake_r(), 5)).with_timing(FAST);
+        drive(&mut governor, "fill", Duration::ZERO, 8, memory_bound, |_| 70);
+        drive(&mut governor, "verify", Duration::from_secs(1), 5, memory_bound, |_| 70);
+        check!(governor.records()[0].chosen.is_none());
+        let measured = governor.records()[0].steps.iter().flatten().count();
+        drive(&mut governor, "fill", Duration::from_secs(2), 60, memory_bound, |_| 70);
+        check!(measured >= 1);
+        check!(governor.records()[0].chosen == Some(2));
+    }
+
+    #[test]
+    fn calibration_measures_every_step_and_then_runs_at_the_top() {
+        let policy = Policy { clock: ClockMode::Calibrate, max_temp: None, tolerance: Tolerance::DEFAULT };
+        let mut governor = Governor::new(policy, Ladder::from_levels(&kaby_lake_r(), 5)).with_timing(FAST);
+        let asked = drive(&mut governor, "fill", Duration::ZERO, 60, memory_bound, |_| 70);
+        check!(asked.last() == Some(&Bound::Highest));
+        check!(governor.records()[0].steps[..5].iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn the_heat_guard_steps_down_while_hot_and_back_up_once_cool() {
+        let policy = Policy { clock: ClockMode::Max, max_temp: TempLimit::new(90), tolerance: Tolerance::DEFAULT };
+        let mut governor = Governor::new(policy, Ladder::from_levels(&kaby_lake_r(), 5));
+        // Hot for 4 s: down at once, and again after 3 s; then cool for 30 s: back up a step every 10 s.
+        let asked = drive(&mut governor, "fill", Duration::ZERO, 340, |_| 1, |t| if t < 40 { 95 } else { 60 });
+        check!(
+            asked == [Bound::Clock(Mhz(3200)), Bound::Clock(Mhz(2700)), Bound::Clock(Mhz(3200)), Bound::Highest],
+            "{asked:?}"
+        );
+    }
+
+    #[test]
+    fn firmware_mode_never_asks() {
+        let policy = Policy { clock: ClockMode::Firmware, ..Policy::default() };
+        let mut governor = Governor::new(policy, Ladder::from_levels(&kaby_lake_r(), 5));
+        check!(drive(&mut governor, "fill", Duration::ZERO, 50, memory_bound, |_| 99).is_empty());
+    }
+}

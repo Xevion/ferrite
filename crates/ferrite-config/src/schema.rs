@@ -16,6 +16,7 @@ pub struct Config {
     pub notify: Option<Notify>,
     pub run: Run,
     pub time: Time,
+    pub cpu: Cpu,
 }
 
 /// A value that must not reach a log: a passphrase, or a URL that works like one. Its `Debug` hides it.
@@ -64,8 +65,9 @@ pub struct Network {
 }
 
 /// How a network is secured.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, strum::IntoStaticStr)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Security {
     /// WPA3-SAE when the access point offers it, WPA2-PSK otherwise; a passphrase is needed.
     #[default]
@@ -76,17 +78,6 @@ pub enum Security {
     Wpa2,
     /// WPA3-SAE only.
     Wpa3,
-}
-
-impl Security {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Open => "open",
-            Self::Wpa2 => "wpa2",
-            Self::Wpa3 => "wpa3",
-        }
-    }
 }
 
 /// `[notify]`: where to POST push notifications, in what body format, for which events.
@@ -103,8 +94,9 @@ pub struct Notify {
 }
 
 /// How the notification's body is written.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, strum::IntoStaticStr)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum NotifyFormat {
     /// The message as plain text, the title in a `Title` header: what ntfy takes.
     #[default]
@@ -113,18 +105,10 @@ pub enum NotifyFormat {
     Json,
 }
 
-impl NotifyFormat {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Text => "text",
-            Self::Json => "json",
-        }
-    }
-}
-
 /// Something worth telling the user about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, strum::IntoStaticStr, strum::VariantArray)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum NotifyEvent {
     /// A pass over every test finished.
     Pass,
@@ -132,18 +116,6 @@ pub enum NotifyEvent {
     Fault,
     /// The run ended.
     End,
-}
-
-impl NotifyEvent {
-    pub const ALL: [Self; 3] = [Self::Pass, Self::Fault, Self::End];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Pass => "pass",
-            Self::Fault => "fault",
-            Self::End => "end",
-        }
-    }
 }
 
 /// `[run]`: when a run is done; the first part met ends it.
@@ -188,5 +160,35 @@ impl Time {
     /// Whether the section says nothing.
     pub const fn is_default(&self) -> bool {
         self.ntp && self.servers.is_none() && self.zone.is_none() && matches!(self.clock, ClockFormat::Twelve)
+    }
+}
+
+/// How `[cpu]` manages the clock, as the file spells it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, strum::IntoStaticStr)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum CpuClock {
+    Firmware,
+    Max,
+    #[default]
+    Auto,
+    Calibrate,
+}
+
+/// `[cpu]`: how the processor's clock is managed while the memory is tested.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Cpu {
+    pub clock: CpuClock,
+    /// Degrees Celsius to stay under, 40 to 105.
+    pub max_temp: Option<i16>,
+    /// How much slower than its fastest a test may run in auto, in percent, 0 to 50.
+    pub tolerance: Option<u8>,
+}
+
+impl Cpu {
+    /// Whether the section says nothing.
+    pub const fn is_default(&self) -> bool {
+        matches!(self.clock, CpuClock::Auto) && self.max_temp.is_none() && self.tolerance.is_none()
     }
 }

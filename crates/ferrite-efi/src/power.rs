@@ -7,13 +7,15 @@
 //! processor found. What each core's request replaced is kept so [`Power::restore`] can put it back
 //! before the next image runs.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use core::time::Duration;
 
 use ferrite_hal::Instant;
-use ferrite_power::control::{Applied, ApplyError, Interface, Request, Saved};
+use ferrite_power::control::{Applied, ApplyError, Interface, Levels, Request, Saved};
 use ferrite_power::discover::Platform;
 use ferrite_power::telemetry::{Meter, Sample};
 
@@ -30,6 +32,41 @@ pub struct Power {
     meter: Meter,
     /// Each core's replaced registers, boot processor first.
     saved: Vec<(Option<ProcessorNumber>, Saved)>,
+    /// The boot processor's levels, once a request has read them.
+    levels: Option<Levels>,
+    /// Every request published for the APs to follow, kept so a core may still be reading one.
+    #[expect(clippy::vec_box, reason = "each request must keep its address while APs read it, as the Vec grows")]
+    published: Vec<Box<Published>>,
+}
+
+/// A request for the APs to follow from inside their sweep jobs.
+struct Published {
+    interface: Interface,
+    request: Request,
+}
+
+static PUBLISHED: AtomicPtr<Published> = AtomicPtr::new(core::ptr::null_mut());
+static GENERATION: AtomicU32 = AtomicU32::new(0);
+
+/// On an AP between steps of a sweep job: apply the published request once per change. `seen`
+/// is the generation the calling core last applied.
+pub fn follow(seen: &Cell<u32>) {
+    let generation = GENERATION.load(Ordering::Acquire);
+    if generation == seen.get() {
+        return;
+    }
+    seen.set(generation);
+    let published = PUBLISHED.load(Ordering::Acquire);
+    if published.is_null() {
+        return;
+    }
+    // SAFETY: `Power` keeps every published request alive for the program's life, and stored it
+    // before the Release of the generation read above.
+    let published = unsafe { &*published };
+    // SAFETY: the registers are the ones discovery found on the boot processor, which every core of
+    // the package has. Nothing is logged here: this runs on an AP inside a sweep job.
+    let mut msrs = unsafe { RawMsrs::new() };
+    let _ = published.interface.apply(published.request, &Cpuid, &mut msrs);
 }
 
 impl Power {
@@ -44,12 +81,34 @@ impl Power {
             msrs.as_mut().map_or_else(|| Platform::discover(&Cpuid, &mut Absent), |m| Platform::discover(&Cpuid, m));
         log::info!("power: {platform}");
         let meter = Meter::new(&platform);
-        Self { platform, msrs, meter, saved: Vec::new() }
+        Self { platform, msrs, meter, saved: Vec::new(), levels: None, published: Vec::new() }
     }
 
     #[must_use]
     pub const fn platform(&self) -> &Platform {
         &self.platform
+    }
+
+    /// Change the request while the APs may be inside sweep jobs: the boot processor applies it now,
+    /// each AP between its next steps, and an AP not in a job at its next one.
+    pub fn publish(&mut self, request: Request) {
+        let Ok(interface) = self.platform.control else { return };
+        if let Some(msrs) = self.msrs.as_mut()
+            && let Err(e) = interface.apply(request, &Cpuid, msrs)
+        {
+            log::warn!("power: the boot processor did not take {request}: {e}");
+        }
+        let mut published = Box::new(Published { interface, request });
+        PUBLISHED.store(&raw mut *published, Ordering::Release);
+        self.published.push(published);
+        GENERATION.fetch_add(1, Ordering::Release);
+        log::debug!("power: published {request}");
+    }
+
+    /// The boot processor's performance levels, once [`Power::apply`] has read them.
+    #[must_use]
+    pub const fn levels(&self) -> Option<Levels> {
+        self.levels
     }
 
     /// Ask every core for `request`: the boot processor here, each AP of `mp` through a short task.
@@ -74,8 +133,16 @@ impl Power {
             });
             results.extend(aps.into_iter().zip(tasks).map(|(n, t)| (Some(n), t.take().unwrap_or(Err(NOT_RUN)))));
         }
-        report(request, &results);
         let first = self.saved.is_empty();
+        if first {
+            report(request, &results);
+        } else {
+            let took = results.iter().filter(|(_, r)| r.as_ref().is_ok_and(Applied::took)).count();
+            log::debug!("power: {request} on {took} of {} cores", results.len());
+        }
+        if let Some((_, Ok(bsp))) = results.first() {
+            self.levels = bsp.levels.or(self.levels);
+        }
         let mut took = 0;
         for (core, result) in results {
             let Ok(applied) = result else { continue };

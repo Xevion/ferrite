@@ -13,6 +13,7 @@ use crate::error::{Path, Problem};
 use crate::run::{RunGoal, parse_duration};
 use crate::schema::{self, NotifyEvent, NotifyFormat, Security};
 use crate::time::{TimeSettings, zone_named};
+use ferrite_power::policy::{ClockMode, Policy, TempLimit, Tolerance};
 
 /// The most networks a file may list. The station tries a few at a time, so more is a mistake.
 pub const MAX_NETWORKS: usize = 16;
@@ -117,4 +118,24 @@ pub fn time_settings(section: &schema::Time) -> Result<TimeSettings, Invalid> {
         Some(name) => zone_named(name).ok_or_else(|| invalid(at.key("zone"), Problem::Zone))?,
     };
     Ok(TimeSettings { ntp: section.ntp, servers, zone, clock: section.clock })
+}
+
+pub fn cpu_policy(section: &schema::Cpu) -> Result<Policy, Invalid> {
+    let at = Path::default().key("cpu");
+    let clock = match section.clock {
+        schema::CpuClock::Firmware => ClockMode::Firmware,
+        schema::CpuClock::Max => ClockMode::Max,
+        schema::CpuClock::Auto => ClockMode::Auto,
+        schema::CpuClock::Calibrate => ClockMode::Calibrate,
+    };
+    let max_temp = section
+        .max_temp
+        .map(|c| TempLimit::new(c).ok_or_else(|| invalid(at.clone().key("max_temp"), Problem::TempLimit)))
+        .transpose()?;
+    let tolerance = section
+        .tolerance
+        .map(|p| Tolerance::new(p).ok_or_else(|| invalid(at.clone().key("tolerance"), Problem::Tolerance)))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(Policy { clock, max_temp, tolerance })
 }

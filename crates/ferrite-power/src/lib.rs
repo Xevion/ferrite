@@ -12,6 +12,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 #[cfg(test)]
 extern crate std;
 
@@ -19,9 +21,11 @@ pub mod amd;
 pub mod control;
 pub mod cpuid;
 pub mod discover;
+pub mod governor;
 pub mod intel;
 pub mod limits;
 pub mod msr;
+pub mod policy;
 pub mod rapl;
 pub mod telemetry;
 pub mod units;

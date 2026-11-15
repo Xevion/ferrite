@@ -12,7 +12,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use ferrite_config::{Config, ConfigError, Network, Notify, NotifyEvent, NotifyFormat, Path as At, Problem, Run};
-use ferrite_config::{Secret, Security, Time, Wifi};
+use ferrite_config::{Cpu, Secret, Security, Time, Wifi};
 use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Clone)]
@@ -268,7 +268,10 @@ fn convert(text: &str) -> Result<Converted, EnvError> {
     }
     let notify = notify_section(&notify, &mut origins)?;
     let run = run_section(&run, &mut origins)?;
-    Ok(Converted { config: Config { wifi: Wifi { networks }, notify, run, time: Time::default() }, origins })
+    Ok(Converted {
+        config: Config { wifi: Wifi { networks }, notify, run, time: Time::default(), cpu: Cpu::default() },
+        origins,
+    })
 }
 
 fn origin(origins: &mut Vec<Origin>, at: At, line: Line<'_>) {
@@ -340,7 +343,10 @@ fn notify_section(lines: &BTreeMap<&str, Line<'_>>, origins: &mut Vec<Origin>) -
                 .split(',')
                 .map(|name| {
                     let name = name.trim();
-                    NotifyEvent::ALL.into_iter().find(|event| event.name().eq_ignore_ascii_case(name))
+                    <NotifyEvent as strum::VariantArray>::VARIANTS
+                        .iter()
+                        .copied()
+                        .find(|&event| <&str>::from(event).eq_ignore_ascii_case(name))
                 })
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(|| EnvError::Events { key: line.key.into(), line: line.number })
@@ -427,6 +433,7 @@ WPA_SSID_01=last-one-wins\r
             }),
             run: Run { passes: Some(3), time: Some("1h30m".into()), stop_on_fault: true },
             time: Time::default(),
+            cpu: Cpu::default(),
         };
         check!(config == want);
     }
