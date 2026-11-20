@@ -55,7 +55,7 @@ object = { version = "0.41.0", default-features = false, features = ["read_core"
 # Group 19 arithmetic and the SSWU map for SAE; no ECDSA, PEM, std or precomputed tables.
 p256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "hash2curve"] }
 parking_lot = "0.13.0"
-picoserve = { version = "0.20.1", default-features = false, features = ["alloc"] }
+picoserve = { version = "0.21.0", default-features = false, features = ["alloc"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 rand_chacha = { version = "0.10.0", default-features = false }
 rand_core = "0.10.1"
