@@ -2324,9 +2324,9 @@ dependencies = [
 
 [[package]]
 name = "picoserve"
-version = "0.20.1"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59fb416fcd483bf1db5aa8d90506aa6967b9d0128e2646a929538d24d117433e"
+checksum = "48ea8011a365c3c6151b430e81368ac304a2075a2016824e9113191d30987edb"
 dependencies = [
  "const-sha1",
  "embedded-io-async",
@@ -2341,9 +2341,9 @@ dependencies = [
 
 [[package]]
 name = "picoserve_derive"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "981b69aa2731710212ac4582c3adc5832e8559d34ec810c318fe73273b05ccfe"
+checksum = "4a6bb05b0d68b7b33e44cdd00189af3c704c14034c3f2b7d283114b1c3134687"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3254,7 +3254,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys",
