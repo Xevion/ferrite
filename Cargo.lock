@@ -991,7 +991,7 @@ dependencies = [
  "rand_xoshiro",
  "ratatui",
  "rayon",
- "rstest 0.26.1",
+ "rstest",
  "serde",
  "serde_json",
  "serial_test",
@@ -1013,7 +1013,7 @@ dependencies = [
  "ferrite-power",
  "ferrite-wpa",
  "jiff",
- "rstest 0.28.0",
+ "rstest",
  "serde",
  "snafu",
  "strum",
@@ -1034,7 +1034,7 @@ dependencies = [
  "nusb",
  "object",
  "parking_lot 0.13.0",
- "rstest 0.28.0",
+ "rstest",
  "rustix",
  "serde",
  "serde_json",
@@ -1059,7 +1059,7 @@ dependencies = [
  "ferrite-wire",
  "ferrite-xhci",
  "log",
- "rstest 0.28.0",
+ "rstest",
  "snafu",
  "strum",
  "uefi",
@@ -1070,7 +1070,7 @@ name = "ferrite-hal"
 version = "0.4.0"
 dependencies = [
  "assert2",
- "rstest 0.28.0",
+ "rstest",
  "strum",
 ]
 
@@ -1090,7 +1090,7 @@ dependencies = [
  "ferrite-wpa",
  "libc",
  "log",
- "rstest 0.28.0",
+ "rstest",
  "smoltcp",
 ]
 
@@ -1104,7 +1104,7 @@ dependencies = [
  "log",
  "rand_chacha",
  "rand_core 0.10.1",
- "rstest 0.28.0",
+ "rstest",
  "snafu",
 ]
 
@@ -1129,7 +1129,7 @@ dependencies = [
  "ferrite-hal",
  "rand_chacha",
  "rand_core 0.10.1",
- "rstest 0.28.0",
+ "rstest",
  "snafu",
  "strum",
 ]
@@ -1144,7 +1144,7 @@ dependencies = [
  "heapless 0.9.3",
  "log",
  "picoserve",
- "rstest 0.28.0",
+ "rstest",
  "smoltcp",
  "snafu",
  "strum",
@@ -1157,7 +1157,7 @@ dependencies = [
  "assert2",
  "ferrite-hal",
  "log",
- "rstest 0.28.0",
+ "rstest",
  "snafu",
 ]
 
@@ -1169,7 +1169,7 @@ dependencies = [
  "assert2",
  "bitbybit",
  "ferrite-hal",
- "rstest 0.28.0",
+ "rstest",
  "snafu",
  "strum",
 ]
@@ -1184,7 +1184,7 @@ dependencies = [
  "ferrite-wire",
  "ferrite-xhci",
  "log",
- "rstest 0.28.0",
+ "rstest",
  "uefi",
 ]
 
@@ -1193,7 +1193,7 @@ name = "ferrite-rt"
 version = "0.4.0"
 dependencies = [
  "assert2",
- "rstest 0.28.0",
+ "rstest",
 ]
 
 [[package]]
@@ -1225,7 +1225,7 @@ dependencies = [
  "log",
  "ratatui",
  "ratatui-core",
- "rstest 0.28.0",
+ "rstest",
  "smoltcp",
  "snafu",
  "tiny-skia",
@@ -1241,7 +1241,7 @@ dependencies = [
  "ferrite-net",
  "ferrite-nl80211",
  "ferrite-wpa",
- "rstest 0.28.0",
+ "rstest",
 ]
 
 [[package]]
@@ -1292,7 +1292,7 @@ version = "0.4.0"
 dependencies = [
  "assert2",
  "crc32fast",
- "rstest 0.28.0",
+ "rstest",
  "snafu",
 ]
 
@@ -1308,7 +1308,7 @@ dependencies = [
  "hmac",
  "p256",
  "pbkdf2",
- "rstest 0.28.0",
+ "rstest",
  "sha1",
  "sha2 0.11.1",
  "snafu",
@@ -1325,7 +1325,7 @@ dependencies = [
  "ferrite-testing",
  "log",
  "proptest",
- "rstest 0.28.0",
+ "rstest",
  "snafu",
  "strum",
 ]
@@ -1415,17 +1415,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "futures-macro"
-version = "0.3.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.10",
-]
-
-[[package]]
 name = "futures-task"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1444,7 +1433,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
- "futures-macro",
  "futures-task",
  "pin-project-lite",
  "slab",
@@ -2791,42 +2779,13 @@ checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
 
 [[package]]
 name = "rstest"
-version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5a3193c063baaa2a95a33f03035c8a72b83d97a54916055ba22d35ed3839d49"
-dependencies = [
- "futures-timer",
- "futures-util",
- "rstest_macros 0.26.1",
-]
-
-[[package]]
-name = "rstest"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b376e512f30a7686a8dbc6aeaace99b3ade1c26c1c63473473a817ade226dafc"
 dependencies = [
  "futures-timer",
  "futures-util",
- "rstest_macros 0.28.0",
-]
-
-[[package]]
-name = "rstest_macros"
-version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c845311f0ff7951c5506121a9ad75aec44d083c31583b2ea5a30bcb0b0abba0"
-dependencies = [
- "cfg-if",
- "glob",
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "regex",
- "relative-path",
- "rustc_version",
- "syn 2.0.118",
- "unicode-ident",
+ "rstest_macros",
 ]
 
 [[package]]

@@ -74,7 +74,7 @@ assert2 = "0.4.1"
 divan = "0.1.21"
 gungraun = "0.19"
 proptest = "1"
-rstest = "0.26.1"
+rstest = "0.28.0"
 serial_test = "3.5.0"
 tempfile = "3.27.0"
 
