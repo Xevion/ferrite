@@ -42,7 +42,7 @@ jobs:
           tool: cargo-nextest@0.9.132
 
       - name: Cache the Linux snapshot
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: crates/ferrite-wifi-sys/linux
           key: linux-snapshot-${{ hashFiles('crates/ferrite-wifi-sys/vendor.toml', 'crates/ferrite-wifi-sys/source.list', 'crates/ferrite-wifi-sys/cflags.txt', 'crates/ferrite-wifi-sys/patches/**', 'crates/ferrite-wifi-sys/vendor_inputs.rs') }}
